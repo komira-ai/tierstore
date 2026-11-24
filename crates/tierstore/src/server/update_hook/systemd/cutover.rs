@@ -64,7 +64,7 @@ pub(super) fn cutover(c: &Ctx<'_, '_>, params: &Params, record: &Record) -> Resu
     }
     // The fs process after the store, as the unit orders itself: the new fs instance talks to the
     // new store, the pair a release is tested as. Not while that store is read-only: its fill
-    // socket is not up yet (`fs::take`).
+    // socket is not up yet, and `fs::take` waits for it to take the cache lock.
     let mut take_note = String::new();
     if let Some(fs_next) = record.fs_next {
         take_note = fs::take(c, fs_next, mode)?;

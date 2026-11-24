@@ -69,6 +69,8 @@ pub struct FsWorld {
     /// The `state` looks that still see the old instance running after it gave the mount away.
     drain_looks: u32,
     take: FsTake,
+    /// Whether an fs instance was ever started while the store said `ready read-only`.
+    started_over_read_only: bool,
 }
 
 impl FsWorld {
@@ -81,6 +83,7 @@ impl FsWorld {
             markers: BTreeSet::new(),
             drain_looks: 0,
             take: FsTake::Works,
+            started_over_read_only: false,
         }
     }
 }
@@ -103,6 +106,7 @@ impl World {
         if self.fs.units[&instance].state == UnitState::Active {
             return Ok(());
         }
+        self.fs.started_over_read_only |= self.store_read_only();
         let release = self.installed.clone();
         let holder = Instance::ALL
             .into_iter()
@@ -353,6 +357,12 @@ impl SystemdFake {
                 left: looks,
             },
         );
+    }
+
+    /// Whether an fs instance was ever started while the store said `ready read-only`: its fill
+    /// socket was not up.
+    pub fn fs_started_over_read_only(&self) -> bool {
+        self.w.borrow().fs.started_over_read_only
     }
 
     /// The state of the fs instance `instance`, without a look that counts.

@@ -75,7 +75,8 @@ pub enum Reason {
     /// The host cannot take the update now (exit 75): both instances run.
     HostNotReady,
     /// An instance that gave its sockets away is still draining, or the new one is still read-only
-    /// after it, which the fs instance's start waits for (exit 75): try again soon.
+    /// after the wait for it to take the cache lock, which the fs instance's start needs (exit 75):
+    /// try again soon.
     Draining,
     /// No instance answered `/readyz` with 200 on the public port. On a Mac that names the fs job:
     /// the fs job's mount is still listed after the job was booted out.

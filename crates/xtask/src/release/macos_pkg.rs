@@ -130,7 +130,7 @@ pub fn manifest_json(min_hostkeeper: &str) -> Value {
             "command": [BINARY_PATH, "update-hook"],
             "boot": "restore",
             "timeoutSecs": {
-                "prepare": "0", "cutover": "1500", "verify": "1000",
+                "prepare": "0", "cutover": "4000", "verify": "1000",
                 "rollback": "1500", "cleanup": "1300", "uninstall": "300",
             },
             "verifyDeadlineSecs": "2500",

@@ -85,7 +85,7 @@ fn the_linux_packages_unpack_with_hostkeeper_and_their_manifest_is_the_one_the_h
                 cleanup_retries: 3,
                 timeout_secs: Timeouts {
                     prepare: None,
-                    cutover: bound(1500),
+                    cutover: bound(4000),
                     verify: bound(1000),
                     rollback: bound(1500),
                     cleanup: bound(1300),
