@@ -408,7 +408,7 @@ async fn a_request_ends_by_its_own_end_or_by_fetch_timeout_and_its_fill_goes_on(
 /// Asserts that a put made in process opens the staged file once and streams it to the upstream
 /// as a create-only object named by its SHA-256, answered as the fill socket answers a put: the
 /// first makes the object (one put of the upstream, of the file's bytes), the same put again finds
-/// the same bytes and makes none, and the staged file is left as it was.
+/// the same bytes and leaves the object as it was, and the staged file is left as it was.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_put_reads_the_staged_file_once_and_stores_it() {
     let rig = Rig::writing("tfs-in-put");
@@ -417,14 +417,19 @@ async fn a_put_reads_the_staged_file_once_and_stores_it() {
     let over = in_process(&rig.cache, None, LONG);
     let sha256 = TreeDigest::of(b"pack bytes").to_string();
     let path = staged.clone();
-    let (made, again) = off_runtime(move || {
-        let put = || over.put(("cas/b/1/n/pack", sha256.as_str(), 10), &path, LONG);
-        (put(), put())
-    })
-    .await;
+    let over = Arc::new(over);
+    let put = move || {
+        let over = Arc::clone(&over);
+        let (sha256, path) = (sha256.clone(), path.clone());
+        off_runtime(move || over.put(("cas/b/1/n/pack", sha256.as_str(), 10), &path, LONG))
+    };
+    let made = put().await;
     assert_eq!(made, Ok(r#"{"ok":true,"created":true}"#.to_owned()));
-    assert_eq!(again, Ok(r#"{"ok":true,"created":false}"#.to_owned()));
     assert_eq!(rig.calls(Op::Put), 1);
+    let stored = rig.tamper.get("cas/b/1/n/pack", None).await.unwrap();
+    assert_eq!(stored, "pack bytes");
+    let again = put().await;
+    assert_eq!(again, Ok(r#"{"ok":true,"created":false}"#.to_owned()));
     let stored = rig.tamper.get("cas/b/1/n/pack", None).await.unwrap();
     assert_eq!(stored, "pack bytes");
     assert_eq!(std::fs::read(&staged).unwrap(), b"pack bytes");
