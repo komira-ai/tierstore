@@ -275,3 +275,31 @@ fn a_mac_config_update_that_moves_the_mount_point_is_refused() {
     lin::assert_failed(&node.step(Prepare, &mac_update()), Reason::ModeUnsupported);
     assert_eq!(node.fake.record(), Record::idle(None));
 }
+
+/// Asserts that a config update of a Mac whose serving file has an `fs` interface, with no move of
+/// the mount and no fs job of the old layout, is refused with mode_unsupported before anything is
+/// recorded or stopped (the config hook restarts the job, which would drop the mount its process
+/// serves); and that `mode = "restart"` lets it through as the restart of the job. Catches a
+/// config update that boots out the process that serves the node's mount.
+#[test]
+fn a_mac_config_update_of_a_node_that_serves_its_mount_is_refused() {
+    let node = Mac::new();
+    node.files.put(Path::new(mac::CONFIG), &fs_file(NEW_MOUNT));
+    node.files.put(&staged(mac::CONFIG), &fs_file(NEW_MOUNT));
+    let done = node.step(Prepare, &mac_update());
+    lin::assert_failed(&done, Reason::ModeUnsupported);
+    assert!(
+        lin::detail(&done).contains("a config update of a Mac restarts its job"),
+        "{}",
+        lin::detail(&done)
+    );
+    assert_eq!(node.fake.record(), Record::idle(None));
+    assert!(node.fake.launchd_calls().is_empty());
+    let declared = mac::params_with(
+        super::PKG_NEW,
+        "1.1.0",
+        Some((super::PKG_OLD, "1.0.0")),
+        "mode = \"restart\"\n",
+    );
+    lin::assert_ok(&node.step(Prepare, &declared));
+}

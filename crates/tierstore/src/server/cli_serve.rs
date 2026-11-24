@@ -350,7 +350,7 @@ pub(super) enum Got<'a> {
     Handed(HandedOffer<'a>),
     /// The sockets of the running instance, already accepted: the start of a switch accepts them
     /// once it holds the mount ([`ask_sockets`]).
-    Taken(Inherited),
+    Taken(Box<Inherited>),
 }
 
 /// The running instance's offer of its sockets, asked for on `handoff` and checked against `s3`
@@ -422,7 +422,7 @@ pub(super) async fn bind_fronts(
         nfs: &[],
     };
     let taken = match (got, handoff) {
-        (Some(Got::Taken(inherited)), _) => Some(inherited),
+        (Some(Got::Taken(inherited)), _) => Some(*inherited),
         (Some(Got::Handed(handed)), _) => {
             let own = Own {
                 control: None,

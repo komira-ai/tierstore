@@ -63,13 +63,8 @@ impl FsNode {
         self.dir.path().join("run")
     }
 
-    /// The file of the node with `server` in `[server]` and `params` among the params of its `fs`
-    /// interface; the S3 front listens on `listen`.
-    fn text(&self, server: &str, params: &str, listen: &str) -> String {
-        self.text_with(server, params, listen, "")
-    }
-
-    /// [`FsNode::text`] with `local` among the keys of `[local_cache]`.
+    /// The file of the node with `server` in `[server]`, `params` among the params of its `fs`
+    /// interface and `local` among the keys of `[local_cache]`; the S3 front listens on `listen`.
     fn text_with(&self, server: &str, params: &str, listen: &str, local: &str) -> String {
         let (uid, gid) = (
             rustix::process::geteuid().as_raw(),
@@ -83,7 +78,7 @@ impl FsNode {
         format!("{fs}{}", self.node.text(server, local)).replace("127.0.0.1:0", listen)
     }
 
-    /// The settings of [`FsNode::text`].
+    /// The settings of [`FsNode::text_with`] with no keys added to `[local_cache]`.
     fn settings(&self, server: &str, params: &str, listen: &str) -> CacheSettings {
         self.settings_with(server, params, listen, "")
     }

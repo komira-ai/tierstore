@@ -535,7 +535,7 @@ pub(super) async fn serve_front(
                 lock: Some(&lock_path),
             })
         })
-        .or(sockets.map(Got::Taken));
+        .or(sockets.map(|taken| Got::Taken(Box::new(taken))));
     let fronts_bound = async {
         let trees_front = match fronts.trees_front {
             Some(setup) => Some(setup.bind().await?),

@@ -318,3 +318,53 @@ fn a_restart_that_would_drop_the_mount_is_refused() {
     assert_eq!(node.fake.record().mode, Some(Mode::Restart));
     assert!(!node.fake.record().fs_switch);
 }
+
+/// Asserts that a config update whose staged file drops the `fs` interface of the file that serves
+/// is refused with mode_unsupported, naming the interface, with nothing recorded or started (the
+/// new process would not take the mount, and the old one's stop would let the kernel abort it);
+/// and that `mode = "restart"` lets it through. Catches a config update that silently ends the
+/// mount under the node's jobs.
+#[test]
+fn a_config_update_that_drops_the_fs_interface_is_refused() {
+    let node = Linux::new(Some(&fs_file("")), lin::WITH_SOCKET);
+    let done = node.step(Prepare, &update());
+    lin::assert_failed(&done, Reason::ModeUnsupported);
+    assert!(
+        lin::detail(&done).starts_with("the staged file has no fs interface"),
+        "{}",
+        lin::detail(&done)
+    );
+    assert_eq!(node.fake.record(), Record::idle(Some(Instance::A)));
+    assert!(node.fake.actions().is_empty());
+    lin::assert_ok(&node.step(Prepare, &restart_params()));
+}
+
+/// Asserts that the switch, on a node whose serving binary does not list `handoff-service-v1` (a
+/// release before the one process), is refused with mode_unsupported by the arm's `prepare`, with
+/// nothing recorded and no unit or marker touched, and that `mode = "restart"` lets it through as
+/// a restart. Catches a switch started by a binary whose new process cannot take the mount, which
+/// would mount afresh over the one the old fs process holds.
+#[test]
+fn a_switch_whose_binary_lacks_handoff_service_v1_is_refused() {
+    use crate::server::update_hook::{
+        CACHE_HANDOFF_CAPABILITY, HANDOFF_CAPABILITY, HANDOFF_STATE_DIR_CAPABILITY,
+    };
+    let node = Linux::listing(
+        lin::SystemdFake::fs_installed(),
+        &[
+            HANDOFF_CAPABILITY,
+            CACHE_HANDOFF_CAPABILITY,
+            HANDOFF_STATE_DIR_CAPABILITY,
+        ],
+        Some(lin::WITH_SOCKET),
+        &fs_file(""),
+    );
+    let done = node.step(Prepare, &update());
+    lin::assert_failed(&done, Reason::ModeUnsupported);
+    assert!(lin::detail(&done).contains("lacks handoff-service-v1"));
+    assert!(node.fake.actions().is_empty());
+    assert!(node.fake.fs_actions().is_empty());
+    assert_eq!(node.fake.fs_markers(), [Instance::A]);
+    lin::assert_ok(&node.step(Prepare, &restart_params()));
+    assert_eq!(node.fake.record().mode, Some(Mode::Restart));
+}

@@ -217,16 +217,19 @@ fn mount_refused(why: String) -> Done {
 
 /// `prepare`'s own part: the release at rest, the staged file accepted, whether the change is a
 /// restart, and whether it is the switch (`holds_fs` says whether the file service of the old
-/// layout runs; `switch_restarts` is true where the switch is a restart by design, on a Mac).
-/// A file that serves the mount and a staged one that moves it, or a change that must restart a
-/// node that holds a mount, is refused unless the params declare a restart. Returns the arm's
-/// params.
+/// layout runs; `mac` is true on a Mac, where every config update is a restart of the one job, and
+/// so is the switch, by design). Unless the params declare a restart, these are refused, as each
+/// would drop or lose the mount of a node whose process serves it: a staged file that drops the
+/// `fs` interface or moves its mount; a change that must be a restart; and on a Mac any config
+/// update of a node whose file has an `fs` interface (the hand-over to the next image is the
+/// update hook's; a config update cannot tell the new image from the one it replaces, as both
+/// report the same build). Returns the arm's params.
 fn prepare_params(
     params: &Params,
     ports_host: &dyn Host,
     common: &Common<'_>,
     holds_fs: &dyn Fn() -> Result<bool, Done>,
-    switch_restarts: bool,
+    mac: bool,
 ) -> Result<Prepared, Done> {
     release_at_rest(common.service)?;
     let (staged, text) = staged_checked(ports_host, common.release, params)?;
@@ -235,6 +238,23 @@ fn prepare_params(
     let old_fs = serving.as_deref().and_then(fs_interface);
     let new_fs = fs_interface(&text);
     let switch = new_fs.is_some() && old_fs.is_none() && holds_fs()?;
+    let switch_restarts = mac;
+    if old_fs.is_some() && !params.declared_restart {
+        if new_fs.is_none() {
+            return Err(mount_refused(
+                "the staged file has no fs interface, and the file that serves has one: the new \
+                 process would not take the mount, which would be dropped"
+                    .to_owned(),
+            ));
+        }
+        if mac {
+            return Err(mount_refused(
+                "the file that serves has an fs interface, and a config update of a Mac restarts \
+                 its job, which would drop the mount"
+                    .to_owned(),
+            ));
+        }
+    }
     if let Some(new) = &new_fs
         && !params.declared_restart
     {

@@ -18,8 +18,8 @@ use super::{Common, Running, staged_copy, systemd_step};
 
 use Step::{Cleanup, Cutover, Prepare, Verify};
 
-const PKG_OLD: &str = "/var/lib/hostkeeper/packages/tierstore-config/1.0.0";
-const PKG_NEW: &str = "/var/lib/hostkeeper/packages/tierstore-config/1.1.0";
+pub(super) const PKG_OLD: &str = "/var/lib/hostkeeper/packages/tierstore-config/1.0.0";
+pub(super) const PKG_NEW: &str = "/var/lib/hostkeeper/packages/tierstore-config/1.1.0";
 
 /// The files a node reads, as the host port of the config hook sees them: the text of each path,
 /// the lines the serving binary refuses a path with, and the paths that cannot be read.
@@ -238,7 +238,8 @@ impl Linux {
     }
 
     /// The same on the machine `fake`, whose running release lists `extra` words besides the
-    /// three of the hand-over of the store.
+    /// three of the hand-over of the store and `handoff-service-v1`, as a release from this one on
+    /// does.
     fn on(
         fake: lin::SystemdFake,
         extra: &[&str],
@@ -249,9 +250,20 @@ impl Linux {
             HANDOFF_CAPABILITY,
             CACHE_HANDOFF_CAPABILITY,
             HANDOFF_STATE_DIR_CAPABILITY,
+            crate::server::update_hook::HANDOFF_SERVICE_CAPABILITY,
         ];
         words.extend_from_slice(extra);
-        let files = Files::new(&words);
+        Linux::listing(fake, &words, serving, staged_text)
+    }
+
+    /// The same, whose running release lists exactly `words`.
+    fn listing(
+        fake: lin::SystemdFake,
+        words: &[&str],
+        serving: Option<&str>,
+        staged_text: &str,
+    ) -> Linux {
+        let files = Files::new(words);
         if let Some(text) = serving {
             files.put(Path::new(lin::CONFIG), text);
         }
