@@ -72,6 +72,14 @@
 # refs/heads/main. `macos-arm64-farm` grants `id-token: write` to the workflow it calls
 # (macos-farm.yml), whose tokens name that file and so cannot sign as this one.
 #
+# Exactly one of macos-arm64 and macos-arm64-farm runs on a push to main, so every such run skips
+# the other. GitHub reads a job's `if:` that names no status function as `success() && ...`, which
+# is false as soon as a job it waits for, at any depth, was skipped. So every job after the two
+# macOS jobs (sign-pkg, check-pkg, sums, attest) starts its `if:` with `!cancelled()` and then tests
+# the result of each job it waits for that is not already behind another of its needs: a skipped
+# macOS job stops none of them, and a failed or skipped job they test still does. The workflow lint
+# holds that (after_macos_problems in crates/xtask/tests/workflows/macos_farm.rs).
+#
 # The attest job signs and does nothing else: while it holds `id-token: write` no repository code
 # runs and nothing is built, only the pinned actions below, two `sha256sum --check` commands that
 # run first (bash-specific: the workflow pins its shell) and a `cp` that names each bundle. The
@@ -634,16 +642,16 @@ jobs:
           retention-days: 90
           if-no-files-found: error
 
-  # Push to main only, with no secret: the signed pkg is checked and only then becomes a release
-  # file. `release check-pkg-signature` refuses it unless pkgutil says the Mac trusts its
-  # signature, signed with a trusted timestamp by exactly the identity under Apple's Developer ID
-  # intermediate and root; the signed and the unsigned pkg must expand to the same files, so
-  # signing changed nothing that check-macos-pkg checked in macos-arm64. The pkg is uploaded as
+  # Push to main only, once sign-pkg passed, with no secret: the signed pkg is checked and only
+  # then becomes a release file. `release check-pkg-signature` refuses it unless pkgutil says the
+  # Mac trusts its signature, signed with a trusted timestamp by exactly the identity under Apple's
+  # Developer ID intermediate and root; the signed and the unsigned pkg must expand to the same
+  # files, so signing changed nothing that check-macos-pkg checked in macos-arm64. The pkg is uploaded as
   # `assets-pkg-macos-arm64`, the one `assets-*` artifact that holds it, so SHA256SUMS, the
   # attestation and the release name the signed bytes.
   check-pkg:
     needs: [version, sign-pkg]
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.sign-pkg.result == 'success' }}
     runs-on: macos-15
     timeout-minutes: 30
     permissions:
@@ -731,12 +739,12 @@ jobs:
           retention-days: 90
           if-no-files-found: error
 
-  # Push to main only: build provenance for every file, an SBOM attestation for every tarball, and
-  # a provenance attestation (and its bundle) of each tarball and each hostkeeper package alone.
-  # See the top of this file.
+  # Push to main only, once sums passed: build provenance for every file, an SBOM attestation for
+  # every tarball, and a provenance attestation (and its bundle) of each tarball and each
+  # hostkeeper package alone. See the top of this file.
   attest:
     needs: [version, sums]
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.sums.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:

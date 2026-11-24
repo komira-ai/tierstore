@@ -51,7 +51,7 @@ pub struct Allowed {
     pub condition: &'static str,
 }
 
-/// Attestations are signed for a push to `main` and for nothing else.
+/// A push to `main` and nothing else (attest adds that `sums` passed: `macos_farm::ATTEST_IF`).
 pub const SIGN_IF: &str = "${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}";
 
 /// The site's deploy runs for a push to `main` or a manual run of `main`, once the repository
@@ -66,13 +66,13 @@ pub const WRITE_ALLOWED: &[Allowed] = &[
         file: "artifacts.yml",
         job: "attest",
         scope: "id-token",
-        condition: SIGN_IF,
+        condition: macos_farm::ATTEST_IF,
     },
     Allowed {
         file: "artifacts.yml",
         job: "attest",
         scope: "attestations",
-        condition: SIGN_IF,
+        condition: macos_farm::ATTEST_IF,
     },
     Allowed {
         file: "tierstore-site-publish.yml",

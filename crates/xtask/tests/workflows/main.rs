@@ -46,6 +46,7 @@ mod hostkeeper;
 mod hostkeeper_tests;
 mod lint;
 mod macos_farm;
+mod macos_farm_skip_tests;
 mod macos_farm_tests;
 mod pkg;
 mod pkg_tests;
@@ -62,8 +63,8 @@ mod yaml_tests;
 use std::path::PathBuf;
 
 use lint::{
-    ARTIFACTS_GROUP, RELEASE_EXEMPT, RELEASE_GROUP, SIGN_IF, artifacts_problems,
-    concurrency_problems, discovery_problems, lint, release_problems,
+    ARTIFACTS_GROUP, RELEASE_EXEMPT, RELEASE_GROUP, artifacts_problems, concurrency_problems,
+    discovery_problems, lint, release_problems,
 };
 
 /// The directory of the workflows of this repository.
@@ -147,7 +148,7 @@ fn only_artifacts_signs_and_only_on_a_push_to_main() {
     }
     let artifacts = text_of("artifacts.yml");
     assert!(
-        artifacts.contains(&format!("    if: {SIGN_IF}")),
+        artifacts.contains(&format!("    if: {}", macos_farm::ATTEST_IF)),
         "the attest job's condition"
     );
     let release = text_of("release.yml");
@@ -320,7 +321,7 @@ jobs:
 "
         )
     };
-    let good = signing(&format!("    if: {SIGN_IF}\n"));
+    let good = signing(&format!("    if: {}\n", macos_farm::ATTEST_IF));
     assert_eq!(lint("artifacts.yml", &good), Vec::<String>::new());
     // The same job in another file is refused.
     assert_eq!(lint("ci.yml", &good).len(), 2);

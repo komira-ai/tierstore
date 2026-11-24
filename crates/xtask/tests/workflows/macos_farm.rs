@@ -8,6 +8,15 @@
 //! does not run under [`HOSTED_IF`], the negation of the farm's condition for a push: on every run
 //! exactly one of the two can run.
 //!
+//! [`after_macos_problems`] refuses `artifacts.yml` when a job that waits, at any depth, for one of
+//! the two macOS jobs ([`after_macos`]) has an `if:` that does not start with [`AFTER_MACOS`], or
+//! does not test the result of each job it needs that is not already behind another of its needs.
+//! One of the two macOS jobs is skipped on every push to main, and GitHub reads an `if:` that names
+//! no status function as `success() && ...`, which a skipped job it waits for at any depth makes
+//! false: that job and every job after it would be skipped, and the release would find no sums,
+//! no signed installer and no bundles. `!cancelled()` alone would let the job run after a job it
+//! needs failed or was skipped, so the results are tested by name.
+//!
 //! [`problems`] refuses [`FILE`] when:
 //! - its `on` is anything but `workflow_call` with the one input `version`, a required string;
 //! - its jobs are anything but [`JOB`], on `ubuntu-24.04`, under [`SIGN_IF`], with `permissions`
@@ -28,6 +37,8 @@
 //! [`assets_step_problems`] refuses a `release macos-assets` whose steps are not the hosted job's
 //! commands, the same arguments in the same order (the runner's own steps aside: the toolchain and
 //! the download of cargo-cyclonedx, which on the farm is an input of the action).
+
+use std::collections::BTreeSet;
 
 use super::lint::{Allowed, SIGN_IF, entries, entry, names, scalars};
 use super::platforms::{BUILDS, UPLOAD, action_problems, at, build_commands, commands, steps};
@@ -68,6 +79,19 @@ pub const HOSTED_IF: &str = "${{ github.event_name != 'pull_request' && !(github
 
 /// The `if:` of `sign-pkg`: a push to main, after whichever of the two macOS jobs ran and passed.
 pub const SIGN_PKG_IF: &str = "${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' && (needs.macos-arm64.result == 'success' || needs.macos-arm64-farm.result == 'success') }}";
+
+/// The `if:` of `check-pkg`: a push to main, once `sign-pkg` passed.
+pub const CHECK_PKG_IF: &str = "${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.sign-pkg.result == 'success' }}";
+
+/// The `if:` of `attest`, the one job of artifacts.yml that signs: a push to main, once `sums`
+/// passed.
+pub const ATTEST_IF: &str = "${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.sums.result == 'success' }}";
+
+/// The two macOS jobs: the hosted one and [`CALLER`]. A push to main skips one of them.
+pub const MACOS_JOBS: [&str; 2] = ["macos-arm64", CALLER];
+
+/// How the `if:` of every job after the two macOS jobs ([`after_macos`]) starts.
+pub const AFTER_MACOS: &str = "${{ !cancelled() && ";
 
 /// The tailnet join and the `with:` of its step, exactly.
 pub const JOIN: &str = "tailscale/github-action@";
@@ -163,6 +187,68 @@ pub fn caller_problems(jobs: &[(Node, Node)]) -> Vec<String> {
             problems.push(format!(
                 "{CALLER}: has `{key}`, which a call of {CALL} does not"
             ));
+        }
+    }
+    problems
+}
+
+/// The jobs the job `name` of `jobs` needs, as the file writes them.
+fn needs_of(jobs: &[(Node, Node)], name: &str) -> Vec<String> {
+    jobs.iter()
+        .find(|(k, _)| k.as_str() == Some(name))
+        .map_or_else(Vec::new, |(_, j)| names(entry(j, "needs")))
+}
+
+/// Every job the job `name` of `jobs` waits for, at any depth. A cycle of needs ends the walk.
+fn waits_for(jobs: &[(Node, Node)], name: &str) -> BTreeSet<String> {
+    let mut seen = BTreeSet::new();
+    let mut todo = needs_of(jobs, name);
+    while let Some(next) = todo.pop() {
+        if seen.insert(next.clone()) {
+            todo.extend(needs_of(jobs, &next));
+        }
+    }
+    seen
+}
+
+/// The jobs of `jobs` that wait, at any depth, for one of [`MACOS_JOBS`], in the order of the file.
+pub fn after_macos(jobs: &[(Node, Node)]) -> Vec<String> {
+    jobs.iter()
+        .filter_map(|(k, _)| k.as_str())
+        .filter(|name| {
+            let above = waits_for(jobs, name);
+            MACOS_JOBS.iter().any(|m| above.contains(*m))
+        })
+        .map(str::to_owned)
+        .collect()
+}
+
+/// One line per job of [`after_macos`] in `jobs` (artifacts.yml's) whose `if:` does not start
+/// with [`AFTER_MACOS`], or does not test `needs.<job>.result` for each job it needs that no other
+/// job it needs waits for.
+pub fn after_macos_problems(jobs: &[(Node, Node)]) -> Vec<String> {
+    let mut problems = Vec::new();
+    for name in after_macos(jobs) {
+        let condition = jobs
+            .iter()
+            .find(|(k, _)| k.as_str() == Some(name.as_str()))
+            .and_then(|(_, j)| at(j, &["if"]))
+            .unwrap_or_default();
+        if !condition.starts_with(AFTER_MACOS) {
+            problems.push(format!(
+                "{name}: waits for {MACOS_JOBS:?}, one of which a push to main skips, so its `if:` must start with `{AFTER_MACOS}`: without a status function GitHub skips it with the skipped one"
+            ));
+        }
+        let needs = needs_of(jobs, &name);
+        for need in &needs {
+            let behind = needs
+                .iter()
+                .any(|other| other != need && waits_for(jobs, other).contains(need));
+            if !behind && !condition.contains(&format!("needs.{need}.result")) {
+                problems.push(format!(
+                    "{name}: its `if:` does not test needs.{need}.result, so `!cancelled()` lets it run when {need} did not pass"
+                ));
+            }
         }
     }
     problems

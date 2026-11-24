@@ -3,7 +3,6 @@
 
 use super::lint::{entries, entry, names, scalars};
 use super::macos_farm;
-use super::pkg::PKG_JOB_IF;
 use super::platforms::{NOT_FOR_A_PULL_REQUEST, at};
 use super::yaml::{self, Node};
 
@@ -54,14 +53,15 @@ fn unseen_runner_problems(file: &str, name: &str, job: &Node) -> Vec<String> {
 }
 
 /// Whether the job condition `condition` is one of the conditions of this repository's jobs that is
-/// never true for a pull request: the beta stage's, a push to main's, and the two of the macOS
-/// build, hosted ([`macos_farm::HOSTED_IF`]) or after it (`sign-pkg`'s, [`macos_farm::SIGN_PKG_IF`]).
+/// never true for a pull request: the beta stage's, and the three of the macOS build, hosted
+/// ([`macos_farm::HOSTED_IF`]) or after it (`sign-pkg`'s, [`macos_farm::SIGN_PKG_IF`], and
+/// `check-pkg`'s, [`macos_farm::CHECK_PKG_IF`]).
 fn never_a_pull_request(condition: &str) -> bool {
     [
         NOT_FOR_A_PULL_REQUEST,
-        PKG_JOB_IF,
         macos_farm::HOSTED_IF,
         macos_farm::SIGN_PKG_IF,
+        macos_farm::CHECK_PKG_IF,
     ]
     .contains(&condition)
 }
