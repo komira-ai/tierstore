@@ -8,9 +8,12 @@
 //! - a step's (or a job's) `uses:` is not an action pinned to a full 40-character commit SHA
 //!   followed on the same line by a version comment (`# v1.2.3`), or names a local path. In
 //!   [`farm_lane::FILE`] alone, [`farm_lane::FARM_CONNECT`] is pinned by commit with no version
-//!   comment: komira tags no release of it;
+//!   comment: komira tags no release of it; in `artifacts.yml` alone, the job
+//!   [`macos_farm::CALLER`] calls [`macos_farm::CALL`], the workflow of the same commit, by its
+//!   path ([`macos_farm::local_call_allowed`]);
 //! - a job's `permissions` is not a mapping, or grants `write` for a scope that is not in
-//!   [`WRITE_ALLOWED`] for that workflow file and job, or grants it under another `if:` than
+//!   [`WRITE_ALLOWED`] (or [`macos_farm::WRITE_ALLOWED`]) for that workflow file and job, or
+//!   grants it under another `if:` than
 //!   the one the table gives. So `id-token` and `attestations` (the scopes that sign) are
 //!   written by the one `attest` job of `artifacts.yml`, on a push to `main` alone, `id-token`
 //!   also by the site's deploy job, by the `set-desired` job of `hostkeeper-desired.yml`
@@ -19,9 +22,12 @@
 //!   for the farm), and by the release's `testing-upload` and `promote-latest` jobs (the
 //!   token the release-files role admits) and its twelve apt jobs that read and write the
 //!   repository (the token the apt role admits), six for the suite `testing` and six for `stable`, and the same twelve for the rpm tree, and by the release's `deploy` and `deploy-mac`
-//!   jobs (the token the hostkeeper coordinator admits, as for `set-desired`), and by the `build`
+//!   jobs (the token the hostkeeper coordinator admits, as for `set-desired`), by the `build`
 //!   job of the farm lane's `farm.yml`, the one job a pull request starts that holds a write scope
-//!   (the token the farm's network trusts, for farm-connect's join); `contents: write`
+//!   (the token the farm's network trusts, for farm-connect's join), and by artifacts.yml's
+//!   [`macos_farm::CALLER`] and the one job of the workflow it calls, [`macos_farm::FILE`], on a
+//!   push to main (the same token, for the tailnet join; a token issued there names that file, so
+//!   it cannot sign as artifacts.yml); `contents: write`
 //!   by the release's `publish` job alone; `issues` by `advisories.yml` and by the `red` job of
 //!   `release.yml` and of `beta.yml` (the issue `RELEASE-RED: tierstore <stage>`).
 //!
@@ -33,6 +39,7 @@
 
 use super::desired::SET_IF as DESIRED_SET_IF;
 use super::farm_lane;
+use super::macos_farm;
 use super::yaml::{self, Node, Value};
 
 /// A write permission a job may hold: the workflow file, the job, the scope, and the `if:` of
@@ -368,6 +375,9 @@ fn uses<'a>(node: &'a Node, out: &mut Vec<(usize, &'a str)>) {
 /// What is wrong with the `uses:` value `value` on `line` of `text`, the workflow `file`, if
 /// anything.
 fn pin_problem(file: &str, text: &str, line: usize, value: &str) -> Option<String> {
+    if macos_farm::local_call_allowed(file, value) {
+        return None;
+    }
     let Some((action, rest)) = value.split_once('@') else {
         return Some(format!(
             "line {line}: `uses: {value}` is not pinned (owner/repo@<40 hex digits>)"
@@ -458,6 +468,7 @@ fn permission_problems(file: &str, name: &str, job: &Node) -> Vec<String> {
         }
         let allowed = WRITE_ALLOWED
             .iter()
+            .chain(macos_farm::WRITE_ALLOWED)
             .find(|a| a.file == file && a.job == name && a.scope == scope);
         match (level, allowed) {
             (Some("write"), Some(a)) if condition == Some(a.condition) => {}

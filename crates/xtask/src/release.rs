@@ -74,6 +74,7 @@ pub mod glibc;
 pub mod hostkeeper_index;
 pub mod hostkeeper_package;
 pub mod hostkeeper_verify;
+pub mod macos_assets;
 pub mod macos_pkg;
 pub mod pkg_signature;
 mod plan;

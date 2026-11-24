@@ -1,0 +1,102 @@
+# The macOS release files of artifacts.yml (the job `macos-arm64`: the binary, its tarball, SBOM,
+# hostkeeper package and tap tarball, and the unsigned installer), built and checked on a Mac of the
+# build farm instead of a GitHub-hosted macOS runner (docs/mac-farm.md). artifacts.yml's job
+# `macos-arm64-farm` calls this workflow on a push to main once the variable
+# MACOS_PACKAGE_ON_FARM is `true`, and the hosted job is then skipped; this job uploads the same two
+# artifacts the hosted one does, `pkg-unsigned-macos-arm64` (pkg/) and `assets-macos-arm64`
+# (dist/), which `sign-pkg` and `sums` read unchanged. A run by hand (workflow_dispatch) builds on
+# the hosted job, as before: a token that reaches the farm is held for a push to main alone.
+#
+# The job runs on a hosted Linux runner, in four steps. It builds xtask (before the tailnet join,
+# so no build script sees that network), joins the farm's Tailscale network as an ephemeral node
+# with the run's OIDC token (workload identity federation, `tag:ci`; the organisation variables
+# TS_CLIENT_ID and TS_AUDIENCE: no stored secret), and runs one command, `cargo xtask mac-farm`
+# (crates/xtask/src/mac_farm.rs). That sends `cargo xtask release macos-assets` to a farm Mac as
+# one remote action, whose inputs are the checkout, the crates of Cargo.lock, the pinned Rust
+# toolchain and cargo-cyclonedx (by URL and SHA-256, the pin of artifacts.yml, which the workflow
+# lint holds equal), since a farm Mac has no Rust and its action no network. `release
+# macos-assets` runs the steps of the hosted job, in their order and with their arguments (the lint
+# holds them equal): the version, the build, the binary's commit and version, the SBOM, the licence
+# notice, the package, its unpack, the hostkeeper package and its unpack, the tap tarball, the code
+# signature, the installer and its read back. The action declares `dist` and `pkg` as its outputs;
+# the verb writes them into the checkout, each file held to its digest, and fails unless the command
+# exited 0 and both are there. The uploads follow.
+#
+# Why a workflow of its own: the attestations of a release are verified as signed by
+# artifacts.yml (`--signer-workflow`, the certificate's `job_workflow_ref`), and this job holds
+# `id-token: write` (the tailnet join) while it runs repository code. A token issued in a called
+# workflow names this file as its `job_workflow_ref`, so nothing this job runs can sign as
+# artifacts.yml; the `attest` job stays the one job of artifacts.yml that can. The workflow lint
+# lets `id-token: write` be held here and by the calling job, each under its exact `if:`, a push to
+# main.
+#
+# The farm's address, instance, TLS and Mac platform are the organisation variables FARM_ADDRESS,
+# FARM_INSTANCE, FARM_TLS and FARM_DARWIN_ARM64_PROPERTIES; no repository holds an endpoint or a
+# property set. The step's header in the log shows them (they are reachable on the farm's private
+# network alone); the verb masks the address in the lines it prints itself. With
+# FARM_ADDRESS unset it runs nothing, and the upload of the files it did not make fails the job.
+name: macos-farm
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: The version of the release the files are built under, X.Y.Z (artifacts.yml's `version` job).
+        required: true
+        type: string
+
+permissions: {}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  # cargo-cyclonedx for aarch64-apple-darwin, an input of the farm action: artifacts.yml's pin.
+  CYCLONEDX_VERSION: 0.5.9
+  CYCLONEDX_SHA256_AARCH64_MACOS: 4c53dfa21e70b65bf7f8d2592aadde3bcb02c1a40b6ec63b877e5ca65a29e180
+
+jobs:
+  package:
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      # For the tailnet join alone: the OIDC token the farm's network trusts.
+      id-token: write
+    env:
+      RELEASE_VERSION: ${{ inputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - name: Compile xtask
+        run: cargo xtask --help
+      - name: Join the farm's Tailscale network
+        uses: tailscale/github-action@d1b6cd204f8dceda5b3eaad7f1f767be390056cd # v4.2.0
+        with:
+          oauth-client-id: ${{ vars.TS_CLIENT_ID }}
+          audience: ${{ vars.TS_AUDIENCE }}
+          tags: tag:ci
+      # The action's timeout is the verb's default (40 minutes, under the farm's limit); this
+      # step's bounds a run that waits for a free Mac.
+      - name: The macOS release files, built and checked on a farm Mac
+        timeout-minutes: 75
+        env:
+          FARM_ADDRESS: ${{ vars.FARM_ADDRESS }}
+          FARM_INSTANCE: ${{ vars.FARM_INSTANCE }}
+          FARM_TLS: ${{ vars.FARM_TLS || 'false' }}
+          FARM_PROPERTIES: ${{ vars.FARM_DARWIN_ARM64_PROPERTIES }}
+        run: cargo xtask mac-farm --address "$FARM_ADDRESS" --instance "$FARM_INSTANCE" --tls "$FARM_TLS" --properties "$FARM_PROPERTIES" --scratch "$RUNNER_TEMP/mac-farm" --tool-url "https://github.com/CycloneDX/cyclonedx-rust-cargo/releases/download/cargo-cyclonedx-$CYCLONEDX_VERSION/cargo-cyclonedx-aarch64-apple-darwin.tar.xz" --tool-sha256 "$CYCLONEDX_SHA256_AARCH64_MACOS" --tool-member cargo-cyclonedx-aarch64-apple-darwin/cargo-cyclonedx --output dist --output pkg -- xtask release macos-assets --version "$RELEASE_VERSION" --commit "$GITHUB_SHA" --scratch target/macos-assets
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pkg-unsigned-macos-arm64
+          path: pkg/
+          retention-days: 90
+          if-no-files-found: error
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: assets-macos-arm64
+          path: dist/
+          retention-days: 90
+          if-no-files-found: error
