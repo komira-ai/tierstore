@@ -11,18 +11,32 @@
 //! - `prepare` has the binary that serves check the file the package stages
 //!   (`<staged release>/tree/<config file>`) before it is installed, refuses while an update of
 //!   the release is in flight, and chooses the way: a hand-over when the file that serves and the
-//!   staged one listen alike and name the same hand-over socket, a restart otherwise.
+//!   staged one listen alike (their `fs` interfaces apart) and name the same hand-over socket, a
+//!   restart otherwise. It refuses with `mode_unsupported`, unless the params say
+//!   `mode = "restart"`, a staged file whose `fs` interface moves the mount point, the control
+//!   socket or the runtime directory of the one that serves, and a change that must restart a
+//!   node that holds a mount. It notes the switch of the node to one process (below).
 //! - `cutover` reloads the network guard (Linux, when the node has `guard.nft`) and starts the
 //!   other instance on the new file, by the hand-over (or the restart) of an update; on a Mac it
 //!   restarts the one job.
 //! - `verify` has the binary check the installed file (`--check-config`) and reads `/readyz`
-//!   and the build of the instance that serves.
+//!   and the build of the instance that serves; for the switch of a Mac it also requires the
+//!   mount listed at the mount point of the installed file.
 //! - `rollback`, after hostkeeper has put the previous package's files back, reloads the guard
-//!   and hands back to the instance that served. A node's first config package has no files to
+//!   and hands back to the instance that served; for the switch the mount goes back first. A node's first config package has no files to
 //!   go back to: its rollback reloads nothing, leaves the instance that runs serving and fails
 //!   `no_previous_release`.
 //! - `cleanup` retires the old instance, as for an update.
 //! - `uninstall` changes nothing: the service keeps what it read.
+//!
+//! A node's fs process of the old layout is left alone by every config update but one: the
+//! **switch** of a node to one process, a package whose staged file has an `fs` interface where
+//! the file that serves has none and the old fs process runs (on a Mac: the `tierstore-fs` job is
+//! loaded). On Linux the new instance of the store takes the mount from the fs process as it
+//! takes the sockets, and the hook removes both fs markers once it serves, starting and stopping
+//! no fs unit; its rollback starts the fs instance again before the store's. On a Mac the switch
+//! is a restart, with the fs job booted out and disabled first (`switch.rs`). Where no old fs
+//! process runs, the package is a plain config update.
 //!
 //! Its record is its own, beside the update hook's and under the same lock
 //! (`config-state.json`), so that the release's record (`to`, `version`, the promotion) is never touched; `cleanup`
@@ -31,6 +45,7 @@
 //! the service's installed binary, which is the one that serves.
 
 mod steps;
+mod switch;
 
 use std::ffi::OsString;
 use std::io::Write;

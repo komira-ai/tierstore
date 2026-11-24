@@ -28,6 +28,7 @@ struct Files {
     refusals: RefCell<BTreeMap<PathBuf, String>>,
     unreadable: RefCell<BTreeSet<PathBuf>>,
     checks_fail: Cell<bool>,
+    mount_fails: Cell<bool>,
     checked: RefCell<Vec<(PathBuf, PathBuf)>>,
     mounts: RefCell<BTreeSet<PathBuf>>,
     capabilities: Vec<String>,
@@ -40,6 +41,7 @@ impl Files {
             refusals: RefCell::new(BTreeMap::new()),
             unreadable: RefCell::new(BTreeSet::new()),
             checks_fail: Cell::new(false),
+            mount_fails: Cell::new(false),
             checked: RefCell::new(Vec::new()),
             mounts: RefCell::new(BTreeSet::new()),
             capabilities: capabilities.iter().map(|word| (*word).to_owned()).collect(),
@@ -72,6 +74,12 @@ impl Host for Files {
     }
 
     fn mounted(&self, path: &Path) -> Result<bool, PortError> {
+        if self.mount_fails.get() {
+            return Err(PortError::failed(
+                PortKind::Host,
+                "the mount list is unreadable",
+            ));
+        }
         Ok(self.mounts.borrow().contains(path))
     }
 
@@ -352,6 +360,8 @@ fn assert_restarts(serving: Option<&str>, staged_text: &str, params: &Params) {
 }
 
 mod macos;
+mod switch_macos;
+mod switch_systemd;
 mod systemd_rollback;
 mod systemd_update;
 

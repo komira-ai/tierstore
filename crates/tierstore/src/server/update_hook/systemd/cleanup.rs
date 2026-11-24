@@ -79,7 +79,12 @@ pub(super) fn finish(c: &Ctx<'_, '_>, committed: &Record) -> Result<(Record, Vec
     finished.live = Some(next);
     finished.next = None;
     finished.mode = None;
-    finished.fs_live = finished.fs_next.or(finished.fs_live);
+    // The switch ends with no fs instance: the one process holds the mount.
+    finished.fs_live = if committed.fs_switch {
+        None
+    } else {
+        finished.fs_next.or(finished.fs_live)
+    };
     finished.fs_next = None;
     c.save(&finished)?;
     Ok((finished, drains))

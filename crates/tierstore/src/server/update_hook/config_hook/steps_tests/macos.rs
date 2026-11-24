@@ -13,14 +13,14 @@ use Step::{Cleanup, Cutover, Prepare, Rollback, Uninstall, Verify};
 
 /// A Mac: one launchd job running the binary of `mac::OLD`, the config hook's record is the
 /// fake's, the release's record is `service`.
-struct Mac {
-    fake: mac::Fake,
-    files: Files,
-    service: Mem,
+pub(super) struct Mac {
+    pub(super) fake: mac::Fake,
+    pub(super) files: Files,
+    pub(super) service: Mem,
 }
 
 impl Mac {
-    fn new() -> Mac {
+    pub(super) fn new() -> Mac {
         let files = Files::new(&[]);
         files.put(Path::new(mac::CONFIG), "[server]\n");
         files.put(&staged(mac::CONFIG), "[server]\n");
@@ -31,7 +31,7 @@ impl Mac {
         }
     }
 
-    fn step(&self, step: Step, params: &Params) -> Done {
+    pub(super) fn step(&self, step: Step, params: &Params) -> Done {
         let running = Running {
             host: &self.files,
             release: Path::new(mac::OLD),
@@ -51,14 +51,14 @@ impl Mac {
         launchd_step(step, params, mac::LABEL, &ports, &common)
     }
 
-    fn go(&self, params: &Params, steps: &[Step]) {
+    pub(super) fn go(&self, params: &Params, steps: &[Step]) {
         for step in steps {
             lin::assert_ok(&self.step(*step, params));
         }
     }
 }
 
-fn mac_update() -> Params {
+pub(super) fn mac_update() -> Params {
     mac::params_for(PKG_NEW, "1.1.0", Some((PKG_OLD, "1.0.0")))
 }
 

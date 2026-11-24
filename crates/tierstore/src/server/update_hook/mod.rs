@@ -123,6 +123,9 @@ pub const SERVICE_BINARY: &str = "/usr/local/libexec/tierstore/tierstore";
 pub const LAUNCHD_PLIST: &str = "/Library/LaunchDaemons/tierstore.plist";
 /// The plist of the launchd job of `tierstore fs`, as the macOS package installs it.
 pub const FS_LAUNCHD_PLIST: &str = "/Library/LaunchDaemons/tierstore-fs.plist";
+/// The label of the launchd job of `tierstore fs`, which the config hook's switch of a Mac boots
+/// out and disables.
+pub const FS_LAUNCHD_LABEL: &str = "tierstore-fs";
 /// The configuration of `tierstore fs` on a Mac, whose `[fs] mountpoint` names the mount the
 /// launchd arm checks after it boots the fs job out.
 pub const FS_CONFIG_FILE: &str = "/usr/local/tierstore/etc/fs.toml";

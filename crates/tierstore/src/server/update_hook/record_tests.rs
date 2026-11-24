@@ -391,3 +391,70 @@ fn the_fs_keys_hold_to_their_rules() {
         "fs_live and fs_next are the same instance"
     );
 }
+
+/// Asserts that `fs_switch` is written only when set (a record without it encodes with no such
+/// key, byte for byte as before), that it reads back, and that a record with no such key reads as
+/// not switched. Catches a new key that changes the bytes of every record, which the previous
+/// release's hook would then read.
+#[test]
+fn fs_switch_is_written_only_when_set_and_reads_back() {
+    let plain = updating();
+    let text = String::from_utf8(plain.encode()).unwrap();
+    assert!(!text.contains("fs_switch"), "{text}");
+    assert!(!Record::decode(plain.encode().as_slice()).unwrap().fs_switch);
+
+    let switched = Record {
+        fs_live: Some(Instance::A),
+        fs_switch: true,
+        ..updating()
+    };
+    let text = String::from_utf8(switched.encode()).unwrap();
+    assert!(text.contains("\"fs_switch\": true"), "{text}");
+    assert_eq!(Record::decode(text.as_bytes()), Ok(switched));
+}
+
+/// Asserts that `fs_switch` passes `check` while an update is in flight and after its commit, and
+/// breaks the rules it must: not at rest with no commit, and not beside `fs_next`. Catches a
+/// switch noted on a record that no update owns, and a record that both hands the fs process over
+/// and drops it.
+#[test]
+fn fs_switch_holds_to_its_rules() {
+    let switched = Record {
+        fs_live: Some(Instance::A),
+        fs_switch: true,
+        ..updating()
+    };
+    assert_eq!(switched.check(), Ok(()));
+    let committed = with_markers(
+        Record {
+            updating: false,
+            from: None,
+            next: None,
+            mode: None,
+            fs_live: None,
+            ..switched.clone()
+        },
+        &[Marker::Swapped, Marker::Verified, Marker::Stopping],
+    );
+    assert_eq!(committed.check(), Ok(()));
+    assert_eq!(
+        Record {
+            fs_switch: true,
+            ..Record::idle(Some(Instance::A))
+        }
+        .check(),
+        marks("fs_switch", "updating or stopping")
+    );
+    assert_eq!(
+        Record {
+            fs_next: Some(Instance::B),
+            ..switched
+        }
+        .check(),
+        Err(Invalid::FsSwitchNext)
+    );
+    assert_eq!(
+        Invalid::FsSwitchNext.to_string(),
+        "fs_switch and fs_next are both set"
+    );
+}

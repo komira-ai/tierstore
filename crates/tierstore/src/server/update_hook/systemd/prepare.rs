@@ -153,6 +153,7 @@ pub(super) fn prepare(
     fresh.mode = mode;
     fresh.fs_live = fs.live;
     fresh.fs_next = fs.next;
+    fresh.fs_switch = fs.switch;
     c.save(&fresh)?;
     Ok(Done::ok(format!(
         "{done_note}prepared {}: {}, serving {}, next {}{}",

@@ -2,7 +2,9 @@
 //! config package's own (the check of the staged and the installed file, the guard, the
 //! instance written back into the release's record) and hands the rest to the update hook's arm
 //! with params that name this binary's build as the version on both sides of the update, so that
-//! the arm starts, observes, retires and hands back instances exactly as for a release.
+//! the arm starts, observes, retires and hands back instances exactly as for a release. The fs
+//! process of the old layout is left alone but for the switch of a node to one process, which the
+//! arm's `prepare` records (systemd) or `switch.rs` does (a Mac).
 
 use std::path::{Path, PathBuf};
 
@@ -11,9 +13,10 @@ use super::super::params::{Params, Previous};
 use super::super::ports::{Guard, Host, Instance, LaunchdPorts, PortError, StateDir, SystemdPorts};
 use super::super::record::{Marker, Record};
 use super::super::report::{Done, Reason};
+use super::super::shape::{FS_INTERFACE, fs_interface};
 use super::super::systemd::FsPolicy;
-use super::super::{DIR_TIER_KIND, HANDOFF_SOCKET_KEY, HOT_STORE_TABLE};
-use super::staged_copy;
+use super::super::{DIR_TIER_KIND, FS_LAUNCHD_LABEL, HANDOFF_SOCKET_KEY, HOT_STORE_TABLE};
+use super::{staged_copy, switch};
 
 /// The network guard's unit on a Linux node.
 pub const GUARD_UNIT: &str = "tierstore-guard.service";
@@ -130,15 +133,35 @@ fn staged_checked(
     Ok((staged, text))
 }
 
+/// The `interface` of a configuration without its `fs` entries: the file service holds no
+/// listening socket of the store, and a successor takes the mount whatever its params say of
+/// anything but the three paths of [`shape::FsShape`](super::super::shape::FsShape), which
+/// `prepare` compares on their own. A list that has nothing else left is none.
+fn listening_interfaces(table: &toml::Table) -> Option<toml::Value> {
+    match table.get("interface")? {
+        toml::Value::Array(entries) => {
+            let kept: Vec<toml::Value> = entries
+                .iter()
+                .filter(|entry| {
+                    entry.get("type").and_then(toml::Value::as_str) != Some(FS_INTERFACE)
+                })
+                .cloned()
+                .collect();
+            (!kept.is_empty()).then_some(toml::Value::Array(kept))
+        }
+        other => Some(other.clone()),
+    }
+}
+
 /// What of a configuration decides whether an instance can take the sockets of an instance
-/// started from the other: the listening addresses, the hand-over socket and a hot tier that is
-/// a directory (which two instances never share).
+/// started from the other: the listening addresses (the `fs` interface apart), the hand-over
+/// socket and a hot tier that is a directory (which two instances never share).
 fn handover_shape(text: &str) -> Option<(Option<toml::Value>, Vec<Option<toml::Value>>, bool)> {
     let table: toml::Table = text.parse().ok()?;
     let server = table.get("server").and_then(toml::Value::as_table);
     let of_server = |key: &str| server.and_then(|server| server.get(key)).cloned();
     let listening = vec![
-        table.get("interface").cloned(),
+        listening_interfaces(&table),
         of_server("listen"),
         of_server("slot"),
     ];
@@ -173,18 +196,83 @@ pub struct Common<'a> {
     pub build: &'a str,
 }
 
-/// `prepare`'s own part: the release at rest, the staged file accepted, and whether the change
-/// is a restart. Returns the arm's params.
+/// What `prepare`'s own part decided: the arm's params, and whether the change is the switch of
+/// a node to one process (the staged file has an `fs` interface, the file that serves has none,
+/// and the file service of the old layout runs).
+struct Prepared {
+    params: Params,
+    switch: bool,
+}
+
+/// The refusal of a change that would drop or move a mount (design 3.6): the taker would say
+/// `nak`, or a restart would end the process that holds it. `mode = "restart"` overrides it.
+fn mount_refused(why: String) -> Done {
+    Done::fail(
+        Reason::ModeUnsupported,
+        format!(
+            "{why}; the params' mode = \"restart\" overrides it for a node whose jobs are drained"
+        ),
+    )
+}
+
+/// `prepare`'s own part: the release at rest, the staged file accepted, whether the change is a
+/// restart, and whether it is the switch (`holds_fs` says whether the file service of the old
+/// layout runs; `switch_restarts` is true where the switch is a restart by design, on a Mac).
+/// A file that serves the mount and a staged one that moves it, or a change that must restart a
+/// node that holds a mount, is refused unless the params declare a restart. Returns the arm's
+/// params.
 fn prepare_params(
     params: &Params,
     ports_host: &dyn Host,
     common: &Common<'_>,
-) -> Result<Params, Done> {
+    holds_fs: &dyn Fn() -> Result<bool, Done>,
+    switch_restarts: bool,
+) -> Result<Prepared, Done> {
     release_at_rest(common.service)?;
     let (staged, text) = staged_checked(ports_host, common.release, params)?;
     let serving = ports_host.config(config_file(params)?)?;
     let restart = must_restart(serving.as_deref(), &text);
-    Ok(arm_params(params, common.build, &staged, restart))
+    let old_fs = serving.as_deref().and_then(fs_interface);
+    let new_fs = fs_interface(&text);
+    let switch = new_fs.is_some() && old_fs.is_none() && holds_fs()?;
+    if let Some(new) = &new_fs
+        && !params.declared_restart
+    {
+        let moved = old_fs.as_ref().map_or_else(Vec::new, |old| old.moved(new));
+        if !moved.is_empty() {
+            return Err(mount_refused(format!(
+                "the staged file moves the mount: {} differ from the file that serves, and the \
+                 new process cannot take the mount over",
+                moved.join(", ")
+            )));
+        }
+        if restart && (old_fs.is_some() || (switch && !switch_restarts)) {
+            return Err(mount_refused(
+                "the staged file with an fs interface needs a restart, which would drop the \
+                 mount"
+                    .to_owned(),
+            ));
+        }
+    }
+    Ok(Prepared {
+        params: arm_params(
+            params,
+            common.build,
+            &staged,
+            restart || (switch && switch_restarts),
+        ),
+        switch,
+    })
+}
+
+/// Whether a `tierstore-fs` instance runs.
+fn fs_runs(ports: &SystemdPorts<'_>) -> Result<bool, Done> {
+    for instance in Instance::ALL {
+        if ports.fs_units.state(instance)?.running() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// A config package that is the node's first has no files to go back to: hostkeeper takes the
@@ -223,30 +311,40 @@ fn systemd_attempt(
     common: &Common<'_>,
 ) -> Result<Done, Done> {
     let config = config_file(params)?.to_path_buf();
-    // A configuration update leaves the fs process alone: its own file is not in that package.
-    let arm = |step: Step, params: &Params| {
-        super::super::systemd::run_step_with(step, params, ports, FsPolicy::LeftAlone)
+    // A configuration update leaves the fs process alone, as its own file is not in that package,
+    // except the switch to one process, which `prepare` notes in the record.
+    let arm = |step: Step, params: &Params, policy: FsPolicy| {
+        super::super::systemd::run_step_with(step, params, ports, policy)
     };
+    let left = FsPolicy::LeftAlone;
     let plain = arm_params(params, common.build, &config, false);
     match step {
         Step::Restore => Err(not_a_step()),
         Step::Uninstall => Ok(uninstalled()),
-        Step::Prepare => Ok(arm(step, &prepare_params(params, ports.host, common)?)),
+        Step::Prepare => {
+            let prepared = prepare_params(params, ports.host, common, &|| fs_runs(ports), false)?;
+            let policy = if prepared.switch {
+                FsPolicy::Switch
+            } else {
+                left
+            };
+            Ok(arm(step, &prepared.params, policy))
+        }
         Step::Cutover => {
             guard.reload()?;
-            Ok(arm(step, &plain))
+            Ok(arm(step, &plain, left))
         }
         Step::Verify => {
             checked(ports.host, common.release, "installed", &config)?;
-            Ok(arm(step, &plain))
+            Ok(arm(step, &plain, left))
         }
         Step::Rollback if params.previous.is_none() => systemd_first_back(ports, &plain),
         Step::Rollback => {
             guard.reload()?;
-            Ok(arm(step, &plain))
+            Ok(arm(step, &plain, left))
         }
         Step::Cleanup => {
-            let done = arm(step, &plain);
+            let done = arm(step, &plain, left);
             if done.outcome == super::super::report::Outcome::Success {
                 write_back(ports.state, common.service)?;
             }
@@ -316,10 +414,14 @@ fn systemd_first_back(ports: &SystemdPorts<'_>, plain: &Params) -> Result<Done, 
 /// which serves the same files).
 pub(super) fn write_back(config: &dyn StateDir, service: &dyn StateDir) -> Result<(), Done> {
     let _lock = config.lock()?;
-    let Some((live, fs_live)) = config
+    let Some((live, fs_live, switched)) = config
         .load()?
         .and_then(|bytes| Record::decode(&bytes).ok())
-        .and_then(|record| record.live.map(|live| (live, record.fs_live)))
+        .and_then(|record| {
+            record
+                .live
+                .map(|live| (live, record.fs_live, record.fs_switch))
+        })
     else {
         return Ok(());
     };
@@ -327,8 +429,13 @@ pub(super) fn write_back(config: &dyn StateDir, service: &dyn StateDir) -> Resul
         return Ok(());
     };
     let mut release = Record::decode(&bytes)?;
-    // A node with no fs process leaves the release's `fs_live` as it is.
-    let fs_live = fs_live.or(release.fs_live);
+    // A node with no fs process leaves the release's `fs_live` as it is; the switch to one
+    // process leaves none.
+    let fs_live = if switched {
+        None
+    } else {
+        fs_live.or(release.fs_live)
+    };
     if release.updating || (release.live == Some(live) && release.fs_live == fs_live) {
         return Ok(());
     }
@@ -365,15 +472,35 @@ fn launchd_attempt(
     match step {
         Step::Restore => Err(not_a_step()),
         Step::Uninstall => Ok(uninstalled()),
-        Step::Prepare => Ok(arm(step, &prepare_params(params, ports.host, common)?)),
+        Step::Prepare => {
+            let loaded = || Ok(ports.launchd.loaded(FS_LAUNCHD_LABEL)?);
+            let prepared = prepare_params(params, ports.host, common, &loaded, true)?;
+            let done = arm(step, &prepared.params);
+            if prepared.switch && done.outcome == super::super::report::Outcome::Success {
+                switch::note(ports.state)?;
+            }
+            Ok(done)
+        }
         Step::Verify => {
             checked(ports.host, common.release, "installed", &config)?;
+            if switch::noted(ports.state)? {
+                switch::mounted(ports, &config)?;
+            }
             Ok(arm(step, &plain))
         }
         Step::Rollback if params.previous.is_none() => launchd_first_back(ports, &plain),
+        Step::Cutover if switch::noted(ports.state)? => {
+            switch::fs_job_out(ports)?;
+            stop_for_new_file(label, ports)?;
+            Ok(arm(step, &switch::cutover_params(&plain, label)))
+        }
         Step::Cutover => {
             stop_for_new_file(label, ports)?;
             Ok(arm(step, &plain))
+        }
+        Step::Rollback if switch::noted(ports.state)? => {
+            ports.launchd.enable(FS_LAUNCHD_LABEL)?;
+            Ok(arm(step, &switch::rollback_params(&plain, label)))
         }
         Step::Rollback | Step::Cleanup => Ok(arm(step, &plain)),
     }
