@@ -35,23 +35,31 @@ fn node_file(files: &Files, cache: &std::path::Path) -> String {
     files.secret("node.toml", &text).display().to_string()
 }
 
-/// The end of a pair the frame of `lines` was written into, with `fds` on it, and the other end
-/// closed: what an image leaves its next one on its standard input.
-fn offer(lines: &[String], fds: &[BorrowedFd<'_>]) -> OwnedFd {
-    let (near, far) = UnixStream::pair().unwrap();
+/// Writes the frame of `lines` into `near`, with `fds` on it.
+fn frame(near: &UnixStream, lines: &[String], fds: &[BorrowedFd<'_>]) {
     let mut bytes = lines.join("\n").into_bytes();
     bytes.extend_from_slice(b"\n\n");
     let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(4))];
     let mut control = SendAncillaryBuffer::new(&mut space);
     assert!(control.push(SendAncillaryMessage::ScmRights(fds)));
     let sent = sendmsg(
-        &near,
+        near,
         &[IoSlice::new(&bytes)],
         &mut control,
         SendFlags::empty(),
     )
     .unwrap();
     assert_eq!(sent, bytes.len());
+}
+
+/// The end of a pair the frame of `lines` was written into, with `fds` on it, then the frame
+/// `keep` with a copy of that end, and the other end closed: what an image leaves its next one on
+/// its standard input. Without `keep`, macOS's collector of descriptors in flight flushes the
+/// offer's sockets once nothing but the offer holds them.
+fn offer(lines: &[String], fds: &[BorrowedFd<'_>]) -> OwnedFd {
+    let (near, far) = UnixStream::pair().unwrap();
+    frame(&near, lines, fds);
+    frame(&near, &["keep".to_owned()], &[far.as_fd()]);
     far.into()
 }
 
