@@ -352,3 +352,61 @@ async fn a_node_whose_stop_is_not_a_hand_over_leaves_no_image() {
     assert!(!next.asked());
     assert!(image_of(&next).await.is_none());
 }
+
+/// The test the child process of [`an_exec_that_fails_is_the_error_the_process_exits_with`] runs.
+const FAILED_EXEC: &str = "server::cache_cli::next_image::tests::the_process_whose_exec_fails";
+
+/// Asserts that an exec of the next image that fails (its program is not there) comes back as the
+/// error the process exits with, naming why, so that launchd starts the job again. The exec runs in
+/// a process of its own: `Command::exec` restores SIGPIPE's default before it tries, which this
+/// test binary, which writes to closed sockets, would not survive.
+#[tokio::test]
+async fn an_exec_that_fails_is_the_error_the_process_exits_with() {
+    let program = std::env::current_exe().unwrap();
+    let mut command = std::process::Command::new(program);
+    command.args([
+        "--exact",
+        FAILED_EXEC,
+        "--ignored",
+        "--nocapture",
+        "--test-threads=1",
+    ]);
+    let ran = tokio::task::spawn_blocking(move || command.output());
+    let ran = within("the process", ran).await.unwrap().unwrap();
+    let said = String::from_utf8_lossy(&ran.stdout);
+    assert!(ran.status.success(), "{said}");
+    assert!(
+        said.contains("exec failed: the next image could not be executed: "),
+        "{said}"
+    );
+}
+
+/// The process of [`an_exec_that_fails_is_the_error_the_process_exits_with`]: it hands over to a
+/// program that is not there, and says the error.
+#[test]
+#[ignore = "run by an_exec_that_fails_is_the_error_the_process_exits_with, in a process of its own"]
+#[expect(
+    clippy::disallowed_macros,
+    reason = "the process reports to the test that runs it on standard output"
+)]
+fn the_process_whose_exec_fails() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let rig = Rig::new("next-image-exec-fails");
+    let image = runtime.block_on(async {
+        let (listener, _) = listening();
+        let next = NextImage::default();
+        next.ask();
+        next.hand(vec![socket(Front::S3, &listener)], &rig.locked())
+            .await
+            .unwrap();
+        let missing = rig.config.path.join("no-such-program");
+        next.image(|| Ok(missing), ["tierstore".into()])
+            .await
+            .unwrap()
+    });
+    let why = exec_next(image).err().unwrap();
+    println!("exec failed: {why}");
+}

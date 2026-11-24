@@ -20,10 +20,12 @@ use crate::files::Files;
 
 const BIN: &str = env!("CARGO_BIN_EXE_tierstore");
 
-/// The file of a build node over a memory upstream, its cache in `cache`, serving on loopback.
+/// The file of a build node over a memory upstream, its cache in `cache`, serving S3 and its trees
+/// on loopback.
 fn node_file(files: &Files, cache: &std::path::Path) -> String {
     let text = format!(
         "[[interface]]\ntype = \"s3\"\nparams = {{ addresses = [\"127.0.0.1:0\"] }}\n\n\
+         [[interface]]\ntype = \"trees\"\nparams = {{ addresses = [\"127.0.0.1:0\"] }}\n\n\
          [server]\nproxy_id = \"bin-handed\"\nbucket = \"tier-bucket\"\naccess_key_file = \"{key}\"\n\n\
          [local_cache]\npath = \"{cache}\"\nbudget = \"1MiB\"\n\n\
          [cold_store]\nkind = \"memory\"\n\n[[policy]]\nprefix = \"cas/\"\ncache = true\n",
@@ -61,7 +63,8 @@ async fn readyz(addr: &str) -> String {
 
 /// Asserts that a build node started with `--handed 0` serves on the listening socket of the offer
 /// on its standard input (its start line names that socket's address, and a client that connected
-/// to it before the start is answered), and becomes the cache's writer with the lock of the offer,
+/// to it before the start is answered), binds its trees socket itself (the offer holds none), and
+/// becomes the cache's writer with the lock of the offer,
 /// which no tick of its own could have taken while the offer held it: `/readyz` says
 /// `ready read-write`. Then SIGTERM ends it with status 0.
 #[tokio::test]
@@ -105,6 +108,8 @@ async fn a_build_node_handed_an_offer_serves_its_socket_and_takes_its_lock() {
         .split_whitespace()
         .find_map(|word| word.strip_prefix("listen="));
     assert_eq!(listen, Some(addr.to_string().as_str()), "{line}");
+    // The trees sockets are not in an offer: the next image binds them itself, beside any other.
+    assert!(line.contains(" trees-listen=127.0.0.1:"), "{line}");
 
     let early = tokio::task::spawn_blocking(move || {
         use std::io::{Read as _, Write as _};

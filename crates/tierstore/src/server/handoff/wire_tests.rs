@@ -150,3 +150,25 @@ fn a_read_stops_at_the_end_of_its_frame() {
     assert_eq!(of_frame(b"by", b"e\n\n"), 3);
     assert_eq!(of_frame(b"", b"one\ntw"), 6);
 }
+
+/// Asserts that a frame longer than what the socket takes in one write is sent in several writes
+/// and arrives whole, its descriptor with it: the writes after the first carry no descriptor, and
+/// the reader gets it once.
+#[tokio::test]
+async fn a_frame_longer_than_one_write_arrives_whole_with_its_descriptors() {
+    let (near, far) = UnixStream::pair().unwrap();
+    rustix::net::sockopt::set_socket_send_buffer_size(&near, 4096).unwrap();
+    let (listener, addr) = listening();
+    let lines: Vec<String> = (0..200).map(|n| format!("line {n:0>100}")).collect();
+    let fds = [listener.as_fd()];
+    let (sent, frame) = tokio::join!(send(&near, &lines, &fds), recv(&far));
+    sent.unwrap();
+    let frame = frame.unwrap();
+    assert_eq!(frame.lines, lines);
+    let addrs: Vec<_> = frame
+        .fds
+        .into_iter()
+        .map(|fd| TcpListener::from(fd).local_addr().unwrap())
+        .collect();
+    assert_eq!(addrs, vec![addr]);
+}
