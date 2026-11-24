@@ -38,6 +38,11 @@ pub(super) fn rollback(c: &Ctx<'_, '_>, params: &Params, record: &Record) -> Res
     if let Some(fs_next) = record.fs_next {
         fs::give_back(c, fs_next)?;
     }
+    // The switch's way back is the same: the mount goes to the fs instance first, then the
+    // sockets go to the store's old instance.
+    if record.fs_switch {
+        fs::take_back(c, record)?;
+    }
     if record.mode == Some(Mode::Handover) {
         hand_back(c, back, next, version)?;
     } else {

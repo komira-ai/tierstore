@@ -72,8 +72,10 @@ use crate::{Backend, Clock, Proxy, SystemClock};
 
 use super::build_info::{COMMIT, VERSION};
 use super::cli::{Addresses, Error, OciSetup, S3Flags, oci_setup_of, open_tier, probe_run_id};
+#[cfg(target_os = "linux")]
+use super::cli_serve::ask_sockets;
 use super::cli_serve::{
-    Bound, HandedOffer, bind_fronts, bind_s3, cut_note, sockets_of, stopped_by,
+    Bound, Got, HandedOffer, bind_fronts, bind_s3, cut_note, sockets_of, stopped_by,
 };
 #[cfg(not(target_os = "linux"))]
 use super::config::fs::not_served;
@@ -81,6 +83,9 @@ use super::config_cache::CacheSettings;
 use super::drain::late_of;
 use super::fill_socket;
 use super::front::{InvalidFlags, server_config};
+use super::handoff::Inherited;
+#[cfg(target_os = "linux")]
+use super::handoff::Offered;
 use super::handoff::{Handoff, Image};
 use super::listen::{LoopbackBind, bind_set, bind_with, joined};
 use super::local_cache::trees::{TreeStore, TreesConfig};
@@ -92,7 +97,7 @@ use super::stop_watcher::{
     oci_cut_note, serve_fronts, serve_oci, serve_trees, stop_watcher, trees_cut_note,
 };
 #[cfg(target_os = "linux")]
-use super::treefs::Service;
+use super::treefs::{Served, Service};
 use super::trees::{TreesSetup, trees_setup_of};
 use super::{Drained, Server, ServerConfig};
 use next_image::{NextImage, stop_or_next, take_write_role};
@@ -395,6 +400,46 @@ pub(super) struct Fronts<'a> {
     pub(super) imaging: Imaging<'a>,
 }
 
+/// The mount of the `fs` interface of `service`, and the sockets `asked` offers, in the order of
+/// the switch from two processes to one (`docs/design/one-service.md` section 4.2): both offers
+/// are checked before either is accepted, and the mount's is accepted first. `asked` was checked
+/// when it was asked for; the mount's offer is checked as it is taken, and a mount that is not
+/// taken (refused, mismatched, not answered) refuses `asked` too, so both running instances serve
+/// on as they were. The sockets are accepted once the mount's instance has said `done` and before
+/// it is told `ready`: sockets that cannot be accepted leave the mount to that instance, which
+/// serves it again. Only then is it told `ready`, and the mount read.
+///
+/// # Errors
+/// What the mount's start said ([`StartError`]), or the hand-off of the sockets
+/// ([`HandingError`](super::cli::HandingError), boxed).
+#[cfg(target_os = "linux")]
+async fn take_mount_and_sockets(
+    service: Service,
+    stores: (LocalCache, Option<TreeStore>),
+    asked: Option<Offered>,
+) -> Result<(Served, Option<Inherited>), Error> {
+    let taking = match service.take(stores).await {
+        Ok(taking) => taking,
+        Err(why) => {
+            if let Some(asked) = asked {
+                asked.refuse().await;
+            }
+            return Err(why.into());
+        }
+    };
+    let sockets = match asked {
+        Some(asked) => match asked.accept().await {
+            Ok(inherited) => Some(inherited),
+            Err(why) => {
+                taking.abandon().await;
+                return Err(super::cli::HandingError::from(why).into_boxed());
+            }
+        },
+        None => None,
+    };
+    Ok((taking.serve().await?, sockets))
+}
+
 /// Serves the S3 front (and the OCI front, if there is a setup) over `cache`, with the loops of
 /// the cache and `beside`, until `stop` resolves, and then drains. It is the one serving of a
 /// cache, whatever its upstream is: a store of a build node or the proxy of a storage node.
@@ -440,14 +485,37 @@ pub(super) async fn serve_front(
         })?;
     config.trees.clone_from(&trees);
     // The mount is got, and the instance it was taken from told that it is served, before any
-    // socket of a front is bound or taken: a start that cannot get it leaves the running
-    // instance serving everything.
+    // socket of a front is bound: a start that cannot get it leaves the running instances serving
+    // everything. Where the file has an `fs` interface and a hand-off, the running instance's
+    // offer of its sockets is asked for and checked first, and accepted only after the mount's
+    // ([`take_mount_and_sockets`]).
     #[cfg(not(target_os = "linux"))]
     let OnSystem {} = fronts.system;
+    #[cfg(not(target_os = "linux"))]
+    let sockets: Option<Inherited> = None;
     #[cfg(target_os = "linux")]
-    let served = match fronts.system.service {
-        Some(service) => Some(Box::pin(service.start((cache.clone(), trees.clone()))).await?),
-        None => None,
+    let (served, sockets) = match fronts.system.service {
+        Some(service) => {
+            let switch = fronts
+                .handoff
+                .filter(|_| service.has_mount() && fronts.imaging.handed.is_none());
+            let asked = match switch {
+                Some(handoff) => {
+                    let oci_listen = oci
+                        .as_ref()
+                        .map_or_else(Vec::new, |setup| setup.listen.clone());
+                    ask_sockets(handoff, &bind_set(fronts.listen, true), &oci_listen)
+                        .await
+                        .map_err(super::cli::HandingError::into_boxed)?
+                }
+                None => None,
+            };
+            let stores = (cache.clone(), trees.clone());
+            let (served, sockets) =
+                Box::pin(take_mount_and_sockets(service, stores, asked)).await?;
+            (Some(served), sockets)
+        }
+        None => (None, None),
     };
     let listen = config.listen;
     // The registry front reads what the S3 front reads: through the cache.
@@ -458,10 +526,14 @@ pub(super) async fn serve_front(
     // bound fails the start while the running instance still serves.
     let Imaging { next, handed } = fronts.imaging;
     let lock_path = cache.lock_path();
-    let handed = handed.map(|fd| HandedOffer {
-        fd,
-        lock: Some(&lock_path),
-    });
+    let got = handed
+        .map(|fd| {
+            Got::Handed(HandedOffer {
+                fd,
+                lock: Some(&lock_path),
+            })
+        })
+        .or(sockets.map(|taken| Got::Taken(Box::new(taken))));
     let fronts_bound = async {
         let trees_front = match fronts.trees_front {
             Some(setup) => Some(setup.bind().await?),
@@ -473,7 +545,7 @@ pub(super) async fn serve_front(
         };
         let bound = bind_fronts(
             fronts.handoff,
-            handed,
+            got,
             &bind_set(fronts.listen, true),
             || bind_cache_s3(fronts.listen, listen.backlog),
             oci,

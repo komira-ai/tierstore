@@ -5,6 +5,7 @@
 
 mod binary;
 mod crash;
+mod exec;
 pub(in crate::server::update_hook) mod fake;
 mod flow;
 mod fs_job;

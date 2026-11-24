@@ -24,6 +24,11 @@
 //!   so a fresh mount is the only way. Once `next` is active the marker of `live` is removed, so
 //!   that both markers exist together only during the take.
 //!
+//! The config hook's switch of a node to one process (`FsPolicy::Switch`) gives the unit up
+//! instead: `give_up` removes both markers once the new instance of the store, which takes the
+//! mount from the fs process itself, serves, and `take_back` starts the instance again in a
+//! rollback, before the store's way back.
+//!
 //! An update hands the fs process over only between releases that both list `handoff-fs-v1`. With
 //! another pair it is left alone, running the release it runs: a restart of the process on a
 //! kernel without `FUSE_HAS_RESEND` can leave requests unanswered until `fs.recover_wait` aborts
@@ -53,6 +58,8 @@ pub(super) struct Plan {
     pub live: Option<Instance>,
     /// The instance the update starts: `None` when the fs process is left alone.
     pub next: Option<Instance>,
+    /// The fs process is given up for the one process of the new file (the switch).
+    pub switch: bool,
     /// What the step says of it, after its own words.
     pub note: String,
 }
@@ -62,6 +69,7 @@ impl Plan {
         Plan {
             live: None,
             next: None,
+            switch: false,
             note: String::new(),
         }
     }
@@ -108,10 +116,22 @@ pub(super) fn plan(
     let Some(live) = serving(c, record)? else {
         return Ok(Plan::none());
     };
+    if c.fs == FsPolicy::Switch {
+        return Ok(Plan {
+            live: Some(live),
+            next: None,
+            switch: true,
+            note: format!(
+                "; the mount moves from {} to the one process of the new file",
+                fs_name(live)
+            ),
+        });
+    }
     if c.fs == FsPolicy::LeftAlone {
         return Ok(Plan {
             live: Some(live),
             next: None,
+            switch: false,
             note: format!(
                 "; fs {} is left on its release: a configuration update does not touch it",
                 fs_name(live)
@@ -133,12 +153,14 @@ fn decide(live: Instance, staged: &[String], before: &[String]) -> Plan {
         return Plan {
             live: Some(live),
             next: Some(next),
+            switch: false,
             note: format!("; fs serving {}, next {}", fs_name(live), fs_name(next)),
         };
     }
     Plan {
         live: Some(live),
         next: None,
+        switch: false,
         note: format!(
             "; fs {} is left on its release: both releases must list {HANDOFF_FS_CAPABILITY}",
             fs_name(live)
@@ -160,7 +182,7 @@ pub(super) fn plan_late(
     record: &Record,
 ) -> Result<Option<(Record, String)>, Done> {
     // A record that names `fs_next` names `fs_live` too (a record that does not decodes as invalid).
-    if c.fs == FsPolicy::LeftAlone || record.fs_live.is_some() || record.has(Marker::Swapped) {
+    if c.fs != FsPolicy::Managed || record.fs_live.is_some() || record.has(Marker::Swapped) {
         return Ok(None);
     }
     let Some(previous) = &params.previous else {
@@ -192,6 +214,12 @@ pub(super) fn plan_late(
 /// What `cutover` says of the fs process, after its own words.
 pub(super) fn cutover_note(record: &Record) -> String {
     match (record.fs_next, record.fs_live) {
+        (None, Some(live)) if record.fs_switch => {
+            format!(
+                "; the mount moved from {} to the one process",
+                fs_name(live)
+            )
+        }
         (Some(next), _) => format!("; {} holds the mount", fs_name(next)),
         (None, Some(live)) => format!("; {} is left on its release", fs_name(live)),
         (None, None) => String::new(),
@@ -246,11 +274,20 @@ pub(super) fn take(c: &Ctx<'_, '_>, next: Instance) -> Result<String, Done> {
             fs_name(next)
         ),
     };
+    start_taking(c, next)?;
+    Ok(note)
+}
+
+/// Lays the marker of `next`, starts it and requires its unit active (the take is done). A start
+/// that fails, or leaves the unit anything but active, has taken nothing: the marker is removed
+/// again and the step fails. A start that succeeded and a look at the unit that failed leaves the
+/// marker.
+fn start_taking(c: &Ctx<'_, '_>, next: Instance) -> Result<(), Done> {
     c.ports.fs_markers.set(next)?;
     let failure = match c.ports.fs_units.start(next) {
         Err(error) => not_taken(next, Done::from(error)),
         Ok(()) => match c.ports.fs_units.state(next) {
-            Ok(UnitState::Active) => return Ok(note),
+            Ok(UnitState::Active) => return Ok(()),
             Ok(state) => Done::fail(
                 Reason::NotReady,
                 format!(
@@ -297,6 +334,47 @@ pub(super) fn check_active(c: &Ctx<'_, '_>, record: &Record, retry: u64) -> Resu
             Reason::NotReady,
             format!("{} is {other:?}, not active", fs_name(next)),
         )),
+    }
+}
+
+/// The end of `cutover` of the switch: both markers of the fs unit are removed, so that no
+/// instance of it starts again. Nothing is stopped: the instance that ran gave the mount to the
+/// new process and ends by itself.
+pub(super) fn give_up(c: &Ctx<'_, '_>) -> Result<(), Done> {
+    for instance in Instance::ALL {
+        c.ports.fs_markers.clear(instance)?;
+    }
+    Ok(())
+}
+
+/// The fs part of `rollback` of the switch, before the store's: the mount goes back to the fs
+/// instance `y` the record names, which the old file serves, ahead of the sockets.
+///
+/// - `y` is active: it never gave the mount away (the new process did not take it), and nothing
+///   is done;
+/// - `y` is activating or deactivating: it is still ending after it gave the mount away, or is
+///   starting, and the step waits;
+/// - `y` is failed or inactive: its marker is laid and it is started, and it takes the mount from
+///   the one process of the new file (a start that fails removes the marker again, as in
+///   `cutover` of an update).
+pub(super) fn take_back(c: &Ctx<'_, '_>, record: &Record) -> Result<(), Done> {
+    let y = record.fs_live.ok_or_else(|| {
+        Done::fail(
+            Reason::StateInvalid,
+            "the record of the switch names no fs instance to go back to",
+        )
+    })?;
+    match c.ports.fs_units.state(y)? {
+        UnitState::Active => Ok(()),
+        UnitState::Activating | UnitState::Deactivating => Err(Done::deferred(
+            Reason::Draining,
+            format!(
+                "{} is starting or still ending: the rollback of the switch waits",
+                fs_name(y)
+            ),
+            DRAIN_RETRY_SECS,
+        )),
+        UnitState::Inactive | UnitState::Failed => start_taking(c, y),
     }
 }
 
@@ -373,8 +451,13 @@ fn draining(live: Instance, next: Instance) -> Done {
     )
 }
 
-/// The fs instance the boot step starts: the one the record says holds the mount.
+/// The fs instance the boot step starts: the one the record says holds the mount. None once a
+/// switch has swapped: the one process holds the mount, and an fs instance started now would take
+/// it back from it.
 fn desired(record: &Record) -> Option<Instance> {
+    if record.fs_switch && record.has(Marker::Swapped) {
+        return None;
+    }
     if record.updating && record.has(Marker::Swapped) {
         record.fs_next.or(record.fs_live)
     } else {

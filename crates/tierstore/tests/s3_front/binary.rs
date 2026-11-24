@@ -288,27 +288,26 @@ fn capabilities_prints_the_names_one_to_a_line_and_exits_0() {
     assert_eq!(out, expected);
 }
 
-/// Asserts that `--capabilities` of the binary prints exactly `handover-v1`, `handoff-socket-v1`,
-/// `handoff-cache-v1`, `handoff-state-dir-v1` and `handoff-fs-v1` in that order, each with a newline, and exits 0
-/// with nothing on stderr: the first is the line the host updater's `prepare` step reads to hand
-/// over to this release instead of restarting it, the second says the binary serves through
-/// `server.handoff_socket`, the third that its build node and its storage node with `[local_cache]`
-/// do too (a node whose configuration has `[local_cache]` is handed over only between releases that
-/// list it), the fourth that the socket defaults to the state directory (a node whose configuration
-/// leaves the key out is handed over only between releases that list it), the fifth that
-/// `tierstore fs` hands its mount over (the second unit is handed over only between releases that
-/// list it); on macOS, sixth, `handoff-exec-v1`, that a build node hands over to its next image on
-/// SIGUSR2. Catches: any capability left out of the list (for `handover-v1`, every update is a
-/// restart), a misspelled name the updater would not find, and a name nothing here promises.
+/// Asserts that `--capabilities` prints exactly `handover-v1`, `handoff-socket-v1`,
+/// `handoff-cache-v1`, `handoff-state-dir-v1`, `handoff-fs-v1` and then, on Linux,
+/// `handoff-service-v1` (a build node with an `fs` interface hands its mount over with its
+/// sockets) or, on macOS, `handoff-exec-v1` (a build node hands over to its next image on SIGUSR2),
+/// each with a newline, exits 0 and says nothing on stderr. The hook reads these words to hand a
+/// node over instead of restarting it: the store, a node with `[local_cache]`, a node that leaves
+/// the socket out, the second unit, a node with a mount. Catches a word left out (an update that
+/// restarts or is refused), a misspelt word, and a word nothing here promises.
 #[test]
 fn capabilities_lists_the_hand_over_words() {
     let (code, out, err) = run(&["--capabilities".to_owned()]);
     let mut words =
         "handover-v1\nhandoff-socket-v1\nhandoff-cache-v1\nhandoff-state-dir-v1\nhandoff-fs-v1\n"
             .to_owned();
-    if cfg!(target_vendor = "apple") {
-        words.push_str("handoff-exec-v1\n");
-    }
+    words += [("handoff-service-v1\n", cfg!(target_os = "linux"))]
+        .into_iter()
+        .chain([("handoff-exec-v1\n", cfg!(target_vendor = "apple"))])
+        .filter_map(|(word, here)| here.then_some(word))
+        .collect::<String>()
+        .as_str();
     assert_eq!((code, out.as_str(), err.as_str()), (0, words.as_str(), ""));
 }
 

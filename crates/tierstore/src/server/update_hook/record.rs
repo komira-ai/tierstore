@@ -38,6 +38,14 @@
 //! - `fs_next` (systemd only, while an update is in flight that hands the fs process over): the
 //!   instance of `tierstore-fs@.service` `cutover` starts. Absent when the update leaves the fs
 //!   process on its release, and on a node with none.
+//! - `fs_switch` (optional, written only when true): the configuration update in flight, or the
+//!   last one when it is committed, is the switch of a node from two processes to one
+//!   (`config-hook`): the new file has an `fs` interface, the file that served had none, and a
+//!   `tierstore-fs` instance ran. On systemd `fs_live` names that instance while the update is in
+//!   flight (a rollback starts it again), and is absent once it is committed; on a Mac there is
+//!   no instance, and the key says the fs job was booted out and disabled. The key is set
+//!   only with an update in flight or committed, and never with `fs_next`. A hook that does not
+//!   know it ignores it.
 //!
 //! An absent `live` with no update in flight means no instance is known to serve: launchd's one
 //! job has no letter, and a systemd host that was never installed has none.
@@ -154,6 +162,9 @@ pub enum Invalid {
     /// `fs_live` and `fs_next` name the same instance.
     #[error("fs_live and fs_next are the same instance")]
     FsSame,
+    /// `fs_switch` and `fs_next` are both set: the switch hands no fs process over.
+    #[error("fs_switch and fs_next are both set")]
+    FsSwitchNext,
 }
 
 /// Only the schema of a record, read before the rest is trusted.
@@ -198,6 +209,10 @@ pub struct Record {
     /// systemd: the `tierstore-fs` instance the update in flight starts.
     #[serde(default)]
     pub fs_next: Option<Instance>,
+    /// The update in flight, or the last committed one, is the switch to one process: see the
+    /// key `fs_switch` above.
+    #[serde(default)]
+    pub fs_switch: bool,
 }
 
 impl Record {
@@ -218,6 +233,7 @@ impl Record {
             mode: None,
             fs_live: None,
             fs_next: None,
+            fs_switch: false,
         }
     }
 
@@ -329,6 +345,9 @@ impl Record {
         if let Some(mode) = self.mode {
             value["mode"] = json!(mode.as_str());
         }
+        if self.fs_switch {
+            value["fs_switch"] = json!(true);
+        }
         let mut text = format!("{value:#}");
         text.push('\n');
         text.into_bytes()
@@ -359,7 +378,8 @@ impl Record {
 
     /// Holds the record to the order of its markers and to what it must name: an update in
     /// flight names `to` and `version`; a committed one too; a record at rest names neither,
-    /// nor `from`, `next`, `mode` or `fs_next`.
+    /// nor `from`, `next`, `mode` or `fs_next`; `fs_switch` is held to an update in flight or a
+    /// commit, and never goes with `fs_next`.
     ///
     /// # Errors
     /// The first [`Invalid`] rule the record breaks.
@@ -392,6 +412,12 @@ impl Record {
         }
         if !self.updating && self.fs_next.is_some() {
             return marks("fs_next", "updating");
+        }
+        if self.fs_switch && !self.updating && !self.committed() {
+            return marks("fs_switch", "updating or stopping");
+        }
+        if self.fs_switch && self.fs_next.is_some() {
+            return Err(Invalid::FsSwitchNext);
         }
         if self.fs_next.is_some() && self.fs_live.is_none() {
             return marks("fs_next", "fs_live");

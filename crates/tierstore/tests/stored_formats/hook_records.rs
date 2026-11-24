@@ -10,6 +10,7 @@ use tierstore::server::update_hook::{Instance, Kind, Marker, Mode, Record, Recor
 const SINGLE: &[u8] = include_bytes!("fixtures/hook_record_single.json");
 const SYSTEMD: &[u8] = include_bytes!("fixtures/hook_record_systemd.json");
 const SYSTEMD_FS: &[u8] = include_bytes!("fixtures/hook_record_systemd_fs.json");
+const SYSTEMD_SWITCH: &[u8] = include_bytes!("fixtures/hook_record_systemd_switch.json");
 const REST: &[u8] = include_bytes!("fixtures/hook_record_systemd_rest.json");
 const NEWER: &[u8] = include_bytes!("fixtures/hook_record_systemd_newer.json");
 
@@ -28,6 +29,7 @@ fn single() -> Record {
         mode: None,
         fs_live: None,
         fs_next: None,
+        fs_switch: false,
     }
 }
 
@@ -50,6 +52,7 @@ fn systemd() -> Record {
         mode: Some(Mode::Handover),
         fs_live: None,
         fs_next: None,
+        fs_switch: false,
     }
 }
 
@@ -95,6 +98,35 @@ fn the_fs_record_fixture_reads_and_is_written_as_the_fixture() {
     assert_eq!(systemd_fs().check(), Ok(()));
     let without = Record::decode(SYSTEMD).unwrap();
     assert_eq!((without.fs_live, without.fs_next), (None, None));
+}
+
+/// The record of the switch of a node to one process, in flight: the fs instance `a` that ran is
+/// named, and `fs_switch` is set.
+fn systemd_switch() -> Record {
+    Record {
+        fs_live: Some(Instance::A),
+        fs_switch: true,
+        ..systemd()
+    }
+}
+
+/// Asserts that the record of the switch reads as its value and is written as the fixture, with
+/// `fs_switch` among the keys in order and the schema still 1, that the fixtures of records
+/// without it read as not switched, and that the same record without the key is the record of an
+/// ordinary update. Catches a renamed or removed key, a key written when it is not set (which
+/// would change every record), and a raised schema.
+#[test]
+fn the_switch_record_fixture_reads_and_is_written_as_the_fixture() {
+    assert_eq!(Record::decode(SYSTEMD_SWITCH).unwrap(), systemd_switch());
+    assert_eq!(systemd_switch().encode(), SYSTEMD_SWITCH);
+    assert_eq!(systemd_switch().check(), Ok(()));
+    for fixture in [SINGLE, SYSTEMD, SYSTEMD_FS] {
+        assert!(!Record::decode(fixture).unwrap().fs_switch);
+    }
+    let text = String::from_utf8(SYSTEMD_SWITCH.to_vec()).unwrap();
+    let without = text.replace("  \"fs_switch\": true,\n", "");
+    assert_ne!(without, text);
+    assert!(!Record::decode(without.as_bytes()).unwrap().fs_switch);
 }
 
 /// Asserts that the record of a systemd host at rest reads as `Record::idle` of the live instance

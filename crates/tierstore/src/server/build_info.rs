@@ -54,6 +54,11 @@ pub const RELEASE_VERSION: &str = concat!(
 /// hands it over only when both releases list it, and leaves it running on its release when either
 /// does not (a restart of the process can fail jobs on a kernel without `FUSE_HAS_RESEND`).
 ///
+/// [`HANDOFF_SERVICE_CAPABILITY`], in the builds for Linux only, says a build node whose file has
+/// an `fs` interface hands its mount over to a successor with its sockets, and takes them from the
+/// processes that run (`docs/design/one-service.md` sections 3.1 and 4.2). The hook hands such a
+/// node over only when both releases list it, and refuses the update otherwise.
+///
 /// [`HANDOFF_EXEC_CAPABILITY`], in the builds for macOS only, says a build node hands over to the
 /// next image of its program on SIGUSR2.
 ///
@@ -64,6 +69,8 @@ pub const CAPABILITIES: &[&str] = &[
     HANDOFF_CACHE_CAPABILITY,
     HANDOFF_STATE_DIR_CAPABILITY,
     HANDOFF_FS_CAPABILITY,
+    #[cfg(target_os = "linux")]
+    HANDOFF_SERVICE_CAPABILITY,
     #[cfg(target_vendor = "apple")]
     HANDOFF_EXEC_CAPABILITY,
 ];
@@ -92,6 +99,17 @@ pub const HANDOFF_STATE_DIR_CAPABILITY: &str = "handoff-state-dir-v1";
 /// offers it in its turn; it keeps the descriptor in the service manager's store, and serves again
 /// the descriptor the manager kept for it after a crash or a restart.
 pub const HANDOFF_FS_CAPABILITY: &str = "handoff-fs-v1";
+
+/// `handoff-service-v1` (Linux builds only): a build node whose file has an `fs` interface serves
+/// the mount itself and hands it over with its sockets. Its start takes the mount and the sockets
+/// from the processes that run, of either layout: it asks the instance on `server.handoff_socket`
+/// for its sockets (`take 1`) and the instance on `handoff.sock` in the runtime directory for the
+/// mount (`take-fs 1`), checks both offers before it accepts either, and accepts the mount's first.
+/// While it holds the mount it answers `take-fs 1` there, for a successor of either layout, and
+/// goes on serving S3 and OCI until a successor takes their sockets; it binds the fill socket
+/// (`local_cache.fill_socket`) while its cache is the writer, as every build node does. The hook
+/// updates a node whose file has an `fs` interface only between releases that both list it.
+pub const HANDOFF_SERVICE_CAPABILITY: &str = "handoff-service-v1";
 
 /// `handoff-exec-v1` (macOS builds only): a build node sent SIGUSR2 hands over to the next image of
 /// its own program, the process keeping its pid: it drains as on a stop with its listening

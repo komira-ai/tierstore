@@ -57,6 +57,11 @@ pub(super) fn cutover(c: &Ctx<'_, '_>, params: &Params, record: &Record) -> Resu
     c.ports.markers.set(next)?;
     c.ports.units.start(next)?;
     c.look().serves(target)?;
+    // The switch: the new process took the mount from the fs unit, which ends by itself; its
+    // markers go so that it never starts again.
+    if record.fs_switch {
+        fs::give_up(c)?;
+    }
     // The fs process after the store, as the unit orders itself: the new fs instance talks to the
     // new store, the pair a release is tested as.
     let mut take_note = String::new();

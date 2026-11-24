@@ -137,7 +137,7 @@ pub(super) fn run_on(config: &SystemConfig<'_>, invocation: &Invocation, params:
                 clock: &clock,
                 state: &state,
             };
-            super::launchd::run_step(invocation.step, params, label, &ports)
+            super::launchd::run_step_with(invocation.step, params, label, &ports, true)
         }
     }
 }

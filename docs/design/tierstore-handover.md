@@ -19,7 +19,7 @@ is one JSON object; every step idempotent.
 ## 0. Live update by listening-socket hand-off (server side)
 
 This replaces the port-forward of sections 1 to 4 and the slot ports. The hook uses it (`server/handoff/`, entered through
-`run_handing`, with the control socket named by `server.handoff_socket`), on Linux; for `tierstore` on macOS the hook restarts it (`tierstore fs` has one for its NFS socket, below), and a build node of a Mac can instead hand over to the next image of its own program on SIGUSR2 (below; the hook does not send it yet).
+`run_handing`, with the control socket named by `server.handoff_socket`), on Linux; for `tierstore` on macOS the hook restarts it (`tierstore fs` has one for its NFS socket, below), and a build node of a Mac hands over to the next image of its own program on SIGUSR2 when both releases list `handoff-exec-v1` and its params name no fs job (below; the hook sends it with `launchctl kill SIGUSR2`).
 The binary calls it: `run_serving` passes the hand-off of the settings, `server.handoff_socket` and `server.handoff_wait`
 (default 10s, 1ms to 1h), to `run_handing`; without `server.handoff_socket` it binds as before and makes no control socket.
 A build node and a storage node with `[local_cache]` hand off through the same `run_handing` machinery: `bind_fronts`
@@ -146,9 +146,10 @@ handed. An offer it refuses fails its start, and launchd's next start binds the 
 serves it on Linux only so far.
 
 Not built yet: the proxy id that does not derive from a port. No package sets either key, and the macOS package is not to
-set `server.handoff_socket`: an update on a Mac is a restart, for every shape, until the launchd jobs `tierstore-fs@a` and
-`@b` and the hook's record and rollback for them land (the next change); `fs.nfs.handoff_socket` is for an operator or a hook
-that starts the two processes by hand.
+set `server.handoff_socket`: an update of a Mac is the hand-over to the next image when both releases list `handoff-exec-v1`
+and the params name no fs job, and a restart otherwise; a Mac whose file has an `fs` interface is refused that restart unless
+the params say `mode = "restart"` (`docs/design/one-service.md` section 3.6). `fs.nfs.handoff_socket` is for an operator or a
+hook that starts the two processes by hand.
 
 ### The hook on top of it
 
@@ -171,8 +172,10 @@ is there (`ConditionPathExists=`), so at boot only the recorded one runs.
   not wait for the old instance's drain, which ends by itself (see `crates/tierstore/docs/update-hook.md`). `rollback` starts the previous release
   on the old letter (the link is back), the new instance gives the sockets back and exits. `restore` starts only the recorded instance.
 - A first install starts `tierstore@a` with a normal bind; its `rollback` stops it and fails with `no_previous_release`.
-- On macOS one launchd job is booted out and bootstrapped again: an update has a gap (the process can hand over to its next
-  image on SIGUSR2, section 0, which the hook does not use yet).
+- On macOS one launchd job: between releases that both list `handoff-exec-v1`, on a Mac whose params name no fs job, the hook
+  installs the new binary and sends the job `SIGUSR2` (`launchctl kill`), and the process hands over to its next image (section
+  0); otherwise the job is booted out and bootstrapped again, with a gap, which the hook refuses for a file with an `fs`
+  interface unless the params say `mode = "restart"`.
 
 The record is `state.json` in `/var/lib/tierstore-hook`, a JSON object whose keys are the previous release's single-instance record and
 three optional keys of the systemd arm (`live`, `next`, `mode`), so a release reads the record of the one before it and the other way round.

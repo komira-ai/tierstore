@@ -29,8 +29,9 @@ pub use host::{CONFIG_MAX, SystemHost};
 pub(crate) use host::{DSCL_PROGRAM, SUDO_PROGRAM};
 pub use instances::LoopbackInstances;
 pub use launchd::{
-    LAUNCHCTL_PROGRAM, LaunchctlJobs, LaunchdTimes, NOT_FOUND as LAUNCHCTL_NOT_FOUND, bootout_args,
-    bootstrap_args, print_args,
+    LAUNCHCTL_PROGRAM, LaunchctlJobs, LaunchdTimes, NEXT_IMAGE_SIGNAL,
+    NOT_FOUND as LAUNCHCTL_NOT_FOUND, bootout_args, bootstrap_args, disable_args, enable_args,
+    kill_args, print_args,
 };
 pub use markers::MarkerFiles;
 pub use runner::{Call, Output, RunError, Runner, SystemRunner};

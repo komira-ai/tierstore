@@ -135,12 +135,15 @@ mod steps;
 )]
 mod nfs;
 
-pub(super) use config::{DEFAULT_MOUNTPOINT, FsSettings, FsTable, Lookup, id_of, load};
+pub(super) use config::{
+    DEFAULT_CONTROL_SOCKET, DEFAULT_MOUNTPOINT, DEFAULT_RUNTIME_DIR, FsSettings, FsTable, Lookup,
+    id_of, load,
+};
 #[cfg(test)]
 pub(super) use config::{builders, from_text};
 pub(super) use groups::{Database, Found, system as system_names};
 #[cfg(target_os = "linux")]
-pub(super) use interface::Service;
+pub(super) use interface::{Served, Service};
 #[cfg(target_os = "linux")]
 pub(super) use launch::serve;
 pub(super) use nfs::config::NfsTable;

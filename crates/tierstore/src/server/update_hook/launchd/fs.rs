@@ -28,7 +28,7 @@ pub(in crate::server::update_hook) const FS_GONE_ATTEMPTS: u32 = 30;
 
 /// The mount point `[fs] mountpoint` of the text of `fs.toml` names; the default when the key, or
 /// the table, is left out. The error says what is wrong.
-fn mountpoint_of(text: &str) -> Result<PathBuf, String> {
+pub(in crate::server::update_hook) fn mountpoint_of(text: &str) -> Result<PathBuf, String> {
     let table: toml::Table = text
         .parse()
         .map_err(|error: toml::de::Error| format!("not TOML: {}", error.message()))?;

@@ -249,6 +249,30 @@ pub trait Launchd {
         call: Duration,
         gone_attempts: u32,
     ) -> Result<(), PortError>;
+
+    /// Sends the process of the job `label` SIGUSR2 (`launchctl kill SIGUSR2 system/<label>`): a
+    /// build node of a release that lists `handoff-exec-v1` then hands over to the next image of
+    /// its program, keeping its pid and its job. Returns once launchd has taken the signal; what
+    /// the process does with it is seen on the public port.
+    ///
+    /// # Errors
+    /// `launchctl` failed (a job that is not loaded included).
+    fn hand_to_next_image(&self, label: &str) -> Result<(), PortError>;
+
+    /// Disables the job `label` (`launchctl disable system/<label>`): launchd does not load it,
+    /// at a boot or by a `bootstrap`, until it is enabled. A job already disabled is not an
+    /// error.
+    ///
+    /// # Errors
+    /// `launchctl` failed.
+    fn disable(&self, label: &str) -> Result<(), PortError>;
+
+    /// Enables the job `label` again (`launchctl enable system/<label>`); a job that is not
+    /// disabled is not an error.
+    ///
+    /// # Errors
+    /// `launchctl` failed.
+    fn enable(&self, label: &str) -> Result<(), PortError>;
 }
 
 /// An answer to a GET.

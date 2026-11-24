@@ -41,6 +41,11 @@
 //! old one), `verify` and `cleanup` need it active, `cleanup` removes the old instance's marker
 //! and neither waits for it nor stops it, `rollback` puts it back before the store, `restore`
 //! starts the recorded instance after the store and `uninstall` stops the instances that run.
+//! The config hook runs the steps with [`FsPolicy::LeftAlone`], or, for the switch of a node to one
+//! process, [`FsPolicy::Switch`]: `prepare` records the switch (`fs_switch`, with `fs_live` naming
+//! the instance that runs), `cutover` removes both fs markers once the new instance serves and
+//! starts and stops no fs unit, `cleanup` records no fs instance, and `rollback` starts the fs
+//! instance and has it take the mount before the store's way back.
 //!
 //! Every step holds the lock of the state directory, holds the record to its rules before it
 //! acts, and sets state rather than doing things once, so a step run again after a crash
@@ -72,6 +77,13 @@ pub(super) enum FsPolicy {
     /// The fs process is left alone, running the release it runs: the update is of the store's
     /// configuration, and the fs process's own file is not in that package.
     LeftAlone,
+    /// The update is the switch of a node to one process: the staged file has an `fs`
+    /// interface, the file that serves had none, and the fs process that runs is not handed
+    /// over but given up. The new instance of the store takes the mount from it; once that
+    /// instance serves, both markers of the fs unit are removed, so that it never starts again,
+    /// and no fs unit is started or stopped. A rollback starts the fs instance again, and the
+    /// mount goes back to it before the store's sockets do.
+    Switch,
 }
 
 /// What a step works with.
@@ -187,6 +199,11 @@ pub(super) fn run_step_with(
     let (_lock, record) = match open(step, ports) {
         Ok(opened) => opened,
         Err(done) => return done,
+    };
+    // A step after `prepare` goes by what the record says: the switch it noted.
+    let fs = match &record {
+        Some(record) if step != Step::Prepare && record.fs_switch => FsPolicy::Switch,
+        _ => fs,
     };
     let c = Ctx {
         ports,

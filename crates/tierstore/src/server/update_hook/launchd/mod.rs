@@ -1,5 +1,7 @@
 //! The steps of the launchd arm: one job, whose label is `launchd_label` of the params, and
-//! whose plist is [`LAUNCHD_PLIST`]. An update is a restart with a gap: no hand-over on a Mac.
+//! whose plist is [`LAUNCHD_PLIST`]. An update is a hand-over to the next image of the job's
+//! process when both releases list `handoff-exec-v1` and the params name no fs job, and a restart
+//! with a gap otherwise; [`exec`] says how the way is decided.
 //!
 //! hostkeeper switches `current` before `cutover` and back before `rollback`; the hook never
 //! moves the link. The plist runs [`SERVICE_BINARY`](super::SERVICE_BINARY), where the hook puts
@@ -19,18 +21,25 @@
 //!
 //! - `prepare` needs the node's configuration file to exist (it does not need a hand-over
 //!   socket), and records the update: `from` the previous release (none on a first install),
-//!   `to` the staged release and its `version`. Nothing is started or stopped.
-//! - `cutover` boots the fs job out first when there is one and it is loaded, boots the job out
-//!   and in, waits for `/readyz` and for the build of the target version, boots the fs job in
-//!   when there is one and it is not loaded, and records `swapped`. A first install boots the
+//!   `to` the staged release and its `version`; the way is not recorded. Where the params leave
+//!   it open it asks the two releases what they list. It refuses a restart of a node whose file
+//!   has an `fs` interface (`mode_unsupported`), and has the staged release check the file before
+//!   a hand-over. Nothing is started or stopped.
+//! - `cutover` of a restart boots the fs job out first when there is one and it is loaded, boots
+//!   the job out and in, waits for `/readyz` and for the build of the target version, boots the
+//!   fs job in when there is one and it is not loaded, and records `swapped`. Of a hand-over, a
+//!   job that is loaded and does not serve the target gets the staged binary and `SIGUSR2`, and
+//!   the step waits for the build of the target version; a job that is not loaded is booted in. A first install boots the
 //!   job out only when it is loaded: a copy installed by hand, whose job serves another version
 //!   or nothing, is taken over as an update would take it over. A run that finds the job loaded
 //!   and serving the target only records `swapped`. A failure is reported; hostkeeper then runs
 //!   `rollback`.
 //! - `verify` observes the target version served by the loaded job and records `verified`. After
 //!   the commit it only observes.
-//! - `rollback` boots the fs job out first when there is one, boots the job out and, for an
-//!   update, in again, waits for the previous version and boots the fs job in; a first install
+//! - `rollback` boots the fs job out first when there is one, then, for an update, puts the
+//!   previous binary in place and boots the job out and in again (a hand-over of a loaded job
+//!   sends `SIGUSR2` instead), waits for the previous version and boots the fs job in; a first
+//!   install
 //!   has nothing to go back to: the jobs stay out and the step fails with `no_previous_release`,
 //!   again on every re-run.
 //! - `cleanup` confirms afresh what `verify` saw, writes `stopping` (the commit) and ends the
@@ -43,6 +52,7 @@
 //! - `restore`, the boot step, puts the current release's binary in place and boots the job in
 //!   when it is not loaded, then boots the fs job in when there is one and it is not loaded.
 
+mod exec;
 pub(super) mod fs;
 
 use std::cell::Cell;
@@ -62,6 +72,9 @@ struct Ctx<'a, 'b> {
     label: &'b str,
     /// The label of the job of `tierstore fs`, when the params name one.
     fs: Option<&'b str>,
+    /// Whether an update may hand over to the next image: the staged and the previous release
+    /// are programs the hook can ask. A package that carries no binary is not.
+    releases: bool,
     /// Whether this step began to write `stopping`: from then on, a failure leaves the commit
     /// undecided until the record on disk says otherwise.
     commit_written: Cell<bool>,
@@ -116,10 +129,26 @@ fn launchd_record(record: &Record) -> Result<(), Done> {
     Ok(())
 }
 
-/// Runs `step` for the job `label`. `params` is the parsed params file.
+/// Runs `step` for the job `label`; every update is a restart. `params` is the parsed params file.
+/// This is the arm of a package that carries no binary (a configuration package), whose releases
+/// are not programs to ask.
 #[must_use]
 pub(super) fn run_step(step: Step, params: &Params, label: &str, ports: &LaunchdPorts<'_>) -> Done {
-    match attempt(step, params, label, ports) {
+    run_step_with(step, params, label, ports, false)
+}
+
+/// [`run_step`], where `releases` says that the staged and the previous release are programs of
+/// the service: an update between releases that both list `handoff-exec-v1` is then a hand-over
+/// (see [`exec`]).
+#[must_use]
+pub(super) fn run_step_with(
+    step: Step,
+    params: &Params,
+    label: &str,
+    ports: &LaunchdPorts<'_>,
+    releases: bool,
+) -> Done {
+    match attempt(step, params, label, ports, releases) {
         Ok((mut done, committed)) => {
             done.report.reversible &= !committed;
             done
@@ -135,6 +164,7 @@ fn attempt(
     params: &Params,
     label: &str,
     ports: &LaunchdPorts<'_>,
+    releases: bool,
 ) -> Result<(Done, bool), Done> {
     let _lock = ports.state.lock()?;
     let mut record = match ports.state.load()? {
@@ -147,6 +177,7 @@ fn attempt(
         ports,
         label,
         fs: params.fs_launchd_label(),
+        releases,
         commit_written: Cell::new(false),
     };
     let done = match step {
@@ -190,12 +221,14 @@ fn prepare(c: &Ctx<'_, '_>, params: &Params, record: &mut Record) -> Result<Done
             "prepare needs the params key config_file",
         ));
     };
-    if c.ports.host.config(config)?.is_none() {
+    let Some(text) = c.ports.host.config(config)? else {
         return Err(Done::fail(
             Reason::ConfigMissing,
             format!("there is no configuration file at {}", config.display()),
         ));
-    }
+    };
+    // The way is not recorded: `cutover` and `rollback` decide it again from the same inputs.
+    let hands_over = c.plan(params, config, &text)?;
     let from = params.previous.as_ref().map(|p| p.release.clone());
     let next = Record {
         updating: true,
@@ -207,10 +240,15 @@ fn prepare(c: &Ctx<'_, '_>, params: &Params, record: &mut Record) -> Result<Done
     c.save(record, next)?;
     Ok(Done::ok(match from {
         Some(from) => format!(
-            "prepared {} to follow {}: {} is restarted in cutover",
+            "prepared {} to follow {}: {} {} in cutover",
             params.staged_release.display(),
             from.display(),
-            c.label
+            c.label,
+            if hands_over {
+                "hands over to the next image of its process"
+            } else {
+                "is restarted"
+            }
         ),
         None => format!(
             "prepared the first install of {}: {} is loaded in cutover",
@@ -233,7 +271,12 @@ fn cutover(c: &Ctx<'_, '_>, params: &Params, record: &mut Record) -> Result<Done
     // A run after the job was loaded (a crash, or a second run) looks first: the job may already
     // serve the target, and an update restarts it only when it does not.
     let seen = loaded && c.look().observed(target).is_ok();
-    if !seen {
+    if !seen && loaded && c.hands_over(params)? {
+        // The process of the loaded job executes the binary that is now at the plist's program.
+        c.ports.host.install_binary(&params.staged_release)?;
+        c.ports.launchd.hand_to_next_image(c.label)?;
+        c.look().serves(target)?;
+    } else if !seen {
         // The file service goes first, and the step goes no further while its mount stays: on
         // an update, and on a first install, which takes over a copy installed by hand that
         // left its jobs loaded. Nothing is stopped when the fs job is not loaded.
@@ -323,8 +366,15 @@ fn rollback(c: &Ctx<'_, '_>, params: &Params, record: &mut Record) -> Result<Don
     // the job that is loaded now runs it.
     c.stop_fs()?;
     c.ports.host.install_binary(&previous.release)?;
-    c.ports.launchd.bootout(c.label)?;
-    c.bootstrap()?;
+    // A new image that failed may have left the job with no process to signal (launchd is
+    // between two of its starts): the signal that launchctl refuses is then a restart.
+    let handed = c.hands_over(params)?
+        && c.ports.launchd.loaded(c.label)?
+        && c.ports.launchd.hand_to_next_image(c.label).is_ok();
+    if !handed {
+        c.ports.launchd.bootout(c.label)?;
+        c.bootstrap()?;
+    }
     c.look().serves(&previous.version)?;
     c.start_fs()?;
     c.save(record, Record::idle(None))?;

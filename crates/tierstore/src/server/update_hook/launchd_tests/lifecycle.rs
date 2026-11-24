@@ -112,8 +112,9 @@ fn the_fake_notes_strays_and_refuses_a_second_bootstrap() {
 }
 
 /// Asserts that the fake's job answers on the public port only while it is loaded, times out when
-/// it is muted, answers 404 for a path it does not serve, and that its host refuses to run a
-/// release. Catches a fake that answers for a job that is not there.
+/// it is muted, answers 404 for a path it does not serve, and that its host lists no
+/// capabilities for the releases it knows and cannot run another. Catches a fake that answers for
+/// a job that is not there.
 #[test]
 fn the_fake_answers_only_for_a_loaded_job_on_the_public_port() {
     let fake = Fake::new();
@@ -124,11 +125,43 @@ fn the_fake_answers_only_for_a_loaded_job_on_the_public_port() {
     assert!(fake.get(9300, "/readyz").is_err());
     fake.reboot();
     assert!(fake.get(9300, "/readyz").is_err());
-    assert!(fake.capabilities(Path::new(OLD)).is_err());
+    assert_eq!(fake.capabilities(Path::new(OLD)), Ok(Vec::new()));
+    assert!(fake.capabilities(Path::new("/elsewhere")).is_err());
     assert_failed(
         &fake.run_with(Cutover, &fake.params(), LABEL),
         Reason::OutOfOrder,
     );
     assert_eq!(fake.pauses(), 0);
     assert!(fake.calls() > 0);
+}
+
+/// Asserts the fake's launchd for the hand-over and the switch, which the other tests lean on: a
+/// signal to a job that is not loaded, or to another label, is launchctl's error and changes
+/// nothing (the other label is noted as a stray); and a bootstrap of the fs job's plist while the
+/// fs job is disabled is refused as launchd refuses it, and succeeds once it is enabled. Catches
+/// a fake that lets a hand-over or a disabled job pass where launchd would not.
+#[test]
+fn the_fakes_signal_and_disable_behave_as_launchd() {
+    use super::fake::FS_LABEL;
+    use crate::server::update_hook::FS_LAUNCHD_PLIST;
+
+    let fake = Fake::first_install();
+    assert!(fake.hand_to_next_image(LABEL).is_err());
+    assert_eq!(fake.snapshot().job, None);
+    let fake = Fake::new();
+    assert!(fake.hand_to_next_image("other.label").is_err());
+    assert_eq!(fake.strays(), ["other.label"]);
+    assert_eq!(fake.snapshot().job, path(OLD));
+    fake.disable(FS_LABEL).unwrap();
+    assert_eq!(fake.disabled(), [FS_LABEL]);
+    let refused = fake.bootstrap(Path::new(FS_LAUNCHD_PLIST)).unwrap_err();
+    assert!(
+        refused.to_string().contains("Service is disabled"),
+        "{refused}"
+    );
+    assert!(!fake.snapshot().fs_job);
+    fake.enable(FS_LABEL).unwrap();
+    assert!(fake.disabled().is_empty());
+    fake.bootstrap(Path::new(FS_LAUNCHD_PLIST)).unwrap();
+    assert!(fake.snapshot().fs_job);
 }

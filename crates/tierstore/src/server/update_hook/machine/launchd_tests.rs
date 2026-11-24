@@ -9,7 +9,7 @@ use super::super::ports::{Clock, Launchd, PortError, PortKind};
 use super::testing::{FakeRunner, exit, signalled};
 use super::{
     Call, LAUNCHCTL_NOT_FOUND, LAUNCHCTL_PROGRAM, LaunchctlJobs, LaunchdTimes, RunError,
-    bootout_args, bootstrap_args, print_args,
+    bootout_args, bootstrap_args, disable_args, enable_args, kill_args, print_args,
 };
 
 const CALL: Duration = Duration::from_secs(11);
@@ -93,6 +93,9 @@ fn the_argument_vectors_are_launchds() {
     assert_eq!(print_args(LABEL), ["print", TARGET]);
     assert_eq!(bootout_args(LABEL), ["bootout", TARGET]);
     assert_eq!(bootstrap_args(PLIST), ["bootstrap", "system", PLIST]);
+    assert_eq!(kill_args(LABEL), ["kill", "SIGUSR2", TARGET]);
+    assert_eq!(disable_args(LABEL), ["disable", TARGET]);
+    assert_eq!(enable_args(LABEL), ["enable", TARGET]);
 }
 
 /// Asserts that `loaded` is `print system/<label>` with the call's time limit, true for exit 0
@@ -297,4 +300,57 @@ fn bootout_within_uses_the_bounds_it_is_given() {
         .bootout_within(LABEL, long, 2)
         .unwrap();
     assert_eq!(runner.calls().len(), 3);
+}
+
+/// Asserts that `hand_to_next_image` is `kill SIGUSR2 system/<label>`, `disable` is
+/// `disable system/<label>` and `enable` is `enable system/<label>`, each one call with the call's
+/// time limit and no look at the domain before or after it. Catches a hand-over sent as another
+/// signal (SIGTERM would stop the job), and a disable of the job's plist path instead of its
+/// target.
+#[test]
+fn the_signal_and_the_switches_are_one_call_each() {
+    let runner = FakeRunner::replying(vec![ok(), ok(), ok()]);
+    let clock = Pauses::default();
+    let jobs = jobs(&runner, &clock);
+    jobs.hand_to_next_image(LABEL).unwrap();
+    jobs.disable(LABEL).unwrap();
+    jobs.enable(LABEL).unwrap();
+    assert_eq!(
+        runner.calls(),
+        [
+            call(&["kill", "SIGUSR2", TARGET], CALL),
+            call(&["disable", TARGET], CALL),
+            call(&["enable", TARGET], CALL),
+        ]
+    );
+    assert_eq!(clock.count.get(), 0);
+}
+
+/// Asserts that a `kill`, `disable` or `enable` that `launchctl` refuses (a job that is not loaded
+/// is `kill`'s status 3) is an error that names the call, the status and the program's words, and
+/// that a label that is no label is refused before any program runs. Catches a hand-over taken for
+/// sent when the job was gone, which would leave the hook waiting for a version no process serves.
+#[test]
+fn a_refused_signal_or_switch_is_an_error() {
+    let clock = Pauses::default();
+    type Call3 = fn(&LaunchctlJobs<'_>, &str) -> Result<(), PortError>;
+    let calls: [(Call3, &str); 3] = [
+        (|j, l| j.hand_to_next_image(l), "kill SIGUSR2"),
+        (|j, l| j.disable(l), "disable"),
+        (|j, l| j.enable(l), "enable"),
+    ];
+    for (made, words) in calls {
+        let runner = FakeRunner::replying(vec![exit(3, "", "No such process")]);
+        let error = made(&jobs(&runner, &clock), LABEL).unwrap_err();
+        assert_eq!(
+            launchd_message(error),
+            format!(
+                "/bin/launchctl {words} system/com.example.tierstore: exited 3: No such process"
+            )
+        );
+        let runner = FakeRunner::replying(vec![]);
+        let text = launchd_message(made(&jobs(&runner, &clock), "a b").unwrap_err());
+        assert!(text.ends_with("is not a launchd label"), "{text}");
+        assert!(runner.calls().is_empty());
+    }
 }

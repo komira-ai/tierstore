@@ -12,6 +12,9 @@
 //!   longer has the job. A `launchctl` call that fails is a failure, never a success.
 //!   `bootout_within` is the same with the time of the call and the number of looks given by
 //!   the caller instead of by [`LaunchdTimes`].
+//! - `hand_to_next_image`: `launchctl kill SIGUSR2 system/<label>`.
+//! - `disable` and `enable`: `launchctl disable system/<label>` and `launchctl enable
+//!   system/<label>`, which launchd keeps across reboots.
 
 use std::path::Path;
 use std::time::Duration;
@@ -53,11 +56,37 @@ pub fn bootstrap_args(plist: &str) -> Vec<String> {
     vec!["bootstrap".to_owned(), DOMAIN.to_owned(), plist.to_owned()]
 }
 
+/// The signal that tells a build node to hand over to the next image of its program.
+pub const NEXT_IMAGE_SIGNAL: &str = "SIGUSR2";
+
+/// `kill SIGUSR2 system/<label>`: tells the job's process to hand over to the next image of its
+/// program.
+#[must_use]
+pub fn kill_args(label: &str) -> Vec<String> {
+    vec![
+        "kill".to_owned(),
+        NEXT_IMAGE_SIGNAL.to_owned(),
+        service_target(label),
+    ]
+}
+
+/// `disable system/<label>`: launchd does not load the job until it is enabled.
+#[must_use]
+pub fn disable_args(label: &str) -> Vec<String> {
+    vec!["disable".to_owned(), service_target(label)]
+}
+
+/// `enable system/<label>`: the job may be loaded again.
+#[must_use]
+pub fn enable_args(label: &str) -> Vec<String> {
+    vec!["enable".to_owned(), service_target(label)]
+}
+
 /// How long the calls of [`LaunchctlJobs`] may take, and how long `bootout` waits for the domain
 /// to let the job go.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LaunchdTimes {
-    /// The longest `print` or `bootstrap` may run.
+    /// The longest `print`, `bootstrap`, `kill`, `disable` or `enable` may run.
     pub call: Duration,
     /// The longest `bootout` may run: it waits for the process to exit, the drain included.
     pub bootout: Duration,
@@ -163,5 +192,20 @@ impl Launchd for LaunchctlJobs<'_> {
                 gone_attempts
             ),
         ))
+    }
+
+    fn hand_to_next_image(&self, label: &str) -> Result<(), PortError> {
+        self.must(&kill_args(checked_label(label)?), self.times.call)
+            .map(|_| ())
+    }
+
+    fn disable(&self, label: &str) -> Result<(), PortError> {
+        self.must(&disable_args(checked_label(label)?), self.times.call)
+            .map(|_| ())
+    }
+
+    fn enable(&self, label: &str) -> Result<(), PortError> {
+        self.must(&enable_args(checked_label(label)?), self.times.call)
+            .map(|_| ())
     }
 }
