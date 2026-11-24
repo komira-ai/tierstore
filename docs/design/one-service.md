@@ -719,7 +719,7 @@ postinstall removes a `tierstore-fs.plist` left by an earlier package.
 | tierstore (release M+1) | deletes the old layout (section 5) | after both windows |
 | `all-in-one`'s configuration package | `config.toml` with the `fs` interface; no `fs.toml`; needs M or later | its window |
 | `mac-build`'s configuration package | `tierstore.toml` with the `fs` interface; no `fs.toml`; params without `fs_launchd_label`; needs M or later | its window |
-| hostkeeper manifest | Linux `run` unchanged (`tierstore@a.service`, `tierstore@b.service`); macOS installer package's params lose `fs_launchd_label` and its payload loses `tierstore-fs.plist` (M+1); the cutover and rollback bounds (1500 s) still cover a Linux take (300 s start) and a Mac hand-over (61 s drain, start) | M, M+1 |
+| hostkeeper manifest | Linux `run` unchanged (`tierstore@a.service`, `tierstore@b.service`); macOS installer package's params lose `fs_launchd_label` and its payload loses `tierstore-fs.plist` (M+1); the cutover bound (4000 s, which includes the wait for the new store to take the cache lock) and the rollback bound (1500 s) still cover a Linux take (300 s start) and a Mac hand-over (61 s drain, start) | M, M+1 |
 | job agent (jobscheduler) | nothing: the mount-provider socket paths (`/var/lib/tierstore/provider.sock`, `/usr/local/tierstore/run/provider.sock`) and the mount roots do not move. On Linux, the ordering drop-in names `tierstore@a.service tierstore@b.service` | 4.2 step 5 |
 
 ## 5. What it deletes (release M+1)

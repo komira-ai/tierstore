@@ -262,10 +262,12 @@ impl World {
                 .unwrap_or(lock.promote_secs)
                 .saturating_sub(1);
             lock.promoting = None;
-            match self.serving() {
-                Some(taker) if left == 0 => lock.holder = Some(taker),
-                Some(_) => lock.promoting = Some(left),
-                None => {}
+            if let Some(taker) = self.serving() {
+                if left == 0 {
+                    lock.holder = Some(taker);
+                } else {
+                    lock.promoting = Some(left);
+                }
             }
         }
         self.cache_lock = Some(lock);
