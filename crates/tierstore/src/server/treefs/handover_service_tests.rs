@@ -562,3 +562,22 @@ async fn a_failed_resume_is_told_and_an_unreachable_store_does_not_stop_the_give
     kernel.getattr(1, ino::ROOT);
     kernel.assert_silent();
 }
+
+/// Asserts that a request of `take-fs` with a line this release does not know is refused as not
+/// understood: another version with the `ready` line, and another second line. It would catch a
+/// running instance that takes a later release's request for one of its own.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_take_fs_request_with_a_line_this_release_does_not_know_is_refused() {
+    let old = instance("tfs-svc-unknown", WAIT, None);
+    for request in [&["take-fs 2", "ready"][..], &["take-fs 1", "later"]] {
+        let taker = connect(&old.settings.handoff_socket).await;
+        let refused = ask(&taker, request).await;
+        assert_eq!(
+            refused.lines,
+            ["refused", "the request is not understood"],
+            "{request:?}"
+        );
+    }
+    old.assert_serving(1);
+    old.serving.abort();
+}
