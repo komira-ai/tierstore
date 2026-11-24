@@ -159,6 +159,24 @@ impl FakeDevice {
         }
     }
 
+    /// The numbers of the replies waiting now, in order; each must answer without an error.
+    pub(in crate::server::treefs) fn waiting(&self) -> Vec<u64> {
+        self.kernel.set_nonblocking(true).unwrap();
+        let mut uniques = Vec::new();
+        let mut bytes = vec![0u8; 1 << 20];
+        while let Ok(got) = self.kernel.recv(&mut bytes) {
+            assert_eq!(
+                i32::from_ne_bytes(bytes[4..8].try_into().unwrap()),
+                0,
+                "an error"
+            );
+            uniques.push(u64::from_ne_bytes(bytes[8..16].try_into().unwrap()));
+            assert!(got >= 16);
+        }
+        self.kernel.set_nonblocking(false).unwrap();
+        uniques
+    }
+
     /// Asserts that no reply is waiting now.
     pub(in crate::server::treefs) fn assert_silent(&self) {
         self.kernel.set_nonblocking(true).unwrap();
@@ -222,6 +240,8 @@ impl Instance {
             mountpoint: &self.settings.mountpoint,
             control: &self.settings.control_socket,
             wait: Duration::from_secs(3600),
+            // The fake device is a socket, not the FUSE device.
+            device: |_| Ok(()),
         }
     }
 

@@ -7,7 +7,7 @@ use std::os::fd::AsFd;
 use tokio::io::AsyncWriteExt;
 use tokio::net::UnixStream;
 
-use super::{MAX_FRAME, recv, send};
+use super::{MAX_FRAME, of_frame, recv, send};
 use crate::server::handoff::testing::{listening, within};
 
 /// Asserts that a frame arrives with its lines in order and with its descriptors, and that a
@@ -114,4 +114,39 @@ async fn ancillary_data_that_is_not_descriptors_is_ignored() {
     let frame = recv(&far).await.unwrap();
     assert_eq!(frame.lines, vec!["hello".to_owned()]);
     assert!(frame.fds.is_empty());
+}
+
+/// Asserts that frames sent one after the other, before the other side reads, are read one at a
+/// time, each with its own descriptors (`bye` then `written`, or a frame and an offer), and that a
+/// frame that ends in what arrives with the next is cut at its end. It would catch a reader that
+/// takes two frames as one, which the successor would refuse as something other than `bye`.
+#[tokio::test]
+async fn frames_sent_together_are_read_one_at_a_time() {
+    let (near, far) = UnixStream::pair().unwrap();
+    let (listener, addr) = listening();
+    send(&near, &["bye".to_owned()], &[]).await.unwrap();
+    send(&near, &["written".to_owned()], &[]).await.unwrap();
+    send(
+        &near,
+        &["offer".to_owned(), format!("s3 {addr}")],
+        &[listener.as_fd()],
+    )
+    .await
+    .unwrap();
+    assert_eq!(recv(&far).await.unwrap().lines, ["bye"]);
+    assert_eq!(recv(&far).await.unwrap().lines, ["written"]);
+    let offer = recv(&far).await.unwrap();
+    assert_eq!(offer.lines, ["offer".to_owned(), format!("s3 {addr}")]);
+    let fd = offer.fds.into_iter().next().unwrap();
+    assert_eq!(TcpListener::from(fd).local_addr().unwrap(), addr);
+}
+
+/// Asserts where a read stops in what it looked at: at the end of the first empty line, one that
+/// begins in what was read already, or nowhere (it takes all) when the frame goes on.
+#[test]
+fn a_read_stops_at_the_end_of_its_frame() {
+    assert_eq!(of_frame(b"", b"bye\n\nwritten\n\n"), 5);
+    assert_eq!(of_frame(b"bye\n", b"\nwritten\n\n"), 1);
+    assert_eq!(of_frame(b"by", b"e\n\n"), 3);
+    assert_eq!(of_frame(b"", b"one\ntw"), 6);
 }

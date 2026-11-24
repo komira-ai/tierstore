@@ -29,6 +29,8 @@ fn kernel_of(rig: &Rig, mountinfo: &str) -> Kernel {
     Kernel {
         mountinfo: table,
         connections,
+        // The stand-in for the device is a socket.
+        device: |_| Ok(()),
     }
 }
 
@@ -458,7 +460,12 @@ async fn a_start_takes_the_mount_from_the_running_instance() {
     );
     old.assert_serving(1);
     let manager = FakeManager::start(&old.rig.dir.path().join("notify.sock"));
-    let platform = platform(&manager, None, Kernel::real());
+    // The stand-in for the device is a socket, not the FUSE device.
+    let kernel = Kernel {
+        device: |_| Ok(()),
+        ..Kernel::real()
+    };
+    let platform = platform(&manager, None, kernel);
     let settings = old.settings.clone();
     let ended = Arc::new(AtomicBool::new(false));
     let done = Arc::clone(&ended);
@@ -592,7 +599,8 @@ fn a_hand_over_between_two_processes_ends_the_first_with_success() {
     assert_eq!(kernel.reply().unique, 1);
 
     let second_manager = FakeManager::start(&rig.dir.path().join("second.sock"));
-    let second = platform(&second_manager, None, Kernel::real());
+    // The stand-in for the device is a socket, not the FUSE device.
+    let second = platform(&second_manager, None, kernel_of(&rig, ""));
     let mine = settings.clone();
     let second_thread = std::thread::spawn(move || serve_with(&mine, second));
     until_ready(&second_manager);
@@ -653,7 +661,8 @@ async fn a_start_that_cannot_store_the_descriptor_leaves_the_running_instance_se
     let platform = Platform {
         manager: Manager::new(Some(old.rig.dir.path().join("nobody-home").as_os_str())),
         stored: Vec::new(),
-        kernel: Kernel::real(),
+        // The stand-in for the device is a socket, not the FUSE device.
+        kernel: kernel_of(&old.rig, ""),
         clock: Arc::new(Mono::new()),
     };
     let settings = old.settings.clone();

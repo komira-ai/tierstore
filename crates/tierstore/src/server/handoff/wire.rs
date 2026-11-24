@@ -5,8 +5,9 @@
 //! A frame is text: lines, each ended by a newline, then an empty line. The descriptors of an
 //! offer (listening sockets, or the `/dev/fuse` descriptor and a control socket) travel in the
 //! same `sendmsg` as the frame's first bytes, as an `SCM_RIGHTS` message, so a frame that names
-//! `n` descriptors arrives with `n` of them. Nothing here is
-//! `unsafe`: `rustix` wraps the two system calls.
+//! `n` descriptors arrives with `n` of them. A read takes one frame and leaves the next in the
+//! socket: a side may send two frames before the other answers (`bye`, then `written`). Nothing
+//! here is `unsafe`: `rustix` wraps the system calls.
 
 use std::io::{self, IoSlice, IoSliceMut};
 use std::mem::MaybeUninit;
@@ -70,7 +71,19 @@ pub(crate) async fn send(
     Ok(())
 }
 
-/// Reads one frame from `stream`, with the descriptors that came with it.
+/// How many of the `peeked` bytes that follow `read` (what was read of the frame so far) belong
+/// to the frame: up to and including its empty line, or all of them if it does not end there.
+fn of_frame(read: &[u8], peeked: &[u8]) -> usize {
+    // The end may begin in what was read: its last newline and the first peeked one.
+    let from = read.len().saturating_sub(1);
+    let mut seen = read[from..].to_vec();
+    seen.extend_from_slice(peeked);
+    let end = seen.windows(2).position(|pair| pair == b"\n\n");
+    end.map_or(peeked.len(), |at| at + 2 - (read.len() - from))
+}
+
+/// Reads one frame from `stream`, with the descriptors that came with it, and nothing of the
+/// frame that follows it.
 ///
 /// # Errors
 /// The stream ended inside the frame, the frame is longer than [`MAX_FRAME`] or is not text, or
@@ -84,10 +97,14 @@ pub(crate) async fn recv(stream: &UnixStream) -> io::Result<Frame> {
             .async_io(
                 Interest::READABLE,
                 || -> io::Result<(usize, Vec<OwnedFd>)> {
+                    // What is there is looked at first, so that the read below stops at the
+                    // frame's end. A peek takes no descriptor (it has no room for one).
+                    let (peeked, _) = rustix::net::recv(stream, &mut buffer[..], RecvFlags::PEEK)?;
+                    let take = of_frame(&bytes, &buffer[..peeked]);
                     let mut space =
                         [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(MAX_FDS))];
                     let mut control = RecvAncillaryBuffer::new(&mut space);
-                    let mut iov = [IoSliceMut::new(&mut buffer)];
+                    let mut iov = [IoSliceMut::new(&mut buffer[..take])];
                     let got = recvmsg(stream, &mut iov, &mut control, RecvFlags::empty())?;
                     let mut received = Vec::new();
                     for message in control.drain() {

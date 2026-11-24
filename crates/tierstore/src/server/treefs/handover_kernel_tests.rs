@@ -223,6 +223,10 @@ fn hand_over_under_read() {
         new_manager.texts(),
         ["FDSTORE=1\nFDNAME=fuse", "BARRIER=1", "READY=1"]
     );
+    // The old instance took its descriptor out of its store at `ready`, before its `bye`.
+    until(|| {
+        old_manager.texts().last().map(String::as_str) == Some("FDSTOREREMOVE=1\nFDNAME=fuse")
+    });
     assert_eq!(
         init_record::read(&rig.runtime).unwrap().generation,
         2,
@@ -354,6 +358,7 @@ fn taker_gone() {
         mountpoint: &settings.mountpoint,
         control: &settings.control_socket,
         wait: settings.handoff_wait,
+        device: handover::check_device,
     };
     let taken = runtime
         .block_on(handover::take(&paths, Box::new(|_| Ok(()))))

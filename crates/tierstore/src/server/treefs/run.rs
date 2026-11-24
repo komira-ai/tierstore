@@ -261,6 +261,34 @@ impl Running {
         device: OwnedFd,
         (control, resend): (Option<std::os::unix::net::UnixListener>, bool),
     ) -> Result<Self, StartError> {
+        Self::adopt_as(settings, prepared, device, (control, resend), true)
+    }
+
+    /// [`Running::adopt`] of the connection of `device` taken in a hand-over, with the control
+    /// socket `control` the running instance gave over: the same state is read and made, but
+    /// nothing reads the device and the control socket accepts nothing before
+    /// [`Running::start_reading`], which the successor calls once the running instance has said
+    /// `bye` (until then it may resume reading).
+    ///
+    /// # Errors
+    /// As [`Running::adopt`].
+    pub(super) fn take_over(
+        settings: &FsSettings,
+        prepared: Prepared,
+        device: OwnedFd,
+        control: std::os::unix::net::UnixListener,
+    ) -> Result<Self, StartError> {
+        Self::adopt_as(settings, prepared, device, (Some(control), false), false)
+    }
+
+    /// [`Running::adopt`], with the readers and the control socket started when `reading`.
+    fn adopt_as(
+        settings: &FsSettings,
+        prepared: Prepared,
+        device: OwnedFd,
+        (control, resend): (Option<std::os::unix::net::UnixListener>, bool),
+        reading: bool,
+    ) -> Result<Self, StartError> {
         let mut steps = Steps::new(Arc::new(MonotonicClock::new()));
         make_state_directories(settings)?;
         let _ = steps.done("making the directories");
@@ -295,13 +323,19 @@ impl Running {
         }
         .map_err(control_error(settings))?;
         init_record::write(&settings.runtime_dir, &record)?;
-        let serving = Serving::adopt(
-            &core,
-            settings,
-            device,
-            record.outcome,
-            (Some(&saved), resend),
-        )
+        let mut control = control;
+        let serving = if reading {
+            Serving::adopt(
+                &core,
+                settings,
+                device,
+                record.outcome,
+                (Some(&saved), resend),
+            )
+        } else {
+            control.pause();
+            Serving::paused(&core, settings, device, record.outcome, &saved)
+        }
         .map_err(io("serving the connection"))?;
         let _ = steps.done("serving the connection");
         Ok(Self::of(core, settings, Parts { control, serving }))
@@ -313,6 +347,23 @@ impl Running {
             settings: settings.clone(),
             parts: Mutex::new(parts),
         }
+    }
+
+    /// Starts the readers and the control socket of a connection [taken over](Running::take_over):
+    /// from here this process reads the device.
+    ///
+    /// # Errors
+    /// What the system said when the readers or the control socket cannot start.
+    pub(super) fn start_reading(&self) -> std::io::Result<()> {
+        let mut parts = locked(&self.parts);
+        parts.serving.restart(&self.core, &self.settings)?;
+        parts.control.resume()
+    }
+
+    /// Whether readers of the device are running.
+    #[cfg(test)]
+    pub(super) fn reading(&self) -> bool {
+        locked(&self.parts).serving.reading()
     }
 
     /// The core the mount is served from.
@@ -416,6 +467,9 @@ pub(super) struct Kernel {
     pub mountinfo: PathBuf,
     /// The directory of connections, `/sys/fs/fuse/connections`.
     pub connections: PathBuf,
+    /// The check that a descriptor offered as the mount's is the FUSE device
+    /// (`handover::check_device`; a test's stand-in for the device is a socket).
+    pub device: fn(std::os::fd::BorrowedFd<'_>) -> std::io::Result<()>,
 }
 
 impl Kernel {
@@ -424,6 +478,7 @@ impl Kernel {
         Self {
             mountinfo: PathBuf::from(MOUNTINFO),
             connections: PathBuf::from(recover::SYS_CONNECTIONS),
+            device: super::handover::check_device,
         }
     }
 
