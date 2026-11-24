@@ -680,20 +680,28 @@ fn the_fs_template_runs_the_fs_verb_of_the_installed_binary() {
 }
 
 /// Asserts that the unit of `tierstore fs` looks at its marker at every start, its automatic
-/// restarts included: one `ExecCondition=` that tests, as root (`+`, as systemd tests the
-/// condition), for exactly the file of `ConditionPathExists=`, beside `Restart=on-failure`.
-/// systemd does not evaluate the conditions of `[Unit]` again for a restart of `Restart=`, so
-/// without it a taker whose take failed is started again after the update hook removed its
-/// marker, again and again, and the rollback, which waits for it to end, never ends. It would catch the line left out, and one that tests another file.
+/// restarts included: one `ExecCondition=` that tests, as the unit's own user (no `+` or `!`, so
+/// the unit grants nothing beyond `CAP_SYS_ADMIN`), for exactly the file of
+/// `ConditionPathExists=`, beside `Restart=on-failure`. And that the user may look there: the
+/// marker is in the `StateDirectory=` of the template, which systemd makes mode 0700 for the
+/// template's `User=`, the same account as this unit's. systemd does not evaluate the conditions
+/// of `[Unit]` again for a restart of `Restart=`, so without the line a taker whose take failed is
+/// started again after the update hook removed its marker, again and again, and the rollback,
+/// which waits for it to end, never ends. It would catch the line left out, one that tests another
+/// file, one run as root, and a marker moved where the unit's user cannot see it.
 #[test]
 fn the_fs_template_looks_at_its_marker_at_every_restart() {
-    let unit = read(FS_TEMPLATE);
+    let (unit, template) = (read(FS_TEMPLATE), read(TEMPLATE));
     let marker = value(&unit, "ConditionPathExists");
     assert_eq!(
         value(&unit, "ExecCondition"),
-        format!("+/usr/bin/test -e {marker}")
+        format!("/usr/bin/test -e {marker}")
     );
     assert_eq!(value(&unit, "Restart"), "on-failure");
+    let state = Path::new("/var/lib").join(value(&template, "StateDirectory"));
+    assert_eq!(Path::new(&marker).parent(), Some(state.as_path()));
+    assert_eq!(value(&template, "StateDirectoryMode"), "0700");
+    assert_eq!(value(&unit, "User"), value(&template, "User"));
 }
 
 /// Asserts that the marker of the unit of `tierstore fs` is not one of the markers the update hook
