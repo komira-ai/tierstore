@@ -74,7 +74,8 @@ fn a_mac_update_with_handoff_exec_v1_sends_sigusr2_and_waits_for_the_target() {
     assert!(fake.record().has(Marker::Swapped));
     fake.advance(&[Verify, Cleanup]);
     let calls = fake.launchd_calls();
-    assert!(!calls.contains(&bootout()) && !calls.contains(&bootstrap()));
+    assert!(!calls.contains(&bootout()));
+    assert!(!calls.contains(&bootstrap()));
     assert_eq!(fake.record().mode, None);
     assert!(fake.strays().is_empty());
 }
@@ -182,7 +183,8 @@ fn a_mac_with_an_fs_job_restarts_as_before() {
     fake.set_config(CONFIG, Some(WITH_MOUNT));
     fake.advance(&[Prepare, Cutover]);
     let calls = fake.launchd_calls();
-    assert!(calls.contains(&bootout()) && calls.contains(&bootstrap()));
+    assert!(calls.contains(&bootout()));
+    assert!(calls.contains(&bootstrap()));
     assert!(!calls.contains(&kill()));
     assert!(
         !fake
@@ -297,10 +299,8 @@ fn a_staged_release_that_refuses_the_file_fails_prepare() {
     let done = fake.run(Prepare);
     assert_failed(&done, Reason::ConfigRefused);
     let text = done.report.detail.clone().unwrap_or_default();
-    assert!(
-        text.contains(NEW) && text.contains("unknown key server.nope"),
-        "{text}"
-    );
+    assert!(text.contains(NEW), "{text}");
+    assert!(text.contains("unknown key server.nope"), "{text}");
     assert_eq!(fake.record(), Record::idle(None));
     assert!(fake.launchd_calls().is_empty());
 

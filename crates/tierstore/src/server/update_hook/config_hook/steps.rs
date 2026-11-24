@@ -266,7 +266,9 @@ fn prepare_params(
                 moved.join(", ")
             )));
         }
-        if restart && (old_fs.is_some() || (switch && !switch_restarts)) {
+        // On a Mac the switch is a restart by design, and a Mac that serves its mount was refused
+        // above.
+        if restart && !switch_restarts && (old_fs.is_some() || switch) {
             return Err(mount_refused(
                 "the staged file with an fs interface needs a restart, which would drop the \
                  mount"

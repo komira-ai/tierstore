@@ -382,3 +382,18 @@ async fn a_start_whose_mount_instance_gives_up_first_leaves_its_control_socket()
     let _control = peer.await.unwrap();
     assert!(fs.control_socket.exists());
 }
+
+/// Asserts that leaving a start that got no mount (its file has no `fs` interface) does nothing
+/// and returns: there is no instance to give anything back to. Catches a start with no mount that
+/// waits on, or touches, a mount it never had.
+#[tokio::test]
+async fn abandoning_a_start_with_no_mount_does_nothing() {
+    use crate::server::treefs::interface::Taking;
+    use crate::server::treefs::sd::Manager;
+
+    let taking = Taking {
+        manager: Manager::new(None),
+        mount: None,
+    };
+    within("leaving no mount ends", taking.abandon()).await;
+}

@@ -71,10 +71,9 @@ fn a_mac_switch_boots_out_and_disables_the_fs_job_before_the_main_job_starts() {
     let disabled = position(&calls, &call("disable", mac::FS_LABEL));
     let main_out = position(&calls, &call("bootout", mac::LABEL));
     let main_in = position(&calls, &format!("launchd.bootstrap {LAUNCHD_PLIST}"));
-    assert!(
-        fs_out < disabled && disabled < main_out && main_out < main_in,
-        "{calls:?}"
-    );
+    assert!(fs_out < disabled, "{calls:?}");
+    assert!(disabled < main_out, "{calls:?}");
+    assert!(main_out < main_in, "{calls:?}");
     assert!(
         !calls.contains(&format!("launchd.bootstrap {FS_LAUNCHD_PLIST}")),
         "{calls:?}"
@@ -148,10 +147,9 @@ fn a_mac_switch_rolls_back_enabling_the_fs_job_before_it_boots_it_in() {
     let main_out = position(&calls, &call("bootout", mac::LABEL));
     let main_in = position(&calls, &format!("launchd.bootstrap {LAUNCHD_PLIST}"));
     let fs_in = position(&calls, &format!("launchd.bootstrap {FS_LAUNCHD_PLIST}"));
-    assert!(
-        enabled < main_out && main_out < main_in && main_in < fs_in,
-        "{calls:?}"
-    );
+    assert!(enabled < main_out, "{calls:?}");
+    assert!(main_out < main_in, "{calls:?}");
+    assert!(main_in < fs_in, "{calls:?}");
     assert!(node.fake.disabled().is_empty());
     let end = node.fake.snapshot();
     assert_eq!((end.job, end.fs_job), (Some(PathBuf::from(mac::OLD)), true));
@@ -318,4 +316,34 @@ fn a_mac_config_update_of_a_node_that_serves_its_mount_is_refused() {
         "mode = \"restart\"\n",
     );
     lin::assert_ok(&node.step(Prepare, &declared));
+}
+
+/// Asserts that a Mac switch whose staged file also changes how the node listens (a change that is
+/// a restart anyway) goes on as the switch, which is a restart by design on a Mac, and is not
+/// refused; and that a switch whose arm refuses `prepare` (an update of the config package is past
+/// its cutover) notes no switch in the record. Catches a Mac switch refused for a restart it is by
+/// design, and a switch noted for an update that was never prepared.
+#[test]
+fn a_mac_switch_that_listens_otherwise_goes_on_and_a_refused_one_notes_nothing() {
+    let node = switching();
+    node.files.put(
+        &staged(mac::CONFIG),
+        &format!(
+            "{}[server]\nlisten = \"0.0.0.0:9300\"\n",
+            fs_file(NEW_MOUNT).replacen("[server]\n", "", 1)
+        ),
+    );
+    lin::assert_ok(&node.step(Prepare, &mac_update()));
+    assert!(node.fake.record().fs_switch);
+
+    let node = switching();
+    let mut past = Record::idle(None);
+    past.updating = true;
+    past.to = Some(PathBuf::from(super::PKG_NEW));
+    past.version = Some("1.1.0".to_owned());
+    node.fake
+        .set_record(&past.with(super::super::super::Marker::Swapped));
+    let done = node.step(Prepare, &mac_update());
+    lin::assert_failed(&done, Reason::OutOfOrder);
+    assert!(!node.fake.record().fs_switch);
 }
