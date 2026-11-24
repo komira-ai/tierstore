@@ -516,6 +516,47 @@ fn the_fs_plists_wait_150_seconds_for_the_unmount_and_kill_the_whole_process_gro
     }
 }
 
+/// The drain of a process on macOS that is given no part of it: the macOS defaults of
+/// `server.drain_lb_wait` (1 s) and `server.drain_deadline` (60 s).
+const MACOS_DRAIN_SECS: i64 = 1 + 60;
+
+/// The longest unmount of the file system: four steps, each at most the largest
+/// `fs.nfs.unmount_wait` (25 s) and 5 s to collect a killed command.
+const LONGEST_UNMOUNT_SECS: i64 = 4 * (25 + 5);
+
+/// Asserts that both plists of the main job (the archive package's and the installer package's)
+/// give launchd 210 seconds after SIGTERM (`ExitTimeOut`), which is more than the drain and the
+/// longest unmount of the file system after it, start the process again after 10 seconds
+/// (`ThrottleInterval`, as the file service's job: a hard mount waits for its server), and leave
+/// `AbandonProcessGroup` out, so that the kill of the job takes a helper command the process left
+/// with it (docs/design/one-service.md section 1.4). It would catch the 90 s and 30 s of the job of
+/// the S3 process alone left in place, with which launchd kills the one process in the middle of
+/// its unmount, and a job whose kill leaves a stray `umount` or `diskutil` running.
+#[test]
+fn the_plist_waits_210_seconds_on_exit() {
+    for (name, job) in [
+        ("archive", plist()),
+        ("package", plist_in(&package_plist_text())),
+    ] {
+        let Some(&Value::Integer(exit)) = job.get("ExitTimeOut") else {
+            panic!("{name}: ExitTimeOut is an integer");
+        };
+        assert_eq!(exit, 210, "{name}");
+        assert!(exit > MACOS_DRAIN_SECS + LONGEST_UNMOUNT_SECS, "{name}");
+        assert_eq!(
+            job.get("ThrottleInterval"),
+            Some(&Value::Integer(10)),
+            "{name}"
+        );
+        assert_eq!(
+            job.get("ThrottleInterval"),
+            fs_plist("macos-pkg").get("ThrottleInterval"),
+            "{name}"
+        );
+        assert!(!job.contains_key("AbandonProcessGroup"), "{name}");
+    }
+}
+
 /// Asserts that the shipped `fs.toml` is the file the job's command line names and that it agrees
 /// with `tierstore.toml`: its `fs.fill_socket` is `local_cache.fill_socket`, its `fs.mountpoint` is
 /// the mount provider's `mountpoint`, its `fs.cache_path` is `local_cache.path`, its runtime

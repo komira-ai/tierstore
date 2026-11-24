@@ -9,11 +9,13 @@ use std::time::Duration;
 
 use tierstore_testkit::dir::TestDir;
 
+use super::launchd::fs::FS_BOOTOUT_TIMEOUT;
 use super::look::POLL_INTERVAL;
 use super::machine::testing::me;
 use super::machine::{Call, Output, RunError, Runner, SystemRunner};
 use super::system::{
-    LAUNCHCTL_PROGRAM, SYSTEMCTL_PROGRAM, SystemConfig, on_this_machine, run_on, system_config,
+    BOOTOUT_TIMEOUT, LAUNCHCTL_PROGRAM, SYSTEMCTL_PROGRAM, SystemConfig, on_this_machine, run_on,
+    system_config,
 };
 use super::{
     Done, Invocation, LAUNCHD_PLIST, Outcome, Params, Reason, SERVICE_BINARY, STATE_DIR, Step,
@@ -391,5 +393,40 @@ fn the_systemd_arm_is_wired_to_the_fs_units_and_markers() {
     assert!(
         !markers.join("run-fs-b").exists(),
         "the fs marker is removed"
+    );
+}
+
+/// The `ExitTimeOut` of the launchd job at `path` from the repository's root.
+fn exit_timeout_of(path: &str) -> Duration {
+    let file = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(path);
+    let text = fs::read_to_string(&file).unwrap();
+    let (_, after) = text.split_once("<key>ExitTimeOut</key>").unwrap();
+    let (_, value) = after.split_once("<integer>").unwrap();
+    let (number, _) = value.split_once("</integer>").unwrap();
+    Duration::from_secs(number.trim().parse().unwrap())
+}
+
+/// Asserts that the hook waits for `launchctl bootout` of each job longer than launchd lets the
+/// job's process take to exit (`ExitTimeOut` of each plist the jobs are loaded from, the archive
+/// package's and the installer package's): the main job's wait is above its plists' 210 s, and the
+/// fs job's above its plists' 150 s. Catches a wait left at the 120 s of the 90 s plist, with which
+/// the hook gives up on a bootout while launchd still lets the process drain and unmount, and
+/// fails the step of an update that was going well.
+#[test]
+fn the_hook_waits_for_each_bootout_longer_than_its_plists_let_the_job_exit() {
+    for (wait, plist) in [
+        (BOOTOUT_TIMEOUT, "tierstore.plist"),
+        (FS_BOOTOUT_TIMEOUT, "tierstore-fs.plist"),
+    ] {
+        for dir in ["packaging/hostkeeper/units", "packaging/macos-pkg"] {
+            let exit = exit_timeout_of(&format!("{dir}/{plist}"));
+            assert!(wait > exit, "{dir}/{plist}: {wait:?} is not above {exit:?}");
+        }
+    }
+    assert_eq!(
+        exit_timeout_of("packaging/macos-pkg/tierstore.plist"),
+        Duration::from_secs(210)
     );
 }

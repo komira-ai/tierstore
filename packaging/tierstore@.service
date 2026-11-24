@@ -21,11 +21,29 @@
 #
 # The hand-over socket lives in the StateDirectory: systemd sets STATE_DIRECTORY for it, and a
 # process that has it and a configuration without `server.handoff_socket` uses
-# /var/lib/tierstore/handoff.sock, so the file need not name it. Under ProtectSystem=strict the
-# StateDirectory is the only place the process may write: a configuration that writes elsewhere (a
-# directory hot tier, `[local_cache]`, `hot_store.lock_file`) needs a drop-in of the host's in
-# /etc/systemd/system/tierstore@.service.d/ that gives the path in ReadWritePaths= (and, for a path
-# on a mount of its own, RequiresMountsFor=). The package never writes there.
+# /var/lib/tierstore/handoff.sock, so the file need not name it. A path of the configuration on a
+# mount of its own (a directory hot tier, `[local_cache]`) is ordered after its mount by a drop-in
+# of the host's in /etc/systemd/system/tierstore@.service.d/ with RequiresMountsFor=. The package
+# never writes there.
+#
+# The unit is the one unit of docs/design/one-service.md (section 1.4): what the file system needs
+# to make and keep a FUSE mount is given to it, and every option that gives a service a mount
+# namespace of its own, from which a mount would not reach the host, is left out (section 2.2):
+# PrivateDevices, ProtectSystem, ProtectHome, PrivateTmp, ProtectKernelTunables,
+# ProtectKernelModules, ProtectKernelLogs, ProtectControlGroups, PrivateMounts, and the path
+# options (ReadWritePaths= and the like). Without ProtectSystem= the process writes where its
+# account may, and no path has to be made writable; a drop-in of the host's that adds a path
+# option gives the service a mount namespace again. In their place: DevicePolicy=closed with
+# DeviceAllow=/dev/fuse (a device filter, with no namespace: the standard pseudo devices and
+# /dev/fuse); CAP_SYS_ADMIN as the only capability, bounding and ambient (the mount); the system
+# calls of @mount, and pidfd_open and pidfd_getfd (a descriptor the service manager passes is
+# taken as an owned duplicate, with no unsafe code); a descriptor store of one, kept across a
+# restart (FileDescriptorStoreMax=1, FileDescriptorStorePreserve=restart); the runtime
+# directories /run/tierstore-fs and /run/tierstore, kept across restarts; and the file system's
+# restart values, 2 s and a start limit of 5 in 60 s, after which the unit is left failed.
+# RestrictNamespaces=yes stays: it is a system-call filter, not a namespace, and the process makes
+# no namespace. The process says nothing to the service manager when it serves, so the unit is
+# Type=simple. tierstore-fs@.service, the unit of `tierstore fs`, leaves out the same options.
 #
 # The drain is the defaults of `server.drain_lb_wait` (10 s) and `server.drain_deadline` (15 m),
 # which TimeoutStopSec= is above; the unit passes no flag for it.
@@ -49,7 +67,7 @@ Wants=network-online.target
 After=tierstore-guard.service
 Wants=tierstore-guard.service
 ConditionPathExists=/var/lib/tierstore/run-%i
-StartLimitIntervalSec=1h
+StartLimitIntervalSec=60
 StartLimitBurst=5
 
 [Service]
@@ -57,33 +75,32 @@ Type=simple
 User=tierstore
 StateDirectory=tierstore
 StateDirectoryMode=0700
+RuntimeDirectory=tierstore-fs tierstore
+RuntimeDirectoryPreserve=yes
 ExecStart=/usr/libexec/tierstore/tierstore \
   --config /etc/tierstore/config.toml
 KillSignal=SIGTERM
 TimeoutStopSec=960
 Restart=on-failure
-RestartSec=30
+RestartSec=2
 RestartPreventExitStatus=2 3
 # The same value as tierstore-fs@.service: this process serves the node's cache and the fill socket for the mount, whose jobs keep files of it open as long as they run.
 LimitNOFILE=1048576
 UMask=0077
 NoNewPrivileges=yes
-ProtectSystem=strict
-ProtectHome=yes
-PrivateTmp=yes
-PrivateDevices=yes
-CapabilityBoundingSet=
+CapabilityBoundingSet=CAP_SYS_ADMIN
+AmbientCapabilities=CAP_SYS_ADMIN
+DevicePolicy=closed
+DeviceAllow=/dev/fuse rw
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 RestrictNamespaces=yes
 RestrictRealtime=yes
 LockPersonality=yes
 MemoryDenyWriteExecute=yes
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
-ProtectKernelLogs=yes
-ProtectControlGroups=yes
 SystemCallArchitectures=native
-SystemCallFilter=@system-service
+SystemCallFilter=@system-service @mount pidfd_open pidfd_getfd
+FileDescriptorStoreMax=1
+FileDescriptorStorePreserve=restart
 
 [Install]
 WantedBy=multi-user.target
