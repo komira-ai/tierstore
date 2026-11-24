@@ -20,7 +20,7 @@ use crate::server::local_cache::trees::testing::{Bench, fs_at};
 use crate::server::local_cache::{LocalCache, Mode, Tick};
 use crate::server::treefs::fill_client::{AskError, FillClient, PAUSE, Place, Until};
 use crate::server::treefs::fills::{Fills, Report};
-use crate::{Clock, Op, TreeDigest};
+use crate::{Backend as _, Clock, Op, TreeDigest};
 
 /// A wait longer than any test: what the requests that must not time out are given.
 const LONG: Duration = Duration::from_secs(30);

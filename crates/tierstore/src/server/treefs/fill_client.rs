@@ -55,10 +55,13 @@ pub(super) enum AskError {
     /// The socket was not there, or went away, for the whole of `fetch_timeout`.
     #[error("the fill socket is not answering")]
     Unavailable,
-    /// The socket took the request and gave no answer in `fetch_timeout`.
+    /// The socket took the request and gave no answer in `fetch_timeout`; also what a request
+    /// made in process (`in_process.rs`) that did not end in that time fails with, in the same
+    /// words, which the core's `passes` reads.
     #[error("the fill socket gave no answer in time")]
     TimedOut,
-    /// The end the request was given passed before it was answered.
+    /// The end the request was given passed before it was answered, over the socket or in
+    /// process.
     #[error("the fill socket did not answer within the time the request was given")]
     Spent,
     /// The cache of this process stayed read-only for the whole of `fetch_timeout`: another
