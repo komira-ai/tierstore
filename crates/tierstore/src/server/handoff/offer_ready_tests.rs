@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use crate::server::handoff::testing::{ask, connect, listening, scratch, send, socket};
+use crate::server::handoff::testing::{ask, connect, listening, scratch, send, settle, socket};
 use crate::server::handoff::{Front, wire};
 
 use super::Offer;
@@ -51,13 +51,6 @@ async fn remade(path: &std::path::Path, was: u64) {
         }
     })
     .await;
-}
-
-/// Lets every task that can run, run.
-async fn settle() {
-    for _ in 0..1000 {
-        tokio::task::yield_now().await;
-    }
 }
 
 /// A taker that asks for the `ready` step, answers `ack`, and reads `done`: the connection.

@@ -115,6 +115,62 @@ pub(crate) fn pretending_with(
     })
 }
 
+/// What a fake mount was told, in order: `quiesce`, `resume`, `give up`.
+pub(crate) type Steps = std::sync::Arc<std::sync::Mutex<Vec<&'static str>>>;
+
+/// A mount for the offer of the one hand-over, in `dir`, that records the steps it is told: its
+/// device is one end of a datagram socket pair (the other end is returned, as the kernel's), and
+/// its control socket listens at `fs-control.sock` in `dir`. Its mount point is `mnt` in `dir`.
+pub(crate) fn fake_mount(
+    dir: &std::path::Path,
+) -> (super::Mount, Steps, std::os::unix::net::UnixDatagram) {
+    use std::sync::{Arc, Mutex};
+    let (device, kernel) = std::os::unix::net::UnixDatagram::pair().expect("a pair");
+    let control =
+        std::os::unix::net::UnixListener::bind(dir.join("fs-control.sock")).expect("bound");
+    let steps: Steps = Arc::new(Mutex::new(Vec::new()));
+    let step = |name: &'static str| -> super::mount::Step {
+        let steps = Arc::clone(&steps);
+        Arc::new(move || steps.lock().expect("the steps").push(name))
+    };
+    let mount = super::Mount {
+        mountpoint: dir.join("mnt"),
+        control: dir.join("fs-control.sock"),
+        share: Arc::new(move || {
+            let device = device.as_fd().try_clone_to_owned()?;
+            Ok((device, control.as_fd().try_clone_to_owned()?))
+        }),
+        quiesce: step("quiesce"),
+        resume: step("resume"),
+        give_up: step("give up"),
+    };
+    (mount, steps, kernel)
+}
+
+/// The steps `steps` recorded so far.
+pub(crate) fn told(steps: &Steps) -> Vec<&'static str> {
+    steps.lock().expect("the steps").clone()
+}
+
+/// The lines of `frame`, as text.
+pub(crate) fn texts(lines: &[String]) -> Vec<&str> {
+    lines.iter().map(String::as_str).collect()
+}
+
+/// The device and inode of the file a descriptor is of: two descriptors of one file have the same.
+pub(crate) fn identity(fd: BorrowedFd<'_>) -> (u64, u64) {
+    let stat = rustix::fs::fstat(fd).expect("a stat");
+    (stat.st_dev, stat.st_ino)
+}
+
+/// Yields to the other tasks a thousand times: what a test does before it asserts that something
+/// has not happened, which proves nothing about time.
+pub(crate) async fn settle() {
+    for _ in 0..1000 {
+        tokio::task::yield_now().await;
+    }
+}
+
 /// Asserts that a step that never ends fails the test with the step's name, on the paused clock
 /// (no real time passes).
 #[tokio::test(start_paused = true)]

@@ -102,6 +102,21 @@ fn attach(device: &OwnedFd, negotiated: Negotiated, readers: NonZeroUsize) -> io
     Ok(session)
 }
 
+/// Where an earlier release answered the connection's `INIT` with passthrough, has the core answer
+/// the opens of the blobs of `saved` with the backing ids that release registered (`backing.rs`);
+/// `None` leaves the core as it is.
+fn adopt_backing(
+    core: &Arc<Core>,
+    settings: &FsSettings,
+    outcome: &Outcome,
+    saved: Option<&[Saved]>,
+) {
+    if let (Some(saved), true) = (saved, outcome.flags.contains(InitFlags::PASSTHROUGH)) {
+        let wrap = |id| -> Guard { Arc::new(BackingId(id)) };
+        core.adopt_backing(&settings.runtime_dir.join(backing::FILE), saved, &wrap);
+    }
+}
+
 impl Serving {
     /// Mounts at `fs.mountpoint` and runs the handshake with the kernel; the readers start.
     ///
@@ -162,10 +177,7 @@ impl Serving {
     ) -> io::Result<Self> {
         let negotiated = outcome.negotiated();
         let session = attach(&device, negotiated, readers(settings))?;
-        if let (Some(saved), true) = (saved, outcome.flags.contains(InitFlags::PASSTHROUGH)) {
-            let wrap = |id| -> Guard { Arc::new(BackingId(id)) };
-            core.adopt_backing(&settings.runtime_dir.join(backing::FILE), saved, &wrap);
-        }
+        adopt_backing(core, settings, &outcome, saved);
         let resend_failed = resend
             && outcome.flags.contains(InitFlags::HAS_RESEND)
             && match session.resend() {
@@ -190,6 +202,30 @@ impl Serving {
         )
     }
 
+    /// [`Serving::adopt`] with no reader started and nothing asked of the kernel: the connection a
+    /// successor took over, which it reads only once the instance it took it from has said `bye`
+    /// ([`Serving::restart`] starts the readers).
+    ///
+    /// # Errors
+    /// What the system said when the frontend cannot be made.
+    pub(super) fn paused(
+        core: &Arc<Core>,
+        settings: &FsSettings,
+        device: OwnedFd,
+        outcome: Outcome,
+        saved: &[Saved],
+    ) -> io::Result<Self> {
+        adopt_backing(core, settings, &outcome, Some(saved));
+        Ok(Self {
+            readers: None,
+            fs: Arc::new(NodeFs::new(Arc::clone(core), readers(settings))?),
+            device,
+            negotiated: outcome.negotiated(),
+            mount: None,
+            resend_failed: false,
+        })
+    }
+
     /// Starts the readers of `session`, which serve `core`.
     fn start(
         session: Session,
@@ -209,6 +245,12 @@ impl Serving {
             mount,
             resend_failed,
         })
+    }
+
+    /// Whether readers of the device are running.
+    #[cfg(test)]
+    pub(super) fn reading(&self) -> bool {
+        self.readers.is_some()
     }
 
     /// The outcome of the handshake this connection was set up with, as the record keeps it.
