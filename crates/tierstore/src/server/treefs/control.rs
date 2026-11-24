@@ -18,7 +18,6 @@
 //! (`core/implicit.rs`) is not listed, and no request here ends it.
 
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
-#[cfg(any(target_os = "linux", test))]
 use std::os::fd::{AsFd as _, OwnedFd};
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -113,7 +112,6 @@ impl Gate {
     }
 
     /// Closes the gate and returns when no request is being answered.
-    #[cfg(any(target_os = "linux", test))]
     fn close_and_drain(&self) {
         let mut state = super::locked(&self.state);
         state.0 = true;
