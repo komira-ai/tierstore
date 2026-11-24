@@ -3,7 +3,9 @@
 // client. Package, message, field and service names and field numbers are the API's, so the farm's
 // server, which implements the whole API, reads these messages and answers them; what is left out
 // is fields and calls the client never sets or makes. A field a server sends that is not here is
-// kept as unknown bytes and ignored.
+// skipped when a message is decoded, so a message decoded and encoded again can differ from the
+// server's bytes: where a digest of those bytes matters (the directories of an output's Tree),
+// the client keeps them as sent (src/mac_farm/outputs.rs).
 syntax = "proto3";
 
 package build.bazel.remote.execution.v2;
