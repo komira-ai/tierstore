@@ -256,10 +256,10 @@ fn the_nfs_front_of_the_one_process_is_served_and_handed_to_the_next_image() {
 }
 
 /// Asserts the mount of the one process on a real Mac: the start mounts the export at the mount
-/// point (a file system is mounted there and lists the `trees` directory), the hand-over to the
-/// next image at SIGUSR2 leaves the mount up and the next image finds it and makes none (it says
-/// so, and the mount still lists `trees`), and SIGTERM unmounts it before the process ends with
-/// status 0.
+/// point (a file system is mounted there, and the `trees` directory is looked up in it), the
+/// hand-over to the next image at SIGUSR2 leaves the mount up and the next image finds it and makes
+/// none (it says so, and `trees` is still looked up through the mount), and SIGTERM unmounts it
+/// before the process ends with status 0.
 #[test]
 fn the_one_process_mounts_keeps_the_mount_across_sigusr2_and_unmounts_at_sigterm() {
     let node = Node::new("fs-interface-mount", true);
@@ -267,13 +267,11 @@ fn the_one_process_mounts_keeps_the_mount_across_sigusr2_and_unmounts_at_sigterm
     let _ = running.start_line();
     let _ = running.said_with("mounted at");
     assert!(node.mounted(), "{:?}", running.said);
-    let names = |at: &Path| -> Vec<String> {
-        std::fs::read_dir(at)
-            .unwrap()
-            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
-            .collect()
-    };
-    assert!(names(&node.mountpoint()).contains(&"trees".to_owned()));
+    // The root of the export is not listable (nobody lists the namespace), but `trees` in it is
+    // looked up.
+    let trees =
+        |node: &Node| std::fs::metadata(node.mountpoint().join("trees")).map(|meta| meta.is_dir());
+    assert!(trees(&node).unwrap(), "{:?}", running.said);
 
     running.signal(Signal::USR2);
     let _ = running.start_line();
@@ -283,7 +281,7 @@ fn the_one_process_mounts_keeps_the_mount_across_sigusr2_and_unmounts_at_sigterm
         "the process did not exit"
     );
     assert!(node.mounted());
-    assert!(names(&node.mountpoint()).contains(&"trees".to_owned()));
+    assert!(trees(&node).unwrap(), "{:?}", running.said);
 
     running.stop();
     assert!(!node.mounted(), "the stop unmounts");
