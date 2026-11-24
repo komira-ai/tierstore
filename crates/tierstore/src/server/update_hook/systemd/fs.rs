@@ -451,8 +451,13 @@ fn draining(live: Instance, next: Instance) -> Done {
     )
 }
 
-/// The fs instance the boot step starts: the one the record says holds the mount.
+/// The fs instance the boot step starts: the one the record says holds the mount. None once a
+/// switch has swapped: the one process holds the mount, and an fs instance started now would take
+/// it back from it.
 fn desired(record: &Record) -> Option<Instance> {
+    if record.fs_switch && record.has(Marker::Swapped) {
+        return None;
+    }
     if record.updating && record.has(Marker::Swapped) {
         record.fs_next.or(record.fs_live)
     } else {

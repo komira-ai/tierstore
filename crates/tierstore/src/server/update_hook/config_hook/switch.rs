@@ -68,10 +68,12 @@ pub(super) fn rollback_params(plain: &Params, label: &str) -> Params {
 }
 
 /// Boots the fs job out, requires its mount gone and disables the job. A job that is not loaded
-/// (an earlier run did this) is left as it is. A mount that stays ends the step with the fs job
+/// (an earlier run booted it out, and may have stopped before the disable) is disabled again,
+/// which launchd takes for done when it is. A mount that stays ends the step with the fs job
 /// booted in again and not disabled, and nothing else stopped.
 pub(super) fn fs_job_out(ports: &LaunchdPorts<'_>) -> Result<(), Done> {
     if !ports.launchd.loaded(FS_LAUNCHD_LABEL)? {
+        ports.launchd.disable(FS_LAUNCHD_LABEL)?;
         return Ok(());
     }
     let mountpoint = fs_mountpoint(ports)?;

@@ -366,9 +366,12 @@ fn rollback(c: &Ctx<'_, '_>, params: &Params, record: &mut Record) -> Result<Don
     // the job that is loaded now runs it.
     c.stop_fs()?;
     c.ports.host.install_binary(&previous.release)?;
-    if c.hands_over(params)? && c.ports.launchd.loaded(c.label)? {
-        c.ports.launchd.hand_to_next_image(c.label)?;
-    } else {
+    // A new image that failed may have left the job with no process to signal (launchd is
+    // between two of its starts): the signal that launchctl refuses is then a restart.
+    let handed = c.hands_over(params)?
+        && c.ports.launchd.loaded(c.label)?
+        && c.ports.launchd.hand_to_next_image(c.label).is_ok();
+    if !handed {
         c.ports.launchd.bootout(c.label)?;
         c.bootstrap()?;
     }

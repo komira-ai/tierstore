@@ -262,8 +262,10 @@ fn a_job_that_is_not_loaded_is_bootstrapped_by_a_hand_over() {
 }
 
 /// Asserts that a `launchctl kill` that launchctl refuses fails `cutover` with `unit_failed`
-/// before `swapped` is recorded, and fails `rollback` with `unit_failed` with the update still on
-/// record. Catches a hand-over that goes on after the signal was not delivered.
+/// before `swapped` is recorded; and that in `rollback` (a new image that failed can leave the job
+/// with no process to signal) it is followed by the restart of the job on the previous release,
+/// which then serves it, and the record is idle. Catches a hand-over that goes on after the signal
+/// was not delivered, and a rollback that can never complete while the new image fails.
 #[test]
 fn a_kill_that_launchctl_refuses_fails_the_step() {
     let fake = capable();
@@ -274,8 +276,14 @@ fn a_kill_that_launchctl_refuses_fails_the_step() {
     fake.heal();
     fake.advance(&[Cutover]);
     fake.fail_nth("launchd.kill", 1);
-    assert_failed(&fake.host_run(Rollback), Reason::UnitFailed);
-    assert!(fake.record().updating);
+    let before = fake.launchd_calls().len();
+    assert_ok(&fake.host_run(Rollback));
+    assert_eq!(
+        fake.launchd_calls()[before..],
+        [loaded(), kill(), bootout(), bootstrap()]
+    );
+    assert_eq!(fake.snapshot().job, path(OLD));
+    assert_eq!(fake.record(), Record::idle(None));
 }
 
 /// Asserts that a staged release that refuses the file fails `prepare` with `config_refused`,

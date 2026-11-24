@@ -100,8 +100,11 @@ fn a_mac_switch_boots_out_and_disables_the_fs_job_before_the_main_job_starts() {
     assert_eq!(node.fake.disabled(), [mac::FS_LABEL]);
 }
 
-/// Asserts that a `cutover` run again after the switch booted the fs job out leaves it alone: no
-/// second boot-out or disable of the fs job.
+/// Asserts that a `cutover` run again after the switch booted the fs job out does not boot it out
+/// or in again, and that a run whose disable failed after the boot-out (the job is out, and still
+/// enabled) disables it on the next run, before the main job is restarted. Catches a switch that
+/// leaves the fs job enabled, so that the plist the package still ships starts a second mounter at
+/// the next boot.
 #[test]
 fn a_mac_switch_run_again_does_not_touch_the_fs_job_again() {
     let node = switching();
@@ -109,11 +112,24 @@ fn a_mac_switch_run_again_does_not_touch_the_fs_job_again() {
     node.go(&p, &[Prepare, Cutover]);
     let before = acts(&node);
     node.go(&p, &[Cutover]);
-    let after = acts(&node);
-    assert_eq!(
-        after.iter().filter(|c| c.contains(mac::FS_LABEL)).count(),
-        before.iter().filter(|c| c.contains(mac::FS_LABEL)).count()
-    );
+    let fs_acts = |calls: &[String]| {
+        calls
+            .iter()
+            .filter(|c| c.contains(mac::FS_LABEL) && !c.starts_with("launchd.disable"))
+            .count()
+    };
+    assert_eq!(fs_acts(&acts(&node)), fs_acts(&before));
+
+    let node = switching();
+    node.go(&p, &[Prepare]);
+    node.fake.fail_nth("launchd.disable", 1);
+    assert!(node.step(Cutover, &p).outcome != super::super::super::Outcome::Success);
+    assert!(node.fake.disabled().is_empty());
+    node.go(&p, &[Cutover]);
+    assert_eq!(node.fake.disabled(), [mac::FS_LABEL]);
+    let calls = acts(&node);
+    let disabled = position(&calls, &call("disable", mac::FS_LABEL));
+    assert!(disabled < position(&calls, &format!("launchd.bootstrap {LAUNCHD_PLIST}")));
 }
 
 /// Asserts that the rollback of the switch enables the fs job first, then boots the main job out
