@@ -20,7 +20,8 @@
 //! Descriptor 0 is where the offer rides because a descriptor number from the command line can be
 //! made a descriptor only by `unsafe` code, which this crate does not have (AGENTS.md R2); the
 //! standard library places a descriptor at 0 for an exec (`Command::stdin`), and standard input
-//! can be read, and then pointed at `/dev/null` again, without it.
+//! can be read without it. Descriptor 0 then stays the pair's end, read out and with its peer gone,
+//! until the next exec places another there.
 
 use std::ffi::OsString;
 use std::os::fd::{AsFd as _, BorrowedFd, OwnedFd};
@@ -197,16 +198,12 @@ pub(crate) struct Handed {
     pub(crate) control: Option<std::os::unix::net::UnixListener>,
 }
 
-/// The descriptor of standard input, where the image that executed this one left its offer, with
-/// standard input itself pointed at `/dev/null` again (what launchd gives a job).
+/// A close-on-exec copy of standard input, where the image that executed this one left its offer.
 ///
 /// # Errors
-/// What the system said of the copy, of `/dev/null` or of the `dup2`.
+/// What the system said of the copy.
 pub(crate) fn handed_input() -> std::io::Result<OwnedFd> {
-    let handed = std::io::stdin().as_fd().try_clone_to_owned()?;
-    let null = std::fs::File::open("/dev/null")?;
-    rustix::stdio::dup2_stdin(&null)?;
-    Ok(handed)
+    std::io::stdin().as_fd().try_clone_to_owned()
 }
 
 /// Reads the offer handed on `handed` and takes it, with the checks of a taker: the sockets must be

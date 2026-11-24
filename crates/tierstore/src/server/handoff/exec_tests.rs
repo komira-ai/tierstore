@@ -353,8 +353,7 @@ fn is_open(n: i32) -> bool {
 /// command the exec runs, which carries the same descriptors) none of the old image's descriptors
 /// of the hand-over survives (the listening socket, its copy in the offer, the lock's copy, the
 /// image's end of the pair under its own number) but the one at descriptor 0, the handed one: the
-/// new image finds it a socket, reads the offer from it with the sockets and the lock in it, and
-/// finds standard input `/dev/null` again once it has taken it.
+/// new image finds it a socket, and reads the offer from it with the sockets and the lock in it.
 #[tokio::test]
 async fn only_the_handed_descriptor_survives_the_exec() {
     let (dir, _) = scratch();
@@ -397,7 +396,6 @@ async fn only_the_handed_descriptor_survives_the_exec() {
     let lines = [
         "open after the exec: ".to_owned(),
         "standard input is a socket: true".to_owned(),
-        "standard input is /dev/null again: true".to_owned(),
         format!("offer: offer | s3 {s3_addr} | lock {}", lock_path.display()),
         "descriptors in it: 2".to_owned(),
     ];
@@ -434,11 +432,6 @@ fn the_image_side_of_the_exec() {
     let input = std::fs::metadata("/dev/fd/0").unwrap().file_type();
     println!("standard input is a socket: {}", input.is_socket());
     let handed = handed_input().unwrap();
-    let input = std::fs::metadata("/dev/fd/0").unwrap().file_type();
-    println!(
-        "standard input is /dev/null again: {}",
-        input.is_char_device()
-    );
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -481,4 +474,25 @@ async fn a_line_this_release_does_not_know_is_skipped_and_its_descriptor_closed(
     assert_eq!(taken.inherited.s3_addrs, [s3_addr]);
     let closed = || std::net::TcpStream::connect(later_addr).is_err();
     once_no_fork_holds("the unknown line's socket is closed", closed).await;
+}
+
+/// Asserts that an offer of more descriptors than one message carries is not written: the image
+/// is refused with the count, rather than handed a frame whose descriptors the kernel would drop.
+#[tokio::test]
+async fn an_offer_of_more_descriptors_than_a_message_carries_is_not_made() {
+    let (listener, _) = listening();
+    let sockets = (0..=crate::server::handoff::MAX_SOCKETS)
+        .map(|_| socket(Front::S3, &listener))
+        .collect();
+    let handing = Handing {
+        sockets,
+        control: None,
+        lock: None,
+    };
+    let refused = Image::prepare(&handing, PathBuf::from("tierstore"), words(&["tierstore"])).await;
+    let count = crate::server::handoff::MAX_SOCKETS + 1;
+    assert!(
+        matches!(refused, Err(HandoffError::TooMany(n)) if n == count),
+        "{refused:?}"
+    );
 }

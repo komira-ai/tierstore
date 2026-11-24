@@ -548,8 +548,8 @@ close-on-exec, and the `flock` on them. So a Mac hands over to the next image of
    number of the other end, the one descriptor not marked close-on-exec. The other end is placed at descriptor 0, the new
    image's standard input, so `<n>` is `0` and `--handed` takes no other number: a descriptor number from the command line
    can be made a descriptor only by `unsafe` code, which tierstore does not have (AGENTS.md R2), while the standard
-   library places a descriptor at 0 for an exec (`Command::stdin`), and the new image reads standard input and points it
-   at `/dev/null` again without it (built: `server/handoff/exec.rs`, `server/next_image.rs`).
+   library places a descriptor at 0 for an exec (`Command::stdin`), and the new image reads standard input without it
+   (built: `server/handoff/exec.rs`, `server/next_image.rs`).
 4. The new image reads the offer from that descriptor with the taker's code and checks it as a taker does (addresses cover
    its settings, paths equal, the lock is the file), reads its runtime state (the table of tree numbers is reopened for the
    same boot epoch, `nfs/boot.rs`; the mount is found and not made again, `nfs/run.rs`), and serves on the inherited

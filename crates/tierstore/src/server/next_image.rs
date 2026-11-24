@@ -179,8 +179,8 @@ pub(in crate::server) fn exec_next(image: Option<Image>) -> Result<(), Error> {
     Err(format!("the next image could not be executed: {why}").into())
 }
 
-/// The offer of a start given `--handed` (`handed`): its standard input, as it found it, which is
-/// pointed at `/dev/null` again. Only a build node is handed over to its next image.
+/// The offer of a start given `--handed` (`handed`): a copy of its standard input. Only a build node
+/// is handed over to its next image.
 ///
 /// # Errors
 /// The exit status: 2 for `--handed` with a file of another shape, 1 when standard input cannot be

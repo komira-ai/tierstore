@@ -108,7 +108,7 @@ ring = { workspace = true, optional = true }
 # The user id the server runs as, which a key file must belong to, and the free space, the link count and
 # the times of the files of the local cache, and the listening sockets, which `std` cannot bind
 # with `IPV6_V6ONLY` set (`server`).
-rustix = { workspace = true, features = ["event", "fs", "mount", "net", "pipe", "process", "stdio"], optional = true }
+rustix = { workspace = true, features = ["event", "fs", "mount", "net", "pipe", "process"], optional = true }
 # The body of a CompleteMultipartUpload request (`server`).
 roxmltree = { workspace = true, optional = true }
 # The TLS of the OCI read front (`server`): the certificate and key are read at start, and the
@@ -203,9 +203,8 @@ reqwest.workspace = true
 # The TLS client of the tests of the OCI read front.
 rustls.workspace = true
 tokio-rustls.workspace = true
-# SIGTERM to the binary; the offer a build node is handed on its standard input (a frame with its
-# descriptors, and the `flock` of the cache lock in it).
-rustix = { workspace = true, features = ["fs", "net", "process"] }
+# SIGTERM to the binary.
+rustix = { workspace = true, features = ["process"] }
 # Turns the `server` feature on for this crate's own tests, and for the clippy and coverage
 # runs over the workspace that build them.
 tierstore = { workspace = true, features = ["server"] }

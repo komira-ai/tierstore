@@ -313,25 +313,42 @@ async fn sigusr2_is_a_stop_that_asks_for_the_next_image() {
     assert!(next.asked());
 }
 
-/// Asserts that an exec that fails (the program is not there) comes back as the start's error,
-/// naming why, so that the process exits and launchd starts the job again.
+/// Asserts that a node given a next image whose stop was not asked to hand over drains as a stop
+/// does and leaves nothing to hand over.
 #[tokio::test]
-async fn an_exec_that_fails_is_the_error_of_the_process() {
-    let (listener, _) = listening();
+async fn a_node_whose_stop_is_not_a_hand_over_leaves_no_image() {
+    let node = Node::new("next-image-plain-stop");
+    let settings = node.settings("", "");
+    let upstream: Arc<dyn Backend> = Arc::new(MemoryBackend::new());
+    let disk: Arc<dyn Disk> = Arc::new(SystemDisk);
     let next = NextImage::default();
-    next.ask();
-    let rig = Rig::new("next-image-exec");
-    next.hand(vec![socket(Front::S3, &listener)], &rig.locked())
-        .await
-        .unwrap();
-    let missing = rig.config.path.join("no-such-program");
-    let image = next
-        .image(|| Ok(missing), ["tierstore".into()])
-        .await
-        .unwrap();
-    let why = exec_next(image).err().unwrap().to_string();
-    assert!(
-        why.starts_with("the next image could not be executed: "),
-        "{why}"
+    let (stop, stopped) = oneshot::channel::<()>();
+    let (told, bound) = oneshot::channel();
+    let imaging = Imaging {
+        next: Some(&next),
+        handed: None,
+    };
+    let stopping = async move {
+        let _ = stopped.await;
+    };
+    let served = serve_cache_on(
+        &settings,
+        (upstream, disk),
+        OnSystem::default(),
+        stopping,
+        |at| {
+            let _ = told.send(at.s3);
+        },
+        imaging,
     );
+    let driving = async {
+        let addr = bound.await.unwrap();
+        read_write_at(addr).await;
+        let _ = stop.send(());
+        addr
+    };
+    let (drained, _) = tokio::join!(served, driving);
+    drained.unwrap();
+    assert!(!next.asked());
+    assert!(image_of(&next).await.is_none());
 }

@@ -420,9 +420,8 @@ impl Running {
         )
     )]
     pub(super) async fn hand_to_image(mut self) -> Result<Handing, NfsError> {
-        if let Some(next) = self.next.take() {
-            let _ = next.send(());
-        }
+        // Taken once: this consumes the instance.
+        let _ = self.next.take().map(|next| next.send(()));
         let ended = self.ended().await;
         tracing::info!("tierstore fs: the NFS front is left to the next image ({ended})");
         let control = &mut self._setup._control;
@@ -624,9 +623,8 @@ async fn serve_until(
             // The offer is gone (its socket closed with it): no successor takes the socket from
             // here on, so the stop may unmount; the stop is told so, and then ends the serving.
             Some(closed) => {
-                if let Ok(ack) = closed {
-                    let _ = ack.send(());
-                }
+                // A leave that is gone asks for no answer.
+                let _ = closed.map(|ack| ack.send(()));
                 ending_stop.notified().await;
             }
             None => {
