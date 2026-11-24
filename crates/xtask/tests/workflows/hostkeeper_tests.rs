@@ -8,7 +8,8 @@ use super::hostkeeper::{
     PACKAGE_VERSION, SUMS_INDEX, SUMS_PATHS, artifacts_index_problems, regenerate,
     release_index_problems, verify_index,
 };
-use super::lint::{SIGN_IF, entry};
+use super::lint::entry;
+use super::macos_farm::ATTEST_IF;
 use super::pkg::MACOS_PKG_COMMANDS;
 use super::platforms::{
     BUILDS, CODESIGN, NOT_FOR_A_PULL_REQUEST, SUMS_IF, artifacts_platform_problems, build_commands,
@@ -99,8 +100,8 @@ fn a_pull_request_builds_and_sums_the_linux_x86_64_package_and_never_signs_it_or
     assert!(SUMS_INDEX.contains("--event \"$GITHUB_EVENT_NAME\""));
     assert_eq!(
         job_value(&doc, "attest", &["if"]).as_deref(),
-        Some(SIGN_IF),
-        "attest runs for a push to main alone"
+        Some(ATTEST_IF),
+        "attest runs for a push to main alone, once sums passed"
     );
     assert_eq!(
         platform_problems_of(&text_of("artifacts.yml")),

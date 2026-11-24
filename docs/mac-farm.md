@@ -18,6 +18,13 @@ It is off until the variable `MACOS_PACKAGE_ON_FARM` (of the repository or the o
 - `sign-pkg` takes the unsigned installer of whichever ran (`pkg-unsigned-macos-arm64`, the same
   artifact), and `sums` takes `assets-macos-arm64` from it, as before.
 
+Since one of the two is skipped on every push to `main`, the farm on or off, every job after them
+(`sign-pkg`, `check-pkg`, `sums`, `attest`) starts its `if:` with `!cancelled()` and then names the
+result of each job it needs: GitHub skips a job whose `if:` names no status function when any job
+it waits for, at any depth, was skipped. A failed job still stops every job after it. The
+workflow lint holds every job that waits for a macOS job to that (`after_macos_problems` in
+`crates/xtask/tests/workflows/macos_farm.rs`).
+
 A run by hand (`workflow_dispatch`, how a branch's macOS build is tried before it merges) and a
 pull request are unchanged: a run by hand builds on the hosted runner, and a pull request builds
 no macOS file. Unset the variable to go back.

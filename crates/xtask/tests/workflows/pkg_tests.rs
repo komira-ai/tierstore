@@ -12,8 +12,7 @@ const IDENT_LINE: &str =
     "      IDENTITY: \"Developer ID Installer: Komira AI, Inc. (U7RTX4XD3X)\"\n";
 const CHECKOUT: &str =
     "      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n";
-const PUSH_ONLY: &str =
-    "    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}\n";
+const CHECK_PKG_LINE: &str = "    if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.sign-pkg.result == 'success' }}\n";
 const SIGN_PKG_LINE: &str = "    if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' && (needs.macos-arm64.result == 'success' || needs.macos-arm64-farm.result == 'success') }}\n";
 
 /// Changes to the macOS installer's path through `artifacts.yml`: its build, the one job that
@@ -189,7 +188,7 @@ fn pkg_defects() -> Vec<(&'static str, String, String, &'static str)> {
         ),
         d(
             "check-pkg",
-            PUSH_ONLY,
+            CHECK_PKG_LINE,
             "",
             "check-pkg: runs under `if: None`",
         ),
@@ -300,7 +299,7 @@ fn a_macos_job_of_a_pull_request_is_accepted_under_a_push_to_main_only_and_named
         pull_request_runner_problems("artifacts.yml", &text),
         Vec::<String>::new()
     );
-    for (job, line) in [("sign-pkg", SIGN_PKG_LINE), ("check-pkg", PUSH_ONLY)] {
+    for (job, line) in [("sign-pkg", SIGN_PKG_LINE), ("check-pkg", CHECK_PKG_LINE)] {
         let weaker = in_job(
             &text,
             job,

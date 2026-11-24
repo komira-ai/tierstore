@@ -25,10 +25,11 @@
 //!   `env`, or any job or step sets a `CYCLONEDX_` variable of its own (which would shadow the pin);
 //! - a Linux build job is not built and checked against glibc 2.28 as [`super::glibc_floor`] says;
 //! - a job other than `attest` has an `if:`, `attest` has another than the
-//!   signing condition, any job or step has `continue-on-error`, or a step that is not a cache
+//!   signing condition ([`macos_farm::ATTEST_IF`]), any job or step has `continue-on-error`, or a step that is not a cache
 //!   save has an `if:` (a required step that can be skipped or fail unseen is no gate); the macOS
-//!   jobs have the conditions [`super::macos_farm`] gives them (the hosted job, the farm job and
-//!   `sign-pkg`, which takes whichever of the two ran);
+//!   jobs have the conditions [`super::macos_farm`] gives them (the hosted job, the farm job,
+//!   `sign-pkg`, which takes whichever of the two ran, and `check-pkg`), and every job after them
+//!   is held to [`macos_farm::after_macos_problems`];
 //! - `sums` does not need every build job; a download of `sums` or `attest` does not
 //!   take every platform's `assets-<platform>` into `dist` merged, or takes `sha256sums` or
 //!   `bundles` with them; `attest` does not take the sums into `dist`;
@@ -57,11 +58,11 @@
 //! hand (`workflow_dispatch`), whose triggers [`TRIGGERS`] pins, and no pull request starts them.
 
 use super::glibc_floor::{self, Zig};
-use super::lint::{SIGN_IF, entries, entry, names, runs};
+use super::lint::{entries, entry, names, runs};
 use super::macos_farm;
 use super::pkg::{
-    MACOS_PKG_COMMANDS, PKG_JOB_IF, PKG_SIGNED, PKG_UNSIGNED, assets_of, pkg_attest_problems,
-    pkg_copy, pkg_jobs_problems,
+    MACOS_PKG_COMMANDS, PKG_SIGNED, PKG_UNSIGNED, assets_of, pkg_attest_problems, pkg_copy,
+    pkg_jobs_problems,
 };
 pub use super::pr_runners::pull_request_runner_problems;
 use super::yaml::{self, Node, Value};
@@ -675,9 +676,9 @@ pub fn artifacts_platform_problems(
     for (name, body) in jobs {
         let name = name.as_str().unwrap_or_default();
         let job_if = match name {
-            "attest" => Some(SIGN_IF),
+            "attest" => Some(macos_farm::ATTEST_IF),
             "sign-pkg" => Some(macos_farm::SIGN_PKG_IF),
-            "check-pkg" => Some(PKG_JOB_IF),
+            "check-pkg" => Some(macos_farm::CHECK_PKG_IF),
             macos_farm::CALLER => Some(macos_farm::FARM_IF),
             "sums" => Some(SUMS_IF),
             _ => BUILDS
@@ -703,6 +704,7 @@ pub fn artifacts_platform_problems(
             problems.push(format!("sums: does not need {}", macos_farm::CALLER));
         }
         problems.extend(macos_farm::caller_problems(jobs));
+        problems.extend(macos_farm::after_macos_problems(jobs));
     }
     problems.extend(pkg_jobs_problems(platforms, jobs, &needs));
     let with_pkg = assets_of(platforms);
