@@ -250,7 +250,7 @@ sudo systemctl enable tierstore@a
 sudo systemctl start tierstore@a
 ```
 
-The unit runs with `ProtectSystem=strict` and `StateDirectory=tierstore`. A configuration that writes outside `/var/lib/tierstore` (a `dir` hot tier, a `[local_cache]` path, `hot_store.lock_file`) needs its paths in a drop-in of your own, `/etc/systemd/system/tierstore@.service.d/*.conf`, with `ReadWritePaths=` (and `RequiresMountsFor=` for a path on a mount of its own). The package never writes there.
+The unit has `StateDirectory=tierstore` and no `ProtectSystem=` or other option that gives the service a mount namespace of its own (the file system's FUSE mount must reach the host: `docs/design/one-service.md` section 2.2), so the process writes wherever the `tierstore` account may: give it the paths a configuration writes outside `/var/lib/tierstore` (a `dir` hot tier, a `[local_cache]` path, `hot_store.lock_file`). A path on a mount of its own wants `RequiresMountsFor=` in a drop-in of your own, `/etc/systemd/system/tierstore@.service.d/*.conf`; do not add `ReadWritePaths=` or another path option there, which gives the service a mount namespace again. The package never writes there. A start that fails is tried again after 2 seconds, up to 5 starts in 60 seconds.
 
 The package manager replaces the binary on `apt upgrade` or `dnf upgrade`; the running instance keeps the old one until `sudo systemctl restart tierstore@a` (a restart, with a gap in serving). Under hostkeeper the update hook hands over instead (see [Updates through hostkeeper](install.md#updates-through-hostkeeper)).
 

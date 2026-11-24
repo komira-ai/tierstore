@@ -37,8 +37,10 @@ pub(super) const STOP_TIMEOUT: Duration = Duration::from_secs(1000);
 pub(super) const SHOW_TIMEOUT: Duration = Duration::from_secs(10);
 /// The longest a `launchctl` call but `bootout` may run.
 pub(super) const LAUNCHCTL_TIMEOUT: Duration = Duration::from_secs(10);
-/// The longest `launchctl bootout` may run: it returns when the drain is over.
-pub(super) const BOOTOUT_TIMEOUT: Duration = Duration::from_secs(120);
+/// The longest `launchctl bootout` of the main job may run: it returns when the process has exited,
+/// which launchd forces at the plist's `ExitTimeOut` (210 s: the drain and the room for an unmount
+/// after it), so this is that and a margin of 30 s, as for the fs job.
+pub(super) const BOOTOUT_TIMEOUT: Duration = Duration::from_secs(240);
 /// How many looks `bootout` takes for the domain to let a job go.
 pub(super) const GONE_ATTEMPTS: u32 = 60;
 /// The longest `<release>/bin/tierstore --capabilities` may run.
