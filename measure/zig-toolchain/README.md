@@ -1,7 +1,7 @@
 # The Zig toolchain, written and read back through the build farm
 
 A repeatable measurement of one tree: the Zig 0.12.0 toolchain, 15,189 files and 306,729,395 bytes in 988 directories (144 files are
-empty, the largest is the 156,925,448-byte `zig` binary). It is written as the output directory of a build action, and read back as the
+empty, the largest is the 156,925,448-byte `zig` binary), as the writer's totals and the reader's report give them. It is written as the output directory of a build action, and read back as the
 input of a later action, both as ordinary farm jobs. Both actions run remotely (`Commands: N (cached: N, remote: N, local: 0)`).
 
 | target | what its action does |
@@ -34,9 +34,9 @@ file it outputs.
 
 A byte-for-byte copy holds blobs the farm already has: every action that uses this Zig reads them, so a node's cache may hold them
 before the tree is first read. With a salt, `tree_copy` replaces the last 16 bytes of each non-empty file (all of a shorter one) with
-the first bytes of SHA-256(salt, the file's digest) (`saltTail` in `tree_copy.zig`). Paths, sizes, modes and the empty files are
-unchanged, and two files of equal bytes stay equal, so the tree has the same shape and the same duplicates. Its blobs are on no node
-until a job of the measurement reads them, which makes a cold read checkable from the job records alone: the first read of a salted
+the first bytes of SHA-256(salt, the file's digest) (`saltTail` in `tree_copy.zig`). Paths, sizes, file permission bits and the empty
+files are unchanged (directories are made with the default mode), and two files of equal bytes stay equal, so the tree has the same
+shape and the same duplicates. Its non-empty blobs are on no node until a job of the measurement reads them, which makes a cold read checkable from the job records alone: the first read of a salted
 tree on a host that is not the writer's host, and that no earlier read of that tree ran on.
 
 ### On a Mac
@@ -51,10 +51,13 @@ buildrules registers only where `[buildrules_re] macos_aarch64_properties` is se
 | the job service's record of the job | the host it ran on; when it was queued, placed, started and ended | the job service's |
 | the ActionResult's execution metadata (REAPI `GetActionResult` of the action's digest) | the durations the task in the job measured: `input_fetch` (`fetch_ms`), `execution` (the command), `output_upload` (`pack_ms`: the outputs walked, hashed and written as one pack, in one pass). The instants are laid end to end back from the time the frontend read the pack, so only the durations are measurements | the node's monotonic clock (durations); the frontend's clock (the end) |
 | buck2's event log (`buck2 log show`) | the action's wall time as the client saw it, and the writer's stderr (its totals) | the client's |
-| the reader's report | the wall time it started; nanoseconds to list the tree's root and every directory; per pass, the time to the first file read whole and to the last; the tree's digest; the node (`boot_id`, the load average, the mount the tree is on) | the node's |
+| the reader's report | the wall time it started; nanoseconds to list the tree's root and every directory; per pass, the time to the first file read whole and to the last; the tree's digest; the node (`boot_id`, the host name, the load average, the mount the tree is on) | the node's |
 
 The commit, the rename by which the job's put directory stores the pack, returns only once the object store has acknowledged it, and
 the job ends after it. No record holds its duration, so it is the job's duration minus `fetch`, `execution` and `output_upload`.
+
+The reports are one JSON object each, with `"version": 1`; a change to them adds fields and renames none, so recorded runs stay
+comparable. A tree with an entry that is neither a file, a directory nor a symbolic link is refused by both programs.
 
 The reader reads with 16 threads (`threads`), twice (`passes`): the second pass, in the same job on the same mount, reads with the
 node's caches as the first left them.

@@ -2,8 +2,9 @@
 //! action, file by file, so that the action's output is that tree.
 //!
 //! With a salt, the last bytes of every non-empty file are replaced by bytes derived from the salt and the file's content digest
-//! (`saltTail`): each file keeps its path, size and executable bit, two files of equal bytes stay equal, and no file has the bytes of
-//! any earlier copy made with another salt. Without one the copy is byte for byte.
+//! (`saltTail`): each file keeps its path, size and permission bits (as the umask lets them be created), two files of equal bytes stay
+//! equal, and a non-empty file's bytes differ from any copy made with another salt. Without one the file contents are byte for byte.
+//! Directories are made with the default mode.
 const std = @import("std");
 const Sha256 = std.crypto.hash.sha2.Sha256;
 

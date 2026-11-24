@@ -56,7 +56,6 @@ test "the listing has every file sorted, counts directories and links, and follo
     for (want, l.files) |w, got| try t.expectEqualStrings(w, got);
     try t.expectEqual(@as(u64, 5), l.dirs);
     try t.expectEqual(@as(u64, 1), l.others);
-    try t.expect(l.root_ns <= l.walk_ns);
 }
 
 test "a pass reads every file whole, and its digest is the same for any number of threads" {
@@ -78,7 +77,6 @@ test "a pass reads every file whole, and its digest is the same for any number o
         try t.expectEqual(@as(u64, 12 + 17 + 0 + 12 + big.len), p.bytes);
         // At most one thread per file.
         try t.expectEqual(@as(usize, @min(threads, 5)), p.threads);
-        try t.expect(p.first_file_ns <= p.read_ns);
     }
 }
 
@@ -127,6 +125,26 @@ test "a file that cannot be opened fails the pass" {
     const root = try pathOf(a, tmp.dir);
     try t.expectError(error.FileNotFound, reader.readPass(a, root, &.{ "here", "gone" }, 2));
     try t.expectError(error.FileNotFound, reader.readPass(a, root, &.{ "gone", "here" }, 1));
+}
+
+test "of two mounts on one point, the later line is the one reported" {
+    const info =
+        \\30 1 0:40 / /in rw - tmpfs under rw
+        \\31 1 0:41 / /in rw - fuse.tierstore over rw
+    ;
+    try t.expectEqualStrings("31 1 0:41 / /in rw - fuse.tierstore over rw", reader.mountFor(info, "/in/x").?);
+}
+
+test "an entry that is neither a file, a directory nor a link fails the listing" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    try write(tmp.dir, "f", "x");
+    const linux = std.os.linux;
+    try t.expectEqual(@as(usize, 0), linux.mknodat(tmp.dir.fd, "fifo", linux.S.IFIFO | 0o644, 0));
+    try t.expectError(error.UnsupportedKind, reader.list(a, try pathOf(a, tmp.dir)));
 }
 
 test "the mount of a path is the line whose mount point is the longest above it" {

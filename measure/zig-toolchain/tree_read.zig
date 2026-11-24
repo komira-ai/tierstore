@@ -67,7 +67,7 @@ pub const Listing = struct {
     /// The files' paths below the tree, sorted.
     files: []const []const u8,
     dirs: u64,
-    /// Entries that are neither a file nor a directory (symbolic links).
+    /// The symbolic links (counted, not followed).
     others: u64,
     /// Nanoseconds to open the tree and list its root.
     root_ns: u64,
@@ -75,7 +75,8 @@ pub const Listing = struct {
     walk_ns: u64,
 };
 
-/// Lists `tree` (allocations in `a`, which the caller frees as one: an arena). A symbolic link is counted in `others` and not followed.
+/// Lists `tree` (allocations in `a`, which the caller frees as one: an arena). A symbolic link is counted in `others` and not followed;
+/// an entry that is neither a file, a directory nor a link is refused.
 pub fn list(a: std.mem.Allocator, tree: []const u8) !Listing {
     const t0 = try std.time.Instant.now();
     var dir = try std.fs.cwd().openDir(tree, .{ .iterate = true });
@@ -92,7 +93,9 @@ pub fn list(a: std.mem.Allocator, tree: []const u8) !Listing {
         switch (e.kind) {
             .file => try files.append(try a.dupe(u8, e.path)),
             .directory => dirs += 1,
-            else => others += 1,
+            .sym_link => others += 1,
+            // Any other kind (a device, a pipe, an entry whose kind the file system does not give) would leave the read short: refused.
+            else => return error.UnsupportedKind,
         }
     }
     const walk_ns = (try std.time.Instant.now()).since(t0);
@@ -135,6 +138,8 @@ const Shared = struct {
         s.lock.lock();
         defer s.lock.unlock();
         if (s.failure == null) s.failure = e;
+        // The other readers take no further file.
+        s.next.store(s.paths.len, .monotonic);
     }
 };
 
@@ -163,10 +168,11 @@ fn readOne(s: *Shared, i: usize, buf: []u8) !void {
     h.final(&s.digests[i]);
     s.sizes[i] = n;
     const at = (try std.time.Instant.now()).since(s.start);
-    _ = s.first_ns.cmpxchgStrong(std.math.maxInt(u64), at, .monotonic, .monotonic);
+    _ = s.first_ns.fetchMin(at, .monotonic);
 }
 
-/// Reads every file of `paths` (below `tree`) once, on `threads` threads (at most one per file, at least one).
+/// Reads every file of `paths` (below `tree`) once, on `threads` threads (at most one per file, at least one). Its buffers (one
+/// `chunk` per thread) and results are allocated in `a`, an arena the caller frees after all the passes.
 pub fn readPass(a: std.mem.Allocator, tree: []const u8, paths: []const []const u8, threads: u32) !Pass {
     var dir = try std.fs.cwd().openDir(tree, .{});
     defer dir.close();
@@ -268,7 +274,8 @@ pub fn mountFor(mountinfo: []const u8, path: []const u8) ?[]const u8 {
             if (k == 4) break f;
         } else continue;
         if (!under(path, point)) continue;
-        if (best == null or point.len > best_len) {
+        // `>=`: of two mounts on one point, the later line is the one on top.
+        if (best == null or point.len >= best_len) {
             best = line;
             best_len = point.len;
         }

@@ -56,8 +56,10 @@ test "a copy without a salt holds every entry byte for byte, with its mode and l
         defer t.allocator.free(got);
         try t.expectEqualSlices(u8, want, got);
     }
-    try t.expectEqual(@as(std.fs.File.Mode, 0o755), try modeOf(out.dir, "bin/tool"));
-    try t.expectEqual(@as(std.fs.File.Mode, 0o644), try modeOf(out.dir, "short"));
+    // The copy has its source's permission bits (both made under the same umask).
+    try t.expectEqual(try modeOf(src.dir, "bin/tool"), try modeOf(out.dir, "bin/tool"));
+    try t.expectEqual(try modeOf(src.dir, "short"), try modeOf(out.dir, "short"));
+    try t.expect(try modeOf(out.dir, "bin/tool") & 0o100 != 0);
     var buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
     try t.expectEqualStrings("bin/tool", try out.dir.readLink("zig", &buf));
     var empty_dir = try out.dir.openDir("doc/empty-dir", .{ .iterate = true });
@@ -107,7 +109,7 @@ test "a salted copy keeps each file's size and its bytes before the last ones, a
     const two = try read(out.dir, "lib/std/same2.txt");
     defer t.allocator.free(two);
     try t.expectEqualSlices(u8, one, two);
-    try t.expectEqual(@as(std.fs.File.Mode, 0o755), try modeOf(out.dir, "bin/tool"));
+    try t.expectEqual(try modeOf(src.dir, "bin/tool"), try modeOf(out.dir, "bin/tool"));
 }
 
 test "copies made with two salts differ in every non-empty file" {

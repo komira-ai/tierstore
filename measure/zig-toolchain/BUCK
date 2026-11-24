@@ -17,7 +17,8 @@ zig_test(
 )
 
 # The line coverage of the two programs (the 0.12 zig has no block counters, so no branch figure; rules/coverage/README.md). The two
-# main files are not counted: each only hands its arguments to the file it imports, and no test can run a process's `main`.
+# main files are not counted: each is three lines that hand the process's arguments and output stream to `run`, which the tests cover
+# whole, and has no branch of its own; no unit test runs a process's `main`.
 zig_coverage(
     test_targets = [":tree_copy_unit", ":tree_read_unit"],
     expect = ["measure/zig-toolchain/tree_copy.zig", "measure/zig-toolchain/tree_read.zig"],
