@@ -96,6 +96,7 @@ use crate::{
 
 use super::ServerConfig;
 use super::build_info::{CAPABILITIES, COMMIT, RELEASE_VERSION, VERSION, capabilities_text};
+use super::cache_cli::next_image::{exec_next, handed_offer};
 use super::cache_cli::serve_cache_until_signalled;
 use super::cli_heartbeat::HeartbeatFlags;
 pub(super) use super::cli_oci::{DEFAULT_OCI_PREFIX, oci_setup, oci_setup_of};
@@ -181,6 +182,10 @@ pub struct Args {
     /// of the file. Given with the key it is refused, as `--drain-lb-wait` is.
     #[arg(long, hide = true, value_parser = parse_duration)]
     pub drain_deadline: Option<Duration>,
+    /// Given by a build node of a Mac to its next image on SIGUSR2, not by an operator: its offer
+    /// is on descriptor 0, the one value taken (`server::next_image`; another shape is status 2).
+    #[arg(long, hide = true, value_name = "N", value_parser = clap::value_parser!(u8).range(0..=0))]
+    pub handed: Option<u8>,
 }
 
 /// The settings of a storage node, made of its configuration file (see
@@ -831,7 +836,7 @@ async fn serve_until_signalled(cli: Cli) -> Result<(), Error> {
     Ok(())
 }
 
-fn blocking(start: impl Future<Output = Result<(), Error>>) -> Result<(), Error> {
+fn blocking<T>(start: impl Future<Output = Result<T, Error>>) -> Result<T, Error> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
@@ -883,13 +888,18 @@ pub fn main(args: Vec<OsString>) -> ExitCode {
     let Launch {
         settings,
         check_only,
+        handed,
     } = launch;
     if check_only {
         return check_config(&settings);
     }
+    let handed = match handed_offer(handed, &settings) {
+        Ok(handed) => handed,
+        Err(status) => return status,
+    };
     let started = match settings {
         Settings::Storage(cli) => blocking(serve_until_signalled(*cli)),
-        Settings::Cache(cache) => blocking(serve_cache_until_signalled(*cache)),
+        Settings::Cache(c) => blocking(serve_cache_until_signalled(*c, handed)).and_then(exec_next),
         Settings::Combined(node) => blocking(serve_combined_until_signalled(*node)),
         Settings::Cold(node) => blocking(super::cli_serve::cold::serve_cold_until_signalled(*node)),
     };

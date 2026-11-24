@@ -545,7 +545,11 @@ close-on-exec, and the `flock` on them. So a Mac hands over to the next image of
    write; the hold of today's NFS hand-over), and writes the offer of section 3.1
    (`s3`, `oci`, `nfs`, `control` and `lock` lines, with their descriptors) into one end of a `socketpair`, and executes
    its own program path (`std::env::current_exe`, which names the new binary) with its arguments and `--handed <n>`, the
-   number of the other end, the one descriptor not marked close-on-exec.
+   number of the other end, the one descriptor not marked close-on-exec. The other end is placed at descriptor 0, the new
+   image's standard input, so `<n>` is `0` and `--handed` takes no other number: a descriptor number from the command line
+   can be made a descriptor only by `unsafe` code, which tierstore does not have (AGENTS.md R2), while the standard
+   library places a descriptor at 0 for an exec (`Command::stdin`), and the new image reads standard input without it
+   (built: `server/handoff/exec.rs`, `server/next_image.rs`).
 4. The new image reads the offer from that descriptor with the taker's code and checks it as a taker does (addresses cover
    its settings, paths equal, the lock is the file), reads its runtime state (the table of tree numbers is reopened for the
    same boot epoch, `nfs/boot.rs`; the mount is found and not made again, `nfs/run.rs`), and serves on the inherited
@@ -566,8 +570,12 @@ close-on-exec, and the `flock` on them. So a Mac hands over to the next image of
   sockets on the same addresses and finds its mount; if the new binary cannot serve at all, the hook's rollback puts the old
   binary back and does the same again. `prepare` runs the staged binary's `--check-config` first, so a configuration it
   refuses never gets that far.
-- **Capability.** `handoff-exec-v1`. Without it in both releases, the update is the restart of today, which unmounts:
-  section 3.6 says when the hook does it.
+- **Capability.** `handoff-exec-v1`, listed by the builds for macOS. Without it in both releases, the update is the restart
+  of today, which unmounts: section 3.6 says when the hook does it.
+- **What P5 built** (section 6): a build node hands its S3 and OCI sockets and its cache lock over this way on SIGUSR2,
+  and the NFS front's part is built and tested (`Running::hand_to_image`, `Running::start_handed` in
+  `server/treefs/nfs/run.rs`: the drain of the owed replies, the hold, the `nfs` and `control` lines) for the start of
+  the one process on macOS to add to the offer once it serves the file system there (P3's start serves it on Linux).
 
 ### 3.5 Stop, crash and a fresh start with a mount there
 

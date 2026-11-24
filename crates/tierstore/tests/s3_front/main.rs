@@ -21,6 +21,7 @@ mod config_file;
 mod conformance;
 mod drain;
 mod files;
+mod handed;
 mod handoff;
 mod handoff_keys;
 mod handoff_process;

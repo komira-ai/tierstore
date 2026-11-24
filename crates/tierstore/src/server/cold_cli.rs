@@ -57,8 +57,10 @@ pub(in crate::server) async fn serve_cold(
         oci,
         addresses,
         offer,
+        lock: _,
     } = bind_fronts(
         settings.handoff.as_ref(),
+        None,
         addrs,
         || bind_s3(addrs, listen.backlog),
         oci,

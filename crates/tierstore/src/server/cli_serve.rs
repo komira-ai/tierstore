@@ -18,10 +18,11 @@ use super::drain::late_of;
 use super::first_beat::wait_first_beat;
 use super::first_format::first_format;
 use super::handoff::{
-    Front, Handoff, HandoffError, Inherited, MAX_SOCKETS, Offer, Socket, Want, check_control_path,
-    take,
+    Front, Handoff, HandoffError, Inherited, MAX_SOCKETS, Offer, Own, Socket, Want,
+    check_control_path, read_handed, take,
 };
 use super::listen::{bind_all_with, duplicates, local_addrs};
+use super::lock::Received;
 use super::memory_format::start_format;
 use super::oci::{OciError, OciFront, OciListener, OciMode};
 use super::rounds::Rounds;
@@ -179,8 +180,10 @@ pub async fn run_handing(
         oci,
         addresses,
         offer,
+        lock: _,
     } = bind_fronts(
         handoff,
+        None,
         &cli.listen,
         || bind_s3(&cli.listen, listen.backlog),
         built.oci,
@@ -327,13 +330,28 @@ pub(super) struct Bound {
     /// The control socket, with a hand-off; [`stopped_by`] waits on it. None without a
     /// hand-off, or when it could not be made after the running instance's `done`.
     pub(super) offer: Option<Offer>,
+    /// The cache lock the image this one was executed from handed over, when it did: the lock
+    /// file the caller named.
+    pub(super) lock: Option<Received>,
+}
+
+/// The offer a start was handed by the image it was executed from (`handoff/exec.rs`): the
+/// descriptor it is on, and the path of the start's cache lock, if it has a cache.
+pub(super) struct HandedOffer<'a> {
+    /// The descriptor of the offer: the start's standard input, as it found it.
+    pub(super) fd: std::os::fd::OwnedFd,
+    /// The lock file of the start's cache.
+    pub(super) lock: Option<&'a std::path::Path>,
 }
 
 /// The sockets of both fronts, as every start with a hand-off gets them: with `handoff`, it first
 /// takes the sockets of the instance that answers on the control socket, if their addresses are
 /// `s3` and the OCI setup's, and binds with `bind_own` (and binds the OCI front) only where none
 /// answers; then it makes the control socket, offering a copy of each. Without `handoff` it binds
-/// and makes no control socket. `s3` is every address the S3 front serves, in the order
+/// and makes no control socket. With `handed` (a start executed by the image it replaces, on a
+/// Mac) the sockets, and the cache lock, are those of the offer that image handed over, checked as
+/// a taker checks an offer, and none is asked of a running instance; a control socket is then made
+/// as after a take. `s3` is every address the S3 front serves, in the order
 /// `bind_own` binds them: a node with a local cache adds loopback sockets to the configured ones.
 /// `backend` is what the OCI front reads from.
 ///
@@ -347,11 +365,12 @@ pub(super) struct Bound {
 ///
 /// # Errors
 /// A hand-off that is refused, mismatched, not ended in time, or whose control socket cannot be
-/// made ([`HandingError::Handoff`]); an address that `bind_own` cannot bind
+/// made, or a handed offer this start refuses ([`HandingError::Handoff`]); an address that `bind_own` cannot bind
 /// ([`HandingError::Start`]) or the OCI front cannot ([`HandingError::Oci`]); a socket whose
 /// address cannot be read or that cannot be copied ([`HandingError::Sockets`]).
 pub(super) async fn bind_fronts(
     handoff: Option<&Handoff>,
+    handed: Option<HandedOffer<'_>>,
     s3: &[SocketAddr],
     bind_own: impl FnOnce() -> Result<Vec<TcpListener>, Error>,
     mut oci: Option<OciSetup>,
@@ -360,23 +379,30 @@ pub(super) async fn bind_fronts(
     let oci_addrs = oci
         .as_ref()
         .map_or_else(Vec::new, |setup| setup.listen.clone());
-    let taken = match handoff {
-        Some(handoff) => {
-            if s3.len() + oci_addrs.len() > MAX_SOCKETS {
-                return Err(HandoffError::TooMany(s3.len() + oci_addrs.len()).into());
-            }
-            check_control_path(&handoff.socket)?;
-            let want = Want {
-                s3,
-                oci: &oci_addrs,
-                nfs: &[],
-            };
-            take(handoff, &want).await?
+    if let Some(handoff) = handoff {
+        if s3.len() + oci_addrs.len() > MAX_SOCKETS {
+            return Err(HandoffError::TooMany(s3.len() + oci_addrs.len()).into());
         }
-        None => None,
+        check_control_path(&handoff.socket)?;
+    }
+    let want = Want {
+        s3,
+        oci: &oci_addrs,
+        nfs: &[],
+    };
+    let taken = match (handed, handoff) {
+        (Some(handed), _) => {
+            let own = Own {
+                control: None,
+                lock: handed.lock,
+            };
+            Some(read_handed(handed.fd, &want, &own).await?.inherited)
+        }
+        (None, Some(handoff)) => take(handoff, &want).await?,
+        (None, None) => None,
     };
     let front = oci.as_mut().map(|setup| oci_front(setup, backend));
-    let (Some(handoff), Some(inherited)) = (handoff, taken) else {
+    let Some(inherited) = taken else {
         // No running instance: this start binds its own sockets, and nothing is committed.
         let listeners = bind_own()?;
         let oci = match (oci, front) {
@@ -395,6 +421,7 @@ pub(super) async fn bind_fronts(
             oci,
             addresses,
             offer,
+            lock: None,
         });
     };
     // Past the running instance's `done`: nothing below may fail the start.
@@ -408,7 +435,7 @@ pub(super) async fn bind_fronts(
         copies,
         ready: _,
         mount: _,
-        lock: _,
+        lock,
     } = inherited;
     let oci = match (oci, front) {
         (Some(setup), Some(front)) => Some(OciListener::over(
@@ -420,7 +447,7 @@ pub(super) async fn bind_fronts(
         _ => None,
     };
     let addresses = Addresses::taken(s3_addrs, oci_addrs, oci.as_ref().map(OciListener::mode));
-    let offer = match Offer::bind(&handoff.socket, copies) {
+    let offer = handoff.and_then(|handoff| match Offer::bind(&handoff.socket, copies) {
         Ok(offer) => Some(offer),
         Err(why) => {
             tracing::warn!(
@@ -429,12 +456,13 @@ pub(super) async fn bind_fronts(
             );
             None
         }
-    };
+    });
     Ok(Bound {
         s3: listeners,
         oci,
         addresses,
         offer,
+        lock,
     })
 }
 
@@ -449,6 +477,18 @@ fn offer_of(
     s3: &[TcpListener],
     oci: Option<&OciListener>,
 ) -> Result<Offer, HandingError> {
+    Ok(Offer::bind(&handoff.socket, sockets_of(s3, oci)?)?)
+}
+
+/// A copy of each socket of the S3 front and of the OCI front, in the order they are served: what
+/// an offer hands over.
+///
+/// # Errors
+/// What the system said of a copy.
+pub(super) fn sockets_of(
+    s3: &[TcpListener],
+    oci: Option<&OciListener>,
+) -> std::io::Result<Vec<Socket>> {
     let mut sockets: Vec<Socket> = Vec::new();
     for copy in duplicates(s3)? {
         sockets.push(Socket::new(Front::S3, copy));
@@ -460,7 +500,7 @@ fn offer_of(
     {
         sockets.push(Socket::new(Front::Oci, copy));
     }
-    Ok(Offer::bind(&handoff.socket, sockets)?)
+    Ok(sockets)
 }
 
 /// `stop`, or the moment a successor has taken the sockets of `offer`, whichever is first.

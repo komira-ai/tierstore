@@ -236,7 +236,7 @@ async fn the_bound_front_pulls_a_missing_blob_from_the_upstream() {
     let s3: Vec<std::net::SocketAddr> = vec!["127.0.0.1:0".parse().expect("an address")];
     let own =
         || crate::server::cli_serve::bind_s3(&s3, crate::server::ListenTuning::default().backlog);
-    let bound = bind_fronts(None, &s3, own, built.oci, backend)
+    let bound = bind_fronts(None, None, &s3, own, built.oci, backend)
         .await
         .expect("bound");
     let listener = bound.oci.expect("a front");

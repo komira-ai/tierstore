@@ -23,7 +23,7 @@ use crate::server::treefs::testing::until;
 /// A wait that only a hung test reaches.
 pub(super) const WAIT: std::time::Duration = std::time::Duration::from_secs(3600);
 
-fn me() -> Cred {
+pub(super) fn me() -> Cred {
     Cred::Sys(euid(), 0)
 }
 
@@ -49,7 +49,7 @@ pub(super) async fn getattr(client: &mut Client, handle: &[u8]) -> u32 {
 }
 
 /// The handle of `name` in `dir`.
-async fn lookup(client: &mut Client, dir: &[u8], name: &str) -> Vec<u8> {
+pub(super) async fn lookup(client: &mut Client, dir: &[u8], name: &str) -> Vec<u8> {
     let args = Enc::default().opaque(dir).opaque(name.as_bytes());
     let reply = client.call(NFS, LOOKUP, me(), args).await;
     let mut body = Dec::new(&reply.body);

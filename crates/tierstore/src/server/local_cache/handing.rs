@@ -151,6 +151,11 @@ impl LocalCache {
         Ok(Tick::Took)
     }
 
+    /// The path of the cache's lock file: where a lock handed to this cache must be.
+    pub(in crate::server) fn lock_path(&self) -> PathBuf {
+        self.inner.config.path.join(super::LOCK)
+    }
+
     /// The process the lock was handed over from is gone (its end of the connection closed): no
     /// other process holds a descriptor of the lock, and it may be offered again.
     pub(in crate::server) fn predecessor_gone(&self) {

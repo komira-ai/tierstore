@@ -17,7 +17,7 @@ use tokio::task::JoinHandle;
 
 use super::Service;
 use crate::server::Drained;
-use crate::server::cache_cli::{OnSystem, serve_cache_on};
+use crate::server::cache_cli::{Imaging, OnSystem, serve_cache_on};
 use crate::server::cache_cli_tests::{Node, QUICK, client, probe};
 use crate::server::cli::{Addresses, Error, exit_status};
 use crate::server::config::settings_from_text;
@@ -161,10 +161,9 @@ fn start(settings: CacheSettings, upstream: Arc<dyn Backend>, system: OnSystem) 
         let stopped = async move {
             let _ = stopped.await;
         };
-        serve_cache_on(&settings, (upstream, disk), system, stopped, move |at| {
-            drop(told.send(at))
-        })
-        .await
+        let told = move |at| drop(told.send(at));
+        let imaging = Imaging::default();
+        serve_cache_on(&settings, (upstream, disk), system, stopped, told, imaging).await
     });
     Started { bound, stop, ended }
 }

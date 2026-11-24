@@ -36,7 +36,7 @@ use crate::{Backend, Clock, Proxy, SystemClock, TokioSleeper};
 use super::Drained;
 use super::bucket::created_at;
 use super::build_info::{COMMIT, VERSION};
-use super::cache_cli::{Fronts, OnSystem, open, serve_front};
+use super::cache_cli::{Fronts, Imaging, OnSystem, open, serve_front};
 use super::cli::{Addresses, Error, build, probe_run_id, signals};
 use super::cli_reconcile::{reconcile, reconcile_gated};
 use super::cli_serve::open_gate;
@@ -113,6 +113,7 @@ pub(super) async fn serve_combined(
         provider: None,
         put_ingest: None,
         system: OnSystem::default(),
+        imaging: Imaging::default(),
     };
     let (server, oci) = (built.server, built.oci);
     // On the heap: the serving of a node is a large future, and a caller's stack is not.

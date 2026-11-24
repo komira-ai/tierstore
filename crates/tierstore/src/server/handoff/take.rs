@@ -105,7 +105,7 @@ impl Ready {
 type Copy = fn(&TcpListener) -> std::io::Result<std::net::TcpListener>;
 
 /// The copy of `listener` the taker offers on: the same socket.
-fn duplicate(listener: &TcpListener) -> std::io::Result<std::net::TcpListener> {
+pub(super) fn duplicate(listener: &TcpListener) -> std::io::Result<std::net::TcpListener> {
     Ok(listener.as_fd().try_clone_to_owned()?.into())
 }
 
@@ -294,19 +294,19 @@ fn entry(text: &str) -> Result<Entry, HandoffError> {
 
 /// The lines and descriptors of an offer, by what they are.
 #[derive(Default)]
-struct Parts {
+pub(super) struct Parts {
     /// The sockets: the front of each (none for a front this release does not know) and its
     /// descriptor.
-    sockets: Vec<(Option<Front>, OwnedFd)>,
+    pub(super) sockets: Vec<(Option<Front>, OwnedFd)>,
     /// The addresses of the sockets of the fronts this release knows.
     addrs: Vec<(Front, SocketAddr)>,
     /// The `fuse`, `control` and `lock` lines, by name, with their descriptors.
-    named: Vec<(&'static str, String, OwnedFd)>,
+    pub(super) named: Vec<(&'static str, String, OwnedFd)>,
 }
 
 impl Parts {
     /// The lines `rest` of an offer, with `fds`, one for each.
-    fn of(rest: &[String], fds: Vec<OwnedFd>) -> Result<Self, HandoffError> {
+    pub(super) fn of(rest: &[String], fds: Vec<OwnedFd>) -> Result<Self, HandoffError> {
         if rest.len() != fds.len() {
             return Err(HandoffError::Protocol(
                 "another number of sockets than lines",
@@ -332,6 +332,32 @@ impl Parts {
         Ok(parts)
     }
 
+    /// Whether the sockets of the offer whose lines are `rest` are those `want` names, front by
+    /// front and in order.
+    ///
+    /// # Errors
+    /// [`HandoffError::Mismatch`], with the offer's lines and what `want` names.
+    pub(super) fn cover(&self, want: &Want<'_>, rest: &[String]) -> Result<(), HandoffError> {
+        if all_cover(want.s3, &self.of_front(Front::S3))
+            && all_cover(want.oci, &self.of_front(Front::Oci))
+            && all_cover(want.nfs, &self.of_front(Front::Nfs))
+        {
+            return Ok(());
+        }
+        let named = |front: Front, addrs: &[SocketAddr]| -> Vec<String> {
+            addrs.iter().map(|addr| line(front, *addr)).collect()
+        };
+        Err(HandoffError::Mismatch {
+            offered: rest.to_vec(),
+            wanted: [
+                named(Front::S3, want.s3),
+                named(Front::Oci, want.oci),
+                named(Front::Nfs, want.nfs),
+            ]
+            .concat(),
+        })
+    }
+
     /// The addresses of `front`'s sockets.
     fn of_front(&self, front: Front) -> Vec<SocketAddr> {
         let of = self.addrs.iter().filter(|(f, _)| *f == front);
@@ -339,7 +365,7 @@ impl Parts {
     }
 
     /// The line `name`, taken out.
-    fn take(&mut self, name: &str) -> Option<(String, OwnedFd)> {
+    pub(super) fn take(&mut self, name: &str) -> Option<(String, OwnedFd)> {
         let at = self.named.iter().position(|(had, _, _)| *had == name)?;
         let (_, value, fd) = self.named.remove(at);
         Some((value, fd))
@@ -411,22 +437,7 @@ async fn exchange(
         return Err(HandoffError::Protocol("a frame that is not an offer"));
     }
     let mut parts = Parts::of(rest, fds)?;
-    if !(all_cover(want.s3, &parts.of_front(Front::S3))
-        && all_cover(want.oci, &parts.of_front(Front::Oci))
-        && all_cover(want.nfs, &parts.of_front(Front::Nfs)))
-    {
-        let named = |front: Front, addrs: &[SocketAddr]| -> Vec<String> {
-            addrs.iter().map(|addr| line(front, *addr)).collect()
-        };
-        let mismatch = HandoffError::Mismatch {
-            offered: rest.to_vec(),
-            wanted: [
-                named(Front::S3, want.s3),
-                named(Front::Oci, want.oci),
-                named(Front::Nfs, want.nfs),
-            ]
-            .concat(),
-        };
+    if let Err(mismatch) = parts.cover(want, rest) {
         return nak(&stream, mismatch).await;
     }
     let offered_mount = match check_mount(&mut parts, request, ask) {
@@ -538,7 +549,10 @@ fn prepare(
 ///
 /// # Errors
 /// The offer names another lock file, or the descriptor is not the file at the path.
-fn take_lock(parts: &mut Parts, wanted: Option<&Path>) -> Result<Option<Received>, HandoffError> {
+pub(super) fn take_lock(
+    parts: &mut Parts,
+    wanted: Option<&Path>,
+) -> Result<Option<Received>, HandoffError> {
     let (Some((offered, fd)), Some(wanted)) = (parts.take(LOCK), wanted) else {
         return Ok(None);
     };
@@ -556,7 +570,7 @@ fn take_lock(parts: &mut Parts, wanted: Option<&Path>) -> Result<Option<Received
 
 /// The listeners of the descriptors that came on the control socket, by front, with their
 /// addresses and a copy of each made by `copy`.
-fn adopt(
+pub(super) fn adopt(
     offered: impl Iterator<Item = (Option<Front>, OwnedFd)>,
     copy: Copy,
 ) -> std::io::Result<Inherited> {

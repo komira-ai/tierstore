@@ -1063,21 +1063,21 @@ infrastructure-retryable when `stall_ms` was over a tenth of the limit.
 
 ### 7.5 Crash and live update of the NFS frontend (macOS)
 
-**Status (pull request 12d, built).** The restart arm is built: the handle is the core's inode number and four bytes of the boot's epoch (a hash of the machine's boot identity; a handle of another boot is `NFS3ERR_STALE`), the table of tree numbers carries the epoch in the header word that was reserved and is reopened by a start of the same epoch, the mount is not made again when the `mount` listing shows it, and a resent READ or LOOKUP is answered as it was (no duplicate request cache: nothing a tree serves changes). The hand-over of the listening socket is built (`fs.nfs.handoff_socket`, a front kind `nfs` in the offer, a drain in the `komira-ai/nfsserve` fork). Not built yet: the launchd jobs `tierstore-fs@a` and `@b` with the hook's record and rollback (12e), and the `fs.recover_wait` watchdog. The walk at start is not a cost: trees are read when a handle first names them.
+**Status (pull request 12d, built).** The restart arm is built: the handle is the core's inode number and four bytes of the boot's epoch (a hash of the machine's boot identity; a handle of another boot is `NFS3ERR_STALE`), the table of tree numbers carries the epoch in the header word that was reserved and is reopened by a start of the same epoch, the mount is not made again when the `mount` listing shows it, and a resent READ or LOOKUP is answered as it was (no duplicate request cache: nothing a tree serves changes). The hand-over of the listening socket is built (`fs.nfs.handoff_socket`, a front kind `nfs` in the offer, a drain in the `komira-ai/nfsserve` fork). The launchd jobs `tierstore-fs@a` and `@b` (12e) are not built and will not be: under one-service.md, a Mac updates by a hand-over to the next image of the one process (section 3.4 there), whose NFS part is built (`Running::hand_to_image`, `Running::start_handed`, the offer on a `socketpair` in `server/handoff/exec.rs`) for the one process to use once it serves the file system on macOS (it does on Linux). Not built yet: that start on macOS, the hook's step that sends SIGUSR2, and the `fs.recover_wait` watchdog. The walk at start is not a cost: trees are read when a handle first names them.
 
 What NFS gives: a hard mount makes the client wait and retry while the server does not answer [S22]; EdenFS reports
 exactly that, I/O hangs while its server is gone, and a dialog the client shows when the server stays unresponsive [S10].
 So the server must come back on the same endpoint, quickly, and answer the handles the client holds.
 
-- **macOS has no hand-over today.** tierstore's hand-off code is portable (`server/handoff/mod.rs`), but a Mac update is
-  a restart of one launchd job and the macOS package does not set `server.handoff_socket` (tierstore-handover.md section
-  0, `crates/tierstore/docs/update-hook.md`), and the hand-off carries only the TCP listening sockets of the S3 and OCI
-  fronts (`Front`, `<front> <address>` lines). A live update of the NFS frontend is therefore new on three counts: two
-  launchd jobs of `tierstore fs` that alternate as `tierstore-fs@a` and `@b` do on Linux, with the hook's record and
-  rollback for them; an offer of its own (as `take-fs` is in 7.3) that can carry a Unix listening socket; and the
-  hand-over of NFS state below. Pull request 12 carries all three and changes tierstore-handover.md section 0 and
-  update-hook.md with them. Until it lands, an update of `tierstore fs` on a Mac is a restart, which the crash path below
-  covers.
+- **A Mac's hand-over is to the next image of the process.** A Mac update is a restart of its launchd jobs today, and the
+  macOS package does not set `server.handoff_socket` (tierstore-handover.md section 0,
+  `crates/tierstore/docs/update-hook.md`). One launchd job has one process, so the hand-over of one-service.md section
+  3.4 does not go to a second instance: the process, sent SIGUSR2, drains, writes the offer of its listening sockets,
+  its control socket (`control <path>`, a Unix listening socket) and its cache lock into a `socketpair`, and executes its
+  own program path with `--handed 0`; the new image reads the offer on its standard input. A build node does this now
+  (`server/next_image.rs`); the NFS front's part is built for the one process that serves the file system, and the hook
+  does not send SIGUSR2 yet. Until both land, an update of `tierstore fs` on a Mac is a restart, which the crash path
+  below covers.
 - **The endpoint.** After a crash or a restart, launchd starts the server again (`KeepAlive`) and it binds the same
   endpoint. In a hand-over the listening socket passes with `SCM_RIGHTS`, and the old instance stops accepting at `ack`,
   so a reconnecting client reaches the new one.
@@ -1455,7 +1455,7 @@ SP4 and SP5:
     - 12b. The core without a FUSE shape: it builds and is tested on macOS, serves a read by inode with no open, and lets a frontend with no `FORGET` hold a tree until its detach. No behaviour change on Linux.
     - 12c. The frontend: a read-only export of the attached trees from the core, derivable 8-byte handles, `ACCESS` from the mode bits, `READDIRPLUS`, the fixed old mtime, a descriptor cache, `nfsserve` (a pinned fork of `komira-ai`, with the transaction tracker swept once a second
       and `ACCESS` answered by the file system) behind the one file-system trait, the uid check of 6.8 (removed later), the `fs.nfs.*` keys, the mount helper and the launchd job. The protocol layer is `nfsserve`'s and not written here (choice below).
-    - 12d. Crash, restart and hand-over for NFS: the table of tree numbers kept across a restart so that every handle the client holds is answered, the pause drill, the duplicate request cache if 7.5 needs one, two alternating launchd jobs and the hook's hand-over arm for them,
+    - 12d. Crash, restart and hand-over for NFS: the table of tree numbers kept across a restart so that every handle the client holds is answered, the pause drill, the duplicate request cache if 7.5 needs one, and (as one-service.md section 3.4 has it now, instead of two alternating launchd jobs) the hand-over to the next image of the process and the hook's arm for it,
       with the changes to tierstore-handover.md section 0 and update-hook.md; the drill of updating and killing it under load on the farm Mac.
     - **The protocol layer.** `nfsserve` 0.11 (BSD-3-Clause, which `deny.toml` allows) already serves MOUNT and NFSv3 on one port, which `mount_nfs` with `port=` and `mountport=` needs, and its file-system trait is the interface the frontend implements. Writing the XDR, record marking and about twenty procedures
       here is a further 3,000 lines with the same coverage bar, for no measured gain yet. Its known costs are the tracker (fixed, 3 lines, `probes/transaction_tracker.patch`), a task, a duplex pipe and a channel per request (the remaining part of the 20x cold-walk gap; inferred, not measured), an `ACCESS` that denies `execve` on a read-only file system

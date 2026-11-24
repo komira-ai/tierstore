@@ -19,6 +19,9 @@ pub(super) struct Launch {
     pub settings: Settings,
     /// Whether `--check-config` was given: the settings are checked and nothing is started.
     pub check_only: bool,
+    /// Whether `--handed` was given: this start is the next image of a process that handed over
+    /// to it, and its offer is on standard input.
+    pub handed: bool,
 }
 
 /// Why there are no settings.
@@ -89,6 +92,7 @@ pub(super) fn resolve(args: Vec<OsString>) -> Result<Launch, Refused> {
     Ok(Launch {
         settings,
         check_only: args.check_config,
+        handed: args.handed.is_some(),
     })
 }
 

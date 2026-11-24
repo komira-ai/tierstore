@@ -31,6 +31,16 @@
 //! instance's now. If the next instance is gone before `ready`, or says it later than
 //! `fs.nfs.handoff_ready_wait` after `done`, this one has handed nothing over: it serves on, takes
 //! attaches again, and binds its control socket again where the next had replaced it.
+//!
+//! On a Mac the process can hand over to the next image of its own program instead
+//! (`docs/design/one-service.md` section 3.4, `handoff/exec.rs`): [`Running::hand_to_image`] stops
+//! accepting (the listening socket stays open, so new connections wait in its backlog), answers the
+//! requests it has read, shuts down the write side of each connection and waits for the clients to
+//! close, for at most `fs.nfs.drain_wait`, as for a successor's `ready`; then it holds the core (no
+//! table or attachment write), pauses the control socket, and gives the listening socket and the
+//! control socket's to the offer. The mount is left as it is: its client waits. The next image
+//! starts from them ([`Running::start_handed`]): it serves on the socket it was handed, answers on
+//! the control socket it was handed, reopens the table of this boot, and finds its mount.
 
 use std::os::fd::AsFd as _;
 use std::sync::Arc;
@@ -47,7 +57,7 @@ use super::error::NfsError;
 use super::fs::{Patience, TreeNfs};
 use super::mount::{Mounter, Runner, System};
 use crate::server::handoff::{
-    Front, Hold, Offer, Socket, Want, check_control_path, take_with_ready,
+    Front, Handed, Handing, Hold, Offer, Socket, Want, check_control_path, take_with_ready,
 };
 use crate::server::treefs::config::FsSettings;
 use crate::server::treefs::control::Control;
@@ -112,8 +122,13 @@ pub(super) struct Running {
     stopping: Arc<Notify>,
     /// Says why the server stopped by itself; it keeps the listening socket until `stopping`.
     failed: oneshot::Receiver<String>,
-    /// Whether a successor took the listening socket, which ended the server.
+    /// Whether a successor took the listening socket, or the next image is given it, which ended
+    /// the server: the mount is not unmounted.
     handed: Arc<AtomicBool>,
+    /// A copy of the listening socket, for the next image of the process.
+    kept: std::net::TcpListener,
+    /// Ends the serving for the next image of the process, which gets the listening socket.
+    next: Option<oneshot::Sender<()>>,
     /// Where the protocols are served.
     #[cfg(test)]
     pub(super) address: std::net::SocketAddr,
@@ -137,6 +152,31 @@ impl Running {
         Self::start_serving(settings, runner, euid, patience, epoch, handle).await
     }
 
+    /// [`Running::start`] of the next image of a process that handed over to it: it serves on the
+    /// listening socket and the control socket of `handed` (none is asked of a running instance),
+    /// and finds the mount of the image before it.
+    ///
+    /// # Errors
+    /// As [`Running::start`].
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the one process serves the fs interface on Linux; its start on macOS serves the NFS front from a handed offer (one-service.md section 3.4)"
+        )
+    )]
+    pub(super) async fn start_handed(
+        settings: &FsSettings,
+        runner: Arc<dyn Runner>,
+        euid: u32,
+        patience: Option<Patience>,
+        epoch: u32,
+        handed: Handed,
+    ) -> Result<Self, NfsError> {
+        let ways = (runner, euid, patience, epoch);
+        Self::start_from(settings, ways, handle, Some(handed)).await
+    }
+
     /// [`Running::start`], with `serve` as what serves the listening socket.
     ///
     /// # Errors
@@ -148,6 +188,20 @@ impl Running {
         patience: Option<Patience>,
         epoch: u32,
         serve: Serve,
+    ) -> Result<Self, NfsError> {
+        Self::start_from(settings, (runner, euid, patience, epoch), serve, None).await
+    }
+
+    /// [`Running::start_serving`], from what `handed` holds when the image before this one handed
+    /// it over.
+    ///
+    /// # Errors
+    /// As [`Running::start`].
+    async fn start_from(
+        settings: &FsSettings,
+        (runner, euid, patience, epoch): (Arc<dyn Runner>, u32, Option<Patience>, u32),
+        serve: Serve,
+        handed: Option<Handed>,
     ) -> Result<Self, NfsError> {
         let nfs = &settings.nfs;
         let mounter = Mounter::new(runner, nfs, settings.mountpoint.clone(), euid);
@@ -162,22 +216,26 @@ impl Running {
         // it ends, and a start that fails then leaves no one listening.
         Setup::preflight(settings)?;
         // The running instance, if there is one, hands its socket over before this start binds
-        // the control socket or opens the table: it holds both until then.
-        let taken = match handoff {
-            Some(handoff) => {
-                take_with_ready(
-                    handoff,
-                    &Want {
-                        s3: &[],
-                        oci: &[],
-                        nfs: &[nfs.listen],
-                    },
-                )
-                .await?
+        // the control socket or opens the table: it holds both until then. The image before this
+        // one, when it executed this one, handed over what it held.
+        let (taken, control) = match (handed, handoff) {
+            (Some(handed), _) => (Some(handed.inherited), handed.control),
+            (None, Some(handoff)) => {
+                let want = Want {
+                    s3: &[],
+                    oci: &[],
+                    nfs: &[nfs.listen],
+                };
+                (take_with_ready(handoff, &want).await?, None)
             }
-            None => None,
+            (None, None) => (None, None),
         };
-        let setup = Setup::start((settings, &Reach::Socket), false, Identity::Boot(epoch))?;
+        let setup = Setup::start(
+            (settings, &Reach::Socket),
+            false,
+            Identity::Boot(epoch),
+            control,
+        )?;
         let reopened = setup.reopened;
         let listen = |source| NfsError::Listen {
             address: nfs.listen,
@@ -192,6 +250,8 @@ impl Running {
         };
         let address = listener.local_addr().map_err(listen)?;
         let keeper = Arc::new(Keeper::new(&setup.core, settings));
+        let kept =
+            std::net::TcpListener::from(listener.as_fd().try_clone_to_owned().map_err(listen)?);
         // A cold start's copy of the socket, which its own offer hands to the next instance.
         let cold = match (nfs.handoff.as_ref(), inherited.as_ref()) {
             (Some(_), None) => Some(std::net::TcpListener::from(
@@ -230,12 +290,14 @@ impl Running {
         let stopping = Arc::new(Notify::new());
         let (closing, closed) = oneshot::channel();
         let (failing, failed) = oneshot::channel();
+        let (next, imaged) = oneshot::channel();
         let handed = Arc::new(AtomicBool::new(false));
         let server = tokio::spawn(serve_until(
             Served {
                 listener,
                 serve,
                 closing: closed,
+                imaged,
                 stop: Arc::clone(&stopping),
                 failed: failing,
             },
@@ -263,6 +325,8 @@ impl Running {
             stopping,
             failed,
             handed,
+            kept,
+            next: Some(next),
             #[cfg(test)]
             address,
             mounted: None,
@@ -335,6 +399,49 @@ impl Running {
             Ok(why) = &mut self.failed => Leaving::ServerStopped(why),
             _ = &mut self.server => Leaving::Ended,
         }
+    }
+
+    /// The step of the hand-over to the next image of the process (one-service.md section 3.4):
+    /// the serving ends as for a successor that said `ready` (no connection is accepted, the
+    /// listening socket stays open with its backlog, every request read is answered, the write side
+    /// of each connection is shut down, and the clients are waited for, for at most
+    /// `fs.nfs.drain_wait`), the control socket stops accepting (its connections wait in its
+    /// backlog) and is left to the next image, and the core is held (no table or attachment
+    /// write). What it gives is the offer of the listening socket and of the control socket; the
+    /// mount is left as it is.
+    ///
+    /// # Errors
+    /// [`NfsError::Start`] when the control socket's descriptor cannot be copied.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the one process serves the fs interface on Linux; on macOS it hands its NFS front over (one-service.md section 3.4)"
+        )
+    )]
+    pub(super) async fn hand_to_image(mut self) -> Result<Handing, NfsError> {
+        // Taken once: this consumes the instance.
+        let _ = self.next.take().map(|next| next.send(()));
+        let ended = self.ended().await;
+        tracing::info!("tierstore fs: the NFS front is left to the next image ({ended})");
+        let control = &mut self._setup._control;
+        control.pause();
+        control.leave_path();
+        let copy = control
+            .listener_fd()
+            .map_err(io("copying the control socket"))?;
+        let core = Arc::clone(&self._setup.core);
+        let held = tokio::task::spawn_blocking(move || core.hold(true)).await;
+        held.map_err(|why| io("holding the file system")(std::io::Error::other(why.to_string())))?;
+        let kept = self
+            .kept
+            .try_clone()
+            .map_err(io("copying the listening socket"))?;
+        Ok(Handing {
+            sockets: vec![Socket::new(Front::Nfs, kept)],
+            control: Some((self._keeper.control.clone(), copy)),
+            lock: None,
+        })
     }
 
     /// How the process leaves, whatever the reason: ends the offer of the listening socket,
@@ -471,6 +578,8 @@ struct Served {
     /// Comes first in a leave: it drops the offer, and is answered once no successor can take
     /// the socket any more.
     closing: oneshot::Receiver<oneshot::Sender<()>>,
+    /// Ends the serving for the next image of the process, as a successor's `ready` does.
+    imaged: oneshot::Receiver<()>,
     /// Comes last in a leave: it ends the serving.
     stop: Arc<Notify>,
     /// Told why the server stopped by itself.
@@ -491,6 +600,7 @@ async fn serve_until(
         listener,
         serve,
         closing,
+        mut imaged,
         stop,
         failed,
     } = served;
@@ -498,20 +608,23 @@ async fn serve_until(
     let signal = Arc::clone(&stopped);
     let ending_stop = Arc::clone(&stop);
     let ending = async move {
-        let closed = match offer {
-            Some(offer) => tokio::select! {
-                closed = closing => Some(closed),
-                () = offer.serve() => None,
-            },
-            None => Some(closing.await),
+        let offered = async {
+            match offer {
+                Some(offer) => offer.serve().await,
+                None => std::future::pending().await,
+            }
+        };
+        let closed = tokio::select! {
+            closed = closing => Some(closed),
+            () = offered => None,
+            Ok(()) = &mut imaged => None,
         };
         match closed {
             // The offer is gone (its socket closed with it): no successor takes the socket from
             // here on, so the stop may unmount; the stop is told so, and then ends the serving.
             Some(closed) => {
-                if let Ok(ack) = closed {
-                    let _ = ack.send(());
-                }
+                // A leave that is gone asks for no answer.
+                let _ = closed.map(|ack| ack.send(()));
                 ending_stop.notified().await;
             }
             None => {
@@ -585,6 +698,9 @@ pub(in crate::server) fn serve(settings: &FsSettings) -> Result<(), NfsError> {
     )
 }
 
+#[cfg(test)]
+#[path = "exec_tests.rs"]
+mod exec_tests;
 #[cfg(test)]
 #[path = "handoff_tests.rs"]
 mod handoff_tests;

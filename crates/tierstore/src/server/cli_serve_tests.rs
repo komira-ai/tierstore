@@ -67,7 +67,7 @@ async fn start(handoff: &Handoff, s3: &[SocketAddr]) -> (Result<Bound, HandingEr
         bound_own.set(true);
         bind_s3(s3, crate::server::ListenTuning::default().backlog)
     };
-    let started = bind_fronts(Some(handoff), s3, own, None, backend()).await;
+    let started = bind_fronts(Some(handoff), None, s3, own, None, backend()).await;
     (started, bound_own.get())
 }
 

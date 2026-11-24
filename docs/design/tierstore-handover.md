@@ -19,7 +19,7 @@ is one JSON object; every step idempotent.
 ## 0. Live update by listening-socket hand-off (server side)
 
 This replaces the port-forward of sections 1 to 4 and the slot ports. The hook uses it (`server/handoff/`, entered through
-`run_handing`, with the control socket named by `server.handoff_socket`), on Linux; for `tierstore` on macOS there is no hand-over and it restarts (`tierstore fs` has one for its NFS socket, below).
+`run_handing`, with the control socket named by `server.handoff_socket`), on Linux; for `tierstore` on macOS the hook restarts it (`tierstore fs` has one for its NFS socket, below), and a build node of a Mac can instead hand over to the next image of its own program on SIGUSR2 (below; the hook does not send it yet).
 The binary calls it: `run_serving` passes the hand-off of the settings, `server.handoff_socket` and `server.handoff_wait`
 (default 10s, 1ms to 1h), to `run_handing`; without `server.handoff_socket` it binds as before and makes no control socket.
 A build node and a storage node with `[local_cache]` hand off through the same `run_handing` machinery: `bind_fronts`
@@ -133,6 +133,18 @@ directory of its control socket) before it asks, since a start that fails after 
 (`a_start_that_cannot_work_is_refused_before_the_running_instance_gives_up_its_socket`). What it cannot find before (the
 bind of the control socket itself, a full disk) is not checked.
 
+A build node of a Mac hands over to the next image of its own program instead of to a second instance
+(`docs/design/one-service.md` section 3.4; `server/handoff/exec.rs`, `server/next_image.rs`): on SIGUSR2 it drains as on a
+stop while it keeps copies of its listening sockets open, its cache starts no write and lets its writes in flight end, and
+it writes the same offer (`offer`, the `<front> <address>` lines, `lock <path>`, with their descriptors) into one end of a
+`socketpair` and executes its program path with its arguments and `--handed 0`: the other end is the new image's standard
+input, the one descriptor not close-on-exec. The new image reads the offer there with the taker's checks (no `ack`, `done`,
+`ready` or `bye`: the image that wrote it is gone), serves on the sockets, and takes the write role with the lock it was
+handed. An offer it refuses fails its start, and launchd's next start binds the addresses itself. A macOS build lists
+`handoff-exec-v1` for it. The NFS front's part (`Running::hand_to_image` and `Running::start_handed` in
+`server/treefs/nfs/run.rs`, with the `control <path>` line) is built for the one process that serves the file system, which
+serves it on Linux only so far.
+
 Not built yet: the proxy id that does not derive from a port. No package sets either key, and the macOS package is not to
 set `server.handoff_socket`: an update on a Mac is a restart, for every shape, until the launchd jobs `tierstore-fs@a` and
 `@b` and the hook's record and rollback for them land (the next change); `fs.nfs.handoff_socket` is for an operator or a hook
@@ -159,7 +171,8 @@ is there (`ConditionPathExists=`), so at boot only the recorded one runs.
   not wait for the old instance's drain, which ends by itself (see `crates/tierstore/docs/update-hook.md`). `rollback` starts the previous release
   on the old letter (the link is back), the new instance gives the sockets back and exits. `restore` starts only the recorded instance.
 - A first install starts `tierstore@a` with a normal bind; its `rollback` stops it and fails with `no_previous_release`.
-- On macOS one launchd job is booted out and bootstrapped again: an update has a gap.
+- On macOS one launchd job is booted out and bootstrapped again: an update has a gap (the process can hand over to its next
+  image on SIGUSR2, section 0, which the hook does not use yet).
 
 The record is `state.json` in `/var/lib/tierstore-hook`, a JSON object whose keys are the previous release's single-instance record and
 three optional keys of the systemd arm (`live`, `next`, `mode`), so a release reads the record of the one before it and the other way round.

@@ -45,8 +45,8 @@ pub(super) const HOLDS_MOUNT: &str = "this instance holds the mount, and a taker
 /// A listening socket the instance offers: a copy of the descriptor the front serves from, so
 /// that the offer outlives nothing but itself.
 pub(crate) struct Socket {
-    front: Front,
-    listener: TcpListener,
+    pub(super) front: Front,
+    pub(super) listener: TcpListener,
 }
 
 impl Socket {

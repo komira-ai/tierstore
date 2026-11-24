@@ -53,6 +53,10 @@ pub const RELEASE_VERSION: &str = concat!(
 /// is about the unit `tierstore-fs@.service`, not the S3 unit: the hook that updates that unit
 /// hands it over only when both releases list it, and leaves it running on its release when either
 /// does not (a restart of the process can fail jobs on a kernel without `FUSE_HAS_RESEND`).
+///
+/// [`HANDOFF_EXEC_CAPABILITY`], in the builds for macOS only, says a build node hands over to the
+/// next image of its program on SIGUSR2.
+///
 /// This list is all `--capabilities` prints.
 pub const CAPABILITIES: &[&str] = &[
     "handover-v1",
@@ -60,6 +64,8 @@ pub const CAPABILITIES: &[&str] = &[
     HANDOFF_CACHE_CAPABILITY,
     HANDOFF_STATE_DIR_CAPABILITY,
     HANDOFF_FS_CAPABILITY,
+    #[cfg(target_vendor = "apple")]
+    HANDOFF_EXEC_CAPABILITY,
 ];
 
 /// `handoff-socket-v1`: a storage node started with `server.handoff_socket` takes the listening
@@ -86,6 +92,14 @@ pub const HANDOFF_STATE_DIR_CAPABILITY: &str = "handoff-state-dir-v1";
 /// offers it in its turn; it keeps the descriptor in the service manager's store, and serves again
 /// the descriptor the manager kept for it after a crash or a restart.
 pub const HANDOFF_FS_CAPABILITY: &str = "handoff-fs-v1";
+
+/// `handoff-exec-v1` (macOS builds only): a build node sent SIGUSR2 hands over to the next image of
+/// its own program, the process keeping its pid: it drains as on a stop with its listening
+/// sockets kept open, lets its cache writes end, and executes its program path with the offer of
+/// the sockets and the cache lock on its standard input (`--handed 0`), which the new image takes
+/// with the checks of a taker (`docs/design/one-service.md` section 3.4). The hook of a Mac hands
+/// over this way only when both releases list it.
+pub const HANDOFF_EXEC_CAPABILITY: &str = "handoff-exec-v1";
 
 /// The text `--capabilities` prints for `names`: each name and a newline, nothing for none.
 #[must_use]

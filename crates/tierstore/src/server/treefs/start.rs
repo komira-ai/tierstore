@@ -250,7 +250,9 @@ impl Setup {
     /// Does what a start does up to a frontend's mount, with a core that asks the node's cache and
     /// tree store by `reach`. `count_lookups` is whether the core counts the lookups of its inodes
     /// (a frontend that is told when they are forgotten, FUSE), or drops a tree when it is detached
-    /// (one that is not told).
+    /// (one that is not told). `control` is the control socket's listening socket when the image
+    /// this process executed from handed it over, bound at `fs.control_socket`; without it the
+    /// socket is bound there.
     ///
     /// # Errors
     /// [`StartError`]: why nothing was made.
@@ -258,6 +260,7 @@ impl Setup {
         (settings, reach): (&FsSettings, &Reach),
         count_lookups: bool,
         identity: Identity,
+        control: Option<std::os::unix::net::UnixListener>,
     ) -> Result<Self, StartError> {
         create_runtime_dir(settings)?;
         create_mount_point(settings)?;
@@ -284,11 +287,16 @@ impl Setup {
             1,
             count_lookups,
         )?;
-        let control = Control::serve(
-            Arc::clone(&core),
-            &settings.control_socket,
-            settings.client_group,
-        )
+        let control = match control {
+            Some(listener) => {
+                Control::serve_on(Arc::clone(&core), listener, &settings.control_socket)
+            }
+            None => Control::serve(
+                Arc::clone(&core),
+                &settings.control_socket,
+                settings.client_group,
+            ),
+        }
         .map_err(control_error(settings))?;
         Ok(Self {
             core,
