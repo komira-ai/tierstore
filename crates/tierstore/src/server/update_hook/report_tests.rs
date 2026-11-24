@@ -65,6 +65,7 @@ fn the_tokens_are_the_ones_the_contract_documents() {
             "unit_failed",
             "state_io",
             "host_failed",
+            "mode_unsupported",
         ]
     );
 }
@@ -88,6 +89,7 @@ fn the_class_follows_the_reason() {
         UnitFailed,
         StateIo,
         HostFailed,
+        ModeUnsupported,
     ];
     let release = [
         OutOfOrder,

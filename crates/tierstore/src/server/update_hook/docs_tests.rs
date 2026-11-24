@@ -2,10 +2,10 @@
 
 use super::{
     CACHE_HANDOFF_CAPABILITY, CONFIG_FILE_KEY, FS_CONFIG_FILE, FS_LAUNCHD_LABEL_KEY,
-    FS_LAUNCHD_PLIST, HANDOFF_CAPABILITY, HANDOFF_SOCKET_KEY, HANDOFF_STATE_DIR_CAPABILITY,
-    LAUNCHD_LABEL_KEY, LAUNCHD_PLIST, MARKER_DIR, MODE_KEY, PREVIOUS_RELEASE_KEY,
-    PREVIOUS_VERSION_KEY, PROMOTION_CEILING_KEY, RESTART_MODE, Reason, SERVICE_MANAGER_KEY,
-    STAGED_RELEASE_KEY, STATE_DIR, Step, TARGET_VERSION_KEY,
+    FS_LAUNCHD_PLIST, HANDOFF_CAPABILITY, HANDOFF_EXEC_CAPABILITY, HANDOFF_SERVICE_CAPABILITY,
+    HANDOFF_SOCKET_KEY, HANDOFF_STATE_DIR_CAPABILITY, LAUNCHD_LABEL_KEY, LAUNCHD_PLIST, MARKER_DIR,
+    MODE_KEY, PREVIOUS_RELEASE_KEY, PREVIOUS_VERSION_KEY, PROMOTION_CEILING_KEY, RESTART_MODE,
+    Reason, SERVICE_MANAGER_KEY, STAGED_RELEASE_KEY, STATE_DIR, Step, TARGET_VERSION_KEY,
 };
 use crate::server::build_info::CAPABILITIES;
 
@@ -115,21 +115,27 @@ fn the_design_marks_the_redirect_sections_superseded() {
 /// a cache shape is a restart.
 #[test]
 fn the_page_says_the_build_lists_the_hand_off() {
-    assert_eq!(
-        CAPABILITIES,
-        [
-            "handover-v1",
-            HANDOFF_CAPABILITY,
-            CACHE_HANDOFF_CAPABILITY,
-            HANDOFF_STATE_DIR_CAPABILITY,
-            crate::server::build_info::HANDOFF_FS_CAPABILITY
-        ]
-    );
+    let mut words = vec![
+        "handover-v1",
+        HANDOFF_CAPABILITY,
+        CACHE_HANDOFF_CAPABILITY,
+        HANDOFF_STATE_DIR_CAPABILITY,
+        crate::server::build_info::HANDOFF_FS_CAPABILITY,
+    ];
+    if cfg!(target_os = "linux") {
+        words.push(HANDOFF_SERVICE_CAPABILITY);
+    }
+    if cfg!(target_vendor = "apple") {
+        words.push(HANDOFF_EXEC_CAPABILITY);
+    }
+    assert_eq!(CAPABILITIES, words);
     for needle in [
         "`handoff-socket-v1`",
         "`handoff-cache-v1`",
         "`handoff-state-dir-v1`",
         "`handoff-fs-v1`",
+        "`handoff-service-v1`",
+        "`handoff-exec-v1`",
         "`[local_cache]`",
         "`server.handoff_socket`",
         "`server.handoff_wait`",

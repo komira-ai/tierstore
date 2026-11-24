@@ -298,7 +298,8 @@ fn capabilities_prints_the_names_one_to_a_line_and_exits_0() {
 /// leaves the key out is handed over only between releases that list it), the fifth that
 /// `tierstore fs` hands its mount over (the second unit is handed over only between releases that
 /// list it); on macOS, sixth, `handoff-exec-v1`, that a build node hands over to its next image on
-/// SIGUSR2. Catches: any capability left out of the list (for `handover-v1`, every update is a
+/// SIGUSR2; on Linux, sixth, `handoff-service-v1`, that a build node with an `fs` interface hands its
+/// mount over with its sockets. Catches: any capability left out of the list (for `handover-v1`, every update is a
 /// restart), a misspelled name the updater would not find, and a name nothing here promises.
 #[test]
 fn capabilities_lists_the_hand_over_words() {
@@ -306,6 +307,9 @@ fn capabilities_lists_the_hand_over_words() {
     let mut words =
         "handover-v1\nhandoff-socket-v1\nhandoff-cache-v1\nhandoff-state-dir-v1\nhandoff-fs-v1\n"
             .to_owned();
+    if cfg!(target_os = "linux") {
+        words.push_str("handoff-service-v1\n");
+    }
     if cfg!(target_vendor = "apple") {
         words.push_str("handoff-exec-v1\n");
     }

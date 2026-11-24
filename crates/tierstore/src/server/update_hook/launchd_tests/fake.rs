@@ -86,6 +86,8 @@ struct World {
     mount: Option<PathBuf>,
     /// The mount stays when the fs job is booted out.
     mount_stays: bool,
+    /// The labels launchd was told to disable, and not enabled since.
+    disabled: BTreeSet<String>,
     /// The bounds each `bootout_within` was given: label, call, looks.
     bounds: Vec<(String, Duration, u32)>,
     versions: BTreeMap<PathBuf, String>,
@@ -174,6 +176,7 @@ impl Fake {
             fs_job: false,
             mount: None,
             mount_stays: false,
+            disabled: BTreeSet::new(),
             bounds: Vec::new(),
             versions: BTreeMap::from([
                 (PathBuf::from(OLD), OLD_VERSION.to_owned()),
@@ -300,6 +303,16 @@ impl Fake {
             fs_job: w.fs_job,
             mounted: w.mount.is_some(),
         }
+    }
+
+    /// The labels that are disabled.
+    pub fn disabled(&self) -> Vec<String> {
+        self.w.borrow().disabled.iter().cloned().collect()
+    }
+
+    /// Disables `label`, as an earlier step would have.
+    pub fn set_disabled(&self, label: &str) {
+        self.w.borrow_mut().disabled.insert(label.to_owned());
     }
 
     /// The record on disk.
@@ -544,6 +557,12 @@ impl Launchd for Fake {
         )?;
         if plist == Path::new(FS_LAUNCHD_PLIST) {
             let mut w = self.w.borrow_mut();
+            if w.disabled.contains(FS_LABEL) {
+                return Err(PortError::failed(
+                    PortKind::Launchd,
+                    "Bootstrap failed: 119: Service is disabled",
+                ));
+            }
             if w.fs_job {
                 return Err(PortError::failed(
                     PortKind::Launchd,
@@ -604,6 +623,41 @@ impl Launchd for Fake {
             .bounds
             .push((label.to_owned(), call, gone_attempts));
         self.bootout(label)
+    }
+
+    /// The job's process executes the program of the plist again, under the same pid: it then
+    /// runs the release whose binary is at [`SERVICE_BINARY`]. A job that is not loaded is
+    /// `launchctl`'s error.
+    fn hand_to_next_image(&self, label: &str) -> Result<(), PortError> {
+        let late =
+            self.tick_changing(format!("launchd.kill SIGUSR2 {label}"), PortKind::Launchd)?;
+        if label != LABEL {
+            self.stray(label);
+            return Err(PortError::failed(PortKind::Launchd, "No such process"));
+        }
+        let mut w = self.w.borrow_mut();
+        if w.job.is_none() {
+            return Err(PortError::failed(PortKind::Launchd, "No such process"));
+        }
+        let reached = (plist_program() == SERVICE_BINARY)
+            .then(|| w.installed.clone())
+            .flatten();
+        w.broken = reached.is_none();
+        w.job = reached;
+        drop(w);
+        Fake::after(late, PortKind::Launchd)
+    }
+
+    fn disable(&self, label: &str) -> Result<(), PortError> {
+        let late = self.tick_changing(format!("launchd.disable {label}"), PortKind::Launchd)?;
+        self.w.borrow_mut().disabled.insert(label.to_owned());
+        Fake::after(late, PortKind::Launchd)
+    }
+
+    fn enable(&self, label: &str) -> Result<(), PortError> {
+        let late = self.tick_changing(format!("launchd.enable {label}"), PortKind::Launchd)?;
+        self.w.borrow_mut().disabled.remove(label);
+        Fake::after(late, PortKind::Launchd)
     }
 }
 

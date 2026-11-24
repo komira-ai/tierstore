@@ -50,6 +50,7 @@ mod ports;
 mod probe;
 mod record;
 mod report;
+mod shape;
 mod system;
 mod systemd;
 
@@ -138,6 +139,16 @@ pub const HANDOFF_STATE_DIR_CAPABILITY: &str =
 /// the other letter and offers it on `fs.handoff_socket`. Both releases need it for the hook to
 /// hand the fs process over.
 pub const HANDOFF_FS_CAPABILITY: &str = crate::server::build_info::HANDOFF_FS_CAPABILITY;
+/// The capability of a release whose build node with an `fs` interface hands its mount over with
+/// its sockets, and takes them from the processes that run. Both releases need it for an update of
+/// a node whose file has an `fs` interface on Linux; without it `prepare` refuses the update
+/// ([`Reason::ModeUnsupported`]) unless the params say `mode = "restart"`.
+pub const HANDOFF_SERVICE_CAPABILITY: &str = crate::server::build_info::HANDOFF_SERVICE_CAPABILITY;
+/// The capability of a release whose build node hands over to the next image of its program on
+/// SIGUSR2 (macOS). Both releases need it for the launchd arm to hand a node over that way: an
+/// update of a Mac whose file has an `fs` interface is refused without it
+/// ([`Reason::ModeUnsupported`]) unless the params say `mode = "restart"`.
+pub const HANDOFF_EXEC_CAPABILITY: &str = crate::server::build_info::HANDOFF_EXEC_CAPABILITY;
 /// The table of the configuration that holds the hot tier.
 pub const HOT_STORE_TABLE: &str = "hot_store";
 /// The `kind` of a tier that is a directory of the file system.

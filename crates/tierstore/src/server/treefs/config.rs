@@ -54,11 +54,11 @@ pub(in crate::server) const DEFAULT_MOUNTPOINT: &str = "/run/tierstore/fs";
 
 /// The runtime directory when the file leaves out `fs.runtime_dir`: the `RuntimeDirectory=` of the
 /// unit.
-const DEFAULT_RUNTIME_DIR: &str = "/run/tierstore-fs";
+pub(in crate::server) const DEFAULT_RUNTIME_DIR: &str = "/run/tierstore-fs";
 
 /// The name of the control socket in the runtime directory when the file leaves out
 /// `fs.control_socket`.
-const DEFAULT_CONTROL_SOCKET: &str = "control.sock";
+pub(in crate::server) const DEFAULT_CONTROL_SOCKET: &str = "control.sock";
 
 /// The most time a fill is waited for by default: a fill that fails sooner is not waited for.
 pub(super) const DEFAULT_FETCH_TIMEOUT: Duration = Duration::from_secs(60);

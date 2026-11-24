@@ -105,11 +105,17 @@ pub enum Reason {
     StateIo,
     /// The host could not be asked.
     HostFailed,
+    /// `prepare`: the node's file has an `fs` interface, and the update cannot hand its mount over
+    /// (the two releases do not both list the capability, or a configuration update moves the
+    /// mount point, the control socket or the runtime directory): a restart would drop the mount
+    /// under running jobs. The params' `mode = "restart"` overrides it, for an operator who has
+    /// drained the node's jobs.
+    ModeUnsupported,
 }
 
 impl Reason {
     /// Every reason.
-    pub const ALL: [Reason; 21] = [
+    pub const ALL: [Reason; 22] = [
         Reason::BadArgs,
         Reason::BadParams,
         Reason::Locked,
@@ -131,6 +137,7 @@ impl Reason {
         Reason::UnitFailed,
         Reason::StateIo,
         Reason::HostFailed,
+        Reason::ModeUnsupported,
     ];
 
     /// The token in the JSON.
@@ -158,6 +165,7 @@ impl Reason {
             Reason::UnitFailed => "unit_failed",
             Reason::StateIo => "state_io",
             Reason::HostFailed => "host_failed",
+            Reason::ModeUnsupported => "mode_unsupported",
         }
     }
 
@@ -177,7 +185,8 @@ impl Reason {
             | Reason::ConfigRefused
             | Reason::UnitFailed
             | Reason::StateIo
-            | Reason::HostFailed => Class::Environment,
+            | Reason::HostFailed
+            | Reason::ModeUnsupported => Class::Environment,
             Reason::OutOfOrder
             | Reason::NotVerified
             | Reason::Committed
