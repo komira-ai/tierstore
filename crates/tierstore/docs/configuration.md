@@ -262,7 +262,7 @@ budget = "185GiB"
 [cold_store]
 kind             = "s3"
 bucket           = "cas"
-endpoint         = "http://192.0.2.1:8333"
+endpoint         = "http://s3-cold.example:9000"
 credentials_file = "/etc/tierstore/cold.credentials"
 
 [[policy]]
