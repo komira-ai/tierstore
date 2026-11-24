@@ -228,6 +228,7 @@ impl Rig {
             drain_lb_wait: Some(spec.lb_wait),
             drain_deadline: Some(spec.deadline),
             state_dir: None,
+            host: crate::server::config::Host::SYSTEM,
         };
         let (told, bound) = oneshot::channel::<Addresses>();
         let ready = move |at: Addresses| drop(told.send(at));

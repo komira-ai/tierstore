@@ -94,7 +94,7 @@ fn a_try_waits_for_its_answer_no_longer_than_the_deadline_leaves() {
     let socket = rig.rig.root.path().join("fill.sock");
     let clock = rig.rig.clock.clone();
     let uploader = super::Uploader::new(
-        &socket,
+        Some(&socket),
         Duration::from_secs(30),
         clock.clone(),
         std::sync::Arc::new(|_| {}),

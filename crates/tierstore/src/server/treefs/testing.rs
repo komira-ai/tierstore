@@ -527,7 +527,7 @@ impl Rig {
                 rustix::process::geteuid().as_raw(),
                 rustix::process::getegid().as_raw(),
             ),
-            fill_socket: self.dir.path().join("fill.sock"),
+            fill_socket: Some(self.dir.path().join("fill.sock")),
             cache_path: self.cache.clone(),
             fetch_timeout: Duration::from_secs(5),
             threads: 4,

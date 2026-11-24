@@ -32,6 +32,7 @@ pub(super) const QUICK: PerRun = PerRun {
     drain_lb_wait: Some(Duration::from_millis(50)),
     drain_deadline: Some(Duration::from_secs(60)),
     state_dir: None,
+    host: crate::server::config::Host::SYSTEM,
 };
 
 /// A scratch directory with a key file, and the directories of a node's tiers and cache in it.

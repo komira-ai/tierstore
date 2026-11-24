@@ -8,6 +8,7 @@ pub(crate) const DEFAULTS: PerRun = PerRun {
     drain_lb_wait: None,
     drain_deadline: None,
     state_dir: None,
+    host: crate::server::config::Host::SYSTEM,
 };
 
 /// Loads the text of a whole file as the process that reads it does: `tierstore fs` has a file of

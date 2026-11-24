@@ -117,6 +117,7 @@ fn a_key_that_is_left_out_has_its_default() {
         drain_lb_wait: Some(Duration::from_secs(1)),
         drain_deadline: Some(Duration::from_secs(2)),
         state_dir: None,
+        host: crate::server::config::Host::SYSTEM,
     };
     let with_run = from_text(MINIMAL, slow).unwrap();
     assert_eq!(with_run.drain_lb_wait, Duration::from_secs(1));
@@ -863,6 +864,7 @@ fn flags(lb_wait: Option<u64>, deadline: Option<u64>) -> PerRun {
         drain_lb_wait: lb_wait.map(Duration::from_secs),
         drain_deadline: deadline.map(Duration::from_secs),
         state_dir: None,
+        host: crate::server::config::Host::SYSTEM,
     }
 }
 

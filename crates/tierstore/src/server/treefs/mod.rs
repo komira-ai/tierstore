@@ -116,13 +116,18 @@ mod steps;
 )]
 mod nfs;
 
-pub(super) use config::{FsSettings, load};
+pub(super) use config::{DEFAULT_MOUNTPOINT, FsSettings, FsTable, Lookup, load};
 #[cfg(test)]
-pub(super) use config::{FsTable, builders, from_text};
+pub(super) use config::{builders, from_text};
+pub(super) use groups::{Database, Found, system as system_names};
 #[cfg(target_os = "linux")]
 pub(super) use launch::serve;
+pub(super) use nfs::config::NfsTable;
 #[cfg(not(target_os = "linux"))]
 pub(super) use nfs::{NfsError, serve};
+pub(super) use put::config::PutTable;
+#[cfg(test)]
+pub(super) use put::config::off_linux as put_off_linux;
 #[cfg(target_os = "linux")]
 pub(super) use start::StartError;
 

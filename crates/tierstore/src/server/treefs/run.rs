@@ -67,7 +67,7 @@ fn serve_put(
     tracing::info!(?replayed, "tierstore fs: the put directory's stage is open");
     let clock = Arc::new(MonotonicClock::new());
     let uploader = Uploader::new(
-        &settings.fill_socket,
+        settings.fill_socket.as_deref(),
         put.commit_deadline,
         clock.clone(),
         Arc::new(std::thread::sleep),

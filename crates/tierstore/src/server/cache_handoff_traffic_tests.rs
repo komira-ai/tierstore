@@ -326,6 +326,7 @@ fn settle(settle: Duration) -> PerRun {
         drain_lb_wait: Some(settle),
         drain_deadline: Some(Duration::from_secs(60)),
         state_dir: None,
+        host: crate::server::config::Host::SYSTEM,
     }
 }
 

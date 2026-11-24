@@ -101,16 +101,17 @@ pub(in crate::server) struct Uploader {
 }
 
 impl Uploader {
-    /// Uploads over the socket at `socket`; each try waits for its answer until the deadline of
-    /// its commit, and no longer than `answer_timeout`.
+    /// Uploads over the socket at `socket` (none: a node without one, whose uploads find no
+    /// socket); each try waits for its answer until the deadline of its commit, and no longer than
+    /// `answer_timeout`.
     pub(in crate::server) fn new(
-        socket: &Path,
+        socket: Option<&Path>,
         answer_timeout: Duration,
         clock: Arc<dyn Clock>,
         pause: Arc<dyn Fn(Duration) + Send + Sync>,
     ) -> Self {
-        let client = FillClient::pausing(
-            socket.to_owned(),
+        let client = FillClient::pausing_on(
+            socket.map(Path::to_owned),
             0,
             answer_timeout,
             Arc::new(std::mem::drop::<Duration>),

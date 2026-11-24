@@ -217,7 +217,7 @@ impl SpaceRig {
             taken.lock().unwrap().push(pause);
             clock.advance(u64::try_from(pause.as_millis()).unwrap());
         });
-        let uploader = Uploader::new(&path, DEADLINE, rig.clock.clone(), pause);
+        let uploader = Uploader::new(Some(&path), DEADLINE, rig.clock.clone(), pause);
         let space = PutSpace::new(
             rig.open(),
             uploader,
