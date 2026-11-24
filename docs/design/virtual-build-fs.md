@@ -428,7 +428,8 @@ a Unix socket, mode 0600, its own user only, bound only by the instance that hol
 The core asks through one internal trait (`Fills`, `server/treefs/fills.rs`) with two implementations: the fill socket's
 client (`server/treefs/fill_client.rs`), which `tierstore fs` uses, and the calls in process (`server/treefs/in_process.rs`),
 which answer each request as the socket does and wait for the write role as above; the start of the one process's `fs`
-interface (one-service.md section 6, P3) is what will use them.
+interface uses them, on Linux (one-service.md section 6, P3, `server/treefs/interface.rs`) and on macOS
+(`server/treefs/nfs/interface.rs`).
 `crates/tierstore/docs/configuration.md` and `operations.md` describe it as it runs.
 
 **The FUSE protocol** is spoken through the `fuser` crate (MIT; kernel passthrough since 0.16, `BackingId::into_raw`,
@@ -1063,7 +1064,7 @@ infrastructure-retryable when `stall_ms` was over a tenth of the limit.
 
 ### 7.5 Crash and live update of the NFS frontend (macOS)
 
-**Status (pull request 12d, built).** The restart arm is built: the handle is the core's inode number and four bytes of the boot's epoch (a hash of the machine's boot identity; a handle of another boot is `NFS3ERR_STALE`), the table of tree numbers carries the epoch in the header word that was reserved and is reopened by a start of the same epoch, the mount is not made again when the `mount` listing shows it, and a resent READ or LOOKUP is answered as it was (no duplicate request cache: nothing a tree serves changes). The hand-over of the listening socket is built (`fs.nfs.handoff_socket`, a front kind `nfs` in the offer, a drain in the `komira-ai/nfsserve` fork). The launchd jobs `tierstore-fs@a` and `@b` (12e) are not built and will not be: under one-service.md, a Mac updates by a hand-over to the next image of the one process (section 3.4 there), whose NFS part is built (`Running::hand_to_image`, `Running::start_handed`, the offer on a `socketpair` in `server/handoff/exec.rs`) for the one process to use once it serves the file system on macOS (it does on Linux). Not built yet: that start on macOS, the hook's step that sends SIGUSR2, and the `fs.recover_wait` watchdog. The walk at start is not a cost: trees are read when a handle first names them.
+**Status (pull request 12d, built).** The restart arm is built: the handle is the core's inode number and four bytes of the boot's epoch (a hash of the machine's boot identity; a handle of another boot is `NFS3ERR_STALE`), the table of tree numbers carries the epoch in the header word that was reserved and is reopened by a start of the same epoch, the mount is not made again when the `mount` listing shows it, and a resent READ or LOOKUP is answered as it was (no duplicate request cache: nothing a tree serves changes). The hand-over of the listening socket is built (`fs.nfs.handoff_socket`, a front kind `nfs` in the offer, a drain in the `komira-ai/nfsserve` fork). The launchd jobs `tierstore-fs@a` and `@b` (12e) are not built and will not be: under one-service.md, a Mac updates by a hand-over to the next image of the one process (section 3.4 there), whose NFS part is built (`Running::hand_to_image`, `Running::start_handed`, the offer on a `socketpair` in `server/handoff/exec.rs`) and the one process uses it: it serves the file system on macOS by the NFS front, and on SIGUSR2 adds the front's part to the offer (`server/treefs/nfs/interface.rs`); the hook sends SIGUSR2 for an update between releases that both list `handoff-exec-v1`. Not built yet: the `fs.recover_wait` watchdog. The walk at start is not a cost: trees are read when a handle first names them.
 
 What NFS gives: a hard mount makes the client wait and retry while the server does not answer [S22]; EdenFS reports
 exactly that, I/O hangs while its server is gone, and a dialog the client shows when the server stays unresponsive [S10].
@@ -1075,9 +1076,8 @@ So the server must come back on the same endpoint, quickly, and answer the handl
   3.4 does not go to a second instance: the process, sent SIGUSR2, drains, writes the offer of its listening sockets,
   its control socket (`control <path>`, a Unix listening socket) and its cache lock into a `socketpair`, and executes its
   own program path with `--handed 0`; the new image reads the offer on its standard input. A build node does this now
-  (`server/next_image.rs`); the NFS front's part is built for the one process that serves the file system, and the hook
-  does not send SIGUSR2 yet. Until both land, an update of `tierstore fs` on a Mac is a restart, which the crash path
-  below covers.
+  (`server/next_image.rs`), with the NFS front's part when its file has an `fs` interface, and the hook sends SIGUSR2.
+  An update of `tierstore fs` on a Mac (the two-job layout) is still a restart, which the crash path below covers.
 - **The endpoint.** After a crash or a restart, launchd starts the server again (`KeepAlive`) and it binds the same
   endpoint. In a hand-over the listening socket passes with `SCM_RIGHTS`, and the old instance stops accepting at `ack`,
   so a reconnecting client reaches the new one.

@@ -130,6 +130,67 @@ async fn the_next_image_reads_the_offer_from_the_handed_descriptor() {
     .await;
 }
 
+/// Asserts that a handed offer splits into the file system's part, the NFS front's socket (with
+/// its address and its copy) and the control socket, and the fronts' part, the S3 socket, its copy
+/// and the cache lock: the copies a control socket of the fronts offers a successor then hold no
+/// NFS socket. Catches a split that leaves the NFS socket with the fronts, whose offer to a
+/// successor would hand it out, or the control socket with them, where no NFS front serves it.
+#[tokio::test]
+async fn a_handed_offer_splits_into_the_file_systems_part_and_the_fronts_part() {
+    let (dir, control_path) = scratch();
+    let (s3, s3_addr) = listening();
+    let (nfs, nfs_addr) = listening();
+    let control = UnixListener::bind(&control_path).unwrap();
+    let lock_path = dir.path().join(".lock");
+    let mut held = try_take(&lock_path).unwrap().unwrap();
+    let ids = [s3.as_fd(), nfs.as_fd(), control.as_fd()].map(identity);
+    let handing = Handing {
+        sockets: vec![socket(Front::S3, &s3), socket(Front::Nfs, &nfs)],
+        control: Some((
+            control_path.clone(),
+            control.as_fd().try_clone_to_owned().unwrap(),
+        )),
+        lock: Some((lock_path.clone(), held.share().unwrap())),
+    };
+    let image = Image::prepare(&handing, PathBuf::from("tierstore"), words(&["tierstore"]))
+        .await
+        .unwrap();
+    held.disarm();
+    drop((handing, held, s3, nfs, control));
+    let want = Want {
+        s3: &[s3_addr],
+        oci: &[],
+        nfs: &[nfs_addr],
+    };
+    let own = Own {
+        control: Some(&control_path),
+        lock: Some(&lock_path),
+    };
+    let taken = within("the offer", read(image.into_handed(), &want, &own))
+        .await
+        .unwrap();
+    let (fs, fronts) = taken.split_fs();
+
+    let fs_sockets = &fs.inherited;
+    assert_eq!(fs_sockets.nfs_addrs, [nfs_addr]);
+    assert!(fs_sockets.s3.is_empty() && fs_sockets.s3_addrs.is_empty());
+    assert!(fs_sockets.lock.is_none());
+    let fs_copies: Vec<Front> = fs_sockets.copies.iter().map(|copy| copy.front).collect();
+    assert_eq!(fs_copies, [Front::Nfs]);
+    let got = [
+        fs_sockets.nfs[0].as_fd(),
+        fs.control.as_ref().unwrap().as_fd(),
+    ];
+    assert_eq!(got.map(identity), [ids[1], ids[2]]);
+
+    assert_eq!(fronts.s3_addrs, [s3_addr]);
+    assert!(fronts.nfs.is_empty() && fronts.nfs_addrs.is_empty());
+    assert_eq!(identity(fronts.s3[0].as_fd()), ids[0]);
+    let copies: Vec<Front> = fronts.copies.iter().map(|copy| copy.front).collect();
+    assert_eq!(copies, [Front::S3]);
+    assert!(fronts.lock.as_ref().unwrap().is_current());
+}
+
 /// Asserts that the next image is given the arguments of the one before less a `--handed` that
 /// one was given (in either spelling, with its value), then `--handed 0`: a second hand-over hands
 /// over on descriptor 0 again, and the flag never piles up.

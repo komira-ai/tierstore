@@ -7,7 +7,9 @@
 //! meanwhile, as copies made at the start ([`NextImage::hand`] gets them), so new connections wait
 //! in their backlog. Then the cache starts no write, and its writes in flight end, as at `ready`
 //! of a hand-over; its lock is kept, disarmed, so nothing of this process unlocks it. The offer of
-//! the sockets and the lock is written into a `socketpair`, and the process executes its program
+//! the sockets and the lock (and, with an `fs` interface, of the NFS front's listening socket and
+//! control socket, once its connections have ended) is written into a `socketpair`, and the process
+//! executes its program
 //! path (`std::env::current_exe`, where the update installed the new binary) with its arguments and
 //! `--handed 0` ([`exec_next`], `handoff/exec.rs`). The pid stays; launchd sees no exit.
 //!
@@ -51,13 +53,17 @@ impl NextImage {
     /// The hand-over's step once the fronts have drained and the loops have ended: the lock of
     /// `cache`, if it holds it, is taken out for the offer; then the cache starts no write, and
     /// this returns once its writes in flight have ended. `sockets` (copies of the fronts'
-    /// listening sockets, which the drain did not close) are kept for the offer with the lock.
+    /// listening sockets, which the drain did not close) are kept for the offer with the lock, and
+    /// so are the NFS front's listening socket and control socket of `fs`, the part of the `fs`
+    /// interface on macOS, which has ended its connections and holds its state
+    /// (`Running::hand_to_image` of `treefs/nfs/run.rs`).
     ///
     /// # Errors
     /// What the system said of the copy of the lock's descriptor.
     pub(in crate::server) async fn hand(
         &self,
-        sockets: Vec<Socket>,
+        mut sockets: Vec<Socket>,
+        fs: Option<Handing>,
         cache: &LocalCache,
     ) -> std::io::Result<()> {
         // `None` while this image has not yet taken the write role with a lock it was handed: the
@@ -65,9 +71,13 @@ impl NextImage {
         let lock = cache.lock_to_hand()?;
         cache.hand_writes();
         cache.writes_ended().await;
+        let control = fs.and_then(|fs| {
+            sockets.extend(fs.sockets);
+            fs.control
+        });
         let handing = Handing {
             sockets,
-            control: None,
+            control,
             lock,
         };
         *self

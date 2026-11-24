@@ -9,19 +9,19 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
 use tokio::runtime::Handle;
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
 use crate::server::local_cache::LocalCache;
 use crate::server::local_cache::attaches::{Attach, Fetches};
 use crate::server::local_cache::descriptors::Descriptors;
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
 use crate::server::local_cache::trees::TreeStore;
 
 use super::config::FsSettings;
 use super::fill_client::{AskError, FillClient, FillFailure, PAUSE, Place, PlacedTree, Until};
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
 use super::in_process::InProcess;
 
 /// Which of the two ways a start makes its core ask: over the fill socket of its settings, or by
@@ -31,13 +31,13 @@ pub(super) enum Reach {
     /// Over `fs.fill_socket`: the process `tierstore fs`.
     Socket,
     /// By calls: the `fs` interface of the one process (`docs/design/one-service.md`, section
-    /// 1.5), which serves on Linux.
-    #[cfg(any(target_os = "linux", test))]
+    /// 1.5), which serves on Linux and macOS.
+    #[cfg(any(target_os = "linux", target_os = "macos", test))]
     Calls(Calls),
 }
 
 /// The node's cache and tree store, called in this process.
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
 #[derive(Clone)]
 pub(super) struct Calls {
     /// The node's cache.
@@ -48,7 +48,7 @@ pub(super) struct Calls {
     pub runtime: Handle,
 }
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
 impl Calls {
     /// The requests to these, each waiting at most `wait`, with the pauses of the core's tries
     /// taken by `pause`.
@@ -67,7 +67,7 @@ impl Reach {
                 settings.fill_socket.clone(),
                 settings.fetch_timeout,
             )),
-            #[cfg(any(target_os = "linux", test))]
+            #[cfg(any(target_os = "linux", target_os = "macos", test))]
             Self::Calls(calls) => calls.fills(settings.fetch_timeout, Arc::new(std::thread::sleep)),
         }
     }

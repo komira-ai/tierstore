@@ -53,7 +53,7 @@ async fn the_cache_writes_in_flight_end_before_the_exec() {
     let (listener, addr) = listening();
     let (handing, on) = (Arc::clone(&next), cache.clone());
     let sockets = vec![socket(Front::S3, &listener)];
-    let hand = tokio::spawn(async move { handing.hand(sockets, &on).await });
+    let hand = tokio::spawn(async move { handing.hand(sockets, None, &on).await });
     settle().await;
     assert!(!hand.is_finished(), "the hand-over waits for the fill");
     assert!(
@@ -399,7 +399,7 @@ fn the_process_whose_exec_fails() {
         let (listener, _) = listening();
         let next = NextImage::default();
         next.ask();
-        next.hand(vec![socket(Front::S3, &listener)], &rig.locked())
+        next.hand(vec![socket(Front::S3, &listener)], None, &rig.locked())
             .await
             .unwrap();
         let missing = rig.config.path.join("no-such-program");

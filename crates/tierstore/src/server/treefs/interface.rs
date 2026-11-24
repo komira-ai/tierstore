@@ -1,7 +1,8 @@
 //! The `fs` interface of the one process (`docs/design/one-service.md`, sections 2.3 and 3.5):
 //! the mount a build node's `tierstore` serves itself when its file has an `[[interface]]` of type
 //! `fs`, with a core that calls the node's cache and tree store (`in_process.rs`) instead of
-//! asking a fill socket. Linux only: the mount is a FUSE mount.
+//! asking a fill socket. Linux only: the mount is a FUSE mount; macOS serves the same interface by
+//! its NFS front (`nfs/interface.rs`).
 //!
 //! The start (`cache_cli.rs`) opens the cache and the tree store and then gets the mount, before it
 //! binds or takes a socket of a front, in the order of `tierstore fs` (`launch.rs`):
