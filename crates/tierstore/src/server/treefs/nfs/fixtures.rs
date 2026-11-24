@@ -22,7 +22,14 @@ pub(super) const EPOCH: u32 = 0x5eed_0001;
 
 /// The bytes of the handle of `ino` in the mount of [`EPOCH`].
 pub(super) fn handle_of(ino: u64) -> Vec<u8> {
-    [ino.to_le_bytes().as_slice(), EPOCH.to_le_bytes().as_slice()].concat()
+    let handle = super::handle::of(ino, EPOCH).data;
+    // The inode number and the epoch first, whatever the bytes after them are.
+    assert_eq!(
+        handle[..12],
+        [ino.to_le_bytes().as_slice(), EPOCH.to_le_bytes().as_slice()].concat()
+    );
+    assert_eq!(handle.len(), 64);
+    handle
 }
 
 /// A patience that never runs out: no read is answered `NFS3ERR_JUKEBOX`.
