@@ -69,7 +69,7 @@ enum Served {
     clippy::expect_used,
     reason = "a blocking task's panic is a bug, passed on"
 )]
-async fn read_piece(file: Arc<File>, offset: u64, len: u64) -> io::Result<Bytes> {
+pub(super) async fn read_piece(file: Arc<File>, offset: u64, len: u64) -> io::Result<Bytes> {
     let reading = tokio::task::spawn_blocking(move || {
         // `len` is at most a chunk, which memory holds.
         let mut bytes = vec![0; len as usize];

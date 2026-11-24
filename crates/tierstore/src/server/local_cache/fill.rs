@@ -27,7 +27,10 @@ use super::layout::{
     Name, Origin, Sidecar, data_path, make_dirs, meta_path, object_dir, stage_dir,
 };
 use super::metrics::{FailedFill, bump};
+use super::stream::read_piece;
 use super::{Disk, Inner, WHOLE_FILL_LIMIT, locked, percent_of};
+
+mod held;
 
 /// How a fill ended, for the readers that waited for it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -197,12 +200,15 @@ pub(super) enum Read<'a> {
     /// The whole object of the key, whose HEAD the caller has made.
     Headed(Meta),
     /// `size` bytes from `offset` of the upstream object `from`, which must hash to `sha256`: a
-    /// blob inside a larger object, kept under the key of the fill (see `source`).
+    /// blob inside a larger object, kept under the key of the fill (see `source`). With `copy`,
+    /// the file of `from` that the cache holds whole, the bytes are read from that file and not
+    /// from the upstream (see `held`).
     Range {
         from: &'a str,
         offset: u64,
         size: u64,
         sha256: &'a str,
+        copy: Option<Arc<File>>,
     },
 }
 
@@ -283,7 +289,8 @@ pub(super) struct Launch {
 pub(super) enum Stop {
     /// The upstream failed, or has no such object.
     Upstream(Error),
-    /// The upstream gave fewer bytes than it had said the object has.
+    /// The upstream gave fewer bytes than it had said the object has, or a read of the cache's
+    /// copy of a pack failed (see `held`).
     Short,
     /// The cache directory could not be written.
     Local,
@@ -718,13 +725,29 @@ impl Inner {
                 self.fetch_from(key, name, live, &Read::Headed(meta)).await
             }
             Plan::Blob { from, offset, size } => {
-                let read = Read::Range {
+                let read = |copy| Read::Range {
                     from,
                     offset: *offset,
                     size: *size,
                     sha256: &name.hex,
+                    copy,
                 };
-                self.fetch_from(key, name, live, &read).await
+                if let Some(copy) = self.held_pack(from, *offset, *size).await {
+                    match self.fetch_from(key, name, live, &read(Some(copy))).await {
+                        // The copy could not be read, or its span is not the blob: the
+                        // upstream's bytes are read instead (see `held`). No reader was given
+                        // bytes of the first try: a fill of a span is followed by nobody (an S3
+                        // read that meets it goes to the upstream, see `join_or_start`, and the
+                        // fill socket waits for its end).
+                        Err(Stop::Short | Stop::Mismatch) => tracing::warn!(
+                            "tierstore: the copy of {from} in the cache does not give the blob \
+                             {} at {offset}: it is read from the upstream",
+                            name.hex
+                        ),
+                        ended => return ended,
+                    }
+                }
+                self.fetch_from(key, name, live, &read(None)).await
             }
         }
     }
@@ -759,6 +782,7 @@ impl Inner {
                 offset,
                 size,
                 sha256,
+                ..
             } => {
                 let meta = Meta {
                     size: *size,
@@ -767,6 +791,10 @@ impl Inner {
                 };
                 (*from, *offset, meta, Some(*sha256))
             }
+        };
+        let copy = match read {
+            Read::Range { copy, .. } => copy.clone(),
+            Read::Object | Read::Headed(_) => None,
         };
         let Some(reservation) = self.reserve(meta.size) else {
             bump(&self.counters.fills_skipped);
@@ -790,8 +818,16 @@ impl Inner {
         let _ = live.send_replace(progress(0));
         while offset < meta.size {
             let want = self.config.fill_chunk.max(1).min(meta.size - offset);
-            let range = ByteRange::new(start + offset, want);
-            let chunk = self.upstream_get(from, range).await?;
+            let chunk = match &copy {
+                // A read of the copy that fails gives no bytes: the fill stops as `Short`.
+                Some(file) => read_piece(Arc::clone(file), start + offset, want)
+                    .await
+                    .unwrap_or_default(),
+                None => {
+                    let range = ByteRange::new(start + offset, want);
+                    self.upstream_get(from, range).await?
+                }
+            };
             if chunk.len() as u64 != want {
                 return Err(Stop::Short);
             }

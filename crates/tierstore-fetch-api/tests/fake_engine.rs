@@ -118,6 +118,28 @@ async fn a_wait_after_complete_answers_the_outcome_at_once() {
     assert_eq!(e.parked(&pack_id("p")), 0);
 }
 
+/// Asserts that `answer_parked` answers the waits parked now, counts them, and leaves the pack
+/// parking: the next wait parks instead of being answered at once. Catches an answer that ends
+/// the parking, as `complete` does.
+#[tokio::test]
+async fn answer_parked_answers_the_parked_waits_and_the_next_wait_parks() {
+    let e = FakeEngine::new();
+    e.park(pack_id("p"));
+    let sp = spec("p");
+    let mut first = Box::pin(e.wait(&sp, range(), JobId(1)));
+    assert!(first.as_mut().now_or_never().is_none());
+    let outcome = WaitOutcome::Eio { cell: 1 };
+    assert_eq!(e.answer_parked(&pack_id("p"), outcome), 1);
+    assert_eq!(first.await, outcome);
+    let mut next = Box::pin(e.wait(&sp, range(), JobId(2)));
+    assert!(
+        next.as_mut().now_or_never().is_none(),
+        "the next wait parks"
+    );
+    assert_eq!(e.parked(&pack_id("p")), 1);
+    assert_eq!(e.answer_parked(&pack_id("other"), WaitOutcome::Ready), 0);
+}
+
 #[tokio::test]
 async fn a_wait_whose_future_was_dropped_is_not_counted_by_complete() {
     let e = FakeEngine::new();
