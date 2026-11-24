@@ -5,10 +5,11 @@
 //! A start, in order: the runtime directory and the mount point are made; the runtime directory
 //! gets a table of tree numbers (afresh, or, for an NFS mount that outlives the server, the one the
 //! mount of this boot left, see [`Identity`]); the backing table an earlier release kept for a mount that is gone is removed; the
-//! core is made over the fill socket; the attachments the file holds are made again (the manifests
-//! are read through the fill socket); the thread is started that tells the cache which trees are
-//! attached, so that it drops the pins of any other, once the fill socket answers (`core/live.rs`:
-//! the start does not wait for it); and the control socket is bound.
+//! core is made, asking the node's cache and tree store by the reach it is given (`fills.rs`: the
+//! fill socket for `tierstore fs`, calls for the one process); the attachments the file holds are
+//! made again (the manifests the cache does not hold are asked of it); the thread is started that
+//! tells the cache which trees are attached, so that it drops the pins of any other, once the cache
+//! answers (`core/live.rs`: the start does not wait for it); and the control socket is bound.
 //!
 //! The pieces a process that takes a connection over also needs (the directories, the core over a
 //! table that was read, the control socket's error) are here too: `run.rs` calls them.
@@ -27,7 +28,7 @@ use super::backing;
 use super::config::FsSettings;
 use super::control::Control;
 use super::core::{self, Core};
-use super::fill_client::FillClient;
+use super::fills::Reach;
 use super::steps::Steps;
 use super::table::{TableError, TreeTable};
 
@@ -153,17 +154,15 @@ pub(super) fn create_mount_point(settings: &FsSettings) -> Result<(), StartError
 /// only on Linux (and in tests), since only the FUSE frontend has file handles.
 /// `count_lookups` is whether the core counts the lookups of its inodes (a frontend that is told
 /// when they are forgotten, FUSE), or drops a tree when it is detached (one that is not told).
+/// `reach` is how the core asks the node's cache and tree store.
 pub(super) fn core_of(
-    settings: &FsSettings,
+    (settings, reach): (&FsSettings, &Reach),
     table: TreeTable,
     mount_id: String,
     #[cfg(any(target_os = "linux", test))] generation: u32,
     count_lookups: bool,
 ) -> Result<Arc<Core>, StartError> {
-    let fills = Arc::new(FillClient::new(
-        settings.fill_socket.clone(),
-        settings.fetch_timeout,
-    ));
+    let fills = reach.core(settings);
     let clock = Arc::new(MonotonicClock::new());
     let mut steps = Steps::new(clock.clone());
     let core = Arc::new(Core::new(
@@ -248,14 +247,15 @@ impl Setup {
         Ok(())
     }
 
-    /// Does what a start does up to a frontend's mount. `count_lookups` is whether the core counts
-    /// the lookups of its inodes (a frontend that is told when they are forgotten, FUSE), or drops
-    /// a tree when it is detached (one that is not told).
+    /// Does what a start does up to a frontend's mount, with a core that asks the node's cache and
+    /// tree store by `reach`. `count_lookups` is whether the core counts the lookups of its inodes
+    /// (a frontend that is told when they are forgotten, FUSE), or drops a tree when it is detached
+    /// (one that is not told).
     ///
     /// # Errors
     /// [`StartError`]: why nothing was made.
     pub(super) fn start(
-        settings: &FsSettings,
+        (settings, reach): (&FsSettings, &Reach),
         count_lookups: bool,
         identity: Identity,
     ) -> Result<Self, StartError> {
@@ -277,7 +277,7 @@ impl Setup {
         #[cfg(any(target_os = "linux", test))]
         remove_stale(&settings.runtime_dir.join(backing::FILE))?;
         let core = core_of(
-            settings,
+            (settings, reach),
             table,
             mount_id.clone(),
             #[cfg(any(target_os = "linux", test))]

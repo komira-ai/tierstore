@@ -963,6 +963,12 @@ pub(super) fn exit_status(why: &Error) -> u8 {
     if why.downcast_ref::<LocalTierFailure>().is_some() {
         return 3;
     }
+    // The start of the mount of a build node's `fs` interface: 3 for a cache on a stacked file
+    // system, as `tierstore fs` says.
+    #[cfg(target_os = "linux")]
+    if let Some(start) = why.downcast_ref::<super::treefs::StartError>() {
+        return start.status();
+    }
     1
 }
 

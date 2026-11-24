@@ -671,7 +671,8 @@ fn the_fs_params_and_the_other_types_params_are_apart() {
     }
 }
 
-/// Asserts the line a start says of an `fs` interface it does not serve, and none without one.
+/// Asserts the line a start off Linux says of an `fs` interface it does not serve, and none without
+/// one.
 #[test]
 fn a_start_says_it_does_not_serve_the_fs_interface() {
     assert_eq!(not_served(None), None);
@@ -679,7 +680,7 @@ fn a_start_says_it_does_not_serve_the_fs_interface() {
     assert_eq!(
         not_served(Some(&fs)).as_deref(),
         Some(
-            "tierstore: the fs interface (mountpoint /run/tierstore/fs) is checked and not served by this release; `tierstore fs`, with its own [fs] table, serves the trees"
+            "tierstore: the fs interface (mountpoint /run/tierstore/fs) is checked and not served by this release on this system; `tierstore fs`, with its own [fs] table, serves the trees"
         )
     );
 }

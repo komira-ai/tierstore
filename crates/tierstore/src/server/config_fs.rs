@@ -1,7 +1,9 @@
 //! An `fs` interface: the settings of the trees of a build node as a file system (one FUSE mount on
 //! Linux, NFS on loopback on macOS) in the node's own file, as `docs/design/one-service.md` lays
-//! out. This release reads and checks them and serves nothing from them ([`not_served`]):
-//! `tierstore fs`, with its own `[fs]` table, still serves the trees.
+//! out. They are read and checked here; on Linux the start of the build node serves the mount from
+//! them (`treefs/interface.rs`), and off Linux this release serves nothing from them and says so
+//! (`not_served`). `tierstore fs`, with its own `[fs]` table, still serves the trees of a node
+//! whose file has no `fs` interface.
 //!
 //! ```toml
 //! [[interface]]
@@ -316,12 +318,13 @@ pub(in crate::server) fn fs_settings(
     Ok(Some(settings))
 }
 
-/// The line a start says when its file has an `fs` interface, which this release reads and checks
-/// and does not serve; none without one.
+/// The line a start off Linux says when its file has an `fs` interface, which this release reads
+/// and checks and serves only on Linux; none without one.
+#[cfg(any(not(target_os = "linux"), test))]
 pub(in crate::server) fn not_served(fs: Option<&FsSettings>) -> Option<String> {
     fs.map(|fs| {
         format!(
-            "tierstore: the fs interface (mountpoint {}) is checked and not served by this release; `tierstore fs`, with its own [fs] table, serves the trees",
+            "tierstore: the fs interface (mountpoint {}) is checked and not served by this release on this system; `tierstore fs`, with its own [fs] table, serves the trees",
             fs.mountpoint.display()
         )
     })

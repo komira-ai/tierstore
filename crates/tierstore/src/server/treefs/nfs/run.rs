@@ -52,6 +52,7 @@ use crate::server::handoff::{
 use crate::server::treefs::config::FsSettings;
 use crate::server::treefs::control::Control;
 use crate::server::treefs::core::Core;
+use crate::server::treefs::fills::Reach;
 use crate::server::treefs::start::{Identity, Setup, Signals, io};
 
 /// A patience that is a timer of `after`.
@@ -176,7 +177,7 @@ impl Running {
             }
             None => None,
         };
-        let setup = Setup::start(settings, false, Identity::Boot(epoch))?;
+        let setup = Setup::start((settings, &Reach::Socket), false, Identity::Boot(epoch))?;
         let reopened = setup.reopened;
         let listen = |source| NfsError::Listen {
             address: nfs.listen,

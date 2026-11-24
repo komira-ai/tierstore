@@ -916,6 +916,8 @@ There is no per-job disk quota (CEO, 2026-11-09). The node's disk is one pool, a
 This is the hard part: the filesystem server is in the path of every lookup and open of every running job, and, on macOS
 and on Linux 6.8 (no passthrough), of every read; on macOS also of every write if the core's views are built. Sections 7.1 to 7.4 are Linux (FUSE); 7.5 is NFS.
 
+In the one process ([one-service.md](one-service.md) 2.3, 3.5) these are the steps of a build node's start and stop whose file has an `fs` interface (`server/treefs/interface.rs`).
+
 ### 7.1 What makes it tractable, and what it needs (Linux)
 
 - **I1, derivable inode numbers** (6.3) and derivable view handles (6.6): any instance can answer any request of the

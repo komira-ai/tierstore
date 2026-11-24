@@ -36,7 +36,7 @@ use crate::{Backend, Clock, Proxy, SystemClock, TokioSleeper};
 use super::Drained;
 use super::bucket::created_at;
 use super::build_info::{COMMIT, VERSION};
-use super::cache_cli::{Fronts, open, serve_front};
+use super::cache_cli::{Fronts, OnSystem, open, serve_front};
 use super::cli::{Addresses, Error, build, probe_run_id, signals};
 use super::cli_reconcile::{reconcile, reconcile_gated};
 use super::cli_serve::open_gate;
@@ -112,9 +112,20 @@ pub(super) async fn serve_combined(
         trees_front: None,
         provider: None,
         put_ingest: None,
+        system: OnSystem::default(),
     };
     let (server, oci) = (built.server, built.oci);
-    serve_front(cache, server, oci, fronts, stop, ready, reconciling).await
+    // On the heap: the serving of a node is a large future, and a caller's stack is not.
+    Box::pin(serve_front(
+        cache,
+        server,
+        oci,
+        fronts,
+        stop,
+        ready,
+        reconciling,
+    ))
+    .await
 }
 
 /// Runs the node until SIGTERM or SIGINT.
