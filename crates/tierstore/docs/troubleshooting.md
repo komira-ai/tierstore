@@ -5,7 +5,7 @@
 | Status | Meaning | The unit |
 |---|---|---|
 | 0 | a clean drain, or `--help` done | stays stopped |
-| 1 | a start that failed: an address in use, a key file refused after parsing, the settings that depend on each other (see "Messages at start"), and a hot tier that cannot be reached when the proxy is opened (`opening the proxy: ...`). A cold store that cannot be reached is not one: tierstore does not test its stores | restarts after 30 seconds |
+| 1 | a start that failed: an address in use, a key file refused after parsing, the settings that depend on each other (see "Messages at start"), and a hot tier that cannot be reached when the proxy is opened (`opening the proxy: ...`). A cold store that cannot be reached is not one: tierstore does not test its stores | restarts after 30 seconds under `tierstore.service` (5 starts in an hour), after 2 seconds under the template `tierstore@.service` (5 starts in 60 seconds) |
 | 2 | a flag the parser refused (or a flag of the data path that went, which the message answers with its key), a start without `--config`, a file that does not load (`conditional_delete = false` for a `memory` or `dir` tier among it), a limit of the OCI front (its prefix, its certificate and key, see "OCI front"), a local cache budget the file system cannot hold (see "Build-node cache"), or two keys with one id | does not restart: a restart cannot mend it |
 | 3 | the cache directory, once opened, could not be probed or its file system failed the cache check (a build node, or a node with `[local_cache]`) | does not restart: the same file system would answer the same way |
 
@@ -13,7 +13,7 @@ Messages go to stderr, prefixed `tierstore: `, and so to the journal: `journalct
 
 ## Messages at start
 
-Settings that depend on each other. These are checked after the file has parsed, and a start that fails one exits with status 1, not 2, so the unit starts again every 30 seconds until the value is fixed:
+Settings that depend on each other. These are checked after the file has parsed, and a start that fails one exits with status 1, not 2, so the unit starts again until the value is fixed or its start limit is reached (`tierstore.service`: every 30 seconds, 5 starts in an hour; the template `tierstore@.service`: every 2 seconds, 5 starts in 60 seconds):
 
 ```message
 hot_store.low_water must be below hot_store.high_water
@@ -64,7 +64,7 @@ opening the proxy: <why>
 binding <address>: <why>
 ```
 
-tierstore does not test its stores at start. Opening the proxy reads and writes the hot tier's own state (its registration), so a hot tier that is down fails the start here with `opening the proxy: <why>`: check the endpoint, the network and the store; the unit tries again every 30 seconds. A cold store that is down does not fail a start: the first request that needs it fails (a client sees 503 `ServiceUnavailable`, see "Errors a client sees"). A store that does not meet what tierstore requires of it (see [operations](operations.md#what-tierstore-requires-of-a-store)) is not detected at all. `binding` is an address in use, or one that is not on this host. A server given several S3 or registry listen addresses (see [configuration](configuration.md)) starts only if it can bind every one: the message names the first that failed, and nothing is served.
+tierstore does not test its stores at start. Opening the proxy reads and writes the hot tier's own state (its registration), so a hot tier that is down fails the start here with `opening the proxy: <why>`: check the endpoint, the network and the store; the unit tries again, every 30 seconds under `tierstore.service` and every 2 seconds under the template `tierstore@.service`, up to its start limit. A cold store that is down does not fail a start: the first request that needs it fails (a client sees 503 `ServiceUnavailable`, see "Errors a client sees"). A store that does not meet what tierstore requires of it (see [operations](operations.md#what-tierstore-requires-of-a-store)) is not detected at all. `binding` is an address in use, or one that is not on this host. A server given several S3 or registry listen addresses (see [configuration](configuration.md)) starts only if it can bind every one: the message names the first that failed, and nothing is served.
 
 An address given twice exits 2 before anything is bound; the message names the entries and the address:
 
@@ -110,7 +110,7 @@ local_cache.budget: <N> bytes is more than the <M> bytes of the file system at <
 
 This exits 2 and the unit does not restart. Lower `local_cache.budget`, lower `local_cache.free_floor`, or give the cache a larger file system. A file system that does not report its size is not judged: the start prints a warning that the budget is not checked and goes on.
 
-A cache directory that cannot be created or locked (missing and cannot be made, not writable by the user the server runs as, or on a read-only mount) fails earlier with `opening the local cache at <path>: <why>` and exits 1, so the unit restarts every 30 seconds: create it and `chown` it to that user, or mount it read-write.
+A cache directory that cannot be created or locked (missing and cannot be made, not writable by the user the server runs as, or on a read-only mount) fails earlier with `opening the local cache at <path>: <why>` and exits 1, so the unit restarts (every 30 seconds under `tierstore.service`, every 2 seconds under the template, up to its start limit): create it and `chown` it to that user, or mount it read-write.
 
 The opened cache directory is then probed with a few files of its own:
 

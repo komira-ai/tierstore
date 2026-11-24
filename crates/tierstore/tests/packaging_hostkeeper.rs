@@ -15,11 +15,20 @@
 )]
 
 use std::collections::BTreeMap;
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use clap::Parser;
 use tierstore::server::cli::{Args, Cli};
+#[path = "packaging/unit_checks.rs"]
+mod unit_checks;
+
+use unit_checks::{
+    MOUNT_NAMESPACE_OPTIONS, grants_cap_sys_admin_alone, mount_namespace_options, values,
+    with_service_line,
+};
+
 use tierstore::server::update_hook::{
     Instance, LAUNCHD_PLIST, PACKAGE_RELEASE_BINARY, POLL_INTERVAL, PROBE_ATTEMPTS, READY_ATTEMPTS,
     SERVICE_BINARY, marker_path,
@@ -60,17 +69,6 @@ fn dir() -> PathBuf {
 /// The text of a file of the directory.
 fn read(file: &str) -> String {
     std::fs::read_to_string(dir().join(file)).unwrap_or_else(|e| panic!("{file}: {e}"))
-}
-
-/// The values of the `key=` lines of a unit, its `\` continuations joined.
-fn values(unit: &str, key: &str) -> Vec<String> {
-    let joined = unit.replace("\\\n", " ");
-    let prefix = format!("{key}=");
-    joined
-        .lines()
-        .filter_map(|line| line.strip_prefix(prefix.as_str()))
-        .map(str::to_owned)
-        .collect()
 }
 
 /// The value of the one `key=` line of a unit.
@@ -194,6 +192,85 @@ fn the_template_runs_the_installed_binary_with_flags_the_binary_parses() {
     assert_eq!(args.drain_deadline, None);
 }
 
+/// The example file `packaging/config.toml` copied into `scratch`, with each file it names under
+/// `/etc/tierstore` (the key files) made in `scratch` (a key of the form the process reads, mode
+/// 0600, each with an access key id of its own) and named there instead; the path of the copy.
+fn example_file_in(scratch: &Path) -> PathBuf {
+    let example = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packaging/config.toml");
+    let mut text = std::fs::read_to_string(example).expect("the example file");
+    let names = [
+        "access.key",
+        "daemons.key",
+        "hot.credentials",
+        "cold.credentials",
+    ];
+    for (index, name) in names.into_iter().enumerate() {
+        let on_host = format!("/etc/tierstore/{name}");
+        assert!(text.contains(&on_host), "{on_host}");
+        let key = scratch.join(name);
+        std::fs::write(&key, format!("KEYID{index}\nsecret-{name}-0123456789\n")).unwrap();
+        std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).unwrap();
+        text = text.replace(&on_host, &key.display().to_string());
+    }
+    let left: Vec<&str> = text
+        .lines()
+        .filter(|line| !line.trim_start().starts_with('#') && line.contains("/etc/tierstore/"))
+        .collect();
+    assert_eq!(left, Vec::<&str>::new(), "every file it names is made");
+    let file = scratch.join("config.toml");
+    std::fs::write(&file, text).unwrap();
+    file
+}
+
+/// Asserts that the binary itself takes the command line of both templates (hostkeeper's and the
+/// deb and rpm packages') and the example file: run with the words of `ExecStart=` after the
+/// program, the file `--config` names replaced by a copy of `packaging/config.toml` with its key
+/// files, and `--check-config` (which reads the file and the key files and binds nothing), it
+/// exits 0 and says nothing. And that a word of the command line the binary does not take fails
+/// the same run (status 2, naming it). It would catch a flag or a file the binary refuses, with
+/// which every start of an instance fails and the unit gives up after 5 starts in 60 s.
+#[test]
+fn the_binary_accepts_the_units_command_line_and_the_example_file() {
+    let scratch = tierstore_testkit::dir::TestDir::under(std::env::temp_dir(), "unit-check");
+    let file = example_file_in(scratch.path());
+    let check = |words: &[String]| {
+        let args: Vec<String> = words[1..]
+            .iter()
+            .map(|word| match word.as_str() {
+                "/etc/tierstore/config.toml" => file.display().to_string(),
+                other => other.to_owned(),
+            })
+            .chain(["--check-config".to_owned()])
+            .collect();
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_tierstore"))
+            .args(&args)
+            .output()
+            .expect("the binary runs");
+        (
+            out.status.code(),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    };
+    for (name, unit) in [(TEMPLATE, read(TEMPLATE)), ("package", package_template())] {
+        let words = exec_start(&unit);
+        assert!(
+            words.contains(&"/etc/tierstore/config.toml".to_owned()),
+            "{name}"
+        );
+        assert_eq!(
+            check(&words),
+            (Some(0), String::new(), String::new()),
+            "{name}"
+        );
+    }
+    let mut wrong = exec_start(&read(TEMPLATE));
+    wrong.push("--no-such-flag".to_owned());
+    let (code, stdout, stderr) = check(&wrong);
+    assert_eq!((code, stdout), (Some(2), String::new()));
+    assert!(stderr.contains("--no-such-flag"), "{stderr}");
+}
+
 /// Asserts that a process on Linux (or anywhere but macOS) with no drain key waits 10 s for the
 /// load balancers and 15 min for the requests in flight, which is the drain the template's
 /// `TimeoutStopSec=` is sized for. It would catch a default raised past the stop timeout, which
@@ -252,10 +329,13 @@ fn the_template_is_enabled_at_boot_with_a_private_state_directory() {
 
 /// Asserts that systemd stops an instance with SIGTERM after a timeout no shorter than the wait of
 /// the load balancers plus the deadline of the drain plus the 5 s the reconciler's lease release
-/// may take; that a failed start is tried again, except for the exit statuses 2 and 3, which a
-/// restart cannot mend; and that an exit 0, the end of a drain after a hand-over, is not a failure
-/// (`Restart=on-failure`). It would catch a SIGKILL of a drain in progress, and a drained
-/// instance that systemd starts again.
+/// may take; that a failed start is tried again after 2 s, except for the exit statuses 2 and 3,
+/// which a restart cannot mend, and given up after 5 starts in 60 s (the file system's values: a
+/// mount whose server is down holds its jobs' requests, so it comes back fast, and one that cannot
+/// come back lets systemd drop the descriptor store); and that an exit 0, the end of a drain after
+/// a hand-over, is not a failure (`Restart=on-failure`). It would catch a SIGKILL of a drain in
+/// progress, a drained instance that systemd starts again, and the S3 unit's 30 s and 5 in an hour
+/// left in the one unit.
 #[test]
 fn the_template_waits_for_the_drain_and_does_not_restart_a_clean_exit() {
     let unit = read(TEMPLATE);
@@ -267,8 +347,8 @@ fn the_template_waits_for_the_drain_and_does_not_restart_a_clean_exit() {
     assert!(timeout >= drain, "{timeout:?} is less than {drain:?}");
     assert_eq!(value(&unit, "Restart"), "on-failure");
     assert_eq!(value(&unit, "RestartPreventExitStatus"), "2 3");
-    assert_eq!(value(&unit, "RestartSec"), "30");
-    assert_eq!(value(&unit, "StartLimitIntervalSec"), "1h");
+    assert_eq!(value(&unit, "RestartSec"), "2");
+    assert_eq!(value(&unit, "StartLimitIntervalSec"), "60");
     assert_eq!(value(&unit, "StartLimitBurst"), "5");
 }
 
@@ -291,19 +371,29 @@ fn no_secret_is_on_the_templates_command_line_or_in_its_environment() {
     assert_eq!(environment.count(), 0);
 }
 
-/// Asserts that the template keeps the hardening of `tierstore.service`: no new privileges, a
-/// read-only file system, a private `/tmp`, no capability, and a system call filter.
+/// Asserts the hardening the template keeps without a mount namespace (docs/design/one-service.md
+/// section 2.2): no new privileges, a device filter that allows the standard pseudo devices and
+/// `/dev/fuse` alone, no namespace the process may make, the network families of its fronts, no
+/// real-time scheduling, no change of personality, no writable and executable memory, the native
+/// system calls of a service and of a mount alone, and a umask that keeps its files its own.
 #[test]
 fn the_template_is_hardened() {
     let unit = read(TEMPLATE);
     let wanted = [
         ("NoNewPrivileges", "yes"),
-        ("ProtectSystem", "strict"),
-        ("ProtectHome", "yes"),
-        ("PrivateTmp", "yes"),
-        ("PrivateDevices", "yes"),
-        ("CapabilityBoundingSet", ""),
-        ("SystemCallFilter", "@system-service"),
+        ("DevicePolicy", "closed"),
+        ("DeviceAllow", "/dev/fuse rw"),
+        ("RestrictNamespaces", "yes"),
+        ("RestrictAddressFamilies", "AF_UNIX AF_INET AF_INET6"),
+        ("RestrictRealtime", "yes"),
+        ("LockPersonality", "yes"),
+        ("MemoryDenyWriteExecute", "yes"),
+        ("SystemCallArchitectures", "native"),
+        (
+            "SystemCallFilter",
+            "@system-service @mount pidfd_open pidfd_getfd",
+        ),
+        ("UMask", "0077"),
     ];
     for (key, want) in wanted {
         assert_eq!(value(&unit, key), want, "{key}");
@@ -354,70 +444,141 @@ fn launchd_waits_for_the_drain() {
 /// The systemd template of `tierstore fs`.
 const FS_TEMPLATE: &str = "tierstore-fs@.service";
 
-/// The options of `tierstore@.service` that give a service a mount namespace of its own, from which
-/// a mount does not reach the host (`docs/design/virtual-build-fs.md` section 6.2): the unit of
-/// `tierstore fs` leaves each out.
-const LEFT_OUT: [&str; 9] = [
-    "PrivateDevices",
-    "PrivateTmp",
-    "ProtectSystem",
-    "ProtectHome",
-    "ProtectKernelTunables",
-    "ProtectKernelModules",
-    "ProtectKernelLogs",
-    "ProtectControlGroups",
-    "RestrictNamespaces",
-];
+/// Every systemd unit that makes or will make the node's FUSE mount: the template of hostkeeper's
+/// package, the template of the deb and rpm packages, and the unit of `tierstore fs`.
+fn mounting_units() -> [(&'static str, String); 3] {
+    [
+        (TEMPLATE, read(TEMPLATE)),
+        ("packaging/tierstore@.service", package_template()),
+        (FS_TEMPLATE, read(FS_TEMPLATE)),
+    ]
+}
 
-/// Asserts the diff of the unit of `tierstore fs` against `tierstore@.service`, as the design lists
-/// it: each option that gives a mount namespace of its own is in the S3 unit and not in this one;
-/// the mount's device, capability and system calls, the notify type, the start limit and the
-/// runtime directory are added with their values; the address families are the Unix ones alone;
-/// and the user, the privilege, memory and umask settings, the restart settings and the release
-/// link are the S3 unit's. It would catch an option left in that makes the mount invisible to the
-/// job runtime, and a capability the unit does not need.
+/// Asserts that no unit that makes the mount sets an option that gives the service a mount
+/// namespace of its own (docs/design/one-service.md section 2.2: the table's options and the path
+/// options), with any value: the template of hostkeeper's package, the template of the deb and rpm
+/// packages and the unit of `tierstore fs` set none. And that the check finds each of them: a copy
+/// of the template with `ProtectSystem=strict` added fails it, as does a copy with any other of
+/// the options. It would catch an option put back in the template, with which the mount the
+/// process makes stays in the service's own namespace and the job runtime and the next instance
+/// never see it.
 #[test]
-fn the_fs_template_differs_from_the_s3_template_as_the_design_lists() {
-    let (s3, fs) = (read(TEMPLATE), read(FS_TEMPLATE));
-    for key in LEFT_OUT {
-        assert_eq!(values(&s3, key).len(), 1, "the S3 unit has {key}");
-        assert!(
-            values(&fs, key).is_empty(),
-            "the unit of tierstore fs has {key}"
+fn the_unit_sets_no_option_that_makes_a_mount_namespace() {
+    for (name, unit) in mounting_units() {
+        assert_eq!(
+            mount_namespace_options(&unit),
+            Vec::<String>::new(),
+            "{name}"
         );
     }
-    let added = [
-        ("DeviceAllow", "/dev/fuse rw"),
-        ("CapabilityBoundingSet", "CAP_SYS_ADMIN"),
-        ("AmbientCapabilities", "CAP_SYS_ADMIN"),
-        (
-            "SystemCallFilter",
-            "@system-service @mount pidfd_open pidfd_getfd",
-        ),
-        ("FileDescriptorStoreMax", "1"),
-        ("FileDescriptorStorePreserve", "restart"),
-        ("Type", "notify"),
-        ("NotifyAccess", "main"),
-        ("StartLimitIntervalSec", "60"),
-        ("StartLimitBurst", "5"),
-        ("RuntimeDirectory", "tierstore-fs tierstore"),
-        ("RuntimeDirectoryPreserve", "yes"),
-        ("RestrictAddressFamilies", "AF_UNIX"),
-    ];
-    for (key, want) in added {
-        assert_eq!(value(&fs, key), want, "{key}");
-    }
-    // The default of `fs.handoff_wait` is 120 s (`DEFAULT_HANDOFF_WAIT` in the crate, not public
-    // to this test): a start that takes the mount over must not be cut by the unit's timeout.
-    let start_secs: u64 = value(&fs, "TimeoutStartSec")
-        .parse()
-        .expect("TimeoutStartSec is whole seconds");
-    assert!(
-        start_secs > 120,
-        "TimeoutStartSec is above the default fs.handoff_wait"
+    let template = read(TEMPLATE);
+    assert_eq!(
+        mount_namespace_options(&with_service_line(&template, "ProtectSystem=strict")),
+        ["ProtectSystem"]
     );
-    assert_ne!(value(&s3, "RestrictAddressFamilies"), "AF_UNIX");
+    for option in MOUNT_NAMESPACE_OPTIONS {
+        let copy = with_service_line(&template, &format!("{option}=yes"));
+        assert_eq!(mount_namespace_options(&copy), [option], "{option}");
+    }
+    let commented = with_service_line(&template, "#ProtectSystem=strict");
+    assert_eq!(mount_namespace_options(&commented), Vec::<String>::new());
+}
+
+/// Asserts that every unit that makes the mount grants `CAP_SYS_ADMIN`, the capability of the
+/// mount (docs/design/one-service.md section 2.1), and no other: the bounding and the ambient set
+/// are that one capability, as an account that is not root that gains no privilege by `execve`.
+/// And that the check finds each way to grant more: a second capability on the line, a second
+/// line that adds one, a bounding set of every capability but some, an ambient set left empty or
+/// left out, a service run as root or that may gain privileges, and a command run with raised
+/// privileges (`+`, `!`, `!!`, alone or after other prefixes), but not a `+` in an argument. It
+/// would catch a capability added to the template beyond the one the mount needs, and the
+/// capability dropped, with which the process cannot mount.
+#[test]
+fn the_unit_grants_cap_sys_admin_and_no_other() {
+    for (name, unit) in mounting_units() {
+        assert_eq!(grants_cap_sys_admin_alone(&unit), Ok(()), "{name}");
+    }
+    let template = read(TEMPLATE);
+    let bounding = "CapabilityBoundingSet=CAP_SYS_ADMIN\n";
+    let ambient = "AmbientCapabilities=CAP_SYS_ADMIN\n";
+    let defects = [
+        (
+            template.replace(
+                bounding,
+                "CapabilityBoundingSet=CAP_SYS_ADMIN CAP_NET_ADMIN\n",
+            ),
+            "CapabilityBoundingSet is {\"CAP_NET_ADMIN\", \"CAP_SYS_ADMIN\"}",
+        ),
+        (
+            with_service_line(&template, "AmbientCapabilities=CAP_NET_RAW"),
+            "AmbientCapabilities is {\"CAP_NET_RAW\", \"CAP_SYS_ADMIN\"}",
+        ),
+        (
+            template.replace(bounding, "CapabilityBoundingSet=~CAP_SYS_MODULE\n"),
+            "CapabilityBoundingSet=~CAP_SYS_MODULE keeps every capability but those",
+        ),
+        (
+            template.replace(ambient, "AmbientCapabilities=\n"),
+            "AmbientCapabilities is {}",
+        ),
+        (template.replace(ambient, ""), "AmbientCapabilities is {}"),
+        (
+            template.replace("User=tierstore\n", "User=root\n"),
+            "User is [\"root\"]",
+        ),
+        (
+            template.replace("NoNewPrivileges=yes\n", ""),
+            "NoNewPrivileges is not yes",
+        ),
+        (
+            with_service_line(&template, "ExecStartPre=+/usr/bin/true"),
+            "ExecStartPre=+/usr/bin/true runs with raised privileges",
+        ),
+        (
+            with_service_line(&template, "ExecStartPost=!!/usr/bin/true"),
+            "ExecStartPost=!!/usr/bin/true runs with raised privileges",
+        ),
+        (
+            with_service_line(&template, "ExecStartPre=-+/usr/bin/true"),
+            "ExecStartPre=-+/usr/bin/true runs with raised privileges",
+        ),
+        (
+            with_service_line(&template, "ExecStopPost= :!/usr/bin/true"),
+            "ExecStopPost= :!/usr/bin/true runs with raised privileges",
+        ),
+    ];
+    for (unit, why) in defects {
+        assert_ne!(unit, template);
+        assert_eq!(grants_cap_sys_admin_alone(&unit), Err(why.to_owned()));
+    }
+    // A `+` or `!` in an argument is not a prefix: the command runs as the unit's user.
+    let argument = with_service_line(&template, "ExecStartPre=-/usr/bin/test +x != y");
+    assert_eq!(grants_cap_sys_admin_alone(&argument), Ok(()));
+}
+
+/// Asserts that the template has what the unit of `tierstore fs` gives its process to make and
+/// keep the mount, with the same values (docs/design/one-service.md section 1.4): the device and
+/// the system calls of the mount, the descriptor store that keeps it across a restart, the start
+/// limit and restart wait that let a mount without a server fail fast, the runtime directories of
+/// the file system's state and of the mount point's parent, and the account, privilege, memory,
+/// umask and file limits the two units already shared. It would catch the template and the unit
+/// of `tierstore fs` drifting apart on what the mount needs, so that one process of the template
+/// cannot do what the unit of `tierstore fs` does.
+#[test]
+fn the_template_has_what_the_fs_unit_gives_the_mount() {
+    let (template, fs) = (read(TEMPLATE), read(FS_TEMPLATE));
     for key in [
+        "DeviceAllow",
+        "CapabilityBoundingSet",
+        "AmbientCapabilities",
+        "SystemCallFilter",
+        "FileDescriptorStoreMax",
+        "FileDescriptorStorePreserve",
+        "StartLimitIntervalSec",
+        "StartLimitBurst",
+        "RestartSec",
+        "RuntimeDirectory",
+        "RuntimeDirectoryPreserve",
         "User",
         "NoNewPrivileges",
         "MemoryDenyWriteExecute",
@@ -430,8 +591,36 @@ fn the_fs_template_differs_from_the_s3_template_as_the_design_lists() {
         "RestrictRealtime",
         "LimitNOFILE",
     ] {
-        assert_eq!(value(&fs, key), value(&s3, key), "{key}");
+        assert_eq!(value(&template, key), value(&fs, key), "{key}");
     }
+    assert_eq!(
+        value(&template, "RuntimeDirectory"),
+        "tierstore-fs tierstore"
+    );
+    assert_eq!(value(&template, "FileDescriptorStoreMax"), "1");
+}
+
+/// Asserts what the unit of `tierstore fs` has that the template has not: it is `Type=notify`
+/// (the process says `READY=1` once it serves the mount, so a unit ordered after it finds the
+/// mount there), with a start timeout above the 120 s default of `fs.handoff_wait` (a start that
+/// takes the mount over must not be cut by the unit's timeout), and its process has no network
+/// (`AF_UNIX` alone), where the template's serves S3.
+#[test]
+fn the_fs_template_is_a_notify_unit_on_unix_sockets_alone() {
+    let (template, fs) = (read(TEMPLATE), read(FS_TEMPLATE));
+    assert_eq!(value(&fs, "Type"), "notify");
+    assert_eq!(value(&fs, "NotifyAccess"), "main");
+    // The default of `fs.handoff_wait` is 120 s (`DEFAULT_HANDOFF_WAIT` in the crate, not public
+    // to this test).
+    let start_secs: u64 = value(&fs, "TimeoutStartSec")
+        .parse()
+        .expect("TimeoutStartSec is whole seconds");
+    assert!(
+        start_secs > 120,
+        "TimeoutStartSec is above the default fs.handoff_wait"
+    );
+    assert_eq!(value(&fs, "RestrictAddressFamilies"), "AF_UNIX");
+    assert_ne!(value(&template, "RestrictAddressFamilies"), "AF_UNIX");
 }
 
 /// Asserts that the units of `tierstore fs` and of the store process set `LimitNOFILE` to exactly
@@ -700,6 +889,35 @@ fn the_manifests_step_bounds_are_above_the_hooks_looks() {
         assert!(above_the_looks(secs), "{step} = {secs} s");
     }
     assert!(!above_the_looks(300));
+}
+
+/// The `ExitTimeOut` of the launchd job of `file`, in hostkeeper's package.
+fn exit_timeout(file: &str) -> Duration {
+    let Some(Plist::Integer(seconds)) = plist_of(file).get("ExitTimeOut").cloned() else {
+        panic!("{file}: ExitTimeOut is an integer");
+    };
+    Duration::from_secs(seconds.try_into().expect("not negative"))
+}
+
+/// Asserts that the manifest's bounds of `cutover` and `rollback`, the same on both systems, cover
+/// what those steps wait for on a Mac at the longest: the bootout of the file service's job (its
+/// `ExitTimeOut`), the bootout of the main job (its `ExitTimeOut`, 210 s), and the hook's looks
+/// for the release to serve and its probe. It would catch an `ExitTimeOut` raised past what the
+/// bound leaves room for, after which hostkeeper would kill a step that launchd and the hook were
+/// still within.
+#[test]
+fn the_manifests_cutover_and_rollback_cover_both_bootouts_and_the_looks() {
+    let looks = POLL_INTERVAL * (READY_ATTEMPTS + PROBE_ATTEMPTS);
+    let longest = exit_timeout("tierstore-fs.plist") + exit_timeout("tierstore.plist") + looks;
+    let bounds = step_bounds();
+    for step in ["cutover", "rollback"] {
+        let bound = Duration::from_secs(bounds[step]);
+        assert!(
+            bound > longest,
+            "{step}: {bound:?} is not above {longest:?}"
+        );
+    }
+    assert_eq!(exit_timeout("tierstore.plist"), Duration::from_secs(210));
 }
 
 /// Asserts that no unit and no launchd job of hostkeeper's package names a path inside

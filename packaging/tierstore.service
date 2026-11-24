@@ -9,6 +9,11 @@
 # section, so placing it starts nothing and `systemctl enable` has nothing to link; start it with
 # `systemctl start tierstore` once the files below are in place.
 #
+# It has no instances, no marker and no hand-over, and its ProtectSystem= and the options beside it
+# give the service a mount namespace of its own. A node that serves the trees as a file system runs
+# the template tierstore@.service instead, whose descriptor store and hand-over the file system
+# needs, and which leaves those options out (docs/design/one-service.md section 1.4).
+#
 # Edit config.toml (placed as /etc/tierstore/config.toml) before use: the address of the s3
 # interface (192.0.2.10 is a documentation address), the proxy id (keep it across restarts, and
 # give each process over the same tiers one of its own), the buckets, the endpoints
