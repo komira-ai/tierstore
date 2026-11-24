@@ -1,7 +1,9 @@
 //! The FUSE side of the process of `tierstore fs`: what a start checks and makes around the neutral
 //! start (`start.rs`). Linux only: the mount is a FUSE mount.
 //!
-//! A start, in order: the cache directory must be on a file system that is not stacked (the job's
+//! A start, in order: a mount of this file system that the kernel's table of mounts shows at the
+//! mount point, which no process serves at a fresh start, is aborted and detached, with no look
+//! at the mount point; the cache directory must be on a file system that is not stacked (the job's
 //! overlay above this mount must stay within the kernel's depth of stacking); the neutral start is
 //! done (`Setup`: a table of tree numbers afresh, the attachments made again, the thread started
 //! that tells the cache which trees are attached once its fill socket answers, the control socket
@@ -27,7 +29,7 @@ use super::backing::{self, Saved};
 use super::config::FsSettings;
 use super::control::Control;
 use super::core::Core;
-use super::fill_client::FillClient;
+use super::fills::Reach;
 use super::init_record::{self, Record};
 use super::locked;
 use super::put::carry;
@@ -43,14 +45,15 @@ use super::table::TreeTable;
 use crate::server::local_cache::SystemDisk;
 use crate::{MonotonicClock, SystemClock};
 
-/// Serves the put directory of `settings` from `core`, where `fs.put` is enabled: the stage opened
+/// Serves the put directory of `settings` from `core`, where `fs.put` is enabled, its puts asked by
+/// `reach`: the stage opened
 /// and its journal replayed, the hand-over of the process before taken over (`handed`, none for a
 /// fresh mount or a start after a crash), and the sweep started. `generation` numbers the handles.
 ///
 /// # Errors
 /// [`StartError::Put`] for a stage that cannot be used, [`StartError::Io`] for the sweep's thread.
 fn serve_put(
-    settings: &FsSettings,
+    (settings, reach): (&FsSettings, &Reach),
     core: &Core,
     generation: u32,
     handed: Option<Option<carry::Handed>>,
@@ -67,9 +70,8 @@ fn serve_put(
     )?;
     tracing::info!(?replayed, "tierstore fs: the put directory's stage is open");
     let clock = Arc::new(MonotonicClock::new());
-    let client = FillClient::for_puts(settings.fill_socket.clone(), put.commit_deadline);
     let uploader = Uploader::new(
-        Arc::new(client),
+        reach.puts(settings, put.commit_deadline),
         put.commit_deadline,
         clock.clone(),
         Arc::new(std::thread::sleep),
@@ -212,32 +214,32 @@ fn begin(settings: &FsSettings, discard: impl FnOnce()) -> Result<(), StartError
 }
 
 impl Running {
-    /// Does what a start does, up to and including the mount: the state of an earlier mount is
-    /// replaced, the control socket is bound and the mount is made.
+    /// Does what a start does, up to and including the mount, with a core that asks the node's
+    /// cache and tree store by `reach`: a mount of this file system that `kernel` shows at the
+    /// mount point is aborted and detached (no process serves it: nothing answered the hand-over
+    /// and the store held nothing), the state of an earlier mount is replaced, the control socket
+    /// is bound and the mount is made.
     ///
     /// # Errors
     /// [`StartError`]: why nothing was mounted.
-    pub(super) fn start(settings: &FsSettings) -> Result<Self, StartError> {
+    pub(super) fn start(
+        (settings, reach): (&FsSettings, &Reach),
+        kernel: &Kernel,
+    ) -> Result<Self, StartError> {
         let mut steps = Steps::new(Arc::new(MonotonicClock::new()));
-        begin(settings, || {
-            discard_dead_mount(
-                settings,
-                std::fs::metadata(&settings.mountpoint),
-                &Kernel::real(),
-            );
-        })?;
+        begin(settings, || discard_unserved(settings, kernel))?;
         let _ = steps.done("making the directories");
         let Setup {
             core,
             mount_id,
             _control: control,
             ..
-        } = Setup::start(settings, true, Identity::Fresh)?;
+        } = Setup::start((settings, reach), true, Identity::Fresh)?;
         let _ = steps.done("setting up the core and the control socket");
         // A hand-over left by an earlier mount names nothing of this one.
         carry::remove(&settings.runtime_dir)
             .map_err(io("removing the put directory's hand-over"))?;
-        serve_put(settings, &core, 1, None)?;
+        serve_put((settings, reach), &core, 1, None)?;
         let _ = steps.done("opening the put directory");
         let serving = Serving::mount(&core, settings)
             .map_err(io(format!("mounting {}", settings.mountpoint.display())))?;
@@ -247,7 +249,8 @@ impl Running {
         Ok(Self::of(core, settings, Parts { control, serving }))
     }
 
-    /// Serves the connection of `device`, which an earlier process set up and `prepared` describes:
+    /// Serves the connection of `device`, which an earlier process set up and `prepared` describes,
+    /// with a core that asks the node's cache and tree store by `reach`:
     /// no mount is made and no handshake is run, and nothing is asked of the mount point (it is the
     /// live mount, and the readers that would answer are not started yet). `control` is the control socket the earlier
     /// process gave over, or none to bind it afresh. `resend` asks the kernel for the requests the
@@ -256,12 +259,12 @@ impl Running {
     /// # Errors
     /// [`StartError`]: why the connection is not served.
     pub(super) fn adopt(
-        settings: &FsSettings,
+        (settings, reach): (&FsSettings, &Reach),
         prepared: Prepared,
         device: OwnedFd,
         (control, resend): (Option<std::os::unix::net::UnixListener>, bool),
     ) -> Result<Self, StartError> {
-        Self::adopt_as(settings, prepared, device, (control, resend), true)
+        Self::adopt_as((settings, reach), prepared, device, (control, resend), true)
     }
 
     /// [`Running::adopt`] of the connection of `device` taken in a hand-over, with the control
@@ -273,17 +276,23 @@ impl Running {
     /// # Errors
     /// As [`Running::adopt`].
     pub(super) fn take_over(
-        settings: &FsSettings,
+        (settings, reach): (&FsSettings, &Reach),
         prepared: Prepared,
         device: OwnedFd,
         control: std::os::unix::net::UnixListener,
     ) -> Result<Self, StartError> {
-        Self::adopt_as(settings, prepared, device, (Some(control), false), false)
+        Self::adopt_as(
+            (settings, reach),
+            prepared,
+            device,
+            (Some(control), false),
+            false,
+        )
     }
 
     /// [`Running::adopt`], with the readers and the control socket started when `reading`.
     fn adopt_as(
-        settings: &FsSettings,
+        (settings, reach): (&FsSettings, &Reach),
         prepared: Prepared,
         device: OwnedFd,
         (control, resend): (Option<std::os::unix::net::UnixListener>, bool),
@@ -298,7 +307,7 @@ impl Running {
             table,
         } = prepared;
         let core = core_of(
-            settings,
+            (settings, reach),
             table,
             record.mount_id.clone(),
             record.generation,
@@ -307,7 +316,7 @@ impl Running {
         let _ = steps.done("setting up the core");
         let handed = carry::read(&settings.runtime_dir)
             .map_err(io("reading the put directory's hand-over"))?;
-        serve_put(settings, &core, record.generation, Some(handed))?;
+        serve_put((settings, reach), &core, record.generation, Some(handed))?;
         // Taken over: a later start must not take it over again.
         carry::remove_or_say(&settings.runtime_dir);
         let _ = steps.done("opening the put directory");
@@ -487,45 +496,47 @@ impl Kernel {
         let info = std::fs::read_to_string(&self.mountinfo).unwrap_or_default();
         recover::connection_of(&info, mountpoint)
     }
-}
 
-/// Aborts and detaches the FUSE mount at `fs.mountpoint` if `probe`, the answer of a look at the
-/// mount point, says its connection is dead (`ENOTCONN`): what a process that was killed with no
-/// one holding the descriptor leaves. A mount that answers is not touched.
-fn discard_dead_mount(
-    settings: &FsSettings,
-    probe: std::io::Result<std::fs::Metadata>,
-    kernel: &Kernel,
-) {
-    if probe.is_err_and(|why| not_connected(&why)) {
-        discard_mount(settings, false, kernel);
+    /// The number of the connection of the mount of this file system (type `fuse.tierstore-fs`)
+    /// at `mountpoint`, if there is one.
+    pub(super) fn tierstore_connection_of(&self, mountpoint: &Path) -> Option<u64> {
+        let info = std::fs::read_to_string(&self.mountinfo).unwrap_or_default();
+        let fuse_type = format!("fuse.{}", super::serving::NAME);
+        let ours: String = info
+            .lines()
+            .filter(|line| {
+                let fstype = line
+                    .split_once(" - ")
+                    .map(|(_, after)| after.split(' ').next());
+                fstype == Some(Some(fuse_type.as_str()))
+            })
+            .map(|line| format!("{line}\n"))
+            .collect();
+        recover::connection_of(&ours, mountpoint)
     }
 }
 
-/// Whether `error` is the kernel's `ENOTCONN`: the answer of a mount whose connection has ended.
-fn not_connected(error: &std::io::Error) -> bool {
-    error.raw_os_error() == Some(rustix::io::Errno::NOTCONN.raw_os_error())
-}
-
-/// Detaches the FUSE mount at `fs.mountpoint`, after aborting its connection if `abort`: every
-/// request waiting on it then fails, and the mount point is free for a new mount.
-pub(super) fn discard_mount(settings: &FsSettings, abort: bool, kernel: &Kernel) {
+/// Aborts and detaches a mount of this file system (type `fuse.tierstore-fs`) that `kernel` shows
+/// at `fs.mountpoint`, as a fresh start finds one: no process serves it, since nothing answered
+/// the hand-over and the service manager's store held nothing. Every request waiting on it then
+/// fails, and the mount point is free for a new mount. The mount is found in the kernel's table of
+/// mounts and the mount point is not looked at: a `stat` of a mount whose descriptor a process
+/// holds and does not read waits for ever (`docs/design/one-service.md`, decision 2). A mount of
+/// another file system there is left.
+fn discard_unserved(settings: &FsSettings, kernel: &Kernel) {
     let detach = |path: &Path| {
         rustix::mount::unmount(path, UnmountFlags::DETACH).map_err(std::io::Error::from)
     };
-    discard_with(&settings.mountpoint, (kernel, abort), &detach);
+    discard_with(&settings.mountpoint, kernel, &detach);
 }
 
-/// [`discard_mount`] with the call that detaches a mount given.
-fn discard_with(
-    mountpoint: &Path,
-    (kernel, abort): (&Kernel, bool),
-    detach: &dyn Fn(&Path) -> std::io::Result<()>,
-) {
-    let Some(number) = kernel.connection_of(mountpoint) else {
+/// [`discard_unserved`] with the call that detaches a mount given. Neither a connection that
+/// cannot be aborted nor a mount that cannot be detached stops the start: each is said.
+fn discard_with(mountpoint: &Path, kernel: &Kernel, detach: &dyn Fn(&Path) -> std::io::Result<()>) {
+    let Some(number) = kernel.tierstore_connection_of(mountpoint) else {
         return;
     };
-    if abort && let Err(why) = recover::Connection::new(&kernel.connections, number).abort() {
+    if let Err(why) = recover::Connection::new(&kernel.connections, number).abort() {
         tracing::warn!("tierstore fs: cannot abort the connection {number}: {why}");
     }
     let shown = mountpoint.display();

@@ -7,6 +7,7 @@ use tsfuse::abi::InitFlags;
 use super::backing;
 use super::config::FsSettings;
 use super::fakedev::{self, Message};
+use super::fills::Reach;
 use super::init_record::{self, Record, RecordError};
 use super::ino;
 use super::run::{Prepared, Running};
@@ -25,7 +26,7 @@ fn left_behind(name: &str, resend: bool) -> (Rig, FsSettings) {
 /// A process over the connection of `device`.
 fn adopt(settings: &FsSettings, device: std::os::fd::OwnedFd, resend: bool) -> Running {
     let prepared = Prepared::load(settings).unwrap();
-    Running::adopt(settings, prepared, device, (None, resend)).unwrap()
+    Running::adopt((settings, &Reach::Socket), prepared, device, (None, resend)).unwrap()
 }
 
 /// Asserts that a reply answers the request `unique` with success.
@@ -227,7 +228,7 @@ fn a_takeover_that_cannot_read_the_state_says_what_and_serves_nothing() {
         cache_path: rig.dir.path().join("none"),
         ..settings
     };
-    let error = Running::adopt(&lost, prepared, device, (None, false))
+    let error = Running::adopt((&lost, &Reach::Socket), prepared, device, (None, false))
         .err()
         .unwrap();
     assert!(error.to_string().contains("fs.cache_path"), "{error}");

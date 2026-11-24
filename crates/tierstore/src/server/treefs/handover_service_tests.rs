@@ -11,6 +11,7 @@ use tokio::net::UnixListener;
 
 use super::config::FsSettings;
 use super::fakedev::{FakeDevice, instance, outcome, pair};
+use super::fills::Reach;
 use super::handover::{self, HandoverError, check_device, offered, take};
 use super::init_record::{self, Record};
 use super::ino;
@@ -50,7 +51,9 @@ fn one(name: &str) -> One {
     .unwrap();
     let (device, kernel) = pair();
     let prepared = Prepared::load(&settings).unwrap();
-    let running = Arc::new(Running::adopt(&settings, prepared, device, (None, false)).unwrap());
+    let running = Arc::new(
+        Running::adopt((&settings, &Reach::Socket), prepared, device, (None, false)).unwrap(),
+    );
     let manager = FakeManager::start(&rig.dir.path().join("old-manager.sock"));
     let store = Manager::new(Some(manager.socket().as_os_str()));
     let mount = offered(&running, &settings, store, |_| {});
@@ -100,7 +103,13 @@ async fn take_one(old: &One, prepare: Prepare<'_>) -> crate::server::handoff::In
 fn successor(old: &One, taken: &mut crate::server::handoff::Inherited) -> Running {
     let mount = taken.mount.take().expect("the mount");
     let prepared = Prepared::load(&old.settings).unwrap();
-    Running::take_over(&old.settings, prepared, mount.device, mount.control).unwrap()
+    Running::take_over(
+        (&old.settings, &Reach::Socket),
+        prepared,
+        mount.device,
+        mount.control,
+    )
+    .unwrap()
 }
 
 /// Asserts the reading of the device across the one hand-over: of twenty requests queued before
@@ -300,7 +309,13 @@ async fn a_successor_killed_after_ready_is_started_again_and_adopts_from_its_sto
     let stored = store.take_fds("FDSTORE=1\nFDNAME=fuse");
     let device = stored.into_iter().next().expect("the stored descriptor");
     let prepared = Prepared::load(&old.settings).unwrap();
-    let again = Running::adopt(&old.settings, prepared, device, (None, false)).unwrap();
+    let again = Running::adopt(
+        (&old.settings, &Reach::Socket),
+        prepared,
+        device,
+        (None, false),
+    )
+    .unwrap();
     assert_eq!(old.kernel.reply().unique, 1);
     drop(again);
 }
@@ -553,7 +568,9 @@ async fn a_failed_resume_is_told_and_an_unreachable_store_does_not_stop_the_give
     .unwrap();
     let (device, kernel) = pair();
     let prepared = Prepared::load(&settings).unwrap();
-    let running = Arc::new(Running::adopt(&settings, prepared, device, (None, false)).unwrap());
+    let running = Arc::new(
+        Running::adopt((&settings, &Reach::Socket), prepared, device, (None, false)).unwrap(),
+    );
     let nobody = Manager::new(Some(rig.dir.path().join("nobody-home").as_os_str()));
     let mount = offered(&running, &settings, nobody, note);
     (mount.quiesce)();
