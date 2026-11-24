@@ -16,6 +16,7 @@ use crate::tree_manifest::TreeDigest;
 
 use crate::server::local_cache::descriptors::Descriptors;
 
+use super::super::fills::Report;
 use super::super::locked;
 use super::Core;
 use super::blob::{FailLog, SAY_EVERY_MS};
@@ -152,7 +153,7 @@ impl Core {
             held: self.open_descriptors() as u64,
             short: self.open_files.short(),
         };
-        self.fills.report(report.line());
+        self.fills.report(Report::Descriptors(report));
         for line in self.lines.unsaid(self.now(), None) {
             tracing::warn!("{line}");
         }

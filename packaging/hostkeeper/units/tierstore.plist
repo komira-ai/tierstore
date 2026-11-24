@@ -25,10 +25,14 @@
   launchd sends SIGTERM on bootout. The process drains: /readyz says 503 for the settle of the
   drain (server.drain_lb_wait, 1 s on macOS: on loopback there is no load balancer to wait for), then it stops
   accepting and waits for requests in flight for at most the drain's deadline (server.drain_deadline,
-  60 s on macOS), and exits 0. ExitTimeOut (90 s) is the 1 s, the 60 s and a margin, so that launchd never
-  sends SIGKILL to a drain in progress. KeepAlive starts the process again whenever it exits while
-  the job is loaded, at most once in ThrottleInterval (30 s); a bootout unloads the job, so a stop
-  is a stop.
+  60 s on macOS), and exits 0. ExitTimeOut (210 s) is the job's of docs/design/one-service.md
+  (section 1.4): the 1 s and the 60 s of the drain, the 120 s at most of the unmount of the file
+  system that follows it when the process serves one (four steps of at most 25 s and 5 s to collect
+  a killed command), and a margin, so that launchd never sends SIGKILL to a drain or an unmount in
+  progress. KeepAlive starts the process again whenever it exits while the job is loaded, at most
+  once in ThrottleInterval (10 s: a hard NFS mount waits for its server, so the server comes back
+  fast); a bootout unloads the job, so a stop is a stop. AbandonProcessGroup is not set, so
+  launchd's kill of the job also kills a helper command the process left.
 
   crates/tierstore/tests/packaging_hostkeeper.rs parses this file and checks it against the hook
   and the binary.
@@ -52,9 +56,9 @@
   <key>KeepAlive</key>
   <true/>
   <key>ThrottleInterval</key>
-  <integer>30</integer>
+  <integer>10</integer>
   <key>ExitTimeOut</key>
-  <integer>90</integer>
+  <integer>210</integer>
   <key>ProcessType</key>
   <string>Standard</string>
   <key>Umask</key>

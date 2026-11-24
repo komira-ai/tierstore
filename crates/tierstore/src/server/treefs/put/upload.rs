@@ -1,6 +1,7 @@
-//! The upload of a commit: the fill socket's `put` request for the staged file, asked again with a
-//! jittered back-off while the answer says the upstream may take it later, until the commit's
-//! deadline (`fs.put.commit_deadline_secs`). The answer of the socket is one line of JSON:
+//! The upload of a commit: the `put` of the staged file ([`Fills::put`]: the fill socket's request,
+//! or the same put made in process), asked again with a jittered back-off while the answer says
+//! the upstream may take it later, until the commit's deadline (`fs.put.commit_deadline_secs`).
+//! The answer is one line of JSON, the socket's:
 //!
 //! ```text
 //! {"ok":true,"created":true}     Created
@@ -23,7 +24,7 @@ use serde::Deserialize;
 use super::commit::PutOutcome;
 use super::names::Sha256Digest;
 use crate::Clock;
-use crate::server::treefs::fill_client::FillClient;
+use crate::server::treefs::fills::Fills;
 
 /// The first pause before a put is asked again.
 const FIRST_PAUSE: Duration = Duration::from_millis(100);
@@ -90,8 +91,9 @@ pub(super) fn pause_before(tries: u32, sha256: &Sha256Digest) -> Duration {
 
 /// The upload of commits over the fill socket.
 pub(in crate::server) struct Uploader {
-    /// A client of the fill socket that does not wait for it itself: the waits are this one's.
-    client: FillClient,
+    /// What puts the file: a client of the fill socket that does not wait for it itself (the
+    /// waits are this one's), or the cache of this process.
+    client: Arc<dyn Fills>,
     /// The longest a try waits for its answer.
     most: Duration,
     /// The time the deadlines are told by, in milliseconds.
@@ -101,20 +103,15 @@ pub(in crate::server) struct Uploader {
 }
 
 impl Uploader {
-    /// Uploads over the socket at `socket`; each try waits for its answer until the deadline of
-    /// its commit, and no longer than `answer_timeout`.
+    /// Uploads by `client` (a client of the fill socket made by `FillClient::for_puts`, or the
+    /// cache of this process); each try waits for its answer until the deadline of its commit, and
+    /// no longer than `answer_timeout`.
     pub(in crate::server) fn new(
-        socket: &Path,
+        client: Arc<dyn Fills>,
         answer_timeout: Duration,
         clock: Arc<dyn Clock>,
         pause: Arc<dyn Fn(Duration) + Send + Sync>,
     ) -> Self {
-        let client = FillClient::pausing(
-            socket.to_owned(),
-            0,
-            answer_timeout,
-            Arc::new(std::mem::drop::<Duration>),
-        );
         Self {
             client,
             most: answer_timeout,

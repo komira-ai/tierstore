@@ -202,6 +202,12 @@ impl Hold {
         self.mode.subscribe()
     }
 
+    /// The receivers of the mode now.
+    #[cfg(test)]
+    pub(super) fn watchers(&self) -> usize {
+        self.mode.receiver_count()
+    }
+
     pub(super) fn new(standing: Standing) -> Self {
         let read_write = !matches!(standing, Standing::Waiting);
         Self {

@@ -79,8 +79,12 @@ fn the_refusal_is_the_loaders_and_the_put_file_is_judged_by_it() {
         .split_once(": ")
         .expect("the refusal names its key");
     let source = code().source;
-    assert!(source.contains(&format!("\"{key}\"")), "{key}");
     assert!(source.contains(&format!("\"{message}\"")), "{message}");
+    let place = key
+        .strip_suffix(".enabled")
+        .expect("the key of the table's switch");
+    let refusal = crate::server::treefs::put_off_linux(place).to_string();
+    assert_eq!(refusal, OFF_LINUX_REFUSAL);
     let on_linux = cfg!(target_os = "linux");
     assert_eq!(judged(loads(PUT_FILE, DEFAULTS), true, on_linux), None);
 }

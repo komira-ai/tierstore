@@ -50,7 +50,7 @@ pub(in crate::server) fn builders(_database: Database, name: &str) -> Found {
 }
 
 /// The mount point when the file leaves out `fs.mountpoint`.
-const DEFAULT_MOUNTPOINT: &str = "/run/tierstore/fs";
+pub(in crate::server) const DEFAULT_MOUNTPOINT: &str = "/run/tierstore/fs";
 
 /// The runtime directory when the file leaves out `fs.runtime_dir`: the `RuntimeDirectory=` of the
 /// unit.
@@ -122,28 +122,30 @@ struct File {
     fs: FsTable,
 }
 
-/// `[fs]`.
-#[derive(Debug, Deserialize)]
+/// `[fs]`, and the params of an `fs` interface (which leave out `fill_socket`, `cache_path` and
+/// `handoff_socket`: see `config_fs.rs`).
+#[derive(Debug, Default, Deserialize)]
 pub(in crate::server) struct FsTable {
-    mountpoint: Option<PathBuf>,
-    runtime_dir: Option<PathBuf>,
-    control_socket: Option<PathBuf>,
-    client_group: Option<String>,
-    owner: Option<String>,
-    fill_socket: Option<PathBuf>,
-    cache_path: Option<PathBuf>,
-    fetch_timeout: Option<Dur>,
-    threads: Option<u32>,
-    nfs: Option<NfsTable>,
-    handoff_socket: Option<PathBuf>,
-    handoff_wait: Option<Dur>,
-    recover_wait: Option<Dur>,
-    reattach_concurrency: Option<u32>,
-    tree_idle_secs: Option<u64>,
-    put: Option<PutTable>,
+    pub(in crate::server) mountpoint: Option<PathBuf>,
+    pub(in crate::server) runtime_dir: Option<PathBuf>,
+    pub(in crate::server) control_socket: Option<PathBuf>,
+    pub(in crate::server) client_group: Option<String>,
+    pub(in crate::server) owner: Option<String>,
+    pub(in crate::server) fill_socket: Option<PathBuf>,
+    pub(in crate::server) cache_path: Option<PathBuf>,
+    pub(in crate::server) fetch_timeout: Option<Dur>,
+    pub(in crate::server) threads: Option<u32>,
+    pub(in crate::server) nfs: Option<NfsTable>,
+    pub(in crate::server) handoff_socket: Option<PathBuf>,
+    pub(in crate::server) handoff_wait: Option<Dur>,
+    pub(in crate::server) recover_wait: Option<Dur>,
+    pub(in crate::server) reattach_concurrency: Option<u32>,
+    pub(in crate::server) tree_idle_secs: Option<u64>,
+    pub(in crate::server) put: Option<PutTable>,
 }
 
-/// What `tierstore fs` runs with.
+/// What the file system runs with: `tierstore fs`, from its `[fs]` table, or the `fs` interface
+/// of a build node's file.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::server) struct FsSettings {
     pub mountpoint: PathBuf,
@@ -153,7 +155,12 @@ pub(in crate::server) struct FsSettings {
     pub client_group: u32,
     /// The user and group id every entry reports.
     pub owner: (u32, u32),
-    pub fill_socket: PathBuf,
+    /// The fill socket the core asks for fills on: `fs.fill_socket` of `tierstore fs`; for an
+    /// `fs` interface, the node's own `local_cache.fill_socket` (or the one in its state
+    /// directory), none when the node has none, as a client whose socket is not there.
+    pub fill_socket: Option<PathBuf>,
+    /// The node's cache directory: `fs.cache_path`, or `local_cache.path` of an `fs` interface's
+    /// file.
     pub cache_path: PathBuf,
     pub fetch_timeout: Duration,
     pub threads: usize,
@@ -222,25 +229,27 @@ fn id_of(
     }
 }
 
-/// `user:group`, each a number or a name of this system, as two ids.
-fn owner_of(text: &str, lookup: Lookup<'_>) -> Result<(u32, u32), ConfigError> {
+/// `user:group`, each a number or a name of this system, as two ids; `key` is the key that holds
+/// it.
+fn owner_of(key: &str, text: &str, lookup: Lookup<'_>) -> Result<(u32, u32), ConfigError> {
     let mut parts = text.split(':');
     let (Some(user), Some(group), None) = (parts.next(), parts.next(), parts.next()) else {
-        return Err(not_two_parts(text));
+        return Err(not_two_parts(key, text));
     };
     if user.is_empty() || group.is_empty() {
-        return Err(not_two_parts(text));
+        return Err(not_two_parts(key, text));
     }
     Ok((
-        id_of("fs.owner", Database::User, user, lookup)?,
-        id_of("fs.owner", Database::Group, group, lookup)?,
+        id_of(key, Database::User, user, lookup)?,
+        id_of(key, Database::Group, group, lookup)?,
     ))
 }
 
-/// The refusal of an `fs.owner` that is not a user and a group joined by one colon.
-fn not_two_parts(text: &str) -> ConfigError {
+/// The refusal of an owner (the value of `key`) that is not a user and a group joined by one
+/// colon.
+fn not_two_parts(key: &str, text: &str) -> ConfigError {
     invalid(
-        "fs.owner",
+        key,
         format!(
             "must be user:group, two parts joined by one colon, each a number or a name of this \
              system, not {text:?}"
@@ -248,13 +257,68 @@ fn not_two_parts(text: &str) -> ConfigError {
     )
 }
 
+/// What the node gives the file system beside its table: the fill socket it asks for fills on,
+/// if any, and the cache directory it reads.
+struct Node {
+    fill_socket: Option<PathBuf>,
+    cache_path: PathBuf,
+}
+
 impl FsSettings {
-    /// The settings of `table`; `lookup` looks a group or user name up.
+    /// The settings of `table`, the `[fs]` table of the file of `tierstore fs`; `lookup` looks a
+    /// group or user name up.
     ///
     /// # Errors
     /// A [`ConfigError`] that names the key: one needed and left out, a path that is not
     /// absolute, an owner or a group that is not one, a value out of its range.
-    pub(super) fn of(table: FsTable, lookup: Lookup<'_>) -> Result<Self, ConfigError> {
+    pub(super) fn of(mut table: FsTable, lookup: Lookup<'_>) -> Result<Self, ConfigError> {
+        let (fill_socket, cache_path) = (table.fill_socket.take(), table.cache_path.take());
+        let node = move || {
+            let fill_socket = require("fs", "fill_socket", fill_socket)?;
+            let fill_socket = Some(absolute("fs.fill_socket", fill_socket)?);
+            let cache_path = require("fs", "cache_path", cache_path)?;
+            let cache_path = absolute("fs.cache_path", cache_path)?;
+            Ok(Node {
+                fill_socket,
+                cache_path,
+            })
+        };
+        Self::made("fs", table, node, lookup)
+    }
+
+    /// The settings of `table`, the params at `place` (`interface[2].params`) of an `fs`
+    /// interface of a build node whose cache directory is `cache_path` and whose own fill socket
+    /// is `fill_socket`; `lookup` looks a group or user name up. The table has no `fill_socket`,
+    /// `cache_path` or `handoff_socket` (the interface refuses them as params), so the hand-over
+    /// socket is `handoff.sock` in the runtime directory.
+    ///
+    /// # Errors
+    /// Those of [`FsSettings::of`] but the keys the node gives, each naming the param.
+    pub(in crate::server) fn of_interface(
+        place: &str,
+        table: FsTable,
+        (cache_path, fill_socket): (PathBuf, Option<PathBuf>),
+        lookup: Lookup<'_>,
+    ) -> Result<Self, ConfigError> {
+        let node = || {
+            Ok(Node {
+                fill_socket,
+                cache_path,
+            })
+        };
+        Self::made(place, table, node, lookup)
+    }
+
+    /// The settings of `table`, whose keys are named under `place` (`fs`, or the params of an
+    /// interface), with what `node` gives, which is asked where the `[fs]` table's own keys of
+    /// the node are checked, after the owner.
+    fn made(
+        place: &str,
+        table: FsTable,
+        node: impl FnOnce() -> Result<Node, ConfigError>,
+        lookup: Lookup<'_>,
+    ) -> Result<Self, ConfigError> {
+        let key = |name: &str| format!("{place}.{name}");
         let mountpoint = table
             .mountpoint
             .unwrap_or_else(|| PathBuf::from(DEFAULT_MOUNTPOINT));
@@ -267,24 +331,24 @@ impl FsSettings {
         let handoff_socket = table
             .handoff_socket
             .unwrap_or_else(|| runtime_dir.join(DEFAULT_HANDOFF_SOCKET));
-        for (key, socket) in [
-            ("fs.control_socket", &control_socket),
-            ("fs.handoff_socket", &handoff_socket),
+        for (name, socket) in [
+            ("control_socket", &control_socket),
+            ("handoff_socket", &handoff_socket),
         ] {
             let length = socket.as_os_str().len();
             if length > MOST_SOCKET_PATH {
                 let why = format!(
                     "is {length} bytes; the path of a Unix socket is at most {MOST_SOCKET_PATH}"
                 );
-                return Err(invalid(key, why));
+                return Err(invalid(&key(name), why));
             }
         }
         let handoff_wait = bounded(
-            "fs.handoff_wait",
+            &key("handoff_wait"),
             table.handoff_wait.map_or(DEFAULT_HANDOFF_WAIT, |dur| dur.0),
         )?;
         let recover_wait = bounded(
-            "fs.recover_wait",
+            &key("recover_wait"),
             table.recover_wait.map_or(DEFAULT_RECOVER_WAIT, |dur| dur.0),
         )?;
         let timeout = table
@@ -292,17 +356,17 @@ impl FsSettings {
             .map_or(DEFAULT_FETCH_TIMEOUT, |dur| dur.0);
         if timeout < MS || timeout > HOUR {
             let why = format!("{}ms is not between 1ms and 1h", timeout.as_millis());
-            return Err(invalid("fs.fetch_timeout", why));
+            return Err(invalid(&key("fetch_timeout"), why));
         }
         let threads = within(
-            "fs",
+            place,
             "threads",
             table.threads.unwrap_or(DEFAULT_THREADS),
             1,
             MOST_THREADS,
         )?;
         let reattach_concurrency = within(
-            "fs",
+            place,
             "reattach_concurrency",
             table
                 .reattach_concurrency
@@ -311,38 +375,38 @@ impl FsSettings {
             MOST_REATTACH_CONCURRENCY,
         )?;
         let tree_idle_secs = within(
-            "fs",
+            place,
             "tree_idle_secs",
             table.tree_idle_secs.unwrap_or(DEFAULT_TREE_IDLE_SECS),
             1,
             MOST_TREE_IDLE_SECS,
         )?;
-        let group = require("fs", "client_group", table.client_group)?;
-        let owner = require("fs", "owner", table.owner)?;
+        let group = require(place, "client_group", table.client_group)?;
+        let owner = require(place, "owner", table.owner)?;
+        let mountpoint = absolute(&key("mountpoint"), mountpoint)?;
+        let runtime_dir = absolute(&key("runtime_dir"), runtime_dir)?;
+        let control_socket = absolute(&key("control_socket"), control_socket)?;
+        let client_group = id_of(&key("client_group"), Database::Group, &group, lookup)?;
+        let owner = owner_of(&key("owner"), &owner, lookup)?;
+        let node = node()?;
         Ok(Self {
-            mountpoint: absolute("fs.mountpoint", mountpoint)?,
-            runtime_dir: absolute("fs.runtime_dir", runtime_dir)?,
-            control_socket: absolute("fs.control_socket", control_socket)?,
-            client_group: id_of("fs.client_group", Database::Group, &group, lookup)?,
-            owner: owner_of(&owner, lookup)?,
-            fill_socket: absolute(
-                "fs.fill_socket",
-                require("fs", "fill_socket", table.fill_socket)?,
-            )?,
-            cache_path: absolute(
-                "fs.cache_path",
-                require("fs", "cache_path", table.cache_path)?,
-            )?,
+            mountpoint,
+            runtime_dir,
+            control_socket,
+            client_group,
+            owner,
+            fill_socket: node.fill_socket,
+            cache_path: node.cache_path,
             fetch_timeout: timeout,
             threads: threads as usize,
-            handoff_socket: absolute("fs.handoff_socket", handoff_socket)?,
+            handoff_socket: absolute(&key("handoff_socket"), handoff_socket)?,
             handoff_wait,
             recover_wait,
             reattach_concurrency: reattach_concurrency as usize,
             tree_idle: Duration::from_secs(tree_idle_secs),
             allow_other: true,
-            nfs: NfsSettings::of(table.nfs, timeout)?,
-            put: put_config::of(table.put)?,
+            nfs: NfsSettings::of(place, table.nfs, timeout)?,
+            put: put_config::of(&key("put"), table.put)?,
         })
     }
 }

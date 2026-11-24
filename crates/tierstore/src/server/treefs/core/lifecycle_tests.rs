@@ -166,6 +166,41 @@ fn a_hold_waits_for_the_unpin_of_a_detach_decided_before_it() {
     assert_eq!(t.rig.upstream.asked("unpin").len(), 1);
 }
 
+/// Asserts that a hold that comes while the sweep of idle trees has its unpin in flight returns
+/// once that unpin is let through, and the sweep ends too: the sweep's drop of idle trees, which
+/// takes the lifecycle lock, does not wait for the hold that holds it while the hold waits for
+/// the sweep's unpins. Then, the hold let go, a lookup that attaches a tree is answered, as a job's
+/// is after a hand-over that did not complete. The two run on threads of their own, not scoped,
+/// so that a wait of each for the other fails the test and does not hang it.
+#[test]
+fn a_hold_during_the_idle_sweeps_unpin_returns_and_the_sweep_ends() {
+    let t = trees("tfs-life-hold-idle");
+    let core = &t.rig.core;
+    assert!(core.lookup(ino::TREES, &t.other).is_ok());
+    t.rig.clock.advance(TREE_IDLE);
+    t.rig.upstream.gate_verb("unpin");
+    let _go = OnDrop(|| t.rig.upstream.permit_verb("unpin", 1_000));
+    let sweeping = Arc::clone(core);
+    let sweep = std::thread::spawn(move || sweeping.detach_idle());
+    t.rig.upstream.wait_for_verb("unpin", 1);
+    let holding = Arc::clone(core);
+    let hold = std::thread::spawn(move || holding.hold(true));
+    // The hold has the lifecycle lock, and waits for the sweep's unpin.
+    until(|| core.is_held());
+    t.rig.upstream.permit_verb("unpin", 1);
+    until(|| hold.is_finished() && sweep.is_finished());
+    hold.join().unwrap();
+    assert_eq!(sweep.join().unwrap(), 1);
+    let unpins = t.rig.upstream.asked("unpin");
+    assert_eq!(unpins.len(), 1);
+    assert!(unpins[0].ends_with(&t.other), "{unpins:?}");
+    core.hold(false);
+    assert!(matches!(
+        core.lookup(ino::TREES, &t.fresh),
+        Ok(Looked::Found(_))
+    ));
+}
+
 /// Asserts that a detach takes the lock of the pins of each tree it frees and of no other: a run
 /// that attached nothing takes none, and a tree that another run still has takes none.
 #[test]

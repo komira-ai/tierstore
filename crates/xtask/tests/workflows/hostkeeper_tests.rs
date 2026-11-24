@@ -65,7 +65,7 @@ fn a_pull_request_builds_and_sums_the_linux_x86_64_package_and_never_signs_it_or
     for (build, condition) in BUILDS.iter().zip([
         None,
         Some(NOT_FOR_A_PULL_REQUEST),
-        Some(NOT_FOR_A_PULL_REQUEST),
+        Some(super::macos_farm::HOSTED_IF),
     ]) {
         let name = build.platform;
         assert_eq!(
@@ -94,7 +94,7 @@ fn a_pull_request_builds_and_sums_the_linux_x86_64_package_and_never_signs_it_or
     }
     assert_eq!(job_value(&doc, "sums", &["if"]).as_deref(), Some(SUMS_IF));
     assert!(SUMS_IF.contains(
-        "(github.event_name == 'pull_request' && needs.linux-arm64.result == 'skipped' && needs.macos-arm64.result == 'skipped')"
+        "(github.event_name == 'pull_request' && needs.linux-arm64.result == 'skipped' && needs.macos-arm64.result == 'skipped' && needs.macos-arm64-farm.result == 'skipped')"
     ));
     assert!(SUMS_INDEX.contains("--event \"$GITHUB_EVENT_NAME\""));
     assert_eq!(
@@ -116,7 +116,7 @@ fn a_main_or_manual_run_builds_the_macos_package_in_the_macos_job_and_its_index_
     // unit test of `release hostkeeper-index`.
     let mac = &BUILDS[2];
     assert_eq!(mac.platform, "macos-arm64");
-    assert_eq!(mac.job_if, Some(NOT_FOR_A_PULL_REQUEST));
+    assert_eq!(mac.job_if, Some(super::macos_farm::HOSTED_IF));
     let commands = build_commands(mac);
     let package = commands
         .iter()

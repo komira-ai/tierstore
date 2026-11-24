@@ -60,6 +60,7 @@ use super::cli::{
     Addresses, Error, OciSetup, S3Flags, oci_setup_of, open_tier, probe_run_id, signals,
 };
 use super::cli_serve::{Bound, bind_fronts, bind_s3, cut_note, stopped_by};
+use super::config::fs::not_served;
 use super::config_cache::CacheSettings;
 use super::drain::late_of;
 use super::fill_socket;
@@ -237,6 +238,9 @@ pub(super) async fn serve_cache(
         true,
     )?;
     config.oci_metrics = oci.as_ref().map(|setup| Arc::clone(&setup.metrics));
+    if let Some(line) = not_served(settings.fs.as_ref()) {
+        tracing::warn!("{line}");
+    }
     let run = probe_run_id(&settings.front.proxy_id, clock.now(), std::process::id());
     let cache = open(&settings.cache, &upstream, &disk, &run).await?;
     if settings.cache.write_through {

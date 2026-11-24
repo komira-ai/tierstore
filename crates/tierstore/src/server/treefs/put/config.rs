@@ -45,8 +45,8 @@ const DEFAULT_COMMITTED_TTL_SECS: u64 = 600;
 /// The most either TTL may be: a week.
 const MOST_TTL_SECS: u64 = 7 * 24 * 3600;
 
-/// `[fs.put]`.
-#[derive(Debug, Deserialize)]
+/// `[fs.put]`, and `params.put` of an `fs` interface.
+#[derive(Clone, Debug, Deserialize)]
 pub(in crate::server) struct PutTable {
     enabled: Option<bool>,
     prefixes: Option<Vec<String>>,
@@ -71,31 +71,37 @@ pub(in crate::server) struct PutConfig {
     pub commit_deadline: Duration,
 }
 
-/// A limit of the table: none, or a number of at least 1 (a limit of 0 would refuse everything).
-fn limit(key: &str, value: Option<u64>) -> Result<Option<u64>, ConfigError> {
+/// A limit of the table at `place`: none, or a number of at least 1 (a limit of 0 would refuse
+/// everything).
+fn limit(place: &str, key: &str, value: Option<u64>) -> Result<Option<u64>, ConfigError> {
     match value {
-        Some(0) => Err(invalid(&format!("fs.put.{key}"), "must be at least 1")),
+        Some(0) => Err(invalid(&format!("{place}.{key}"), "must be at least 1")),
         other => Ok(other),
     }
 }
 
-/// The settings of `table`: none when the table is left out or not enabled.
+/// The settings of `table`, whose keys are named under `place` (`fs.put`, or `params.put` of an
+/// interface): none when the table is left out or not enabled.
 ///
 /// # Errors
 /// A [`ConfigError`] that names the key: a prefix that is not a key prefix ending in `/` or is one
 /// the proxy keeps for itself, a stage directory that is not absolute, a limit of 0, a number out
 /// of its range, or a key needed when enabled and left out.
-pub(in crate::server) fn of(table: Option<PutTable>) -> Result<Option<PutConfig>, ConfigError> {
+pub(in crate::server) fn of(
+    place: &str,
+    table: Option<PutTable>,
+) -> Result<Option<PutConfig>, ConfigError> {
     let Some(table) = table else {
         return Ok(None);
     };
+    let key = |name: &str| format!("{place}.{name}");
     let limits = (
-        limit("max_object_bytes", table.max_object_bytes)?,
-        limit("max_dir_bytes", table.max_dir_bytes)?,
-        limit("max_dir_files", table.max_dir_files)?,
+        limit(place, "max_object_bytes", table.max_object_bytes)?,
+        limit(place, "max_dir_bytes", table.max_dir_bytes)?,
+        limit(place, "max_dir_files", table.max_dir_files)?,
     );
     let deadline = within(
-        "fs.put",
+        place,
         "commit_deadline_secs",
         table
             .commit_deadline_secs
@@ -104,14 +110,14 @@ pub(in crate::server) fn of(table: Option<PutTable>) -> Result<Option<PutConfig>
         MOST_COMMIT_DEADLINE_SECS,
     )?;
     let stage_ttl = within(
-        "fs.put",
+        place,
         "stage_ttl_secs",
         table.stage_ttl_secs.unwrap_or(DEFAULT_STAGE_TTL_SECS),
         LEAST_STAGE_TTL_SECS,
         MOST_TTL_SECS,
     )?;
     let committed_ttl = within(
-        "fs.put",
+        place,
         "committed_ttl_secs",
         table
             .committed_ttl_secs
@@ -122,28 +128,28 @@ pub(in crate::server) fn of(table: Option<PutTable>) -> Result<Option<PutConfig>
     if !table.enabled.unwrap_or(false) {
         return Ok(None);
     }
-    let prefixes = require("fs.put", "prefixes", table.prefixes)?;
+    let prefixes = require(place, "prefixes", table.prefixes)?;
     if prefixes.is_empty() {
         return Err(invalid(
-            "fs.put.prefixes",
+            &key("prefixes"),
             "is empty: no key could be written",
         ));
     }
     check_prefixes(&prefixes).map_err(|prefix| {
         invalid(
-            "fs.put.prefixes",
+            &key("prefixes"),
             format!("{prefix:?} is not a key prefix of names joined by `/` and ending in `/`"),
         )
     })?;
     if let Some(prefix) = prefixes.iter().find(|prefix| is_reserved(prefix)) {
         return Err(invalid(
-            "fs.put.prefixes",
+            &key("prefixes"),
             format!("{prefix:?} is under a prefix the proxy keeps for itself"),
         ));
     }
-    let stage_dir = require("fs.put", "stage_dir", table.stage_dir)?;
+    let stage_dir = require(place, "stage_dir", table.stage_dir)?;
     if !stage_dir.is_absolute() {
-        return Err(invalid("fs.put.stage_dir", "must be an absolute path"));
+        return Err(invalid(&key("stage_dir"), "must be an absolute path"));
     }
     let config = PutConfig {
         stage_dir,
@@ -161,13 +167,20 @@ pub(in crate::server) fn of(table: Option<PutTable>) -> Result<Option<PutConfig>
     #[cfg(not(target_os = "linux"))]
     {
         let _ = config;
-        return Err(invalid(
-            "fs.put.enabled",
-            "the put directory is served by the FUSE frontend (Linux) alone in this release",
-        ));
+        return Err(off_linux(place));
     }
     #[cfg(target_os = "linux")]
     Ok(Some(config))
+}
+
+/// The refusal, off Linux, of an enabled put directory of the table at `place`: only the FUSE
+/// frontend serves one.
+#[cfg(any(not(target_os = "linux"), test))]
+pub(in crate::server) fn off_linux(place: &str) -> ConfigError {
+    invalid(
+        &format!("{place}.enabled"),
+        "the put directory is served by the FUSE frontend (Linux) alone in this release",
+    )
 }
 
 #[cfg(test)]

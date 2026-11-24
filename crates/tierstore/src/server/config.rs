@@ -18,8 +18,8 @@
 //!
 //! The tables:
 //!
-//! - `[[interface]]`: the fronts, one entry each: `type = "s3"` or `type = "oci"`, and `params`
-//!   (see [`config_interface`](super::config_interface)). At least one `s3` entry is needed. A
+//! - `[[interface]]`: the fronts, one entry each: a `type` (`s3`, `oci`, `trees`,
+//!   `mount-provider` or `fs`) and `params` (see [`config_interface`](super::config_interface)). At least one `s3` entry is needed. A
 //!   build node serves the registry from its cache.
 //!   The keys of the release before, `server.listen` and the `[oci]` table, are still read and
 //!   make an `s3` and an `oci` interface (see [`config_interface`](super::config_interface)).
@@ -60,6 +60,8 @@ use super::config_cache::{CacheSettings, LocalCacheTable};
 use super::config_combined::{CombinedSettings, combined};
 #[path = "config_cold.rs"]
 pub(super) mod cold;
+#[path = "config_fs.rs"]
+pub(super) mod fs;
 use super::config_entry::entry_tuning;
 use super::config_handoff::handoff_of;
 use super::config_hot_only::{refuse_hot_keys, warn_retired_keys};
@@ -82,6 +84,7 @@ use super::listen::Addrs;
 use super::local_cache::trees::{TreesTable, check_trees};
 use super::lock::check_lock_path;
 use cold::ColdSettings;
+pub(super) use fs::Host;
 
 /// The key of each flag that the file holds, or held before the flags went: the flag's name
 /// without `--`, then the keys that stand for it, the first of them the one an error message
@@ -247,8 +250,9 @@ pub enum ConfigError {
 }
 
 /// What the run itself gives, beside the file: the flags of the drain, which a unit of the
-/// releases before still passes, and the directory the service manager made for the service.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// releases before still passes, the directory the service manager made for the service, and the
+/// system the file's names and paths are looked up in.
+#[derive(Clone, Debug, Default)]
 pub(super) struct PerRun {
     /// `--drain-lb-wait`, if given; the file's `server.drain_lb_wait` is refused beside it.
     pub drain_lb_wait: Option<Duration>,
@@ -257,6 +261,9 @@ pub(super) struct PerRun {
     /// The service's state directory (systemd's `STATE_DIRECTORY`), if the unit has one: where
     /// `server.handoff_socket` is by default (see [`config_handoff`](super::config_handoff)).
     pub state_dir: Option<PathBuf>,
+    /// Where an `fs` interface's user and group names and the file systems of its paths are looked
+    /// up (see [`fs`]): the system, or a test's.
+    pub host: Host,
 }
 
 /// What a tier is made of.

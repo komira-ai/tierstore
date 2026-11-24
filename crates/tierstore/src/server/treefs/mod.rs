@@ -49,9 +49,20 @@ mod config;
 pub(in crate::server) mod control;
 pub(in crate::server) mod core;
 mod fill_client;
+mod fills;
 mod groups;
+// The core's requests as calls of the cache and the tree store of this process: made by the start
+// of the one process's `fs` interface, a later change (docs/design/one-service.md, build plan P3).
 #[cfg(any(target_os = "linux", test))]
 mod handle;
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the start of the `fs` interface in the one process, which makes it, is a later change"
+    )
+)]
+mod in_process;
 mod ino;
 // The put directory: served by the FUSE frontend on Linux; its NFS frontend is a later change.
 #[cfg_attr(
@@ -116,13 +127,18 @@ mod steps;
 )]
 mod nfs;
 
-pub(super) use config::{FsSettings, load};
+pub(super) use config::{DEFAULT_MOUNTPOINT, FsSettings, FsTable, Lookup, load};
 #[cfg(test)]
-pub(super) use config::{FsTable, builders, from_text};
+pub(super) use config::{builders, from_text};
+pub(super) use groups::{Database, Found, system as system_names};
 #[cfg(target_os = "linux")]
 pub(super) use launch::serve;
+pub(super) use nfs::config::NfsTable;
 #[cfg(not(target_os = "linux"))]
 pub(super) use nfs::{NfsError, serve};
+pub(super) use put::config::PutTable;
+#[cfg(test)]
+pub(super) use put::config::off_linux as put_off_linux;
 #[cfg(target_os = "linux")]
 pub(super) use start::StartError;
 

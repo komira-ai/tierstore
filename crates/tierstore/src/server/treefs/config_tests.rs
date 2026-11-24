@@ -30,7 +30,7 @@ fn the_needed_keys_alone_give_the_defaults() {
         control_socket: PathBuf::from("/run/tierstore-fs/control.sock"),
         client_group: 2001,
         owner: (1000, 1001),
-        fill_socket: PathBuf::from("/run/tierstore/fill.sock"),
+        fill_socket: Some(PathBuf::from("/run/tierstore/fill.sock")),
         cache_path: PathBuf::from("/var/cache/tierstore"),
         fetch_timeout: Duration::from_secs(60),
         threads: 16,

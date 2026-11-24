@@ -41,6 +41,7 @@ use crate::tree_manifest::{
 use crate::{MAX_TREE_LIST_BYTES, TreeImage};
 
 use super::super::fill_client::{AskError, Place, PlacedTree, Until};
+use super::super::fills::Report;
 use super::super::ino;
 use super::super::tree::Tree;
 use super::fetched::Fetched;
@@ -274,7 +275,7 @@ impl Core {
             had
         };
         let flattened = flatten_in_waves(digest, MANIFESTS_AT_ONCE, fetch);
-        self.fills.report(fetched.counts().line());
+        self.fills.report(Report::Fetched(fetched.counts()));
         flattened.map(Tree::new).map_err(|why| {
             let gone = matches!(
                 &why,
@@ -359,7 +360,7 @@ impl Core {
         let first = !loaded.looked_into.load(Ordering::Acquire)
             && !loaded.looked_into.swap(true, Ordering::AcqRel);
         if first {
-            self.fills.report_started(path);
+            self.fills.report(Report::Started(path.to_owned()));
         }
     }
 

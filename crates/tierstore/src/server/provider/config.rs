@@ -8,15 +8,18 @@
 //! ```
 //!
 //! `params.socket` is needed: an absolute path of a file, at most as long as a Unix socket's path
-//! can be, and neither the hand-off socket nor the fill socket. `params.mountpoint` is the mount of
-//! `tierstore fs` on the node (its `fs.mountpoint`), under which the provider answers a source's
-//! directory: an absolute path, `/run/tierstore/fs` if left out. `params.fetch_timeout` bounds one
+//! can be, and neither the hand-off socket nor the fill socket. `params.mountpoint` is the node's
+//! file system mount, under which the provider answers a source's directory: an absolute path. In a
+//! file with an `fs` interface it is that interface's `mountpoint`, which it takes when left out and
+//! must equal when given (`config_fs.rs`); in a file without one it is the mount of `tierstore fs`
+//! on the node (its `fs.mountpoint`), `/run/tierstore/fs` if left out. `params.fetch_timeout` bounds one
 //! read of the store (a tree list, or the bytes of one file): longer than zero, `60s` if left out.
 //! The interface listens on no address and takes no other param; a file has at most one, and only
 //! a build node's file has one, since the provider makes its trees in the node's tree store.
 
 use std::path::Path;
 
+use super::super::config::fs::refuse_fs_params;
 use super::super::config::{ConfigError, invalid, refuse, require};
 use super::super::config_combined::normalised;
 use super::super::config_handoff::MOST_SOCKET_PATH;
@@ -52,6 +55,7 @@ pub(in crate::server) fn provider_of(
     ];
     let why = "not for type \"mount-provider\": it listens on its socket alone";
     refuse(&place, why, &others)?;
+    refuse_fs_params(&place, "mount-provider", params)?;
     let socket = require(&place, "socket", params.socket.clone())?;
     let key = format!("{place}.socket");
     check_lock_path(&socket).map_err(|why| invalid(&key, format!("{socket:?} {why}")))?;

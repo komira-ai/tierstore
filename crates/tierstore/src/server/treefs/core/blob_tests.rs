@@ -53,7 +53,7 @@ fn rig_pausing(
     rig.core = Arc::new(
         Core::new(
             settings,
-            fills,
+            Arc::new(fills),
             TreeTable::create(&runtime).unwrap(),
             &runtime,
         )

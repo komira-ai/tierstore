@@ -178,8 +178,9 @@ fn a_cutover_whose_ports_fail_reports_the_port() {
 }
 
 /// Asserts that `verify` after the commit watches the promotion: it reads the build and says
-/// `promotion_pending` while the cache is read-only, and fails `wrong_build` or `not_ready`
-/// when the build is another or nothing answers.
+/// `promotion_pending` while the cache is read-only, fails `wrong_build` when the build is
+/// another, and defers `not_ready` when nothing answers `/readyz`. This is an intended change: a
+/// look not answered after the commit failed `not_ready`.
 #[test]
 fn verify_after_the_commit_watches_the_promotion() {
     let fake = SystemdFake::installed();
@@ -198,7 +199,34 @@ fn verify_after_the_commit_watches_the_promotion() {
     fake.lie(NEW, "9.9.9+0123456789ab");
     assert_failed(&fake.run(Verify, &p), Reason::WrongBuild);
     fake.mute(NEW);
-    assert_failed(&fake.run(Verify, &p), Reason::NotReady);
+    assert_deferred(&fake.run(Verify, &p), Reason::NotReady, 5);
+}
+
+/// Asserts the `verify` that hostkeeper runs again for a pending promotion after `cleanup`, while
+/// the old instance still drains and answers `/readyz` with 503 on the sockets the two share:
+/// that look defers `not_ready` with `verify_retry_secs`, not reversible, the update stays
+/// committed, and the next `verify` passes. Catches the update that failed at its `verify` after
+/// `cleanup` (`port 9300 does not answer /readyz`) while the new release served.
+#[test]
+fn verify_after_cleanup_defers_past_the_draining_503() {
+    let fake = SystemdFake::installed();
+    let p = params(NEW, Some(OLD));
+    fake.complete(&p);
+    assert!(fake.record().committed());
+    fake.set_read_only(true);
+    fake.answer_draining(1);
+    let done = fake.run(Verify, &p);
+    assert_deferred(&done, Reason::NotReady, 5);
+    assert_eq!(
+        detail(&done),
+        "port 9300 does not answer /readyz yet",
+        "{done:?}"
+    );
+    assert!(!done.report.reversible);
+    assert!(fake.record().committed());
+    let again = fake.run(Verify, &p);
+    assert_ok(&again);
+    assert!(again.report.promotion_pending);
 }
 
 /// Asserts that `verify` before the commit records `verified` and passes the pending promotion

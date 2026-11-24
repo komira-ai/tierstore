@@ -40,6 +40,7 @@ pub(super) const QUICK: PerRun = PerRun {
     drain_lb_wait: Some(Duration::from_millis(50)),
     drain_deadline: Some(Duration::from_secs(60)),
     state_dir: None,
+    host: crate::server::config::Host::SYSTEM,
 };
 
 /// A scratch directory with a key file in it.
@@ -212,6 +213,45 @@ async fn a_build_node_serves_the_upstream_through_its_cache() {
         .join(&name[2..4])
         .join(&name);
     assert_eq!(std::fs::read(file).unwrap(), pattern(1000));
+}
+
+/// Asserts that a build node whose file has an `fs` interface, which this release checks and does
+/// not serve, says so in one line on stderr naming the mount point, and serves its S3 front all
+/// the same.
+#[tokio::test]
+async fn a_build_node_with_an_fs_interface_serves_s3_and_mounts_nothing() {
+    let node = Node::new("tscache-cli-fs");
+    let mountpoint = node.cache_dir().with_file_name("mnt");
+    let fs = format!(
+        "[[interface]]\ntype = \"fs\"\n[interface.params]\nmountpoint = \"{}\"\nclient_group = \"1000\"\nowner = \"1000:1000\"\n\n",
+        mountpoint.display()
+    );
+    let text = format!("{fs}{}", node.text("", ""));
+    let settings = settings_from_text(&text, QUICK)
+        .unwrap()
+        .into_cache()
+        .unwrap();
+    assert_eq!(
+        settings.fs.as_ref().map(|fs| fs.mountpoint.clone()),
+        Some(mountpoint.clone())
+    );
+    let upstream: Arc<dyn Backend> = Arc::new(MemoryBackend::new());
+    let disk: Arc<dyn Disk> = Arc::new(SystemDisk);
+    let work = |addr: SocketAddr| async move {
+        let (status, text) = probe(addr, "/readyz").await;
+        assert_eq!((status, text.as_str()), (200, "ready read-write"));
+    };
+    let log = crate::server::treefs::testing::Logged::default();
+    let guard = crate::server::treefs::testing::logged(&log, tracing::Level::WARN);
+    let drained = serving(&settings, upstream, disk, work).await.unwrap();
+    drop(guard);
+    assert_eq!(drained, Drained { abandoned: 0 });
+    let said = format!(
+        "tierstore: the fs interface (mountpoint {}) is checked and not served by this release; `tierstore fs`, with its own [fs] table, serves the trees\n",
+        mountpoint.display()
+    );
+    assert!(log.text().contains(&said), "{}", log.text());
+    assert!(!mountpoint.exists());
 }
 
 /// Asserts that `run_cache` makes the upstream of the file (a memory tier here, empty) and

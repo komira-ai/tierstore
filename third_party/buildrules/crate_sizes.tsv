@@ -36,6 +36,8 @@ aws-smithy-schema 1.1.0 186792
 aws-smithy-types 1.9.1 122310
 aws-smithy-xml 0.60.15 26237
 aws-types 1.7.0 35574
+axum 0.8.9 180525
+axum-core 0.5.6 26769
 base64 0.22.1 81597
 base64 0.23.1 93605
 base64-simd 0.8.0 12531
@@ -126,6 +128,7 @@ httparse 1.10.1 45190
 httpdate 1.0.3 10639
 hybrid-array 0.4.15 36801
 hyper 1.12.0 172269
+hyper-timeout 0.5.2 19222
 hyper-util 0.1.21 126820
 icu_collections 2.3.0 87970
 icu_locale_core 2.3.0 80250
@@ -158,11 +161,13 @@ lsm-tree 3.1.10 182607
 lz4_flex 0.13.2 45699
 lzma-rs 0.3.0 29080
 matchers 0.2.0 7075
+matchit 0.8.4 33986
 md-5 0.10.6 16161
 md-5 0.11.0 17404
 memchr 2.8.3 99165
 miette 7.6.0 114499
 miette-derive 7.6.0 17249
+mime 0.3.18 16648
 minimal-lexical 0.2.1 94841
 miniz_oxide 0.9.1 70519
 mio 1.2.4 110437

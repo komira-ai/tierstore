@@ -1,0 +1,19 @@
+// The operation the Execution service streams (`cargo xtask mac-farm`). Names and field numbers
+// are Google's long-running operations API's (see remote_execution.proto in this directory tree for
+// why this is a part).
+syntax = "proto3";
+
+package google.longrunning;
+
+import "google/protobuf/any.proto";
+import "google/rpc/status.proto";
+
+message Operation {
+  string name = 1;
+  google.protobuf.Any metadata = 2;
+  bool done = 3;
+  oneof result {
+    google.rpc.Status error = 4;
+    google.protobuf.Any response = 5;
+  }
+}

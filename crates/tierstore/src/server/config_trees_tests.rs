@@ -156,7 +156,7 @@ fn a_trees_interface_is_refused_for_a_param_that_is_wrong() {
     // interface says it.
     assert_eq!(
         check("max_request_bytes = 1048576"),
-        "line 7, column 12: params: unknown field `max_request_bytes`, expected one of `port`, `addresses`, `tls_cert_file`, `tls_key_file`, `prefix`, `max_connections`, `connection_lifetime`, `require_auth`, `stage_read`, `max_manifest_bytes`, `read_chunk_bytes`, `echo_bytes`, `upstream`, `socket`, `mountpoint`, `fetch_timeout`"
+        "line 7, column 12: params: unknown field `max_request_bytes`, expected one of `port`, `addresses`, `tls_cert_file`, `tls_key_file`, `prefix`, `max_connections`, `connection_lifetime`, `require_auth`, `stage_read`, `max_manifest_bytes`, `read_chunk_bytes`, `echo_bytes`, `upstream`, `socket`, `mountpoint`, `fetch_timeout`, `owner`, `client_group`, `runtime_dir`, `control_socket`, `threads`, `handoff_wait`, `recover_wait`, `reattach_concurrency`, `tree_idle_secs`, `nfs`, `put`, `fill_socket`, `cache_path`, `handoff_socket`"
     );
     let clash = refusal(
         BUILD_NODE,

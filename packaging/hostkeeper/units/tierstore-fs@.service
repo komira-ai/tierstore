@@ -5,12 +5,12 @@
 # over its fill socket on the file's first open (docs/design/virtual-build-fs.md sections 6.2 to
 # 6.5, crates/tierstore/docs/configuration.md "[fs]").
 #
-# It is not the unit of tierstore@.service: that process parses requests from the network and must
-# not be able to mount, and this one parses the kernel's FUSE requests and tree manifests and has
-# no network. Every option of tierstore@.service that gives a service a mount namespace of its
-# own, from which a mount would not reach the host, is therefore left out: PrivateDevices,
-# PrivateTmp, ProtectSystem, ProtectHome, ProtectKernelTunables, ProtectKernelModules,
-# ProtectKernelLogs, ProtectControlGroups and RestrictNamespaces. What is added: DeviceAllow for
+# It is a unit of its own beside tierstore@.service, whose process serves the network: this one
+# parses the kernel's FUSE requests and tree manifests and has no network. Every option that gives
+# a service a mount namespace of its own, from which a mount would not reach the host, is left out,
+# as tierstore@.service leaves them out: PrivateDevices, PrivateTmp, ProtectSystem, ProtectHome,
+# ProtectKernelTunables, ProtectKernelModules, ProtectKernelLogs, ProtectControlGroups, and the
+# path options; RestrictNamespaces= is left out too. What it has: DeviceAllow for
 # /dev/fuse; CAP_SYS_ADMIN as the only capability (the mount; the process asks the kernel for no
 # passthrough and registers no backing id, so it is for the mount alone); the system calls of
 # @mount, and pidfd_open and pidfd_getfd (the process takes the descriptor the service manager
@@ -24,9 +24,10 @@
 # limit of 5 in 60 s, after which the unit is left failed, systemd drops the store and the kernel
 # aborts the connection, so jobs fail instead of hanging; and two RuntimeDirectories, kept across
 # restarts: /run/tierstore-fs for its state and /run/tierstore, the parent of its mount point (the
-# process makes /run/tierstore/fs). What changes: RestrictAddressFamilies is AF_UNIX alone. What
-# stays: User, NoNewPrivileges, MemoryDenyWriteExecute, UMask, and the marker file, restart
-# settings and binary of the template (the copy the update hook puts at
+# process makes /run/tierstore/fs). What differs from tierstore@.service: RestrictAddressFamilies
+# is AF_UNIX alone, and the marker file. What is the same: User, NoNewPrivileges,
+# MemoryDenyWriteExecute, UMask, the restart settings and the binary of the template (the copy the
+# update hook puts at
 # /usr/local/libexec/tierstore/tierstore, which the account can run: the release inside
 # hostkeeper's package directory is root's alone). The hand-over between the two instances is done
 # by the processes themselves (`handoff-fs-v1`, on fs.handoff_socket in the runtime directory): a
@@ -35,8 +36,15 @@
 # An instance starts only when its marker file, /var/lib/tierstore/run-fs-%i, exists. The update
 # hook writes and removes it on a node where an instance of this unit runs (crates/tierstore/
 # docs/update-hook.md "The second unit"): it starts the instance of the other letter, which takes
-# the mount from the running one, and never stops the one that holds the mount. On a node where
-# none runs, an operator creates the marker for instance a once /etc/tierstore/fs.toml is there.
+# the mount from the running one, and never stops the one that holds the mount. The marker is
+# looked at twice: ConditionPathExists= at a start from inactive or failed, and ExecCondition= at
+# every start, the automatic restarts of Restart=on-failure included, for which systemd does not
+# evaluate the conditions of [Unit] again (ExecCondition= is systemd 243 or later). Its `+` runs
+# the test as root, as systemd tests the condition, whoever owns /var/lib/tierstore. A taker
+# whose take failed and whose marker the hook removed is therefore not started again: the
+# restart is skipped and the unit is left inactive, not failed. An instance that holds the mount
+# keeps its marker, and its restart after a crash goes on as before. On a node where none runs,
+# an operator creates the marker for instance a once /etc/tierstore/fs.toml is there.
 # The mount must be made before the job runtime starts: the runtime's unit names both letters,
 # Wants= and After= tierstore-fs@a.service tierstore-fs@b.service (packaging/README.md "A unit
 # that needs the mount"), as only the letter with its marker starts.
@@ -58,6 +66,7 @@ NotifyAccess=main
 User=tierstore
 RuntimeDirectory=tierstore-fs tierstore
 RuntimeDirectoryPreserve=yes
+ExecCondition=+/usr/bin/test -e /var/lib/tierstore/run-fs-%i
 ExecStart=/usr/local/libexec/tierstore/tierstore fs \
   --config /etc/tierstore/fs.toml
 KillSignal=SIGTERM

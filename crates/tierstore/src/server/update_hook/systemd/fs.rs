@@ -14,8 +14,9 @@
 //!   until it serves, and one stopped while its take is in progress that then completes leaves at
 //!   once, after the old instance has ended. An instance that failed to take the mount, or that a
 //!   rollback finds activating (it may be in a `Restart=on-failure` retry), has its marker removed
-//!   instead: systemd evaluates `ConditionPathExists=` on every start, automatic restarts
-//!   included, so with the marker gone the unit is not started again and the instance ends by
+//!   instead: the template tests for the marker with `ExecCondition=` at every start, automatic
+//!   restarts included (systemd evaluates `ConditionPathExists=` only at a start from inactive or
+//!   failed), so with the marker gone the next restart is skipped and the instance ends by
 //!   itself;
 //! - `next` is started only while `live` runs. A new instance that finds nobody to ask makes a
 //!   mount afresh, and over a mount that is held that is a collision: a `live` that is
@@ -322,7 +323,8 @@ pub(super) fn retire(c: &Ctx<'_, '_>, record: &Record) -> Result<Option<Instance
 ///   from `next`, which ends by itself; the step waits for that;
 /// - `next` is only activating (a start that failed and retries, or a take in progress): it is not
 ///   stopped, its marker goes so that it is not started again, and the step waits for it to end by
-///   itself: failed (the next run finds it holding nothing), or active after it took the mount
+///   itself: failed, or inactive once `ExecCondition=` skips its next restart (the next run finds
+///   it holding nothing), or active after it took the mount
 ///   (the next run takes the mount back);
 /// - `next` is failed or inactive: it holds nothing;
 /// - `live` is started when it does not run and nothing holds the mount.

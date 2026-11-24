@@ -3,7 +3,8 @@
 //!
 //! - the macOS build job builds it unsigned into `pkg/`, expands it and reads it back
 //!   ([`MACOS_PKG_COMMANDS`]), and uploads it as [`PKG_UNSIGNED`];
-//! - `sign-pkg` is the one job that holds the installer identity, on a push to main alone, in the
+//! - `sign-pkg` is the one job that holds the installer identity, on a push to main alone, after
+//!   whichever macOS build ran (hosted or on the farm, the same artifact), in the
 //!   environment `pkg-signing`, with `contents: read`, and runs no repository code: no checkout,
 //!   no cargo, exactly [`SIGN_PKG_COMMANDS`] and [`SIGN_PKG_CLEANUP`] ([`sign_pkg_problems`]);
 //! - `check-pkg` holds no secret and no environment, runs exactly [`CHECK_PKG_COMMANDS`] and
@@ -40,8 +41,9 @@ pub const PKG_ASSETS: &str = "assets-pkg-macos-arm64";
 /// signature to.
 pub const PKG_IDENTITY: &str = "Developer ID Installer: Komira AI, Inc. (U7RTX4XD3X)";
 
-/// The `if:` of `sign-pkg` and `check-pkg`: a push to main alone. It is never true for a pull
-/// request, so these macOS jobs are as much the beta stage of the release as the build job.
+/// The `if:` of `check-pkg`, and the part of `sign-pkg`'s (`macos_farm::SIGN_PKG_IF`, which also
+/// takes whichever macOS build ran): a push to main alone. It is never true for a pull request, so
+/// these macOS jobs are as much the beta stage of the release as the build job.
 pub const PKG_JOB_IF: &str = SIGN_IF;
 
 /// The `run:` commands of `sign-pkg`, in order. No checkout and no cargo: no repository code runs
@@ -164,7 +166,7 @@ pub fn sign_pkg_problems(job: Option<&Node>) -> Vec<String> {
     let mut problems = pkg_job_problems(
         "sign-pkg",
         job,
-        &["version", "macos-arm64"],
+        &["version", "macos-arm64", super::macos_farm::CALLER],
         &[(Some(PKG_UNSIGNED), Some("unsigned"))],
         &[(Some(PKG_SIGNED), Some("dist/"))],
         &[DOWNLOAD, UPLOAD],

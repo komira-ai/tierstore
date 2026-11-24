@@ -122,7 +122,7 @@ fn the_plist_runs_the_installed_binary_as_tierstore_and_its_exit_timeout_covers_
     assert_eq!(string(&job["GroupName"]), "_tierstore");
     assert_eq!(job["RunAtLoad"], Value::Bool(true));
     assert_eq!(job["KeepAlive"], Value::Bool(true));
-    assert_eq!(integer(&job["ThrottleInterval"]), 30);
+    assert_eq!(integer(&job["ThrottleInterval"]), 10);
     let exit_timeout = u64::try_from(integer(&job["ExitTimeOut"])).expect("positive");
     let drain = MACOS_DRAIN_SECS;
     assert!(
