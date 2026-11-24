@@ -416,3 +416,47 @@ async fn the_nfs_front_is_taken_by_its_address_and_a_mismatch_is_refused() {
         .collect();
     assert_eq!(copies, vec![(Front::Nfs, a)]);
 }
+
+/// Asserts that an offer asked for and checked without an answer ([`super::offered`]) is
+/// accepted only within the hand-off's wait: a running instance that reads the `ack` and never
+/// says `done` fails [`super::Offered::accept`] by naming its control socket, and does not hang the
+/// start. Catches the start of a switch that waits for ever on an old `tierstore` that stopped
+/// answering after the mount was taken.
+#[tokio::test(start_paused = true)]
+async fn an_offer_whose_done_never_comes_fails_its_accept_within_the_wait() {
+    use tokio::net::UnixListener;
+
+    use crate::server::handoff::wire;
+
+    let (_dir, path) = scratch();
+    let (listener, addr) = listening();
+    let control = UnixListener::bind(&path).unwrap();
+    let silent = tokio::spawn(async move {
+        let (stream, _) = control.accept().await.unwrap();
+        let _ = wire::recv(&stream).await.unwrap();
+        let lines = ["offer".to_owned(), format!("s3 {addr}")];
+        wire::send(&stream, &lines, &[std::os::fd::AsFd::as_fd(&listener)])
+            .await
+            .unwrap();
+        assert_eq!(wire::recv(&stream).await.unwrap().lines, ["ack"]);
+        // Holds the connection and says nothing.
+        std::future::pending::<()>().await;
+        drop(stream);
+    });
+    let handoff = Handoff {
+        socket: path.clone(),
+        wait: Duration::from_secs(5),
+    };
+    let want = Want {
+        s3: &[addr],
+        oci: &[],
+        nfs: &[],
+    };
+    let asked = super::offered(&handoff, &want).await.unwrap().unwrap();
+    let error = asked.accept().await.err().unwrap();
+    assert!(
+        matches!(&error, HandoffError::Timeout(at) if *at == path),
+        "{error}"
+    );
+    silent.abort();
+}

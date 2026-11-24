@@ -421,10 +421,8 @@ async fn take_mount_and_sockets(
     let taking = match service.take(stores).await {
         Ok(taking) => taking,
         Err(why) => {
-            if let Some(asked) = asked
-                && let Err(nak) = asked.refuse().await
-            {
-                tracing::warn!("tierstore: {nak}; the running instance takes the end for a nak");
+            if let Some(asked) = asked {
+                asked.refuse().await;
             }
             return Err(why.into());
         }

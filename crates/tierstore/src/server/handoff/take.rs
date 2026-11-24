@@ -437,15 +437,10 @@ impl Offered {
         Ok(inherited)
     }
 
-    /// Says `nak`: the running instance goes on as it was.
-    ///
-    /// # Errors
-    /// What the system said of the `nak`; the running instance takes the end of the connection for
-    /// one all the same.
-    pub(crate) async fn refuse(self) -> Result<(), HandoffError> {
-        wire::send(&self.stream, &["nak".to_owned()], &[])
-            .await
-            .map_err(HandoffError::io("refusing the offer"))
+    /// Says `nak`: the running instance goes on as it was. A `nak` that cannot be sent is not an
+    /// error: the connection ends here, which the running instance takes for one.
+    pub(crate) async fn refuse(self) {
+        let _ = wire::send(&self.stream, &["nak".to_owned()], &[]).await;
     }
 }
 

@@ -366,12 +366,21 @@ pub(super) async fn ask_sockets(
     s3: &[SocketAddr],
     oci: &[SocketAddr],
 ) -> Result<Option<Offered>, HandingError> {
-    if s3.len() + oci.len() > MAX_SOCKETS {
-        return Err(HandoffError::TooMany(s3.len() + oci.len()).into());
-    }
-    check_control_path(&handoff.socket)?;
+    before_asking(handoff, s3.len() + oci.len())?;
     let want = Want { s3, oci, nfs: &[] };
     Ok(offered(handoff, &want).await?)
+}
+
+/// What is checked before a running instance is asked for its sockets: that `sockets` fit in one
+/// message, and the directory of this start's own control socket ([`check_control_path`]).
+///
+/// # Errors
+/// [`HandoffError::TooMany`], or the control socket's path cannot be used.
+fn before_asking(handoff: &Handoff, sockets: usize) -> Result<(), HandingError> {
+    if sockets > MAX_SOCKETS {
+        return Err(HandoffError::TooMany(sockets).into());
+    }
+    Ok(check_control_path(&handoff.socket)?)
 }
 
 /// The sockets of both fronts, as every start with a hand-off gets them: with `handoff`, it first
@@ -411,10 +420,7 @@ pub(super) async fn bind_fronts(
         .as_ref()
         .map_or_else(Vec::new, |setup| setup.listen.clone());
     if let Some(handoff) = handoff {
-        if s3.len() + oci_addrs.len() > MAX_SOCKETS {
-            return Err(HandoffError::TooMany(s3.len() + oci_addrs.len()).into());
-        }
-        check_control_path(&handoff.socket)?;
+        before_asking(handoff, s3.len() + oci_addrs.len())?;
     }
     let want = Want {
         s3,

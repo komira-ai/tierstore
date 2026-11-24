@@ -44,7 +44,7 @@ async fn still_offers(control: &std::path::Path, s3: std::net::SocketAddr) {
         .await
         .unwrap()
         .expect("the old tierstore answers");
-    asked.refuse().await.unwrap();
+    asked.refuse().await;
 }
 
 /// Asserts that the switch checks the old `tierstore`'s offer of its sockets before it accepts the
