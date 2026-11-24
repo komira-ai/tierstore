@@ -11,6 +11,8 @@ the owner's decisions and sets out the macOS frontend (C9, decided 2026-11-10: N
 
 **The `fuser` crate was replaced by `tsfuse`** (row T-R of `docs/design/fetch-cache-serve.md`): the Linux frontend speaks the FUSE protocol through `tsfuse`, the FUSE library of this repository, which serves an initialised connection without a handshake and sends `FUSE_NOTIFY_RESEND` itself, and the `fuser` fork is retired. Where this document speaks of the `fuser` crate or its patch (sections 3, 6.2, 7.1 and the plan of section 12), it records the design as built before that change.
 
+**One process, one unit, one configuration file** (the owner's decision of 2026-11-23, design in [one-service.md](one-service.md)): the file system becomes the `[[interface]]` of type `fs` of the build node's `tierstore`, and `tierstore fs` as a process of its own, its unit or launchd job, `fs.toml`, the fill socket between the two and the second hand-over go. Section 6.2 is rewritten for it, and decision C5 is reversed. Where this document speaks of `tierstore fs` as a process, of the fill socket, of `fs.toml` or of the hand-over of `tierstore fs` (sections 5, 6.3, 6.5, 6.8, 7, 8 and 12), it describes what is built today, which the pull requests of one-service.md section 6 change.
+
 **What this document starts from.** An earlier proposal, built on researched findings, preceded it and recommended: one tierstore
 filesystem core in Rust with thin frontends (FUSE with passthrough on Linux, an NFSv4.0 loopback server on macOS, FSKit
 later); the per-job writable layer, copy-up included, in that core; pinning of a job's tree in the local cache; and three
@@ -232,7 +234,7 @@ Non-goals:
 | Lazy Merkle expansion, one directory level on first access [S6] | **Changed: metadata eager per tree, data lazy** | A directory expanded on first access gets an inode number that depends on the order of lookups, which a restarted process cannot recover. Flattening a tree when it is first attached keeps numbers derivable; its cost is spike SP4 (6.3, D7). |
 | Pin the job's tree in the local cache; the evictor skips pinned; refcount per job tree, not per file | **Kept, designed** | Pins are kept by the cache's single writer, per attached tree, over the blobs the tree has opened, with a cap on pinned bytes (6.5). Correctness never depends on them: an evicted blob is fetched again (6.4). |
 | The per-job writable layer, copy-up included, lives in the core, so no overlayfs is needed | **Linux: changed, decided (C4 = A). macOS: kept, but possibly unnecessary** | On Linux a kernel overlayfs over a **read-only** FUSE tree keeps every job's writes on the node's disk, outside tierstore, in the directory both job runtimes already collect outputs from: tierstore holds no job data, a crash loses nothing, and the FUSE server stays read-only, which keeps its crash and update simplest (section 7). That composition works on 6.8 and on 7.0 (Measured: linux E4). The owner decided that the executor always overlays the mount and never writes into it. On macOS there is no overlay; the core's views (6.6) are the design only if a client needs a writable view that it cannot build itself, and the executor can (Measured: macos E18; 8). |
-| Linux: FUSE with passthrough (6.9+), `max_background` raised to about 1024 (the default of 12 wedged busy Buildbarn workers [S28]) | **Kept for kernels with passthrough; a mode without it for 6.8 (C8)** | Passthrough needs `CAP_SYS_ADMIN` in the initial user namespace of the calling process, not satisfied by uid 0 without the capability, by root in a user namespace, or by the opener of `/dev/fuse` (Measured: linux E10), which the network-facing tierstore process must not have, hence a separate filesystem process (6.2, C5). The kernel binds an inode to one backing file and forbids mixing passthrough and cached opens of one inode [S2], which shapes 6.4. The lab runs 6.8, which has no passthrough (the ioctl returns `ENOTTY`; Measured: linux E10): on it every read crosses the server (6.4). |
+| Linux: FUSE with passthrough (6.9+), `max_background` raised to about 1024 (the default of 12 wedged busy Buildbarn workers [S28]) | **Kept for kernels with passthrough; a mode without it for 6.8 (C8)** | Passthrough needs `CAP_SYS_ADMIN` in the initial user namespace of the calling process, not satisfied by uid 0 without the capability, by root in a user namespace, or by the opener of `/dev/fuse` (Measured: linux E10), which the network-facing tierstore process must not have, hence, in the design as first written, a separate filesystem process (6.2, C5; reversed on 2026-11-23: one process holds `CAP_SYS_ADMIN` only until it has mounted, [one-service.md](one-service.md) section 2). The kernel binds an inode to one backing file and forbids mixing passthrough and cached opens of one inode [S2], which shapes 6.4. The lab runs 6.8, which has no passthrough (the ioctl returns `ENOTTY`; Measured: linux E10): on it every read crosses the server (6.4). |
 | macOS: one NFSv4.0 loopback server, mounted once per node at a fixed path, a per-job view per run, Seatbelt `(subpath ...)` isolation | **Kept, with two additions and the frontend still open (C9)** | 8. Additions: the server also checks the caller's uid against the run (jobscheduler gives each run its own user), and handles are derivable so a restart is a pause (Measured: macos E16, with a patched demo server). NFSv4.0 could not be measured: no server was available (Measured: macos E12c). NFSv3 was measured and is slower and chattier than native by a large factor on metadata (8). |
 | FSKit later, as a third frontend behind a flag | **Changed (C3 reframed): an open candidate, blocked on signing** | No passthrough for file-backed volumes, interactive per-user enablement, and Apple's own statement that it is not yet suited to a network-backed filesystem [S20, S25]. On the farm Mac an ad-hoc signed extension with the FSKit entitlement is killed at exec, so it needs a team with the entitlement and one click in System Settings by the console user (8; Measured: macos E13). It is not set aside on the forum posts; it is measured against NFS once signing is available (C3). |
 | APFS `clonefile` as the fallback with no server | **Kept** | It is the executor's macOS path today and stays the default and the kill-switch (8). |
@@ -380,68 +382,56 @@ frontend through the `fuser` crate on Linux, the NFS frontend on macOS (C2), an 
 split of its FUSE code into a virtual layer plus FUSE and NFS adapters is the precedent [S5]. The core has more than one
 frontend from its first macOS release, so it is not a single-implementation abstraction (R9).
 
-Two processes on a build node, one binary, one package:
+**One process on a build node** (the owner's decision of 2026-11-23, which reverses C5; the design is
+[one-service.md](one-service.md)). The file system is an interface of the build node's `tierstore`: `[[interface]]`
+with `type = "fs"` in the node's one configuration file, whose `params` are what `fs.toml`'s `[fs]` table holds today
+(one-service.md section 1.2). It is allowed only on a build node (`[local_cache]` and `[cold_store]`, no `[hot_store]`),
+the shape that has a tree store. One unit on Linux (`tierstore@.service`, instances `a` and `b`), one launchd job on
+macOS.
 
-- **`tierstore`**, the build-node instance of today (`[local_cache]` in front of an upstream). It stays exactly as
-  hardened as it ships (read in code: `packaging/hostkeeper/units/tierstore@.service`: `User=tierstore`,
-  `PrivateDevices=yes`, an empty capability set). It gains a **fill socket**: a Unix socket in its runtime directory, mode
-  0600, its own user only, peer credentials checked as the hand-off socket checks them (`server/handoff/`). It accepts:
-  - `fill <sha256> <size> from <key> @ <offset>`: fetch that range from upstream, check that it hashes to `<sha256>`,
-    and publish it in the cache as the entry named by `<sha256>` (since the prefetch design, the same entry the object
-    `cas/l/<sha256>` has; earlier releases kept it under the reserved key `_tiering/fill/<sha256>`), then answer `ok`, or
-    the reason it did not (`upstream <status>`, `mismatch`, `no space`). The entry's sidecar says its origin: `span` for
-    a blob cut out of a pack, which the S3 front does not serve as the object `cas/l/<sha256>` (a `GET` or `HEAD` of
-    that key goes to the upstream), so a source fill is never visible to an S3 client as an object that was written
-    (`local_cache/names_tests.rs`: `span_entry_is_not_an_s3_object`). A request without `<size>` and source (a tree manifest, whose root size the attaching client
-    does not know) fills the whole object `cas/l/<sha256>`, up to the 64 MiB manifest limit.
-  - `touch <sha256> ...`: mark those blobs used now, for the cache's recency. Not answered; best effort.
-  - `pin <mount id> <tree> <sha256> ...`, `unpin <mount id> <tree>`, `pins-live <mount id> <trees>`: section 6.5. Each
-    is answered.
+- **Calls, not a socket.** The core asks the node's cache and tree store directly for what it asks over the fill socket
+  today: a source fill (`fill <sha256> <size> from <key> @ <offset>`: fetch that range from upstream, check that it hashes
+  to `<sha256>`, publish it as the cache entry of `<sha256>`, whose sidecar says its origin is `span`, so the S3 front never
+  serves it as the object `cas/l/<sha256>`; `local_cache/names_tests.rs`: `span_entry_is_not_an_s3_object`), the fill of a
+  whole tree manifest, `touch`, the pins of 6.5, the puts of the put directory, the placements of the mount provider and
+  the reports for the metrics. These fills keep their own pool of permits (`local_cache.fill_socket_concurrency`, default
+  16) and **wait** for one, up to `local_cache.fill_socket_wait`; they never take the S3 path's `max_concurrent_fills`
+  permits, which skip rather than wait (`local_cache/mod.rs`). While the cache is read-only (a successor of a hand-over
+  before it is the writer), a fill waits for the write role up to the interface's `fetch_timeout`.
+- **Privilege, Linux.** `CAP_SYS_ADMIN` is needed for the mount alone (passthrough is gone, head note). The unit grants it,
+  and the process makes the mount, or decides to take or adopt it, as the first thing it does, on its only thread, then
+  clears its effective, permitted, inheritable and ambient sets; it takes or adopts after that, and only then binds, accepts on or reads any network socket, or reads
+  a request of the mount; `NoNewPrivileges=yes` keeps it from coming back (one-service.md section 2.2). Mounting through
+  `fusermount3` instead was rejected: it needs `NoNewPrivileges=no` and a host-wide `user_allow_other` for the process's
+  whole life, and wins back no hardening (one-service.md section 2.1).
+- **Privilege, macOS:** none. The NFS export is on loopback and the mount is made by the account the job runs as, which
+  owns the mount point (Measured: macos E14).
+- **The unit** must make its mount in the host's mount namespace, so that the job runtime and the next instance see it.
+  Every option that gives a service a mount namespace of its own, from which a mount does not reach the host [S11], is
+  therefore left out: `PrivateDevices` (replaced by `DevicePolicy=closed` and `DeviceAllow=/dev/fuse rw`, a cgroup fence
+  with no namespace), `PrivateTmp`, `ProtectSystem`, `ProtectHome`, `ProtectKernelTunables`, `ProtectKernelModules`,
+  `ProtectKernelLogs` and `ProtectControlGroups`; `PrivateMounts` is not set. Kept: `User=tierstore`, `NoNewPrivileges`,
+  `RestrictNamespaces` (a system-call filter, not a namespace), `MemoryDenyWriteExecute`, `RestrictRealtime`,
+  `LockPersonality`, `UMask=0077`, the system-call filter (with `@mount`, `pidfd_open` and `pidfd_getfd` added),
+  `RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6`. Added: the descriptor store of 7.2 (`FileDescriptorStoreMax=1`,
+  `FileDescriptorStorePreserve=restart`), `Type=notify`, the runtime directories (`/run/tierstore-fs` for the state of 7.1,
+  `/run/tierstore` for the mount point's parent) kept across restarts, and the restart values of 7.2 (`RestartSec=2`,
+  `StartLimitBurst=5` within `StartLimitIntervalSec=60`). One-service.md section 2.3 has the table and section 2.4 what is
+  weaker than the two processes, and by how much.
 
-  The ranged fill of a blob inside a larger object is new cache code (the cache fills whole objects by key today,
-  `local_cache/fill.rs`). Fill-socket requests have their own pool of permits (`local_cache.fill_socket_concurrency`,
-  default 16) and **wait** for one, up to `fs.fetch_timeout`; they never take the S3 path's `max_concurrent_fills`
-  permits, which skip rather than wait (`local_cache/mod.rs`). The fill socket is bound only by the instance that holds
-  the cache lock (`local_cache/hold.rs`): a read-only instance fills nothing, so during a hand-over of this process the old
-  instance keeps answering fills through its drain, and the new one binds the socket in the tick in which it takes the
-  lock (7.3).
-- **`tierstore fs`**, new, a subcommand of the same binary with its own unit, `tierstore-fs@.service`, alternating
-  instances `a` and `b` as the S3 unit does (on macOS, a second launchd job). It runs as the same user as the cache, so it
-  can read the cache's files. On Linux it holds `CAP_SYS_ADMIN` as its only capability (to mount, and for passthrough's
-  `FUSE_DEV_IOC_BACKING_OPEN`, which checks `CAP_SYS_ADMIN` in the initial user namespace [S1], for open and for close, on the calling process; Measured: linux E10);
-  the capability is needed for passthrough only, so on 6.8 (no passthrough) mounting is all it is for. A server that requests passthrough without `CAP_SYS_ADMIN` gets `EIO` on every
-  open, not an error at mount, because the server's `BACKING_OPEN` is `EPERM`; so a server without the capability must not request `FUSE_PASSTHROUGH`. A user-namespace container cannot serve passthrough, and a process that only holds the
-  descriptor store needs no capability (Measured: linux E10). On macOS it needs no
-  privilege, because the NFS export is mounted at boot (8) and `mount_nfs` of a loopback export needs no root when the mount point is owned by the mounting user (Measured: macos E14). It has **no network**: on Linux `RestrictAddressFamilies=AF_UNIX`;
-  on macOS its NFS listener is bound to loopback (or a Unix socket, MP1) and it makes no outbound connection. It talks to
-  the node's tierstore over the fill socket only, and opens the cache's files read-only, at the path the cache's layout
-  gives the digest (`cas/l/<sha256>`) (`local_cache/layout.rs`: `name_of`, `data_path`).
+**Why one process.** A file system that is a second process is a second unit, a second configuration file whose keys must
+agree with the first by hand, a socket between the two, a second hand-over and a hook that stops one before the other. The
+reason for the split was to keep `CAP_SYS_ADMIN` out of the process that parses the network; with passthrough gone the
+capability is needed only to mount, so the one process holds it only until the mount is made, before it reads any input
+from the network or a job (one-service.md section 2). This replaces "Why two processes" and decision C5 of the earlier
+text, and the `fs` front of `docs/design/pluggable-interfaces.md` section 4 is again the design.
 
-The Linux unit of `tierstore fs` must make its mount in the host's mount namespace, so that the job runtime and the next
-instance see it. Every option of `tierstore@.service` that gives a service a mount namespace of its own, from which a mount
-does not reach the host [S11], is therefore left out: `PrivateDevices`, `PrivateTmp`, `ProtectSystem`, `ProtectHome`,
-`ProtectKernelTunables`, `ProtectKernelModules`, `ProtectKernelLogs`, `ProtectControlGroups` and `RestrictNamespaces`;
-`PrivateMounts` is not set. Added: `DeviceAllow=/dev/fuse rw`; `CapabilityBoundingSet=CAP_SYS_ADMIN` and
-`AmbientCapabilities=CAP_SYS_ADMIN`; `SystemCallFilter=@system-service @mount`; `Type=notify`, `NotifyAccess=main`,
-`FileDescriptorStoreMax=1`, `FileDescriptorStorePreserve=restart` (7.2); `StartLimitIntervalSec=60` and
-`StartLimitBurst=5` (the bound of 7.2); `RuntimeDirectory=tierstore-fs` with `RuntimeDirectoryPreserve=yes` for its
-state (7.1) and its control socket. Changed: `RestrictAddressFamilies=AF_UNIX` (the S3 unit also allows `AF_INET` and
-`AF_INET6`). Kept: `User=tierstore`, `NoNewPrivileges=yes`, `MemoryDenyWriteExecute=yes`, `UMask=0077`, and the
-template's instance marker and restart settings. The pull request that adds the unit lists its diff against
-`tierstore@.service` line by line; spike SP1 checks which of the left-out options a host-visible mount really needs, and
-that the mount survives a restart of the unit and is seen by the agent. What each left-out option protected, and what an
-attacker gains without it, is in C5.
-
-**Why two processes**, and not a front inside the one (the `type = "fs"` interface the configuration reserves,
-`crates/tierstore/docs/configuration.md`): the S3 process parses requests from the network and responses from upstream;
-giving it `CAP_SYS_ADMIN` would give anyone who finds a bug in those parsers the right to mount filesystems on the host.
-`tierstore fs` parses FUSE requests from the kernel and tree manifests that clients wrote; manifests are hash-checked
-before they are parsed and are size, depth and entry limited (6.1), and the process has no network and writes only its
-runtime directory and the views' upper directories. It is the one place where a manifest bug becomes a bug in a process
-that can mount; that trade is decision C5. This supersedes the `fs` front sketched in
-`docs/design/pluggable-interfaces.md` section 4, which put the mount in the S3 process and its descriptor in the S3
-hand-off; nothing relies on that sketch, and if this design is accepted the pull request that adds `tierstore fs`
-rewrites that paragraph and the `"fs"` row of `configuration.md` (P10).
+**What is built today** is still the two-process design, until the pull requests of one-service.md section 6 land:
+`tierstore fs`, a subcommand of the same binary with its own unit (`tierstore-fs@.service`, instances `a` and `b`) or
+launchd job (`tierstore-fs`), its own file (`fs.toml`, the `[fs]` table), holding `CAP_SYS_ADMIN` as its only capability
+with `RestrictAddressFamilies=AF_UNIX`, and talking to the node's `tierstore` over the fill socket (`local_cache.fill_socket`,
+a Unix socket, mode 0600, its own user only, bound only by the instance that holds the cache lock: `server/fill_socket/`).
+`crates/tierstore/docs/configuration.md` and `operations.md` describe it as it runs.
 
 **The FUSE protocol** is spoken through the `fuser` crate (MIT; kernel passthrough since 0.16, `BackingId::into_raw`,
 which lets a backing id outlive the process that made it, since 0.18 [S4]). Our code adds no `unsafe` (R2): the mount is
@@ -1473,8 +1463,8 @@ A general read/write interface of `tierstore fs`, which the owner wants separate
 ### 13.1 Decisions
 
 C1 to C3 are the decisions the earlier proposal asked for; C4 to C7 were this document's. On 2026-11-09 the owner answered C4 and C6, reframed C3, and
-the experiments of that day and the next settled C1 and C7 in effect. **C2 and C5 were not part of those decisions; their recommendations stand and the
-owner has not confirmed them.** Two decisions are open and new: the Linux kernel (C8) and the macOS frontend (C9). The original text of each decision is kept, with its status first.
+the experiments of that day and the next settled C1 and C7 in effect. **C2 and C5 were not part of those decisions; C2's recommendation stands and the
+owner has not confirmed it, and on 2026-11-23 the owner reversed C5 (one process).** Two decisions are open and new: the Linux kernel (C8) and the macOS frontend (C9). The original text of each decision is kept, with its status first.
 
 - **C1. Status: done.** MP1 to MP3 and MP5 were run on a farm Mac, in part (section 12). Original question: run the macOS probes (MP1 to MP5) on a farm Mac before any macOS work?
   - Recommendation: **yes.** Every macOS choice rests on them: the transport and who mounts (MP1), whether Seatbelt fences
@@ -1515,7 +1505,7 @@ owner has not confirmed them.** Two decisions are open and new: the Linux kernel
   - Original recommendation: **(A).** (Arm E, the views on Linux, is dropped from Q-B with this decision, 11.)
   - If (B): the views move into phase 1 (pull request 11 before 5), spike SP1 shrinks to the FUSE mount alone, and arm C
     of Q-B runs on the views.
-- **C5. A second process on Linux build nodes holding `CAP_SYS_ADMIN`, with no network?**
+- **C5. Status: reversed by the owner, 2026-11-23: one process, which holds `CAP_SYS_ADMIN` only until its mount is made and drops it before it reads any input from the network or a job ([one-service.md](one-service.md) section 2).** Original question: a second process on Linux build nodes holding `CAP_SYS_ADMIN`, with no network?
   - What an attacker who controls `tierstore fs` gains: `CAP_SYS_ADMIN` in the initial namespace is close to root. It can
     mount and bind-mount over any path of the host (a configuration file, a binary another service runs), change mount
     propagation, and use the other operations the capability gates (namespaces, some cgroup and kernel interfaces). The
@@ -1575,7 +1565,8 @@ owner has not confirmed them.** Two decisions are open and new: the Linux kernel
 - **D1.** tierstore's own tree manifest format, JSON, one object per directory, with blob sources; not REAPI. Why:
   tierstore stays generic, and only the client knows where a blob is (the executor's packs).
 - **D2.** The reserved front type `fs` is not used by `tierstore fs`; the pull request that adds it frees the name or uses
-  it for the `[fs]` table.
+  it for the `[fs]` table. Superseded by the reversal of C5: `type = "fs"` is the file system's interface, with the `[fs]` table as its params
+  ([one-service.md](one-service.md) section 1.2).
 - **D3.** One node-wide mount (Linux `/run/tierstore/fs`, macOS `/private/var/tierstore/fs`), trees at `trees/<digest>`,
   views at `views/<run>`, one owner per node on Linux (`fs.owner`, the action user's host id). Why: one connection or
   endpoint to hand over, no per-job mount to leak.
