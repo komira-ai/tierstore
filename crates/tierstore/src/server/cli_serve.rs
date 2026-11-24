@@ -18,8 +18,8 @@ use super::drain::late_of;
 use super::first_beat::wait_first_beat;
 use super::first_format::first_format;
 use super::handoff::{
-    Front, Handoff, HandoffError, Inherited, MAX_SOCKETS, Offer, Own, Socket, Want,
-    check_control_path, read_handed, take,
+    Front, Handoff, HandoffError, Inherited, MAX_SOCKETS, Offer, Offered, Own, Socket, Want,
+    check_control_path, offered, read_handed, take,
 };
 use super::listen::{bind_all_with, duplicates, local_addrs};
 use super::lock::Received;
@@ -344,6 +344,36 @@ pub(super) struct HandedOffer<'a> {
     pub(super) lock: Option<&'a std::path::Path>,
 }
 
+/// Sockets a start has already got before [`bind_fronts`].
+pub(super) enum Got<'a> {
+    /// The offer the image this start was executed from handed over.
+    Handed(HandedOffer<'a>),
+    /// The sockets of the running instance, already accepted: the start of a switch accepts them
+    /// once it holds the mount ([`ask_sockets`]).
+    Taken(Inherited),
+}
+
+/// The running instance's offer of its sockets, asked for on `handoff` and checked against `s3`
+/// and `oci`, and not yet answered (`None` where no instance answers): the start of a node whose
+/// file has an `fs` interface holds it while it takes the mount from the other process, so that it
+/// has checked both offers before it accepts either (`docs/design/one-service.md` section 4.2).
+/// The checks [`bind_fronts`] makes before it asks are made first.
+///
+/// # Errors
+/// As [`bind_fronts`], for what is found before the `ack`.
+pub(super) async fn ask_sockets(
+    handoff: &Handoff,
+    s3: &[SocketAddr],
+    oci: &[SocketAddr],
+) -> Result<Option<Offered>, HandingError> {
+    if s3.len() + oci.len() > MAX_SOCKETS {
+        return Err(HandoffError::TooMany(s3.len() + oci.len()).into());
+    }
+    check_control_path(&handoff.socket)?;
+    let want = Want { s3, oci, nfs: &[] };
+    Ok(offered(handoff, &want).await?)
+}
+
 /// The sockets of both fronts, as every start with a hand-off gets them: with `handoff`, it first
 /// takes the sockets of the instance that answers on the control socket, if their addresses are
 /// `s3` and the OCI setup's, and binds with `bind_own` (and binds the OCI front) only where none
@@ -351,7 +381,8 @@ pub(super) struct HandedOffer<'a> {
 /// and makes no control socket. With `handed` (a start executed by the image it replaces, on a
 /// Mac) the sockets, and the cache lock, are those of the offer that image handed over, checked as
 /// a taker checks an offer, and none is asked of a running instance; a control socket is then made
-/// as after a take. `s3` is every address the S3 front serves, in the order
+/// as after a take. With sockets already `Taken` (the start of a switch, [`ask_sockets`]) none is
+/// asked either. `s3` is every address the S3 front serves, in the order
 /// `bind_own` binds them: a node with a local cache adds loopback sockets to the configured ones.
 /// `backend` is what the OCI front reads from.
 ///
@@ -370,7 +401,7 @@ pub(super) struct HandedOffer<'a> {
 /// address cannot be read or that cannot be copied ([`HandingError::Sockets`]).
 pub(super) async fn bind_fronts(
     handoff: Option<&Handoff>,
-    handed: Option<HandedOffer<'_>>,
+    got: Option<Got<'_>>,
     s3: &[SocketAddr],
     bind_own: impl FnOnce() -> Result<Vec<TcpListener>, Error>,
     mut oci: Option<OciSetup>,
@@ -390,8 +421,9 @@ pub(super) async fn bind_fronts(
         oci: &oci_addrs,
         nfs: &[],
     };
-    let taken = match (handed, handoff) {
-        (Some(handed), _) => {
+    let taken = match (got, handoff) {
+        (Some(Got::Taken(inherited)), _) => Some(inherited),
+        (Some(Got::Handed(handed)), _) => {
             let own = Own {
                 control: None,
                 lock: handed.lock,

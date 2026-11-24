@@ -8,9 +8,15 @@
 //!
 //! 1. **Take** it from a running instance that answers `take-fs 1` on `handoff.sock` in the
 //!    runtime directory (`handover.rs`): a `tierstore fs` process of the two-process layout, or a
-//!    process of this layout, which answers there too. In the switch from two processes to one,
-//!    the start then takes the S3 and OCI sockets from the old `tierstore` with `take 1`, as any
-//!    start of a build node does: the mount comes from the process that holds it.
+//!    process of this layout, which answers there too. The mount comes from the process that holds
+//!    it, and the S3 and OCI sockets from the instance on `server.handoff_socket` (`take 1`): in
+//!    the switch from two processes to one these are two processes, and with one process they are
+//!    the same one. The start asks for the sockets first and checks their offer, holds it
+//!    unanswered while it takes the mount, and accepts it once the mount's instance has said `done`
+//!    and before that one is told `ready` (`cache_cli.rs`, `docs/design/one-service.md` section
+//!    4.2): both offers are checked before either is accepted, a mount that is not taken refuses
+//!    the sockets' offer, and sockets that cannot be taken leave the mount to its instance
+//!    ([`Taking::abandon`]).
 //! 2. Else **adopt** the descriptor the service manager kept under the name `fuse`.
 //! 3. Else **mount afresh**: a mount of this file system that the kernel's table of mounts shows
 //!    at the mount point has no server, and is aborted and detached, with no look at the mount
@@ -18,9 +24,9 @@
 //!
 //! A running instance that accepts on the socket and does not answer fails the start after
 //! `params.handoff_wait`, before anything is detached or mounted. The mount is served, and the
-//! instance it was taken from told `ready`, before the start takes the sockets of the fronts; the
-//! start then binds `handoff.sock` itself, and the service manager is told `READY=1` once the
-//! fronts serve too.
+//! instance it was taken from told `ready`, before the start binds a socket of a front; the start
+//! then binds `handoff.sock` itself, and the service manager is told `READY=1` once the fronts serve
+//! too.
 //!
 //! A start that fails once the mount is served (the hand-over socket, or a socket of a front, cannot
 //! be bound or taken) stops reading the connection and leaves the mount where it is, for the next
@@ -75,20 +81,27 @@ impl Service {
         Self { fs, platform }
     }
 
+    /// Whether the file has an `fs` interface.
+    pub(in crate::server) fn has_mount(&self) -> bool {
+        self.fs.is_some()
+    }
+
     /// Gets the mount of the `fs` interface, if the file has one: taken, adopted or made (see the
-    /// module), with a core that calls `cache` and `trees`, and serves it.
+    /// module), with a core that calls `cache` and `trees`; [`Taking::serve`] then serves it. A
+    /// mount that was taken is not read yet: the instance it was taken from has said `done` and not
+    /// yet `bye`, so a start that goes no further leaves it serving again ([`Taking::abandon`]).
     ///
     /// # Errors
-    /// [`StartError`]: why the mount is not served; nothing was detached or mounted when a running
+    /// [`StartError`]: why the mount is not got; nothing was detached or mounted when a running
     /// instance refused, did not keep to the protocol or did not answer in time.
-    pub(in crate::server) async fn start(
+    pub(in crate::server) async fn take(
         self,
         (cache, trees): (LocalCache, Option<TreeStore>),
-    ) -> Result<Served, StartError> {
+    ) -> Result<Taking, StartError> {
         let Self { fs, platform } = self;
         let manager = platform.manager.clone();
         let Some(settings) = fs else {
-            return Ok(Served {
+            return Ok(Taking {
                 manager,
                 mount: None,
             });
@@ -108,6 +121,34 @@ impl Service {
         })
         .await
         .unwrap_or_else(|panicked| std::panic::resume_unwind(panicked.into_panic()))?;
+        Ok(Taking {
+            manager,
+            mount: Some((settings, started)),
+        })
+    }
+}
+
+/// A mount got and not yet read where it was taken ([`Service::take`]).
+pub(in crate::server) struct Taking {
+    manager: Manager,
+    mount: Option<(FsSettings, Started)>,
+}
+
+impl Taking {
+    /// Serves the mount [`Service::take`] got: a mount that was taken is read once the instance it
+    /// came from has said `bye`, and the hand-over socket of the mount is bound.
+    ///
+    /// # Errors
+    /// The instance the mount was taken from gave up first and serves on, or the hand-over socket
+    /// cannot be bound: the mount is left where it is ([`abandon`]).
+    pub(in crate::server) async fn serve(self) -> Result<Served, StartError> {
+        let Self { manager, mount } = self;
+        let Some((settings, started)) = mount else {
+            return Ok(Served {
+                manager,
+                mount: None,
+            });
+        };
         let Started {
             running,
             notice,
@@ -120,7 +161,11 @@ impl Service {
                 Ok(()) => running
                     .start_reading()
                     .map_err(super::start::io("reading the connection taken over")),
-                Err(why) => Err(StartError::from(why)),
+                Err(why) => {
+                    // That instance gave up first and serves on, on its control socket's file.
+                    running.give_up();
+                    Err(StartError::from(why))
+                }
             },
             None => Ok(()),
         };
@@ -149,6 +194,22 @@ impl Service {
                 hung,
             }),
         })
+    }
+
+    /// Leaves the mount as [`abandon`] does, without a `ready` to the instance it was taken from,
+    /// which then serves it again: what a start does when it cannot go on before `ready` (the
+    /// sockets of the other process of a switch could not be taken).
+    pub(in crate::server) async fn abandon(self) {
+        if let Some((_, started)) = self.mount {
+            let Started {
+                running, notice, ..
+            } = started;
+            // The control socket's file is that instance's: it serves on it again.
+            running.give_up();
+            // The connection to it ends last: until then it holds the mount quiesced.
+            abandon(running).await;
+            drop(notice);
+        }
     }
 }
 

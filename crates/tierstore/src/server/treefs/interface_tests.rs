@@ -66,6 +66,11 @@ impl FsNode {
     /// The file of the node with `server` in `[server]` and `params` among the params of its `fs`
     /// interface; the S3 front listens on `listen`.
     fn text(&self, server: &str, params: &str, listen: &str) -> String {
+        self.text_with(server, params, listen, "")
+    }
+
+    /// [`FsNode::text`] with `local` among the keys of `[local_cache]`.
+    fn text_with(&self, server: &str, params: &str, listen: &str, local: &str) -> String {
         let (uid, gid) = (
             rustix::process::geteuid().as_raw(),
             rustix::process::getegid().as_raw(),
@@ -75,15 +80,27 @@ impl FsNode {
             self.mountpoint().display().to_string(),
             self.runtime().display().to_string(),
         );
-        format!("{fs}{}", self.node.text(server, "")).replace("127.0.0.1:0", listen)
+        format!("{fs}{}", self.node.text(server, local)).replace("127.0.0.1:0", listen)
     }
 
     /// The settings of [`FsNode::text`].
     fn settings(&self, server: &str, params: &str, listen: &str) -> CacheSettings {
-        let mut settings = settings_from_text(&self.text(server, params, listen), QUICK)
-            .unwrap()
-            .into_cache()
-            .unwrap();
+        self.settings_with(server, params, listen, "")
+    }
+
+    /// The settings of [`FsNode::text_with`].
+    fn settings_with(
+        &self,
+        server: &str,
+        params: &str,
+        listen: &str,
+        local: &str,
+    ) -> CacheSettings {
+        let mut settings =
+            settings_from_text(&self.text_with(server, params, listen, local), QUICK)
+                .unwrap()
+                .into_cache()
+                .unwrap();
         // A mount the test makes is its user's alone: `allow_other` needs the system's consent.
         if let Some(fs) = &mut settings.fs {
             fs.allow_other = false;
@@ -807,3 +824,6 @@ async fn a_start_whose_s3_address_is_taken_leaves_the_mount_it_served() {
     assert!(manager.texts().is_empty(), "{:?}", manager.texts());
     drop(taken);
 }
+
+#[path = "switch_tests.rs"]
+mod switch;

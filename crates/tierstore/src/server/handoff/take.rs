@@ -4,7 +4,7 @@
 use std::io::ErrorKind;
 use std::net::SocketAddr;
 use std::os::fd::{AsFd as _, OwnedFd};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use rustix::io::{FdFlags, fcntl_setfd};
@@ -373,11 +373,98 @@ impl Parts {
 }
 
 /// Why an offer is not taken, and the `nak` that says so.
-async fn nak(stream: &UnixStream, why: HandoffError) -> Result<Option<Inherited>, HandoffError> {
+async fn nak(stream: &UnixStream, why: HandoffError) -> Result<Option<Offered>, HandoffError> {
     wire::send(stream, &["nak".to_owned()], &[])
         .await
         .map_err(HandoffError::io("refusing the offer"))?;
     Err(why)
+}
+
+/// An offer of the sockets (and of what [`Ask`] adds to them) that this taker has checked whole
+/// and not yet answered: the running instance serves on as it was, waiting for `ack` or `nak`.
+/// [`Offered::accept`] says `ack` and [`Offered::refuse`] says `nak`; dropped, the connection ends,
+/// which the running instance takes for a `nak`.
+///
+/// The start that switches a node from two processes to one asks both for their offers before it
+/// accepts either (`docs/design/one-service.md` section 4.2): it holds this one while it takes the
+/// mount from the other process, and refuses it when that fails.
+pub(crate) struct Offered {
+    stream: UnixStream,
+    /// What the offer gives, all made before `ack`, with the mount and the lock already in it.
+    inherited: Inherited,
+    request: Request,
+    /// The control socket, for the error of a wait that ran out.
+    socket: PathBuf,
+    /// The wait from `ack` to `done`.
+    wait: Duration,
+}
+
+impl Offered {
+    /// Says `ack`, and waits for the running instance's `done`, within the wait of the hand-off.
+    ///
+    /// # Errors
+    /// The running instance is gone, answered something other than `done`, or did not answer
+    /// within the wait.
+    pub(crate) async fn accept(self) -> Result<Inherited, HandoffError> {
+        let socket = self.socket.clone();
+        match tokio::time::timeout(self.wait, self.answer()).await {
+            Ok(accepted) => accepted,
+            Err(_) => Err(HandoffError::Timeout(socket)),
+        }
+    }
+
+    /// Says `ack` and reads `done`, with no wait of its own.
+    async fn answer(self) -> Result<Inherited, HandoffError> {
+        let Self {
+            stream,
+            mut inherited,
+            request,
+            ..
+        } = self;
+        let io = HandoffError::io;
+        wire::send(&stream, &["ack".to_owned()], &[])
+            .await
+            .map_err(io("accepting the offer"))?;
+        let done = wire::recv(&stream)
+            .await
+            .map_err(io("waiting for the end of the hand-off"))?;
+        if done.lines != ["done"] {
+            return Err(HandoffError::Protocol(
+                "something other than done after ack",
+            ));
+        }
+        inherited.ready = (request != Request::Plain).then_some(Ready(stream));
+        Ok(inherited)
+    }
+
+    /// Says `nak`: the running instance goes on as it was.
+    ///
+    /// # Errors
+    /// What the system said of the `nak`; the running instance takes the end of the connection for
+    /// one all the same.
+    pub(crate) async fn refuse(self) -> Result<(), HandoffError> {
+        wire::send(&self.stream, &["nak".to_owned()], &[])
+            .await
+            .map_err(HandoffError::io("refusing the offer"))
+    }
+}
+
+/// Asks the instance that answers at `handoff.socket` for its listening sockets (`take 1`) and
+/// checks the offer whole, as [`take`] does, without answering it: `Ok(None)` where no instance
+/// answers. The wait for the offer is `handoff.wait`, and so is the wait of
+/// [`Offered::accept`].
+///
+/// # Errors
+/// As [`take`], for what is found before `ack`; an offer found wrong was refused with `nak`.
+pub(crate) async fn offered(
+    handoff: &Handoff,
+    want: &Want<'_>,
+) -> Result<Option<Offered>, HandoffError> {
+    let mut ask = Ask {
+        mount: None,
+        lock: None,
+    };
+    offer_of(handoff, want, (Request::Plain, &mut ask), Knobs::real()).await
 }
 
 /// The whole exchange with the running instance: `request`, and what `ask` adds to it; `knobs`
@@ -388,6 +475,21 @@ async fn exchange(
     (request, ask): (Request, &mut Ask<'_>),
     knobs: Knobs,
 ) -> Result<Option<Inherited>, HandoffError> {
+    // The wait of the whole exchange is the caller's.
+    match offer_of(handoff, want, (request, ask), knobs).await? {
+        Some(offered) => offered.answer().await.map(Some),
+        None => Ok(None),
+    }
+}
+
+/// The exchange up to the taker's answer: `request`, and what `ask` adds to it, sent; the offer
+/// read and checked whole; `nak` said to an offer found wrong. `Ok(None)` where nothing answers.
+async fn offer_of(
+    handoff: &Handoff,
+    want: &Want<'_>,
+    (request, ask): (Request, &mut Ask<'_>),
+    knobs: Knobs,
+) -> Result<Option<Offered>, HandoffError> {
     let io = HandoffError::io;
     let asking = async {
         let stream = match UnixStream::connect(&handoff.socket).await {
@@ -429,7 +531,7 @@ async fn exchange(
         if let Some(again) = request.fallback(rest) {
             // A release, or an instance, that does not take the step: ask as it understands.
             drop(stream);
-            return Box::pin(exchange(handoff, want, (again, ask), knobs)).await;
+            return Box::pin(offer_of(handoff, want, (again, ask), knobs)).await;
         }
         return Err(HandoffError::Refused(rest.join(" ")));
     }
@@ -454,25 +556,18 @@ async fn exchange(
         Err(why) => return nak(&stream, io("taking over a socket")(why)).await,
     };
     // Last before `ack`, as it puts the device in the taker's store.
-    let taken_mount = match prepare(offered_mount, ask) {
+    inherited.mount = match prepare(offered_mount, ask) {
         Ok(taken) => taken,
         Err(why) => return nak(&stream, why).await,
     };
-    wire::send(&stream, &["ack".to_owned()], &[])
-        .await
-        .map_err(io("accepting the offer"))?;
-    let done = wire::recv(&stream)
-        .await
-        .map_err(io("waiting for the end of the hand-off"))?;
-    if done.lines != ["done"] {
-        return Err(HandoffError::Protocol(
-            "something other than done after ack",
-        ));
-    }
-    inherited.mount = taken_mount;
     inherited.lock = lock;
-    inherited.ready = (request != Request::Plain).then_some(Ready(stream));
-    Ok(Some(inherited))
+    Ok(Some(Offered {
+        stream,
+        inherited,
+        request,
+        socket: handoff.socket.clone(),
+        wait: handoff.wait,
+    }))
 }
 
 /// The mount of an offer, checked against `ask.mount`, when it was asked for: the device and the
