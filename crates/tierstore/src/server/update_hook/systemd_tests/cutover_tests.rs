@@ -522,7 +522,7 @@ fn cleanup_waits_for_readyz_at_most_ready_attempts_looks() {
 /// Runs `tierstore update-hook <step> --params <file>` as hostkeeper does, through the verb's
 /// command line and params file, with the systemd steps over `fake`: the exit status and the
 /// report line.
-fn on_the_command_line(
+pub(super) fn on_the_command_line(
     fake: &SystemdFake,
     step: &str,
     name: &str,

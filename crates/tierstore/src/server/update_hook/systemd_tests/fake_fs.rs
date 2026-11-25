@@ -7,21 +7,27 @@
 //! it and is active (a notify unit is active once it said `READY=1`, which it says after the
 //! take), and the old one is deactivating for a chosen number of `state` looks and then inactive,
 //! by itself; with no holder it makes the mount afresh and is active. [`FsTake`] makes the take
-//! fail. Every call is counted and logged with the prefix `fs_units.` or `fs_markers.`, so the
-//! exact lists of `actions()` of the first unit are not changed by it; `fs_actions()` lists
-//! these.
+//! fail. Every call is counted and logged with the prefix `fs_units.`, `fs_markers.` or
+//! `fs_proc.`, so the exact lists of `actions()` of the first unit are not changed by it;
+//! `fs_actions()` lists the changes.
+//!
+//! The process of a running instance has the pid [`fs_pid`]. The file at [`SERVICE_BINARY`] is
+//! the binary of the release installed there, a file of its own per release ([`file_of`]); a
+//! process runs the file of its release, and its `/proc/<pid>/exe` reads [`SERVICE_BINARY`] while
+//! that release is the one installed, and `<SERVICE_BINARY> (deleted)` once another one replaced
+//! it. Its `--version` is the version of its release.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use crate::server::update_hook::{
-    Family, HANDOFF_FS_CAPABILITY, Instance, MARKER_DIR, Markers, PortError, PortKind, Record,
-    UnitState, Units,
+    Exe, Family, FileId, HANDOFF_FS_CAPABILITY, Instance, MARKER_DIR, Markers, PortError, PortKind,
+    Processes, Record, SERVICE_BINARY, UnitState, Units,
 };
 
-use super::{NEW, NEWER, OLD, SystemdFake, Unit, World, count_in};
+use super::{NEW, NEWER, OLD, SystemdFake, Unit, World, count_in, version_of};
 
 /// The unit file the package ships for `tierstore fs`.
 const TEMPLATE: &str =
@@ -50,6 +56,23 @@ pub fn fs_unit_program() -> &'static str {
         .expect("the fs unit file has an ExecStart")
 }
 
+/// The pid of the process of the fs instance `instance`, while it runs.
+pub fn fs_pid(instance: Instance) -> u32 {
+    match instance {
+        Instance::A => 4101,
+        Instance::B => 4102,
+    }
+}
+
+/// The file of the binary of `release`, as a copy of it at [`SERVICE_BINARY`] is: one per release.
+pub fn file_of(release: &Path) -> FileId {
+    let ino = [OLD, NEW, NEWER]
+        .iter()
+        .position(|known| Path::new(known) == release)
+        .map_or(99, |at| at as u64 + 10);
+    FileId { dev: 2049, ino }
+}
+
 /// What a new fs instance does when it asks the running one for the mount.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FsTake {
@@ -71,6 +94,10 @@ pub struct FsWorld {
     take: FsTake,
     /// Whether an fs instance was ever started while the store said `ready read-only`.
     started_over_read_only: bool,
+    /// systemd names no main process of a running fs instance.
+    no_pid: bool,
+    /// The path every `/proc/<pid>/exe` reads, instead of the one its release gives.
+    exe_shown: Option<PathBuf>,
 }
 
 impl FsWorld {
@@ -84,6 +111,8 @@ impl FsWorld {
             drain_looks: 0,
             take: FsTake::Works,
             started_over_read_only: false,
+            no_pid: false,
+            exe_shown: None,
         }
     }
 }
@@ -244,6 +273,63 @@ impl Units for FsPorts {
     }
 }
 
+impl FsPorts {
+    /// The release the process `pid` runs: that of the running instance whose pid it is.
+    /// The steps ask only for a pid that `main_pid` gave.
+    fn release_of(&self, pid: u32) -> PathBuf {
+        let w = self.w.borrow();
+        Instance::ALL
+            .into_iter()
+            .filter(|instance| fs_pid(*instance) == pid)
+            .map(|instance| &w.fs.units[&instance])
+            .find(|unit| unit.state.running())
+            .and_then(|unit| unit.release.clone())
+            .expect("the pid of a running fs instance with a release")
+    }
+}
+
+impl Processes for FsPorts {
+    fn main_pid(&self, instance: Instance) -> Result<Option<u32>, PortError> {
+        count_in(
+            &self.w,
+            format!("fs_proc.main_pid {instance}"),
+            PortKind::Units,
+        )?;
+        // The steps ask only for the pid of an instance they saw active.
+        Ok((!self.w.borrow().fs.no_pid).then(|| fs_pid(instance)))
+    }
+
+    fn exe(&self, pid: u32) -> Result<Exe, PortError> {
+        count_in(&self.w, format!("fs_proc.exe {pid}"), PortKind::Host)?;
+        let release = self.release_of(pid);
+        let w = self.w.borrow();
+        let path = match (&w.fs.exe_shown, &w.installed) {
+            (Some(shown), _) => shown.clone(),
+            (None, Some(installed)) if *installed == release => PathBuf::from(SERVICE_BINARY),
+            (None, _) => PathBuf::from(format!("{SERVICE_BINARY} (deleted)")),
+        };
+        Ok(Exe {
+            path,
+            file: file_of(&release),
+        })
+    }
+
+    fn installed(&self) -> Result<FileId, PortError> {
+        count_in(&self.w, "fs_proc.installed".to_owned(), PortKind::Host)?;
+        let w = self.w.borrow();
+        let installed = w.installed.as_deref().ok_or_else(|| {
+            PortError::failed(PortKind::Host, format!("{SERVICE_BINARY}: not there"))
+        })?;
+        Ok(file_of(installed))
+    }
+
+    fn version(&self, pid: u32) -> Result<String, PortError> {
+        count_in(&self.w, format!("fs_proc.version {pid}"), PortKind::Host)?;
+        let release = self.release_of(pid);
+        Ok(version_of(&release.to_string_lossy()))
+    }
+}
+
 impl Markers for FsPorts {
     fn present(&self, instance: Instance) -> Result<bool, PortError> {
         Ok(self
@@ -307,6 +393,17 @@ impl SystemdFake {
             w.log.clear();
         }
         fake
+    }
+
+    /// Whether systemd names no main process of a running fs instance.
+    pub fn set_fs_no_pid(&self, gone: bool) {
+        self.w.borrow_mut().fs.no_pid = gone;
+    }
+
+    /// The path every `/proc/<pid>/exe` of an fs process reads, instead of the one its release
+    /// gives.
+    pub fn set_fs_exe_shown(&self, shown: Option<&str>) {
+        self.w.borrow_mut().fs.exe_shown = shown.map(PathBuf::from);
     }
 
     /// Whether `release` lists `handoff-fs-v1`.

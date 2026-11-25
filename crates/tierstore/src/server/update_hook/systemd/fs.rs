@@ -3,7 +3,7 @@
 //!
 //! The hook hands it over as it hands the S3 process over, with one difference it keeps to: the
 //! fs process has no port and no status request, so what it says for itself is the state of its
-//! unit. The unit is `Type=notify`, and a new instance says `READY=1` only once it has taken the
+//! unit (and, to `verify`, the binary its process runs: [`super::fs_exe`]). The unit is `Type=notify`, and a new instance says `READY=1` only once it has taken the
 //! mount from the running one (`handoff-fs-v1`), so an instance whose unit is active has the
 //! mount, and the old one ends by itself with status 0. Two rules follow from what the hook
 //! cannot see of the processes:

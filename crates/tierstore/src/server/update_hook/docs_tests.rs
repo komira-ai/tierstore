@@ -186,7 +186,8 @@ const FS_UNIT: &str =
 
 /// Asserts that the page, the operations page and the header of the fs unit file describe the
 /// second unit as the hook acts on it: the page names the record keys, the marker, the rule that
-/// the instance that holds the mount is never stopped and the capability both releases need, and
+/// the instance that holds the mount is never stopped and the capability both releases need, how
+/// `verify` checks the binary of the fs process and the sentence it says of one left alone, and
 /// none of the three says any longer that the hook does not act on the unit or that nothing writes
 /// its marker. Catches a page left behind when the code learned the unit.
 #[test]
@@ -199,6 +200,11 @@ fn the_pages_describe_the_second_unit_as_the_hook_acts_on_it() {
         "`handoff-fs-v1`",
         "left on its release",
         "`tierstore-fs@<fs_next>`",
+        "`/proc/<pid>/exe`",
+        "still runs release 0.4.0+0123456789ab, and the update installed 0.5.0+0123456789ab: it \
+         was left on its release",
+        "/usr/local/libexec/tierstore/tierstore (deleted)",
+        "`/proc/<pid>/exe --version`",
     ] {
         assert!(
             PAGE.contains(needle),

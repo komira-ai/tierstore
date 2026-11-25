@@ -177,7 +177,7 @@ struct Opened {
 }
 
 /// `path` below `root`: an absolute path is taken as if the root were `/`.
-fn under(root: &Path, path: &Path) -> PathBuf {
+pub(super) fn under(root: &Path, path: &Path) -> PathBuf {
     root.join(path.strip_prefix("/").unwrap_or(path))
 }
 

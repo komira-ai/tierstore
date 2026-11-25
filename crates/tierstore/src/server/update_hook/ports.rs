@@ -1,6 +1,7 @@
 //! What the steps do to the machine, as ports: the two systemd instances of each of the two
-//! templates and their start markers, the launchd job, the instances' HTTP answers, what the host
-//! says of itself, the clock and the state directory.
+//! templates and their start markers, the process of an fs instance and the binary it runs, the
+//! launchd job, the instances' HTTP answers, what the host says of itself, the clock and the state
+//! directory.
 //!
 //! Each port is a small trait; the steps take a [`SystemdPorts`] or a [`LaunchdPorts`] and never
 //! reach for the machine themselves. Tests keep the machine's world in a fake. Nothing here reads
@@ -11,7 +12,7 @@
 
 use std::any::Any;
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -215,6 +216,59 @@ pub trait Markers {
     fn clear(&self, instance: Instance) -> Result<(), PortError>;
 }
 
+/// A file as the kernel tells it from every other: its device and inode. Two paths name the same
+/// file when these are equal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FileId {
+    /// The device.
+    pub dev: u64,
+    /// The inode on it.
+    pub ino: u64,
+}
+
+/// The binary a process runs, as `/proc/<pid>/exe` shows it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Exe {
+    /// The path the link names: the path the file had when the process executed it, with
+    /// ` (deleted)` after it once that name was removed or replaced (as the hook's copy is
+    /// replaced by a rename).
+    pub path: PathBuf,
+    /// The file the process runs, which a replaced name no longer names.
+    pub file: FileId,
+}
+
+/// The processes of the instances of `tierstore-fs@.service` (Linux): which process systemd
+/// has for an instance, and the binary that process runs.
+pub trait Processes {
+    /// The main process of the instance's unit (`MainPID`); `None` when systemd names none.
+    ///
+    /// # Errors
+    /// The program failed, or said something that is not a pid.
+    fn main_pid(&self, instance: Instance) -> Result<Option<u32>, PortError>;
+
+    /// The binary the process `pid` runs (`/proc/<pid>/exe`).
+    ///
+    /// # Errors
+    /// The link cannot be read or followed: the process is gone, or the hook may not look at it.
+    fn exe(&self, pid: u32) -> Result<Exe, PortError>;
+
+    /// The file at [`SERVICE_BINARY`](super::SERVICE_BINARY): the copy the hook installed, which
+    /// the fs unit runs.
+    ///
+    /// # Errors
+    /// There is no file there, or it cannot be looked at.
+    fn installed(&self) -> Result<FileId, PortError>;
+
+    /// The version of the binary the process `pid` runs: what `--version` of its
+    /// `/proc/<pid>/exe` prints after the program's name, such as `0.5.0+0123456789ab`. The fs
+    /// process serves no port, so this is the one way to ask it; it works for a binary whose
+    /// name was replaced too.
+    ///
+    /// # Errors
+    /// The binary cannot be run, ends any way but 0, or prints no version.
+    fn version(&self, pid: u32) -> Result<String, PortError>;
+}
+
 /// The launchd system domain, for the one job of the service.
 pub trait Launchd {
     /// Whether the system domain has the job `label`.
@@ -412,6 +466,8 @@ pub struct SystemdPorts<'a> {
     pub fs_units: &'a dyn Units,
     /// Their start markers.
     pub fs_markers: &'a dyn Markers,
+    /// Their processes.
+    pub fs_processes: &'a dyn Processes,
     /// The instances' answers.
     pub instances: &'a dyn Instances,
     /// The host.

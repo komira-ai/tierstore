@@ -306,6 +306,7 @@ impl Linux {
             markers: &self.fake,
             fs_units: self.fake.fs_ports(),
             fs_markers: self.fake.fs_ports(),
+            fs_processes: self.fake.fs_ports(),
             instances: &self.fake,
             host: &running,
             clock: &self.fake,
