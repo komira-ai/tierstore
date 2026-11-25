@@ -604,9 +604,18 @@ async fn a_descriptors_is_answered_ok_and_counted() {
 
 /// Asserts that an `opens` is answered `ok`, by a node with no tree store, and shows in the cache's
 /// families: the histogram at what the process's totals grew by and the gauge at the last report;
-/// one of another number of buckets is refused and counts nothing.
+/// one of another number of buckets is refused and changes neither family.
 #[tokio::test]
 async fn an_opens_is_answered_ok_and_counted() {
+    // The lines of the two families: the rest of the text holds the free space of the real disk,
+    // which other tests change meanwhile.
+    let opens = |metrics: &str| -> Vec<String> {
+        metrics
+            .lines()
+            .filter(|line| line.contains("tierstore_fs_open"))
+            .map(str::to_owned)
+            .collect()
+    };
     let rig = Rig::new("tfs-opens");
     let place = Place::new("tfs-opens");
     let served = Served::start(&rig.cache, &place.path);
@@ -625,12 +634,12 @@ async fn an_opens_is_answered_ok_and_counted() {
     report.spans[1].ms = 70;
     report.spans[1].buckets[5] = 2;
     assert_eq!(client.ask(&report.line()).await, "ok");
-    let before = rig.cache.metrics();
+    let before = opens(&rig.cache.metrics());
     report.spans[1].buckets[5] = 9;
     let fewer = report.line().rsplit_once(' ').unwrap().0.to_owned();
     assert_eq!(client.ask(&fewer).await, "refused malformed request");
     let metrics = rig.cache.metrics();
-    assert_eq!(metrics, before);
+    assert_eq!(opens(&metrics), before);
     let filled = "outcome=\"ok\",source=\"filled\"";
     for line in [
         format!("tierstore_fs_open_seconds_bucket{{{filled},le=\"0.05\"}} 2\n"),
