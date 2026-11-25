@@ -78,6 +78,10 @@ pub(in crate::server) enum NfsError {
     /// earlier one.
     #[error("the identity of this boot: {0}")]
     Boot(String),
+    /// The NFS server of the `fs` interface of the one process stopped by itself: the process
+    /// unmounted and ends in failure, so that launchd starts it again.
+    #[error("{0}")]
+    Stopped(String),
     /// The unmount did not succeed.
     #[error("unmounting {path}: {said}")]
     Unmount {

@@ -40,9 +40,11 @@
 //!
 //! On a Mac, SIGUSR2 hands the process over to the next image of its own program instead of a stop
 //! (see [`next_image`]): the fronts drain as on SIGTERM with their listening sockets kept open, the
-//! cache's writes end, and the process executes its program path with the offer of the sockets and
-//! the cache lock on its standard input (`--handed 0`), which the new image takes as it would from a
-//! running instance.
+//! NFS front of an `fs` interface ends its connections and holds its state with the mount left as it
+//! is, the cache's writes end, and the process executes its program path with the offer of the
+//! sockets (the NFS one and the control socket of the file system among them) and the cache lock on
+//! its standard input (`--handed 0`), which the new image reads whole before it serves anything and
+//! takes as it would from a running instance.
 //!
 //! On Linux, with an `[[interface]]` of type `fs` the start serves the mount of the virtual build
 //! file system too (see [`Service`]): after the cache and the tree store are open it takes the
@@ -52,6 +54,14 @@
 //! service manager `READY=1` where one listens. The mount is served while the fronts drain and is
 //! left once they have; a mount that cannot be served on stops the fronts as a signal does, and the
 //! start ends in failure.
+//!
+//! On macOS, with an `[[interface]]` of type `fs` the start serves the NFS front of the file system
+//! too (see [`NfsService`]): after the cache and the tree store are open it serves the front (on the
+//! sockets it was handed, or on its own) and mounts the export where the `mount` listing does not
+//! show it mounted, and only then binds the trees front and takes or binds the S3 and OCI sockets; a
+//! start that fails after that leaves the mount where it is. A stop drains the fronts, serving the
+//! mount, and then unmounts while the NFS front still answers; an NFS server that stops by itself
+//! stops the fronts as a signal does, and the start ends in failure.
 //!
 //! On SIGTERM or SIGINT the process drains as a storage node does; the eviction pass, the lock
 //! task, the scrub and the fill socket are the only things running beside the server, and they stop
@@ -74,10 +84,8 @@ use super::build_info::{COMMIT, VERSION};
 use super::cli::{Addresses, Error, OciSetup, S3Flags, oci_setup_of, open_tier, probe_run_id};
 #[cfg(target_os = "linux")]
 use super::cli_serve::ask_sockets;
-use super::cli_serve::{
-    Bound, Got, HandedOffer, bind_fronts, bind_s3, cut_note, sockets_of, stopped_by,
-};
-#[cfg(not(target_os = "linux"))]
+use super::cli_serve::{Bound, Got, bind_fronts, bind_s3, cut_note, sockets_of, stopped_by};
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 use super::config::fs::not_served;
 use super::config_cache::CacheSettings;
 use super::drain::late_of;
@@ -86,7 +94,7 @@ use super::front::{InvalidFlags, server_config};
 use super::handoff::Inherited;
 #[cfg(target_os = "linux")]
 use super::handoff::Offered;
-use super::handoff::{Handoff, Image};
+use super::handoff::{Handed, Handing, Handoff, Image, Own, Want, read_handed};
 use super::listen::{LoopbackBind, bind_set, bind_with, joined};
 use super::local_cache::trees::{TreeStore, TreesConfig};
 use super::local_cache::{CacheConfig, Disk, Every, LocalCache, Mode, SystemDisk, check_local};
@@ -96,6 +104,8 @@ use super::put_ingest::PutIngest;
 use super::stop_watcher::{
     oci_cut_note, serve_fronts, serve_oci, serve_trees, stop_watcher, trees_cut_note,
 };
+#[cfg(any(target_os = "macos", test))]
+use super::treefs::{NfsServed, NfsService};
 #[cfg(target_os = "linux")]
 use super::treefs::{Served, Service};
 use super::trees::{TreesSetup, trees_setup_of};
@@ -103,26 +113,34 @@ use super::{Drained, Server, ServerConfig};
 use next_image::{NextImage, stop_or_next, take_write_role};
 
 /// What the start of a node gets from the system it runs on: on Linux, the service manager and
-/// the `fs` interface of a build node's file (see [`Service`]); none for a storage node, which has
-/// neither.
+/// the FUSE mount of the `fs` interface of a build node's file (see [`Service`]); on macOS, the
+/// NFS front of that interface (see [`NfsService`]); none for a storage node, which has neither.
 #[derive(Default)]
 pub(super) struct OnSystem {
     /// The service manager and the mount of the `fs` interface.
     #[cfg(target_os = "linux")]
     pub(super) service: Option<Service>,
+    /// The NFS front of the `fs` interface, if the file has one.
+    #[cfg(any(target_os = "macos", test))]
+    pub(super) nfs: Option<NfsService>,
 }
 
 impl OnSystem {
-    /// What the start of a build node with `settings` gets from this process's system. Off Linux
-    /// an `fs` interface is not served by this release, and the start says so on stderr.
+    /// What the start of a build node with `settings` gets from this process's system. On a system
+    /// that is neither Linux nor macOS an `fs` interface is not served, and the start says so on
+    /// stderr.
     fn of_process(settings: &CacheSettings) -> Self {
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         if let Some(line) = not_served(settings.fs.as_ref()) {
             tracing::warn!("{line}");
         }
         Self {
             #[cfg(target_os = "linux")]
             service: Some(Service::of_process(settings.fs.clone())),
+            #[cfg(target_os = "macos")]
+            nfs: settings.fs.clone().map(NfsService::of_process),
+            #[cfg(all(test, not(target_os = "macos")))]
+            nfs: None,
         }
     }
 }
@@ -440,6 +458,35 @@ async fn take_mount_and_sockets(
     Ok((taking.serve().await?, sockets))
 }
 
+/// Reads the offer the image before this one handed over on `fd` (`handoff/exec.rs`) and takes it,
+/// checked as a taker checks an offer: its S3 and OCI sockets must be on `s3` and `oci`, its NFS
+/// socket on the address of `nfs` and its control socket at the path of `nfs` (an `fs` interface
+/// on macOS; none without one, when an offer of either is refused), and its lock the file at
+/// `lock`.
+///
+/// # Errors
+/// A handed offer this start refuses ([`HandingError`](super::cli::HandingError), boxed).
+async fn read_offer(
+    fd: std::os::fd::OwnedFd,
+    (s3, oci): (&[std::net::SocketAddr], &[std::net::SocketAddr]),
+    nfs: Option<(std::net::SocketAddr, &Path)>,
+    lock: &Path,
+) -> Result<Handed, Error> {
+    let nfs_listen: Vec<std::net::SocketAddr> = nfs.iter().map(|(listen, _)| *listen).collect();
+    let want = Want {
+        s3,
+        oci,
+        nfs: &nfs_listen,
+    };
+    let own = Own {
+        control: nfs.map(|(_, control)| control),
+        lock: Some(lock),
+    };
+    read_handed(fd, &want, &own)
+        .await
+        .map_err(|why| super::cli::HandingError::from(why).into_boxed())
+}
+
 /// Serves the S3 front (and the OCI front, if there is a setup) over `cache`, with the loops of
 /// the cache and `beside`, until `stop` resolves, and then drains. It is the one serving of a
 /// cache, whatever its upstream is: a store of a build node or the proxy of a storage node.
@@ -484,21 +531,64 @@ pub(super) async fn serve_front(
             )
         })?;
     config.trees.clone_from(&trees);
+    let OnSystem {
+        #[cfg(target_os = "linux")]
+        service,
+        #[cfg(any(target_os = "macos", test))]
+        nfs,
+    } = fronts.system;
+    // The offer the image before this one handed over is read whole, and checked against this
+    // start's settings, before anything is served: the NFS front's part of it (`nfs` and
+    // `control`) is the start of the `fs` interface's, and the rest the fronts'.
+    let Imaging { next, handed } = fronts.imaging;
+    let lock_path = cache.lock_path();
+    #[cfg(any(target_os = "macos", test))]
+    let nfs_own = nfs
+        .as_ref()
+        .map(|service| (service.listen(), service.control_socket()));
+    #[cfg(not(any(target_os = "macos", test)))]
+    let nfs_own = None;
+    let handed = match handed {
+        Some(fd) => {
+            let s3 = bind_set(fronts.listen, true);
+            let oci_listen = oci
+                .as_ref()
+                .map_or_else(Vec::new, |setup| setup.listen.clone());
+            Some(read_offer(fd, (&s3, &oci_listen), nfs_own, &lock_path).await?)
+        }
+        None => None,
+    };
+    let (fs_handed, handed) = match handed.map(Handed::split_fs) {
+        Some((fs, rest)) => (Some(fs), Some(rest)),
+        None => (None, None),
+    };
+    // On macOS the NFS front of the `fs` interface serves, and its export is mounted where it is
+    // not mounted already, before any socket of a front is bound, as the mount is got first on
+    // Linux.
+    #[cfg(any(target_os = "macos", test))]
+    let nfs_served: Option<NfsServed> = match nfs {
+        Some(service) => Some(
+            service
+                .start((cache.clone(), trees.clone()), fs_handed)
+                .await?,
+        ),
+        None => None,
+    };
+    #[cfg(not(any(target_os = "macos", test)))]
+    drop(fs_handed);
     // The mount is got, and the instance it was taken from told that it is served, before any
     // socket of a front is bound: a start that cannot get it leaves the running instances serving
     // everything. Where the file has an `fs` interface and a hand-off, the running instance's
     // offer of its sockets is asked for and checked first, and accepted only after the mount's
     // ([`take_mount_and_sockets`]).
     #[cfg(not(target_os = "linux"))]
-    let OnSystem {} = fronts.system;
-    #[cfg(not(target_os = "linux"))]
     let sockets: Option<Inherited> = None;
     #[cfg(target_os = "linux")]
-    let (served, sockets) = match fronts.system.service {
+    let (served, sockets) = match service {
         Some(service) => {
             let switch = fronts
                 .handoff
-                .filter(|_| service.has_mount() && fronts.imaging.handed.is_none());
+                .filter(|_| service.has_mount() && handed.is_none());
             let asked = match switch {
                 Some(handoff) => {
                     let oci_listen = oci
@@ -524,16 +614,7 @@ pub(super) async fn serve_front(
     // The trees sockets are bound beside a running instance's (`SO_REUSEPORT`, they are not handed
     // over), and before the S3 and OCI sockets are taken from it: a trees address that cannot be
     // bound fails the start while the running instance still serves.
-    let Imaging { next, handed } = fronts.imaging;
-    let lock_path = cache.lock_path();
-    let got = handed
-        .map(|fd| {
-            Got::Handed(HandedOffer {
-                fd,
-                lock: Some(&lock_path),
-            })
-        })
-        .or(sockets.map(|taken| Got::Taken(Box::new(taken))));
+    let got = handed.or(sockets).map(|taken| Got::Taken(Box::new(taken)));
     let fronts_bound = async {
         let trees_front = match fronts.trees_front {
             Some(setup) => Some(setup.bind().await?),
@@ -572,6 +653,10 @@ pub(super) async fn serve_front(
             #[cfg(target_os = "linux")]
             if let Some(served) = served {
                 served.abandon().await;
+            }
+            #[cfg(any(target_os = "macos", test))]
+            if let Some(served) = nfs_served {
+                served.abandon();
             }
             return Err(why);
         }
@@ -708,16 +793,24 @@ pub(super) async fn serve_front(
             tracing::debug!("tierstore: put ingest ended");
         }
     };
-    // The mount is served while the fronts drain, and left once they have (`fs_halt`).
+    // The mount is served while the fronts drain, and left once they have (`fs_halt`); on macOS a
+    // stop that hands over to the next image hands the NFS front over instead.
     let mounting = async {
         #[cfg(target_os = "linux")]
         if let Some(served) = served {
             let ended = served.serve(fs_halt, failed).await;
             tracing::debug!("tierstore: mount ended");
+            return ended.map(|()| None).map_err(Error::from);
+        }
+        #[cfg(any(target_os = "macos", test))]
+        if let Some(served) = nfs_served {
+            let handing = || next.is_some_and(NextImage::asked);
+            let ended = served.serve(fs_halt, failed, handing).await;
+            tracing::debug!("tierstore: mount ended");
             return ended.map_err(Error::from);
         }
         let _unmounted = (fs_halt, failed);
-        Ok::<(), Error>(())
+        Ok::<Option<Handing>, Error>(None)
     };
     let ((drained, (oci_cut, trees_cut)), (), (), (), (), (), (), (), (), (), mounted) = tokio::join!(
         serving,
@@ -733,10 +826,14 @@ pub(super) async fn serve_front(
         mounting
     );
     watcher.abort();
+    let (mounted, fs_handing) = match mounted {
+        Ok(handing) => (Ok(()), handing),
+        Err(why) => (Err(why), None),
+    };
     if let (Some(next), Some(kept)) = (next, kept)
         && next.asked()
     {
-        next.hand(kept, &cache).await?;
+        next.hand(kept, fs_handing, &cache).await?;
     }
     super::build_info::stderr_log::notes(&cut_note(drained));
     super::build_info::stderr_log::notes(&oci_cut_note(oci_cut));

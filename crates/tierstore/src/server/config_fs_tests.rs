@@ -672,8 +672,8 @@ fn the_fs_params_and_the_other_types_params_are_apart() {
     }
 }
 
-/// Asserts the line a start off Linux says of an `fs` interface it does not serve, and none without
-/// one.
+/// Asserts the line a start on a system that is neither Linux nor macOS says of an `fs` interface
+/// it does not serve, and none without one.
 #[test]
 fn a_start_says_it_does_not_serve_the_fs_interface() {
     assert_eq!(not_served(None), None);

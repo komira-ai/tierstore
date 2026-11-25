@@ -3,8 +3,8 @@
 //! that clients attach by digest for their runs, and any tree whose digest a lookup names
 //! (`core/implicit.rs`, until it is idle for `fs.tree_idle_secs`), lazily: a file's bytes are
 //! fetched from the node's tierstore on the file's first open, over its fill socket, or, in the one
-//! process whose file has an `fs` interface (`interface`, Linux), by calls of its cache
-//! (`fills`, `in_process`).
+//! process whose file has an `fs` interface (`interface` on Linux, `nfs` on macOS), by calls of its
+//! cache (`fills`, `in_process`).
 //!
 //! - [`config`]: the `[fs]` table of the file.
 //! - [`ino`], [`table`], [`tree`]: the inode numbers (invariant I1), the table of tree numbers in
@@ -24,7 +24,8 @@
 //!   `docs/design/fetch-cache-serve.md`), which a mount process serves once it attaches to the
 //!   node's shared cache (section 23 of that design).
 //! - [`nfs`] (macOS serves it; built and tested everywhere): the NFSv3 frontend, over loopback,
-//!   and the mount around it.
+//!   and the mount around it; on macOS also the `fs` interface of a build node's file, served by
+//!   the node's own process (`nfs/interface.rs`).
 //! - `interface` (Linux): the mount of the `fs` interface of a build node's file, served by the
 //!   node's own process: its start (as `launch`'s, before the sockets of the fronts) and its stop
 //!   (after the fronts drain).
@@ -59,13 +60,13 @@ mod groups;
 #[cfg(any(target_os = "linux", test))]
 mod handle;
 // The core's requests as calls of the cache and the tree store of this process: made by the start
-// of the one process's `fs` interface (`interface`), which serves on Linux; the NFS frontend's
-// start in the one process is a later change.
+// of the one process's `fs` interface (`interface` on Linux, `nfs/interface.rs` on macOS); a
+// system that serves neither front builds them for the tests.
 #[cfg_attr(
-    all(not(test), not(target_os = "linux")),
+    all(not(test), not(target_os = "linux"), not(target_os = "macos")),
     expect(
         dead_code,
-        reason = "the start of the `fs` interface in the one process off Linux is a later change"
+        reason = "the one process serves the `fs` interface on Linux and macOS alone"
     )
 )]
 mod in_process;
@@ -149,6 +150,8 @@ pub(super) use launch::serve;
 pub(super) use nfs::config::NfsTable;
 #[cfg(not(target_os = "linux"))]
 pub(super) use nfs::{NfsError, serve};
+#[cfg(any(target_os = "macos", test))]
+pub(super) use nfs::{NfsServed, NfsService};
 pub(super) use put::config::PutTable;
 #[cfg(test)]
 pub(super) use put::config::off_linux as put_off_linux;

@@ -579,8 +579,9 @@ close-on-exec, and the `flock` on them. So a Mac hands over to the next image of
   of today, which unmounts: section 3.6 says when the hook does it.
 - **What P5 built** (section 6): a build node hands its S3 and OCI sockets and its cache lock over this way on SIGUSR2,
   and the NFS front's part is built and tested (`Running::hand_to_image`, `Running::start_handed` in
-  `server/treefs/nfs/run.rs`: the drain of the owed replies, the hold, the `nfs` and `control` lines) for the start of
-  the one process on macOS to add to the offer once it serves the file system there (P3's start serves it on Linux).
+  `server/treefs/nfs/run.rs`: the drain of the owed replies, the hold, the `nfs` and `control` lines). The start of the
+  one process on macOS serves the file system by that front and adds its part to the offer
+  (`server/treefs/nfs/interface.rs`), as P3's start serves it on Linux by FUSE.
 
 ### 3.5 Stop, crash and a fresh start with a mount there
 
