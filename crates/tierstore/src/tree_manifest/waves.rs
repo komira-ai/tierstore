@@ -28,12 +28,13 @@ const HELPER: &str = "fs-manifests";
 /// Flattens the tree whose root manifest has digest `root`, as [`flatten`](super::flatten) does,
 /// fetching the manifests of each level by up to `width` calls of `fetch` at once.
 ///
-/// `fetch` returns the bytes of the manifest with the digest it is given, and is called from
-/// several threads at once. A tree over a limit is refused before any entry is made.
+/// `fetch` returns the bytes of the manifest with the digest it is given, which is of the level it
+/// is also given (0 for the root, 1 for the manifests the root holds, and so on), and is called
+/// from several threads at once. A tree over a limit is refused before any entry is made.
 pub(crate) fn flatten_in_waves<E: fmt::Display>(
     root: &TreeDigest,
     width: usize,
-    fetch: impl Fn(&TreeDigest) -> Result<Vec<u8>, E> + Sync,
+    fetch: impl Fn(&TreeDigest, usize) -> Result<Vec<u8>, E> + Sync,
 ) -> Result<Vec<TreeEntry>, TreeError> {
     let held = gather(root, width, &fetch)?;
     let measured = measure(root, |digest| {
@@ -53,7 +54,7 @@ pub(crate) fn flatten_in_waves<E: fmt::Display>(
 fn gather<E: fmt::Display>(
     root: &TreeDigest,
     width: usize,
-    fetch: &(impl Fn(&TreeDigest) -> Result<Vec<u8>, E> + Sync),
+    fetch: &(impl Fn(&TreeDigest, usize) -> Result<Vec<u8>, E> + Sync),
 ) -> Result<HashMap<TreeDigest, Arc<TreeManifest>>, TreeError> {
     let mut held = HashMap::new();
     let mut seen = HashSet::from([*root]);
@@ -117,7 +118,7 @@ impl Level<'_> {
     fn fetch<E: fmt::Display>(
         &self,
         width: usize,
-        fetch: &(impl Fn(&TreeDigest) -> Result<Vec<u8>, E> + Sync),
+        fetch: &(impl Fn(&TreeDigest, usize) -> Result<Vec<u8>, E> + Sync),
     ) -> Vec<Result<Arc<TreeManifest>, TreeError>> {
         let helpers = width.min(self.digests.len()).saturating_sub(1);
         let mut got = std::thread::scope(|scope| {
@@ -147,7 +148,7 @@ impl Level<'_> {
     /// the level.
     fn take<E: fmt::Display>(
         &self,
-        fetch: &impl Fn(&TreeDigest) -> Result<Vec<u8>, E>,
+        fetch: &impl Fn(&TreeDigest, usize) -> Result<Vec<u8>, E>,
     ) -> Vec<Got> {
         let mut got = Vec::new();
         while !self.stop.load(Ordering::Acquire) {
@@ -155,7 +156,8 @@ impl Level<'_> {
             let Some(digest) = self.digests.get(index) else {
                 break;
             };
-            let manifest = parsed(digest, fetch(digest));
+            // The children of the level's manifests are at `depth`, so the level is `depth - 1`.
+            let manifest = parsed(digest, fetch(digest, self.depth - 1));
             let stops = match &manifest {
                 Ok(manifest) => self.passes_a_limit(manifest),
                 Err(_) => true,

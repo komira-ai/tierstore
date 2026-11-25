@@ -11,7 +11,7 @@ use tokio::sync::Notify;
 
 use super::InProcess;
 use crate::server::fill_socket;
-use crate::server::local_cache::attaches::{Attach, Fetches, Outcome};
+use crate::server::local_cache::attaches::{Attach, Fetches, Levels, Outcome};
 use crate::server::local_cache::descriptors::Descriptors;
 use crate::server::local_cache::pack_testing::{Pack, blob_hex, fills, recency};
 use crate::server::local_cache::testing::{Rig, until};
@@ -19,7 +19,7 @@ use crate::server::local_cache::trees::TreeStore;
 use crate::server::local_cache::trees::testing::{Bench, fs_at};
 use crate::server::local_cache::{LocalCache, Mode, Tick};
 use crate::server::treefs::fill_client::{AskError, FillClient, PAUSE, Place, Until};
-use crate::server::treefs::fills::{Fills, Report};
+use crate::server::treefs::fills::{Fills, Report, TreeAnswer};
 use crate::{Backend as _, Clock, Op, TreeDigest};
 
 /// A wait longer than any test: what the requests that must not time out are given.
@@ -294,7 +294,8 @@ async fn a_fill_waits_for_the_write_role_then_fills() {
 
 /// Asserts that every request that waits for the write role fails once `fetch_timeout` has passed
 /// with the cache still read-only, each in the words of its kind (`read-only` for a fill, a
-/// manifest and a span; the read-only error for the others), that a hold is not ended then, and
+/// manifest, a span and a fill of a tree; the read-only error for the others), that a hold is not
+/// ended then, and
 /// that none of the fills, spans and puts asked starts once the cache takes the lock. The clock is
 /// paused and moves when every task waits.
 #[tokio::test(start_paused = true)]
@@ -337,6 +338,10 @@ async fn a_request_still_read_only_after_fetch_timeout_fails_and_starts_nothing(
                 "{:?}",
                 over.put(("cas/b/k", sha256.as_str(), 1), &staged, LONG)
             ),
+            format!(
+                "{:?}",
+                over.fill_tree(&TreeDigest::of(b"a tree"), after(u64::MAX))
+            ),
         ]
     })
     .await;
@@ -357,6 +362,7 @@ async fn a_request_still_read_only_after_fetch_timeout_fails_and_starts_nothing(
             said.clone(),
             said,
             failed,
+            format!("{:?}", TreeAnswer::Failed("read-only".to_owned())),
         ]
     );
     let info = bench
@@ -446,8 +452,8 @@ fn reported(cache: &LocalCache) -> Vec<String> {
 }
 
 /// Asserts that each report made in process is in the cache's metrics when the call returns,
-/// with no thread or queue between: the metrics after `started`, `attached`, `fetched` and
-/// `descriptors` are those of a cache told the same by its own calls, and differ from a cache told
+/// with no thread or queue between: the metrics after `started`, `attached`, `fetched`, `levels`
+/// and `descriptors` are those of a cache told the same by its own calls, and differ from a cache told
 /// nothing.
 #[tokio::test]
 async fn the_reports_reach_the_cache_without_a_queue() {
@@ -475,16 +481,22 @@ async fn the_reports_reach_the_cache_without_a_queue() {
         held: 12,
         short: 3,
     };
+    let levels = Levels {
+        levels: 4,
+        rounds: 1,
+    };
     let over = in_process(&told.cache, None, LONG);
     let started = format!("{RUN}/0");
     over.report(Report::Started(started.clone()));
     over.report(Report::Attached(attach));
     over.report(Report::Fetched(fetches));
+    over.report(Report::Levels(levels));
     over.report(Report::Descriptors(descriptors.clone()));
     let after = reported(&told.cache);
     let _ = direct.cache.run_started(&started);
     direct.cache.tree_attached(attach);
     direct.cache.manifests_fetched(&fetches);
+    direct.cache.tree_levels(levels);
     direct.cache.descriptors_reported(descriptors);
     assert_eq!(after, reported(&direct.cache));
     assert_ne!(after, before);
@@ -584,4 +596,46 @@ async fn a_place_holds_the_placement_and_an_unplace_gives_it_back() {
     let id = created.placement.to_string();
     off_runtime(move || over.unplace(MOUNT, &id)).await;
     assert_eq!(held(), 0);
+}
+
+/// Asserts that a fill of a tree made in process fills its new manifests in the cache, answered as
+/// the fill socket answers it: a root over one directory is filled at both levels, in no time of
+/// the cache's clock; a root the upstream does not have fails with the words of its fill and its
+/// digest; and a fill whose end has passed is not asked, and fails in the client's words.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_fill_of_a_tree_fills_its_new_manifests_in_the_cache() {
+    use crate::server::local_cache::TreeFilled;
+    use crate::tree_manifest_tests::{dir, file, manifest};
+
+    let rig = Rig::new("tfs-in-tree");
+    let below = manifest(&[file("f", 1)]);
+    let below_digest = TreeDigest::of(below.as_bytes());
+    let root = manifest(&[dir("d", &below_digest)]);
+    let root_digest = TreeDigest::of(root.as_bytes());
+    for text in [&below, &root] {
+        let key = format!("cas/l/{}", TreeDigest::of(text.as_bytes()));
+        rig.put(&key, text.as_bytes()).await;
+    }
+    let absent = TreeDigest::of(b"no tree");
+    let over = in_process(&rig.cache, None, LONG);
+    let answers = off_runtime(move || {
+        [
+            over.fill_tree(&root_digest, after(60_000)),
+            over.fill_tree(&absent, after(60_000)),
+            over.fill_tree(&root_digest, after(0)),
+        ]
+    })
+    .await;
+    assert_eq!(
+        answers,
+        [
+            TreeAnswer::Filled(TreeFilled {
+                ms: 0,
+                levels: vec![1, 1],
+            }),
+            TreeAnswer::Failed(format!("upstream 404 at {absent}")),
+            TreeAnswer::Failed(AskError::Spent.to_string()),
+        ]
+    );
+    assert!(rig.has_file(&format!("cas/l/{below_digest}")));
 }

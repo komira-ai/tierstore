@@ -36,7 +36,11 @@ const REPORTER: &str = "fs-reports";
 /// it as the production client does. Each pause of a request moves the rig's clock on by the
 /// pause, and `paused` is told how many such pauses were taken so far; the pauses of the thread
 /// that sends the reports move nothing, so the clock is the read's alone.
-fn core_over(rig: &Rig, socket: &Path, paused: impl Fn(u32) + Send + Sync + 'static) -> Arc<Core> {
+pub(super) fn core_over(
+    rig: &Rig,
+    socket: &Path,
+    paused: impl Fn(u32) + Send + Sync + 'static,
+) -> Arc<Core> {
     let runtime = rig.dir.path().join("run-bound");
     std::fs::create_dir_all(&runtime).unwrap();
     let clock = Arc::clone(&rig.clock);

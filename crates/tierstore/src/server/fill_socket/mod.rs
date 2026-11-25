@@ -30,6 +30,12 @@
 //! several. `ok` answers a fill that is in the cache; the other answers are the words of
 //! `FillError` (`upstream <status>`, `mismatch`, `short`, `no space`, `too large`, `busy`,
 //! `read-only`, `io`, `changed`, `aborted`) and `refused <why>` for a line that is not a request.
+//! A `fill-tree <sha256> <ms>` fills the new manifests of a tree, going down from its root in the
+//! cache, and is answered once, `ok <ms> <filled> [<filled> ...]` (the milliseconds it took and the
+//! manifests it filled at each level), or the words of `TreeFillError` (a fill's failure and the
+//! digest, `cannot read <digest>: ...`, `tree too large: ...`, `tree too deep: ...`, `spent`);
+//! a node of a release before it answers `refused unknown request`, and the mount reads the tree
+//! one manifest at a time (`local_cache/source/tree_fill.rs`).
 //! A `touch` is never answered. The pin requests are answered `ok <pinned> <refused> <absent>`
 //! (`pin`: the blobs now pinned by the tree, the blobs refused for the cache's `pin_limit`, the
 //! blobs the cache does not hold), `ok <blobs>` (`unpin`: the blobs the tree had pinned) and
@@ -42,7 +48,7 @@
 //! `span`, `unplace`, `places-live`) are answered from the node's tree store, `mounted` and `flat`
 //! in one line of JSON (see [`mount`]). A `started` (the mount first looked into a tree, see
 //! `local_cache/starts.rs`) is answered `ok`, by a node with no tree store too, and so are an
-//! `attached` and a `fetched` (what the mount reports of its attaches, see
+//! `attached`, a `fetched` and a `levels` (what the mount reports of its attaches, see
 //! `local_cache/attaches.rs`), and a `descriptors` (what it reports of its open cache files, see
 //! `local_cache/descriptors.rs`).
 
@@ -268,6 +274,11 @@ async fn session((cache, trees): (LocalCache, Option<TreeStore>), stream: UnixSt
                 said(cache.fill_blob(&blob).await)
             }
             Ok(Request::Manifest { sha256 }) => said(cache.fill_manifest(&sha256).await),
+            Ok(Request::Tree { root, ms }) => {
+                let within = Duration::from_millis(ms);
+                let filled = cache.fill_tree(&root, within).await;
+                filled.map_or_else(|error| error.to_string(), |filled| filled.answer())
+            }
             Ok(Request::Pin { mount, tree, blobs }) => pin(&cache, (&mount, &tree), &blobs),
             Ok(Request::Unpin { mount, tree }) => unpin(&cache, &mount, &tree),
             Ok(Request::PinsLive { mount, trees }) => pins_live(&cache, &mount, &trees),
@@ -288,6 +299,10 @@ async fn session((cache, trees): (LocalCache, Option<TreeStore>), stream: UnixSt
             }
             Ok(Request::Fetched(fetches)) => {
                 cache.manifests_fetched(&fetches);
+                "ok".to_owned()
+            }
+            Ok(Request::Levels(levels)) => {
+                cache.tree_levels(levels);
                 "ok".to_owned()
             }
             Ok(Request::Descriptors(report)) => {

@@ -12,9 +12,11 @@ use std::time::Duration;
 #[cfg(any(target_os = "linux", target_os = "macos", test))]
 use tokio::runtime::Handle;
 
+use crate::TreeDigest;
 #[cfg(any(target_os = "linux", target_os = "macos", test))]
 use crate::server::local_cache::LocalCache;
-use crate::server::local_cache::attaches::{Attach, Fetches};
+use crate::server::local_cache::TreeFilled;
+use crate::server::local_cache::attaches::{Attach, Fetches, Levels};
 use crate::server::local_cache::descriptors::Descriptors;
 #[cfg(any(target_os = "linux", target_os = "macos", test))]
 use crate::server::local_cache::trees::TreeStore;
@@ -95,6 +97,8 @@ pub(super) enum Report {
     Attached(Attach),
     /// Where the manifests of a read of a tree came from (`local_cache/attaches.rs`).
     Fetched(Fetches),
+    /// The levels of a read of a tree and its rounds of fills (`local_cache/attaches.rs`).
+    Levels(Levels),
     /// The cache files the mount holds open (`local_cache/descriptors.rs`).
     Descriptors(Descriptors),
 }
@@ -106,9 +110,22 @@ impl Report {
             Self::Started(path) => format!("started {path}"),
             Self::Attached(attach) => attach.line(),
             Self::Fetched(fetches) => fetches.line(),
+            Self::Levels(levels) => levels.line(),
             Self::Descriptors(descriptors) => descriptors.line(),
         }
     }
+}
+
+/// What the node answered to a fill of a tree's new manifests (`fill-tree`,
+/// `local_cache/source/tree_fill.rs`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum TreeAnswer {
+    /// It filled them: what it did, on its clock.
+    Filled(TreeFilled),
+    /// It is of a release before the request.
+    Unknown,
+    /// It did not fill them all: why, in its words or the client's.
+    Failed(String),
 }
 
 /// The requests of the core to the node's cache and tree store (the verbs of the fill socket,
@@ -122,6 +139,11 @@ pub(super) trait Fills: Send + Sync {
     /// # Errors
     /// The words of the fill's failure, or that it was not answered in time.
     fn fill_manifest(&self, sha256: &str, until: Until<'_>) -> Result<(), FillFailure>;
+
+    /// Puts the new manifests of the tree whose root manifest is `root` in the cache, the node
+    /// going down the tree itself, answered by `until`. The answer is never an error: a node that
+    /// did not fill them all leaves the rest to the reader, which fills them one at a time.
+    fn fill_tree(&self, root: &TreeDigest, until: Until<'_>) -> TreeAnswer;
 
     /// Puts the blob `sha256` of `size` bytes at `offset` of the upstream object `key` in the
     /// cache, answered by `until` where given.

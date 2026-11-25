@@ -1,8 +1,9 @@
 //! What the mounts report of their attaches, as the cache counts and renders it: the words of the
-//! two reports, read back as written and every other form refused; the bucket of a span at each
-//! bound; the families at zero; and the reports added up, rendered line for line.
+//! three reports, read back as written and every other form refused; the bucket of a span at each
+//! bound; the families at zero; and the reports added up, rendered line for line. And the node's
+//! own fills of manifests by the way they were asked, rendered the same way.
 
-use super::{Attach, BOUNDS_MS, BUCKETS, Fetches, Outcome, bucket_of};
+use super::{Attach, BOUNDS_MS, BUCKETS, Fetches, Levels, Outcome, Via, bucket_of};
 use crate::server::local_cache::testing::Rig;
 
 /// The lines of the three families in the cache's `/metricz` text.
@@ -200,4 +201,91 @@ async fn reports_add_up_by_outcome_and_by_where_the_manifests_came_from() {
     ];
     let fills = (cumulated(cold.fills), "0.094");
     assert_eq!(families(&rig), expected(attaches, [41, 3, 1], fills));
+}
+
+/// The lines of the families of the levels of the reads and of the node's own fills.
+fn levels_and_node_fills(rig: &Rig) -> Vec<String> {
+    rig.cache
+        .metrics()
+        .lines()
+        .filter(|line| {
+            [
+                "tierstore_fs_tree_levels_",
+                "tierstore_fs_tree_fill_rounds_",
+                "tierstore_cache_manifest_fill_seconds",
+            ]
+            .iter()
+            .any(|family| line.contains(family))
+        })
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The text of those families: the levels and rounds, and the node's fills by `via` (`fill`,
+/// `tree`), each given as its cumulative counts and its sum.
+fn levels_expected(levels: Levels, by_way: [([u64; BUCKETS], &str); 2]) -> Vec<String> {
+    let mut lines = vec![
+        "# TYPE tierstore_fs_tree_levels_total counter".to_owned(),
+        format!("tierstore_fs_tree_levels_total {}", levels.levels),
+        "# TYPE tierstore_fs_tree_fill_rounds_total counter".to_owned(),
+        format!("tierstore_fs_tree_fill_rounds_total {}", levels.rounds),
+    ];
+    let node = "tierstore_cache_manifest_fill_seconds";
+    lines.push(format!("# TYPE {node} histogram"));
+    for (via, (below, sum)) in ["fill", "tree"].iter().zip(by_way) {
+        lines.extend(histogram(node, &format!("via=\"{via}\","), below, sum));
+    }
+    lines
+}
+
+/// Asserts that a `levels` report reads back as it is written, and that every other form is
+/// refused: no words, one number, three, a sign, a number that is not decimal, two spaces.
+#[test]
+fn a_levels_report_reads_back_as_written_and_any_other_form_is_refused() {
+    let levels = Levels {
+        levels: 9,
+        rounds: 1,
+    };
+    assert_eq!(levels.line(), "levels 9 1");
+    assert_eq!(Levels::parse("9 1"), Some(levels));
+    for refused in [
+        "", "9", "9 ", "9 1 2", "+9 1", "9 -1", "9 1x", "9  1", "nine 1",
+    ] {
+        assert_eq!(Levels::parse(refused), None, "{refused:?}");
+    }
+}
+
+/// Asserts that the levels of the reads and the node's own fills add up and are rendered with
+/// their families whole: at zero first; then two reads of 9 and 3 levels with 1 and 3 rounds, and
+/// fills of 3 ms asked by `fill`, and of 0 ms and 400000 ms (over the last bound) for a tree.
+#[tokio::test]
+async fn levels_and_the_nodes_own_fills_add_up_and_render_by_way() {
+    let rig = Rig::new("tscache-attaches-levels");
+    let zero = ([0; BUCKETS], "0");
+    assert_eq!(
+        levels_and_node_fills(&rig),
+        levels_expected(Levels::default(), [zero; 2])
+    );
+    rig.cache.tree_levels(Levels {
+        levels: 9,
+        rounds: 1,
+    });
+    rig.cache.tree_levels(Levels {
+        levels: 3,
+        rounds: 3,
+    });
+    rig.cache.manifest_filled(Via::Fill, 3);
+    rig.cache.manifest_filled(Via::Tree, 0);
+    rig.cache.manifest_filled(Via::Tree, 400_000);
+    let mut fill = [0; BUCKETS];
+    fill[2] = 1;
+    let mut tree = [0; BUCKETS];
+    tree[0] = 1;
+    tree[BUCKETS - 1] = 1;
+    let by_way = [(cumulated(fill), "0.003"), (cumulated(tree), "400")];
+    let levels = Levels {
+        levels: 12,
+        rounds: 4,
+    };
+    assert_eq!(levels_and_node_fills(&rig), levels_expected(levels, by_way));
 }

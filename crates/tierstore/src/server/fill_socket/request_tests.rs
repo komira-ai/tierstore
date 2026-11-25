@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use super::{MountRequest, Refusal, Request, parse};
 use crate::TreeDigest;
-use crate::server::local_cache::attaches::{Attach, Fetches, Outcome};
+use crate::server::local_cache::attaches::{Attach, Fetches, Levels, Outcome};
 use crate::server::local_cache::descriptors::Descriptors;
 use crate::server::local_cache::trees::{PlacementId, placement_id};
 
@@ -516,6 +516,55 @@ fn a_descriptors_is_the_report_it_writes() {
         "descriptors boot-1 7 1 x",
         "descriptors  7 1 2",
     ] {
+        assert_eq!(line(text), Err(Refusal::Malformed), "{text:?}");
+    }
+}
+
+/// Asserts that a `fill-tree` names the root manifest and the milliseconds it may take, the
+/// largest number of them that fits 64 bits included, and that one without both, with a digest
+/// that is not one, or with a time that is not a number, is refused for it.
+#[test]
+fn a_fill_tree_names_its_root_and_its_time() {
+    let root = TreeDigest::from_hex(SHA).unwrap();
+    assert_eq!(
+        line(&format!("fill-tree {SHA} 30000")),
+        Ok(Request::Tree { root, ms: 30000 })
+    );
+    assert_eq!(
+        line(&format!("fill-tree {SHA} {}", u64::MAX)),
+        Ok(Request::Tree { root, ms: u64::MAX })
+    );
+    let refused = [
+        ("fill-tree".to_owned(), Refusal::Malformed),
+        (format!("fill-tree {SHA}"), Refusal::Malformed),
+        (
+            format!("fill-tree {} 1", SHA.to_uppercase()),
+            Refusal::Digest,
+        ),
+        ("fill-tree abc 1".to_owned(), Refusal::Digest),
+        (format!("fill-tree {SHA} -1"), Refusal::Number),
+        (format!("fill-tree {SHA} 1 2"), Refusal::Number),
+        (format!("fill-tree {SHA} "), Refusal::Number),
+        (
+            format!("fill-tree {SHA} 18446744073709551616"),
+            Refusal::Number,
+        ),
+    ];
+    for (text, refusal) in refused {
+        assert_eq!(line(&text), Err(refusal), "{text:?}");
+    }
+}
+
+/// Asserts that a `levels` is the report it writes, and that one that is not is refused as
+/// malformed.
+#[test]
+fn a_levels_is_the_report_it_writes() {
+    let levels = Levels {
+        levels: 9,
+        rounds: 1,
+    };
+    assert_eq!(line(&levels.line()), Ok(Request::Levels(levels)));
+    for text in ["levels", "levels 9", "levels 9 1 2", "levels x 1"] {
         assert_eq!(line(text), Err(Refusal::Malformed), "{text:?}");
     }
 }

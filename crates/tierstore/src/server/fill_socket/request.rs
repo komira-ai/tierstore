@@ -3,6 +3,7 @@
 //! ```text
 //! fill <sha256> <size> from <key> @ <offset>   a blob inside the upstream object <key>
 //! fill <sha256>                                the whole object cas/l/<sha256>
+//! fill-tree <sha256> <ms>                      the new manifests of the tree, within <ms>
 //! touch <sha256> [<sha256> ...]                these blobs were used now (no answer)
 //! pin <mount> <tree> <sha256> [<sha256> ...]   keep these blobs for the tree of the mount
 //! unpin <mount> <tree>                         take away every pin of the tree of the mount
@@ -18,6 +19,7 @@
 //! started <path>                              the mount first looked into the tree at <path>
 //! attached <outcome> <ms>                      the mount attached a tree on a lookup, or did not
 //! fetched <cache> <filled> <failed> <ms> <n>.. where the manifests of a read of a tree came from
+//! levels <levels> <rounds>                     the levels of a read of a tree, its rounds of fills
 //! descriptors <mount> <process> <held> <short> the cache files the mount holds open; its opens short of descriptors
 //! ```
 //!
@@ -31,10 +33,14 @@
 //! none at either end, the first not one of the mount's own (`trees`, `views`, `put`); so is the
 //! `<path>` of a `started`, the rest of the line after the verb. A
 //! `<placement>` is thirty-two lower-case hex digits. A `span` has the words of a `fill` of a blob.
-//! The words of an `attached` and of a `fetched` are those of
-//! [`Attach`](crate::server::local_cache::attaches::Attach) and
-//! [`Fetches`](crate::server::local_cache::attaches::Fetches): an outcome (`ok`, `absent`,
-//! `failed`) and a number, and four numbers and one for each bucket of the fill histogram. The words
+//! The `<sha256>` of a `fill-tree` is the root manifest of a tree, and `<ms>` the milliseconds
+//! the request may take (`local_cache/source/tree_fill.rs`).
+//! The words of an `attached`, a `fetched` and a `levels` are those of
+//! [`Attach`](crate::server::local_cache::attaches::Attach),
+//! [`Fetches`](crate::server::local_cache::attaches::Fetches) and
+//! [`Levels`](crate::server::local_cache::attaches::Levels): an outcome (`ok`, `absent`,
+//! `failed`) and a number, four numbers and one for each bucket of the fill histogram, and two
+//! numbers. The words
 //! of a `descriptors` are those of
 //! [`Descriptors`](crate::server::local_cache::descriptors::Descriptors): a mount name and two
 //! numbers.
@@ -43,7 +49,7 @@ use std::path::PathBuf;
 
 use crate::TreeDigest;
 use crate::journal::is_reserved;
-use crate::server::local_cache::attaches::{Attach, Fetches};
+use crate::server::local_cache::attaches::{Attach, Fetches, Levels};
 use crate::server::local_cache::descriptors::Descriptors;
 use crate::server::local_cache::layout::is_digest;
 use crate::server::local_cache::trees::{Location, PlacementId, placement_id};
@@ -69,6 +75,9 @@ pub(super) enum Request {
     },
     /// Fill the whole object `cas/l/<sha256>`.
     Manifest { sha256: String },
+    /// Fill the new manifests of the tree whose root manifest is `root`, within `ms`
+    /// milliseconds.
+    Tree { root: TreeDigest, ms: u64 },
     /// Count these blobs as used now; only the digests that are digests are kept.
     Touch(Vec<String>),
     /// Pin these blobs for `tree` of `mount`.
@@ -98,6 +107,8 @@ pub(super) enum Request {
     Attached(Attach),
     /// Where the manifests of a read of a tree came from (`local_cache/attaches.rs`).
     Fetched(Fetches),
+    /// The levels of a read of a tree and its rounds of fills (`local_cache/attaches.rs`).
+    Levels(Levels),
     /// The cache files the mount holds open, and the opens short of descriptors since its last
     /// report (`local_cache/descriptors.rs`).
     Descriptors(Descriptors),
@@ -223,6 +234,13 @@ pub(super) fn parse(line: &[u8]) -> Result<Request, Refusal> {
     let (verb, rest) = text.split_once(' ').unwrap_or((text, ""));
     match verb {
         "fill" => fill(rest),
+        "fill-tree" => {
+            let (root, ms) = rest.split_once(' ').ok_or(Refusal::Malformed)?;
+            Ok(Request::Tree {
+                root: TreeDigest::from_hex(root).ok_or(Refusal::Digest)?,
+                ms: number(ms)?,
+            })
+        }
         "touch" => Ok(Request::Touch(
             rest.split(' ')
                 .filter(|word| is_digest(word))
@@ -250,6 +268,9 @@ pub(super) fn parse(line: &[u8]) -> Result<Request, Refusal> {
             .ok_or(Refusal::Malformed),
         "fetched" => Fetches::parse(rest)
             .map(Request::Fetched)
+            .ok_or(Refusal::Malformed),
+        "levels" => Levels::parse(rest)
+            .map(Request::Levels)
             .ok_or(Refusal::Malformed),
         "descriptors" => Descriptors::parse(rest)
             .map(Request::Descriptors)

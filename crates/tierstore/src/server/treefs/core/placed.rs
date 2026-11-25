@@ -44,7 +44,7 @@ use super::super::fill_client::{AskError, Place, PlacedTree, Until};
 use super::super::fills::Report;
 use super::super::ino;
 use super::super::tree::Tree;
-use super::fetched::Fetched;
+use super::fetched::{Fetched, TreeAsked};
 use super::loaded::Loaded;
 use super::said::Failing;
 use super::{Core, Errno, Looked, locked};
@@ -72,7 +72,8 @@ const MOST_ENTRIES: usize = 1 << 24;
 /// The most manifests of a tree one read fetches at once, each level of the tree before the next
 /// (`tree_manifest/waves.rs`): as many fills as the node's fill socket runs at once by default, so
 /// that a read of a tree whose manifests the cache does not hold costs a round trip for each level
-/// of the tree and not one for each directory.
+/// of the tree and not one for each directory, where the node did not fill them first
+/// (`fill-tree`, [`Core::read_tree`]).
 const MANIFESTS_AT_ONCE: usize = FILL_SOCKET_CONCURRENCY;
 
 /// The bytes of the manifest file at `path`, at most [`MAX_MANIFEST_BYTES`] and one more byte, so
@@ -229,7 +230,14 @@ impl Core {
     /// does not hold them, a level of the tree at a time and up to [`MANIFESTS_AT_ONCE`] at once,
     /// all of them by [`TREE_READ`] after the read began, and flattened. The manifests it fetches
     /// are counted in `fetched`, which the caller makes for this read alone, and reported to the
-    /// node (`fetched`) when the read ends.
+    /// node (`fetched`, then `levels`) when the read ends.
+    ///
+    /// A tree whose root manifest the cache does not hold is new, and so are the manifests of the
+    /// chain of directories that changed below it, which a level at a time would cost a round
+    /// trip of the socket each: the node is first asked to fill them itself (`fill-tree`), going
+    /// down the tree in the cache and answering once. Whatever it answers, the tree is then read as
+    /// above, so a manifest the node did not fill (it failed, or it is of a release before the
+    /// request) is filled by the read itself, and fails the read in the words it did before.
     pub(in crate::server::treefs) fn read_tree(
         &self,
         digest: &TreeDigest,
@@ -259,11 +267,18 @@ impl Core {
                 .now()
                 .saturating_add(u64::try_from(TREE_READ.as_millis()).unwrap_or(u64::MAX)),
         };
-        let fetch = |wanted: &TreeDigest| -> Result<Vec<u8>, String> {
+        let root = manifest_path(&self.settings.cache_path, &digest.to_string());
+        if std::fs::metadata(root).is_err() {
+            let start = self.now();
+            let answer = self.fills.fill_tree(digest, until);
+            let ms = self.now().saturating_sub(start);
+            fetched.asked_tree(TreeAsked { answer, ms });
+        }
+        let fetch = |wanted: &TreeDigest, level: usize| -> Result<Vec<u8>, String> {
             let hex = wanted.to_string();
             let path = manifest_path(&self.settings.cache_path, &hex);
             if let Ok(bytes) = read_manifest(&path) {
-                fetched.cached();
+                fetched.cached(level);
                 return Ok(bytes);
             }
             let read = |()| read_manifest(&path).map_err(|error| error.to_string());
@@ -271,11 +286,12 @@ impl Core {
             let filled = self.fills.fill_manifest(&hex, until);
             let ms = self.now().saturating_sub(start);
             let had = filled.and_then(read);
-            fetched.filled(ms, had.is_ok());
+            fetched.filled(level, ms, had.is_ok());
             had
         };
         let flattened = flatten_in_waves(digest, MANIFESTS_AT_ONCE, fetch);
         self.fills.report(Report::Fetched(fetched.counts()));
+        self.fills.report(Report::Levels(fetched.levels()));
         flattened.map(Tree::new).map_err(|why| {
             let gone = matches!(
                 &why,
@@ -511,3 +527,7 @@ mod image_tests;
 #[cfg(test)]
 #[path = "tree_read_tests.rs"]
 mod tree_read_tests;
+
+#[cfg(test)]
+#[path = "tree_fill_tests.rs"]
+mod tree_fill_tests;
