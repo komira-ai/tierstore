@@ -1,10 +1,8 @@
 //! [`Live`]: the credentials of a store as requests are signed, fetched from their source, kept,
 //! and renewed before they expire (the module docs of `credentials` say when).
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-
-use tokio::sync::Mutex;
 
 use super::answer::Http;
 use super::{AwsEnv, CredentialSource, Credentials, CredentialsError, Kind};
@@ -18,7 +16,8 @@ pub(super) const RENEW_BEFORE: Duration = Duration::from_secs(5 * 60);
 /// Credentials with this long or less left are never signed with.
 pub(super) const MARGIN: Duration = Duration::from_secs(60);
 
-/// After a renewal fails, how long the credentials kept are signed with before the next try.
+/// After a fetch fails, how long before the source is asked again: until then the credentials kept
+/// sign while they may, and with none the request fails with the error of that fetch.
 pub(super) const RETRY_AFTER: Duration = Duration::from_secs(10);
 
 /// One set of keys to sign with.
@@ -80,14 +79,35 @@ pub(crate) struct Renewing {
     /// The region whose STS endpoint is asked when the environment names none (the store's).
     region: String,
     clock: Clock,
+    /// The keys kept and the last failure: held only to read or change them, never across a
+    /// fetch.
     state: Mutex<State>,
+    /// Held by the one fetch in flight, with the source settled on: a request that finds a fetch
+    /// in flight signs with the keys kept if they may sign, and waits for the fetch if not.
+    fetching: tokio::sync::Mutex<Option<(Plan, CredentialSource)>>,
 }
 
-/// The source settled on, and the keys it gave last.
+/// The keys a source gave last, and the fetch that failed last.
 #[derive(Default)]
 struct State {
-    plan: Option<(Plan, CredentialSource)>,
     kept: Option<Kept>,
+    failed: Option<Failed>,
+}
+
+/// A fetch that failed with no keys kept that may sign, and when the source is asked again.
+struct Failed {
+    error: CredentialsError,
+    retry_at: SystemTime,
+}
+
+/// What a request does with what is kept.
+enum Look {
+    /// Sign with these keys.
+    Sign(Arc<Keys>),
+    /// Fail with this error: a fetch failed a moment ago.
+    Fail(CredentialsError),
+    /// Fetch new keys.
+    Fetch,
 }
 
 /// Keys kept, and when to renew them.
@@ -154,6 +174,7 @@ impl Live {
                 region: region.to_owned(),
                 clock,
                 state: Mutex::default(),
+                fetching: tokio::sync::Mutex::default(),
             })),
         })
     }
@@ -172,49 +193,104 @@ impl Live {
 
 impl Renewing {
     async fn keys(&self) -> Result<Arc<Keys>, CredentialsError> {
-        // Held while a renewal is fetched: the requests behind it wait for its keys, so one
-        // renewal is asked for, not one for each request.
-        let mut state = self.state.lock().await;
-        let now = (self.clock)();
-        if let Some(kept) = &state.kept
-            && kept.fresh(now)
-        {
-            return Ok(Arc::clone(&kept.keys));
+        match self.look((self.clock)()) {
+            Look::Sign(keys) => return Ok(keys),
+            Look::Fail(error) => return Err(error),
+            Look::Fetch => {}
         }
-        match self.fetch(&mut state.plan, now).await {
+        // One fetch at a time: the requests that find one in flight sign with the keys kept if
+        // they may, or wait for its keys, so one renewal is asked for, not one for each request.
+        let mut plan = match self.fetching.try_lock() {
+            Ok(plan) => plan,
+            Err(_) => {
+                if let Some(keys) = self.signing((self.clock)()) {
+                    return Ok(keys);
+                }
+                self.fetching.lock().await
+            }
+        };
+        // The fetch this one waited for may have given keys, or failed.
+        let now = (self.clock)();
+        match self.look(now) {
+            Look::Sign(keys) => return Ok(keys),
+            Look::Fail(error) => return Err(error),
+            Look::Fetch => {}
+        }
+        let fetched = self.fetch(&mut plan, now).await;
+        let mut state = self.state();
+        let error = match fetched {
             Ok((fetched, from)) => {
                 let kept = Kept::new(fetched, from, now);
-                if !kept.usable(now) {
-                    return Err(CredentialsError::Expired {
-                        from,
-                        at: kept.expiry(),
-                        why: "the source gave credentials with a minute or less left".to_owned(),
-                    });
+                if kept.usable(now) {
+                    tracing::info!(source = %from, expires = %kept.expiry(), "fetched AWS credentials");
+                    let keys = Arc::clone(&kept.keys);
+                    state.kept = Some(kept);
+                    state.failed = None;
+                    return Ok(keys);
                 }
-                tracing::info!(source = %from, expires = %kept.expiry(), "fetched AWS credentials");
-                let keys = Arc::clone(&kept.keys);
-                state.kept = Some(kept);
-                Ok(keys)
+                CredentialsError::Expired {
+                    from,
+                    at: kept.expiry(),
+                    why: "the source gave credentials with a minute or less left".to_owned(),
+                }
             }
-            Err(error) => match &mut state.kept {
-                Some(kept) if kept.usable(now) => {
-                    tracing::warn!(
-                        source = %kept.from,
-                        expires = %kept.expiry(),
-                        %error,
-                        "renewing AWS credentials failed; signing with the current ones until they near their end"
-                    );
-                    kept.renew_at = now.checked_add(RETRY_AFTER);
-                    Ok(Arc::clone(&kept.keys))
-                }
-                Some(kept) => Err(CredentialsError::Expired {
+            Err(error) => error,
+        };
+        let error = match &mut state.kept {
+            Some(kept) if kept.usable(now) => {
+                tracing::warn!(
+                    source = %kept.from,
+                    expires = %kept.expiry(),
+                    %error,
+                    "renewing AWS credentials failed; signing with the current ones until they near their end"
+                );
+                kept.renew_at = now.checked_add(RETRY_AFTER);
+                return Ok(Arc::clone(&kept.keys));
+            }
+            Some(kept) if !matches!(error, CredentialsError::Expired { .. }) => {
+                CredentialsError::Expired {
                     from: kept.from,
                     at: kept.expiry(),
                     why: error.to_string(),
-                }),
-                None => Err(error),
-            },
+                }
+            }
+            _ => error,
+        };
+        state.failed = now.checked_add(RETRY_AFTER).map(|retry_at| Failed {
+            error: error.clone(),
+            retry_at,
+        });
+        Err(error)
+    }
+
+    /// The state, also after a panic of another request while it held it (the state is whole
+    /// after each change).
+    fn state(&self) -> MutexGuard<'_, State> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// What a request at `now` does: sign with the keys kept while it is not yet time to renew
+    /// them and they may sign, fail with the error of a fetch that failed less than
+    /// [`RETRY_AFTER`] ago, or fetch.
+    fn look(&self, now: SystemTime) -> Look {
+        let state = self.state();
+        if let Some(kept) = &state.kept
+            && kept.fresh(now)
+            && kept.usable(now)
+        {
+            return Look::Sign(Arc::clone(&kept.keys));
         }
+        match &state.failed {
+            Some(failed) if now < failed.retry_at => Look::Fail(failed.error.clone()),
+            _ => Look::Fetch,
+        }
+    }
+
+    /// The keys kept, if they may sign at `now`.
+    fn signing(&self, now: SystemTime) -> Option<Arc<Keys>> {
+        let state = self.state();
+        let kept = state.kept.as_ref()?;
+        kept.usable(now).then(|| Arc::clone(&kept.keys))
     }
 
     /// Fetches keys from the source settled on in `plan`, or settles on one first: the source

@@ -239,7 +239,7 @@ conditional_delete = true
 ```
 
 - `region` is the bucket's: AWS S3 refuses a request signed for another, and with `web-identity` it also picks the STS endpoint when the environment names no region.
-- No credentials are fetched at start; the first request to the tier fetches them, and a source that is set up wrongly fails that request (answered 503) with the source and the reason in the log.
+- Loading the file fetches no credentials; the first request to the tier does, and a source that is set up wrongly fails that request (a client's is answered 503) with the source and the reason.
 - `credentials_file` is refused beside a `credential_source` that names a source, and `credential_profile` (the profile of the shared AWS files) is only for `profile` and `auto`.
 
 ## Sizing budgets and water marks

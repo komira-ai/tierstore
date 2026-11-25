@@ -1,8 +1,10 @@
 //! [`CredentialSource::Profile`]: a profile of the shared config and credentials files.
 //!
-//! The profile is the one [`AwsEnv::with_profile`] or `AWS_PROFILE` names, or `default`. Its keys
-//! are those of its section in the config file (`[profile <name>]`, or `[default]` for the
-//! default profile) with those of its section in the credentials file (`[<name>]`) over them.
+//! The files are those of `AWS_SHARED_CREDENTIALS_FILE` and `AWS_CONFIG_FILE` (`~/.aws` is not
+//! looked in: `HOME` is not read). The profile is the one [`AwsEnv::with_profile`] or
+//! `AWS_PROFILE` names, or `default`. Its keys are those of its section in the config file
+//! (`[profile <name>]`, or `[default]` for the default profile) with those of its section in the
+//! credentials file (`[<name>]`) over them.
 //! It gives:
 //!
 //! - with `role_arn` and `web_identity_token_file` (and `role_session_name`, if given): the
@@ -13,8 +15,8 @@
 //! A role taken with the credentials of another profile or source (`source_profile`,
 //! `credential_source`), `credential_process` and IAM Identity Center (`sso_session`,
 //! `sso_start_url`) are refused by name. A profile that is not in either file, or has no key of
-//! these, is not set up, unless it was named: a profile asked for by name that is not there is an
-//! error.
+//! these, is not set up (nor is the source with neither variable set), unless it was named: a
+//! profile asked for by name that is not there is an error.
 //!
 //! The files are read as the AWS CLI writes them: `[section]` lines, `key = value` lines, and
 //! comment lines starting with `#` or `;`. An indented line is a nested value of the key before
@@ -37,16 +39,15 @@ pub(super) type Sections = BTreeMap<String, BTreeMap<String, String>>;
 /// asks for what is not supported, or has half of a pair of keys.
 pub(super) fn find(env: &AwsEnv) -> Result<Found, CredentialsError> {
     let (name, named) = env.profile();
-    let credentials_path = env.shared_file("AWS_SHARED_CREDENTIALS_FILE", "credentials");
-    let config_path = env.shared_file("AWS_CONFIG_FILE", "config");
-    let (Some(credentials_path), Some(config_path)) = (credentials_path, config_path) else {
+    let credentials_path = env.shared_file("AWS_SHARED_CREDENTIALS_FILE");
+    let config_path = env.shared_file("AWS_CONFIG_FILE");
+    if credentials_path.is_none() && config_path.is_none() {
         return Ok(Found::Unset(
-            "HOME is not set, and AWS_SHARED_CREDENTIALS_FILE and AWS_CONFIG_FILE are not both set"
-                .to_owned(),
+            "AWS_SHARED_CREDENTIALS_FILE and AWS_CONFIG_FILE are not set".to_owned(),
         ));
-    };
-    let credentials = read(&credentials_path)?;
-    let config = read(&config_path)?;
+    }
+    let credentials = read(credentials_path.as_deref())?;
+    let config = read(config_path.as_deref())?;
     let mut keys = BTreeMap::new();
     let config_section = config.as_ref().and_then(|sections| {
         let section = sections.get(&format!("profile {name}"));
@@ -57,11 +58,12 @@ pub(super) fn find(env: &AwsEnv) -> Result<Found, CredentialsError> {
         keys.extend(section.iter().map(|(k, v)| (k.as_str(), v.as_str())));
     }
     if config_section.is_none() && credentials_section.is_none() {
-        let why = format!(
-            "no profile {name:?} in {} or {}",
-            credentials_path.display(),
-            config_path.display()
-        );
+        let files: Vec<String> = [credentials_path, config_path]
+            .iter()
+            .flatten()
+            .map(|path| path.display().to_string())
+            .collect();
+        let why = format!("no profile {name:?} in {}", files.join(" or "));
         if named {
             return Err(failed(why));
         }
@@ -136,11 +138,14 @@ fn failed(why: String) -> CredentialsError {
     }
 }
 
-/// The sections of the file at `path`, or `None` if there is no file.
+/// The sections of the file at `path`, or `None` if no path is given or there is no file.
 ///
 /// # Errors
 /// The file exists and cannot be read as UTF-8 text.
-fn read(path: &Path) -> Result<Option<Sections>, CredentialsError> {
+fn read(path: Option<&Path>) -> Result<Option<Sections>, CredentialsError> {
+    let Some(path) = path else {
+        return Ok(None);
+    };
     match std::fs::read_to_string(path) {
         Ok(text) => Ok(Some(sections(&text))),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -148,8 +153,9 @@ fn read(path: &Path) -> Result<Option<Sections>, CredentialsError> {
     }
 }
 
-/// The sections of the INI text `text` (see the module docs). A key before the first section,
-/// and a line that is not a section, a key or a comment, are skipped; a section given twice has
+/// The sections of the INI text `text` (see the module docs). A key before the first section or
+/// after a `[` line with no `]`, and a line that is not a section, a key or a comment, are
+/// skipped; a section given twice has
 /// the keys of both, the later value of a key given twice.
 pub(super) fn sections(text: &str) -> Sections {
     let mut sections = Sections::new();
@@ -162,10 +168,14 @@ pub(super) fn sections(text: &str) -> Sections {
         if line.is_empty() || line.starts_with(['#', ';']) {
             continue;
         }
-        if let Some(name) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
-            let name = name.split_whitespace().collect::<Vec<_>>().join(" ");
-            sections.entry(name.clone()).or_default();
-            current = Some(name);
+        if let Some(header) = line.strip_prefix('[') {
+            // `[name]`, and anything after the `]` (a comment) ignored; a `[` with no `]` is no
+            // section, and the keys after it belong to none.
+            current = header.split_once(']').map(|(name, _)| {
+                let name = name.split_whitespace().collect::<Vec<_>>().join(" ");
+                sections.entry(name.clone()).or_default();
+                name
+            });
             continue;
         }
         let (Some(section), Some((key, value))) = (&current, line.split_once('=')) else {

@@ -19,9 +19,10 @@
 //! it does not exist. A tier `s3:<bucket>` is a bucket of an S3-compatible store (see
 //! [`S3Backend`]), which the keys of the tier say how to reach, in the table of the tier: `hot_store.endpoint` or `cold_store.endpoint` (`http://host[:port]` or `https://host[:port]`, whose certificate is verified against the system's CA certificates; an AWS S3 endpoint takes the bucket in the host name, any other in the path), or `endpoints` in place of it (a list whose addresses the requests go to in turn),
 //! `hot_store.region` or `cold_store.region` (the signing region, `us-east-1` if not given), and
-//! `hot_store.credentials_file` or `cold_store.credentials_file` (required: a file only its owner may
+//! `hot_store.credentials_file` or `cold_store.credentials_file` (a file only its owner may
 //! read, in the form of `server.access_key_file` below; a secret in the config file would be
-//! readable by more users). The two tiers have a table of their own, so they may be two stores. These
+//! readable by more users), or in its place a `credential_source` that takes AWS credentials as
+//! the AWS SDKs find them (`credential_profile` with it; see `config_tier`). The two tiers have a table of their own, so they may be two stores. These
 //! keys are refused for a tier that is not an S3 bucket, since they would do nothing. A request
 //! to an S3 tier is bounded by `server.s3_request_timeout`. Both tiers must do multipart uploads,
 //! which all three kinds do, and the proxy passes them to the tier that holds the upload.
@@ -221,7 +222,8 @@ pub struct Cli {
     pub slot: Option<u16>,
     /// The hot tier: `memory` (its objects are lost when the process stops), `dir:<path>` (a
     /// directory, made if it does not exist) or `s3:<bucket>` (a bucket of an S3-compatible
-    /// store, which needs `hot_store.endpoint` and `hot_store.credentials_file`).
+    /// store, which needs `hot_store.endpoint`, and `hot_store.credentials_file` or a
+    /// `hot_store.credential_source`).
     pub hot: String,
     /// The tier of the markers of the hot store (the marks bucket, `hot_store.marks_bucket`), in
     /// the form of `hot`: `s3:<bucket>` with the endpoint, region and credentials of the hot tier
@@ -229,7 +231,7 @@ pub struct Cli {
     /// directory, or `memory` for a hot tier that is.
     pub hot_marks: String,
     /// The cold tier: `memory`, `dir:<path>` or `s3:<bucket>` (which needs `cold_store.endpoint`
-    /// and `cold_store.credentials_file`). Multipart uploads go straight to it, part by part, so it
+    /// and `cold_store.credentials_file` or a `cold_store.credential_source`). Multipart uploads go straight to it, part by part, so it
     /// must do them; all three kinds do.
     pub cold: String,
     /// The endpoint of the hot tier when it is `s3:<bucket>`: `http(s)://host[:port]`, no path.

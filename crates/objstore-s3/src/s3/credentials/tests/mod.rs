@@ -58,6 +58,7 @@ pub(crate) fn http() -> Http {
     let tls = tls_config(None, Vec::new()).unwrap();
     let client = client_builder(Duration::from_secs(5), Duration::from_secs(5), tls)
         .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .unwrap();
     Http {

@@ -7,11 +7,13 @@ use std::path::PathBuf;
 use super::live::Keys;
 use super::{CredentialSource, CredentialsError};
 
-/// The environment the credential sources are found in: the `AWS_*` variables, and `HOME`, under
-/// which the shared files are (`~/.aws/config`, `~/.aws/credentials`), with the profile to use.
+/// The environment the credential sources are found in: the `AWS_*` variables, with the profile to
+/// use.
 ///
 /// These are the provider-standard variables of AWS credentials; nothing else of the process's
-/// environment is kept. `Debug` shows the names of the variables, never their values.
+/// environment is kept. `HOME` is not read, so the shared files are not looked for under
+/// `~/.aws`: `AWS_SHARED_CREDENTIALS_FILE` and `AWS_CONFIG_FILE` name them (a service runs with
+/// no home of its own to read). `Debug` shows the names of the variables, never their values.
 #[derive(Clone, Default)]
 pub struct AwsEnv {
     vars: BTreeMap<String, String>,
@@ -19,12 +21,12 @@ pub struct AwsEnv {
 }
 
 impl AwsEnv {
-    /// The `AWS_*` variables and `HOME` of this process, those whose name and value are UTF-8.
+    /// The `AWS_*` variables of this process, those whose name and value are UTF-8.
     #[must_use]
     pub fn from_process() -> Self {
         #[expect(
             clippy::disallowed_methods,
-            reason = "the provider-standard AWS credential variables (AGENTS.md S2), and HOME, under which the AWS SDKs find the shared credential files"
+            reason = "the provider-standard AWS credential variables (AGENTS.md S2); every other variable is dropped"
         )]
         let vars = std::env::vars_os();
         Self::from_vars(vars.filter_map(|(name, value)| {
@@ -32,12 +34,12 @@ impl AwsEnv {
         }))
     }
 
-    /// The environment of `vars` alone, of which the `AWS_*` variables and `HOME` are kept.
+    /// The environment of `vars` alone, of which the `AWS_*` variables are kept.
     #[must_use]
     pub fn from_vars(vars: impl IntoIterator<Item = (String, String)>) -> Self {
         let vars = vars
             .into_iter()
-            .filter(|(name, _)| name.starts_with("AWS_") || name == "HOME")
+            .filter(|(name, _)| name.starts_with("AWS_"))
             .collect();
         Self {
             vars,
@@ -69,14 +71,9 @@ impl AwsEnv {
         }
     }
 
-    /// The path of a shared file: the one the variable `name` gives, or `~/.aws/<file>`; `None`
-    /// with neither the variable nor `HOME`.
-    pub(super) fn shared_file(&self, name: &str, file: &str) -> Option<PathBuf> {
-        if let Some(path) = self.var(name) {
-            return Some(PathBuf::from(path));
-        }
-        let home = self.var("HOME")?;
-        Some(PathBuf::from(home).join(".aws").join(file))
+    /// The path of a shared file, as the variable `name` gives it.
+    pub(super) fn shared_file(&self, name: &str) -> Option<PathBuf> {
+        self.var(name).map(PathBuf::from)
     }
 
     /// The region of the AWS services this environment names: `AWS_REGION`, then

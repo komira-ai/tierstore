@@ -118,11 +118,11 @@ async fn empty_values_count_as_unset() {
     assert_eq!(keys.session_token, None);
 }
 
-/// Asserts that `AwsEnv::from_vars` keeps the `AWS_*` variables and `HOME` and nothing else
-/// (`AWSX`, `PATH` and a lower-case `aws_` name are dropped), and that its `Debug` shows names
-/// and no value.
+/// Asserts that `AwsEnv::from_vars` keeps the `AWS_*` variables and nothing else (`HOME`, `AWSX`,
+/// `PATH` and a lower-case `aws_` name are dropped), and that its `Debug` shows names and no
+/// value.
 #[test]
-fn from_vars_keeps_only_aws_variables_and_home() {
+fn from_vars_keeps_only_aws_variables() {
     let env = env(&[
         ("AWS_SECRET_ACCESS_KEY", "the-secret"),
         ("HOME", "/home/someone"),
@@ -135,10 +135,10 @@ fn from_vars_keeps_only_aws_variables_and_home() {
     assert_eq!(env.var("AWSX"), None);
     assert_eq!(env.var("aws_region"), None);
     assert_eq!(env.var("AWS_SECRET_ACCESS_KEY"), Some("the-secret"));
-    assert_eq!(env.var("HOME"), Some("/home/someone"));
+    assert_eq!(env.var("HOME"), None);
     assert_eq!(
         format!("{env:?}"),
-        r#"AwsEnv { vars: ["AWS_SECRET_ACCESS_KEY", "HOME"], profile: None }"#
+        r#"AwsEnv { vars: ["AWS_SECRET_ACCESS_KEY"], profile: None }"#
     );
 }
 
@@ -155,10 +155,10 @@ fn debug_shows_names_not_values() {
     assert!(!shown.contains("secret-token-value"));
 }
 
-/// Asserts that the environment taken from this process names only `AWS_*` variables and `HOME`
-/// (the values are the host's and are not looked at).
+/// Asserts that the environment taken from this process names only `AWS_*` variables (the values
+/// are the host's and are not looked at).
 #[test]
-fn from_process_names_only_aws_variables_and_home() {
+fn from_process_names_only_aws_variables() {
     let shown = format!("{:?}", AwsEnv::from_process());
     let names = shown
         .split_once("vars: [")
@@ -167,10 +167,7 @@ fn from_process_names_only_aws_variables_and_home() {
         .unwrap();
     for name in names.split(',').map(str::trim).filter(|n| !n.is_empty()) {
         let name = name.trim_matches('"');
-        assert!(
-            name.starts_with("AWS_") || name == "HOME",
-            "unexpected variable {name}"
-        );
+        assert!(name.starts_with("AWS_"), "unexpected variable {name}");
     }
     assert!(shown.ends_with("profile: None }"));
 }
@@ -188,27 +185,23 @@ fn with_profile_overrides_aws_profile() {
     assert_eq!(chosen.profile(), ("chosen", true));
 }
 
-/// Asserts that a shared file is the one its variable gives, else under `HOME/.aws`, and that
-/// there is none with neither (an empty `HOME` counts as unset).
+/// Asserts that a shared file is the path its variable gives and nothing else: with the variable
+/// unset or empty there is none, whatever `HOME` is.
 #[test]
-fn shared_file_is_the_variable_or_under_home() {
+fn shared_file_is_the_variable_alone() {
     let given = env(&[
         ("AWS_CONFIG_FILE", "/given/config"),
         ("HOME", "/home/someone"),
     ]);
     assert_eq!(
-        given.shared_file("AWS_CONFIG_FILE", "config"),
+        given.shared_file("AWS_CONFIG_FILE"),
         Some("/given/config".into())
     );
+    assert_eq!(given.shared_file("AWS_SHARED_CREDENTIALS_FILE"), None);
     assert_eq!(
-        given.shared_file("AWS_SHARED_CREDENTIALS_FILE", "credentials"),
-        Some("/home/someone/.aws/credentials".into())
-    );
-    assert_eq!(
-        env(&[("HOME", "")]).shared_file("AWS_CONFIG_FILE", "config"),
+        env(&[("AWS_CONFIG_FILE", "")]).shared_file("AWS_CONFIG_FILE"),
         None
     );
-    assert_eq!(env(&[]).shared_file("AWS_CONFIG_FILE", "config"), None);
 }
 
 /// Asserts that the region is `AWS_REGION`, else `AWS_DEFAULT_REGION`, else none, and that an

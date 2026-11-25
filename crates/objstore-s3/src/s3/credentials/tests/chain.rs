@@ -6,9 +6,10 @@ use tierstore_testkit::port::dead_addr;
 
 use super::*;
 use crate::s3::CredentialsError;
+use crate::s3::credentials::live::RETRY_AFTER;
 
 const NONE_SET: &str = "environment: AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY are not set; \
-     profile: HOME is not set, and AWS_SHARED_CREDENTIALS_FILE and AWS_CONFIG_FILE are not both set; \
+     profile: AWS_SHARED_CREDENTIALS_FILE and AWS_CONFIG_FILE are not set; \
      web-identity: AWS_WEB_IDENTITY_TOKEN_FILE is not set; \
      container: AWS_CONTAINER_CREDENTIALS_RELATIVE_URI and AWS_CONTAINER_CREDENTIALS_FULL_URI are not set";
 
@@ -323,7 +324,8 @@ async fn a_missing_web_identity_token_stops_the_chain() {
 }
 
 /// Asserts that a first fetch that fails settles on nothing: the container endpoint that
-/// answered 500 is asked again by the next call, which gets its keys once it answers.
+/// answered 500 is not asked again within `RETRY_AFTER` (the same error, no new request), and is
+/// asked again after it, which gets its keys once it answers.
 #[tokio::test]
 async fn a_failed_first_fetch_is_asked_again() {
     let container = Fake::start(|_| (500, String::new())).await;
@@ -343,12 +345,16 @@ async fn a_failed_first_fetch_is_asked_again() {
         T0 + 3600,
     );
     container.reroute(move |_| (200, answer.clone()));
+    clock.set(T0 + RETRY_AFTER.as_secs() - 1);
+    assert_eq!(live.keys().await.err().unwrap(), error);
+    assert_eq!(container.seen().len(), 1);
+    clock.set(T0 + RETRY_AFTER.as_secs());
     assert_eq!(live.keys().await.unwrap().access_key_id, "CONTAINER");
     assert_eq!(container.seen().len(), 2);
 }
 
-/// Asserts that a chain that found no source is walked again by the next call: a profile file
-/// written after the first failure is found.
+/// Asserts that a chain that found no source is walked again once `RETRY_AFTER` has passed (not
+/// before: the same error is given): a profile file written after the first failure is found.
 #[tokio::test]
 async fn a_chain_that_found_nothing_is_walked_again() {
     let files = Files::new("chain-walked-again");
@@ -363,5 +369,8 @@ async fn a_chain_that_found_nothing_is_walked_again() {
     let error = live.keys().await.err().unwrap();
     assert!(matches!(error, CredentialsError::NoSource(_)), "{error}");
     files.write_profile();
+    clock.set(T0 + RETRY_AFTER.as_secs() - 1);
+    assert_eq!(live.keys().await.err().unwrap(), error);
+    clock.set(T0 + RETRY_AFTER.as_secs());
     assert_eq!(live.keys().await.unwrap().access_key_id, "PROFILEKEY");
 }

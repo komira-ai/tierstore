@@ -22,14 +22,19 @@ fn put(dir: &TestDir, rel: &str, text: &str) -> PathBuf {
     path
 }
 
-/// The environment whose `HOME` is `dir`, with `extra` variables.
-fn home_env(dir: &TestDir, extra: &[(&str, &str)]) -> AwsEnv {
-    let mut vars = vec![("HOME", dir.path().to_str().unwrap())];
+/// The environment whose two file variables name `.aws/credentials` and `.aws/config` under
+/// `dir`, with `extra` variables.
+fn files_env(dir: &TestDir, extra: &[(&str, &str)]) -> AwsEnv {
+    let (credentials, config) = shown(dir);
+    let mut vars = vec![
+        ("AWS_SHARED_CREDENTIALS_FILE", credentials.as_str()),
+        ("AWS_CONFIG_FILE", config.as_str()),
+    ];
     vars.extend_from_slice(extra);
     env(&vars)
 }
 
-/// The paths of the credentials and config files under the `HOME` of `dir`, as messages show them.
+/// The paths of the credentials and config files under `.aws` of `dir`, as messages show them.
 fn shown(dir: &TestDir) -> (String, String) {
     let aws = dir.path().join(".aws");
     (
@@ -50,8 +55,8 @@ async fn error_of(env: AwsEnv) -> CredentialsError {
 }
 
 /// Asserts that the INI reader skips comment lines (`#` and `;`), blank lines, indented
-/// continuation lines (even ones that look like sections), keys before the first section and
-/// lines with no `=`; merges a section given twice (the later value of a key wins); keeps `=`
+/// continuation lines (even ones that look like sections), keys before the first section or
+/// after an unterminated `[` line, and lines with no `=`; merges a section given twice (the later value of a key wins); keeps `=`
 /// in a value; and normalises the whitespace of a section name.
 #[test]
 fn the_ini_reader_follows_the_shared_file_format() {
@@ -78,12 +83,29 @@ fn the_ini_reader_follows_the_shared_file_format() {
         BTreeMap::from([
             ("a".to_owned(), "3".to_owned()),
             ("b".to_owned(), "2".to_owned()),
-            ("c".to_owned(), String::new()),
         ]),
     );
     expected.insert(
         "profile spaced name".to_owned(),
         BTreeMap::from([("k".to_owned(), "v = w".to_owned())]),
+    );
+    assert_eq!(sections(text), expected);
+}
+
+/// Asserts that a comment after a section header leaves the section's name alone (`[dev] # note`
+/// is `dev`), and that a `[` line with no `]` starts no section: the keys after it belong to none
+/// and do not land in the section before it.
+#[test]
+fn a_header_comment_is_ignored_and_an_unclosed_header_starts_no_section() {
+    let text = "[dev] # a comment\nk = 1\n[broken\nlost = 2\n[other] ; note\nm = 3\n";
+    let mut expected = Sections::new();
+    expected.insert(
+        "dev".to_owned(),
+        BTreeMap::from([("k".to_owned(), "1".to_owned())]),
+    );
+    expected.insert(
+        "other".to_owned(),
+        BTreeMap::from([("m".to_owned(), "3".to_owned())]),
     );
     assert_eq!(sections(text), expected);
 }
@@ -97,17 +119,17 @@ fn an_empty_section_is_a_section() {
     assert!(found["lonely"].is_empty());
 }
 
-/// Asserts that the keys of the default profile of `~/.aws/credentials` are signed with, with no
+/// Asserts that the keys of the default profile of the credentials file are signed with, with no
 /// session token when the file has none.
 #[tokio::test]
-async fn static_keys_come_from_the_credentials_file_under_home() {
+async fn static_keys_come_from_the_credentials_file() {
     let dir = scratch();
     put(
         &dir,
         ".aws/credentials",
         "[default]\naws_access_key_id = AKIAFILE\naws_secret_access_key = file-secret\n",
     );
-    let keys = result_of(home_env(&dir, &[])).await.ok().unwrap();
+    let keys = result_of(files_env(&dir, &[])).await.ok().unwrap();
     assert_eq!(keys.access_key_id, "AKIAFILE");
     assert_eq!(keys.secret_access_key, "file-secret");
     assert_eq!(keys.session_token, None);
@@ -122,7 +144,7 @@ async fn the_session_token_of_a_profile_is_kept() {
         ".aws/credentials",
         "[default]\naws_access_key_id = ASIAFILE\naws_secret_access_key = s\naws_session_token = file-token\n",
     );
-    let keys = result_of(home_env(&dir, &[])).await.ok().unwrap();
+    let keys = result_of(files_env(&dir, &[])).await.ok().unwrap();
     assert_eq!(keys.session_token.as_deref(), Some("file-token"));
 }
 
@@ -138,14 +160,14 @@ async fn the_config_file_names_profiles_with_the_profile_prefix() {
          [profile work]\naws_access_key_id = FROMWORK\naws_secret_access_key = s\n\
          [bare]\naws_access_key_id = BARE\naws_secret_access_key = s\n",
     );
-    let default = result_of(home_env(&dir, &[])).await.ok().unwrap();
+    let default = result_of(files_env(&dir, &[])).await.ok().unwrap();
     assert_eq!(default.access_key_id, "FROMDEFAULT");
-    let work = result_of(home_env(&dir, &[("AWS_PROFILE", "work")]))
+    let work = result_of(files_env(&dir, &[("AWS_PROFILE", "work")]))
         .await
         .ok()
         .unwrap();
     assert_eq!(work.access_key_id, "FROMWORK");
-    let bare = error_of(home_env(&dir, &[("AWS_PROFILE", "bare")])).await;
+    let bare = error_of(files_env(&dir, &[("AWS_PROFILE", "bare")])).await;
     let (credentials, config) = shown(&dir);
     assert_eq!(
         bare.to_string(),
@@ -158,7 +180,7 @@ async fn the_config_file_names_profiles_with_the_profile_prefix() {
         ".aws/config",
         "[profile default]\naws_access_key_id = PREFIXED\naws_secret_access_key = s\n",
     );
-    let keys = result_of(home_env(&dir, &[])).await.ok().unwrap();
+    let keys = result_of(files_env(&dir, &[])).await.ok().unwrap();
     assert_eq!(keys.access_key_id, "PREFIXED");
 }
 
@@ -178,7 +200,7 @@ async fn the_credentials_file_overrides_the_config_file_key_by_key() {
         ".aws/credentials",
         "[p]\naws_access_key_id = CREDSID\n",
     );
-    let keys = result_of(home_env(&dir, &[("AWS_PROFILE", "p")]))
+    let keys = result_of(files_env(&dir, &[("AWS_PROFILE", "p")]))
         .await
         .ok()
         .unwrap();
@@ -199,54 +221,55 @@ async fn aws_profile_and_with_profile_pick_the_profile() {
          [one]\naws_access_key_id = ONEID\naws_secret_access_key = s\n\
          [two]\naws_access_key_id = TWOID\naws_secret_access_key = s\n",
     );
-    let by_env = result_of(home_env(&dir, &[("AWS_PROFILE", "one")]))
+    let by_env = result_of(files_env(&dir, &[("AWS_PROFILE", "one")]))
         .await
         .ok()
         .unwrap();
     assert_eq!(by_env.access_key_id, "ONEID");
-    let by_call = result_of(home_env(&dir, &[("AWS_PROFILE", "one")]).with_profile("two"))
+    let by_call = result_of(files_env(&dir, &[("AWS_PROFILE", "one")]).with_profile("two"))
         .await
         .ok()
         .unwrap();
     assert_eq!(by_call.access_key_id, "TWOID");
 }
 
-/// Asserts that `AWS_SHARED_CREDENTIALS_FILE` and `AWS_CONFIG_FILE` give the files with no
-/// `HOME` at all, and that the files under `HOME` are then not read.
+/// Asserts that `AWS_SHARED_CREDENTIALS_FILE` and `AWS_CONFIG_FILE` give the files wherever they
+/// are, the keys of the credentials file over those of the config file, and that `HOME` is not
+/// read: the files under `HOME/.aws` are not looked at.
 #[tokio::test]
-async fn the_file_variables_override_the_home_paths() {
+async fn the_file_variables_name_the_files_and_home_is_not_read() {
     let dir = scratch();
     let credentials = put(
         &dir,
         "elsewhere/creds",
-        "[default]\naws_access_key_id = OVERRIDDEN\n",
+        "[default]\naws_access_key_id = FROMVARS\n",
     );
     let config = put(
         &dir,
         "elsewhere/conf",
-        "[default]\naws_secret_access_key = override-secret\n",
+        "[default]\naws_secret_access_key = vars-secret\n",
     );
     put(
         &dir,
         ".aws/credentials",
         "[default]\naws_access_key_id = HOMEID\naws_secret_access_key = home-secret\n",
     );
+    let home = dir.path().to_str().unwrap();
     let env = env(&[
+        ("HOME", home),
         ("AWS_SHARED_CREDENTIALS_FILE", credentials.to_str().unwrap()),
         ("AWS_CONFIG_FILE", config.to_str().unwrap()),
     ]);
     let keys = result_of(env).await.ok().unwrap();
-    assert_eq!(keys.access_key_id, "OVERRIDDEN");
-    assert_eq!(keys.secret_access_key, "override-secret");
-    let both_with_home = home_env(
-        &dir,
-        &[
-            ("AWS_SHARED_CREDENTIALS_FILE", credentials.to_str().unwrap()),
-            ("AWS_CONFIG_FILE", config.to_str().unwrap()),
-        ],
-    );
-    let keys = result_of(both_with_home).await.ok().unwrap();
-    assert_eq!(keys.access_key_id, "OVERRIDDEN");
+    assert_eq!(keys.access_key_id, "FROMVARS");
+    assert_eq!(keys.secret_access_key, "vars-secret");
+    let only_home = error_of(env_of_home(home)).await;
+    assert!(matches!(only_home, CredentialsError::NotSet { .. }));
+}
+
+/// The environment of `HOME` alone.
+fn env_of_home(home: &str) -> AwsEnv {
+    env(&[("HOME", home)])
 }
 
 /// Asserts that a profile named and not in either file fails, naming both files.
@@ -254,14 +277,14 @@ async fn the_file_variables_override_the_home_paths() {
 async fn a_named_profile_that_is_not_there_fails() {
     let dir = scratch();
     put(&dir, ".aws/credentials", "[other]\naws_access_key_id = X\n");
-    let error = error_of(home_env(&dir, &[("AWS_PROFILE", "absent")])).await;
+    let error = error_of(files_env(&dir, &[("AWS_PROFILE", "absent")])).await;
     let (credentials, config) = shown(&dir);
     assert_eq!(
         error.to_string(),
         format!("credential source profile: no profile \"absent\" in {credentials} or {config}")
     );
     assert!(matches!(error, CredentialsError::Failed { .. }));
-    let by_call = error_of(home_env(&dir, &[]).with_profile("absent")).await;
+    let by_call = error_of(files_env(&dir, &[]).with_profile("absent")).await;
     assert_eq!(by_call, error);
 }
 
@@ -273,28 +296,75 @@ async fn a_default_profile_that_is_not_there_is_not_set() {
     let (credentials, config) = shown(&dir);
     let expected =
         format!("credential source profile: no profile \"default\" in {credentials} or {config}");
-    let no_files = error_of(home_env(&dir, &[])).await;
+    let no_files = error_of(files_env(&dir, &[])).await;
     assert_eq!(no_files.to_string(), expected);
     assert!(matches!(no_files, CredentialsError::NotSet { .. }));
     put(&dir, ".aws/credentials", "[other]\naws_access_key_id = X\n");
-    assert_eq!(error_of(home_env(&dir, &[])).await.to_string(), expected);
+    assert_eq!(error_of(files_env(&dir, &[])).await.to_string(), expected);
 }
 
-/// Asserts that with no `HOME` and not both file variables the source is not set up.
+/// Asserts that with neither file variable set the source is not set up, whatever `HOME` is.
 #[tokio::test]
-async fn without_home_or_both_file_variables_the_source_is_not_set() {
-    let expected = "credential source profile: HOME is not set, and AWS_SHARED_CREDENTIALS_FILE and AWS_CONFIG_FILE are not both set";
+async fn without_a_file_variable_the_source_is_not_set() {
+    let expected =
+        "credential source profile: AWS_SHARED_CREDENTIALS_FILE and AWS_CONFIG_FILE are not set";
     let none = error_of(env(&[])).await;
     assert_eq!(none.to_string(), expected);
     assert!(matches!(none, CredentialsError::NotSet { .. }));
-    let one = error_of(env(&[("AWS_CONFIG_FILE", "/unused/config")])).await;
-    assert_eq!(one.to_string(), expected);
-    let other = error_of(env(&[(
+    let home = error_of(env(&[("HOME", "/unused/home"), ("AWS_CONFIG_FILE", "")])).await;
+    assert_eq!(home.to_string(), expected);
+}
+
+/// Asserts that either file variable alone is enough: the credentials file alone and the config
+/// file alone each give a profile's keys.
+#[tokio::test]
+async fn one_file_variable_is_enough() {
+    let dir = scratch();
+    let credentials = put(
+        &dir,
+        "creds",
+        "[default]\naws_access_key_id = ONLYCREDS\naws_secret_access_key = s\n",
+    );
+    let config = put(
+        &dir,
+        "conf",
+        "[default]\naws_access_key_id = ONLYCONF\naws_secret_access_key = s\n",
+    );
+    let keys = result_of(env(&[(
         "AWS_SHARED_CREDENTIALS_FILE",
-        "/unused/credentials",
+        credentials.to_str().unwrap(),
     )]))
+    .await
+    .ok()
+    .unwrap();
+    assert_eq!(keys.access_key_id, "ONLYCREDS");
+    let keys = result_of(env(&[("AWS_CONFIG_FILE", config.to_str().unwrap())]))
+        .await
+        .ok()
+        .unwrap();
+    assert_eq!(keys.access_key_id, "ONLYCONF");
+}
+
+/// Asserts that a named profile that is missing names only the files whose variables are set:
+/// the credentials file alone, and the config file alone.
+#[tokio::test]
+async fn a_missing_profile_names_only_the_files_that_are_set() {
+    let dir = scratch();
+    let (credentials, config) = shown(&dir);
+    let error = error_of(env(&[
+        ("AWS_PROFILE", "x"),
+        ("AWS_SHARED_CREDENTIALS_FILE", &credentials),
+    ]))
     .await;
-    assert_eq!(other.to_string(), expected);
+    assert_eq!(
+        error.to_string(),
+        format!("credential source profile: no profile \"x\" in {credentials}")
+    );
+    let error = error_of(env(&[("AWS_PROFILE", "x"), ("AWS_CONFIG_FILE", &config)])).await;
+    assert_eq!(
+        error.to_string(),
+        format!("credential source profile: no profile \"x\" in {config}")
+    );
 }
 
 /// Asserts that a profile with a region and no keys is not set up, and says what it lacks.
@@ -302,7 +372,7 @@ async fn without_home_or_both_file_variables_the_source_is_not_set() {
 async fn a_profile_with_only_a_region_is_not_set() {
     let dir = scratch();
     put(&dir, ".aws/config", "[default]\nregion = eu-west-1\n");
-    let error = error_of(home_env(&dir, &[])).await;
+    let error = error_of(files_env(&dir, &[])).await;
     assert_eq!(
         error.to_string(),
         "credential source profile: profile \"default\" has no aws_access_key_id, and no role_arn with web_identity_token_file"
@@ -322,18 +392,18 @@ async fn half_a_key_pair_is_refused_both_ways() {
          [other]\naws_secret_access_key = half-secret\n\
          [empty]\naws_access_key_id =\naws_secret_access_key = other-secret\n",
     );
-    let id_only = error_of(home_env(&dir, &[])).await;
+    let id_only = error_of(files_env(&dir, &[])).await;
     assert_eq!(
         id_only.to_string(),
         "credential source profile: profile \"default\" has aws_access_key_id and no aws_secret_access_key"
     );
-    let secret_only = error_of(home_env(&dir, &[("AWS_PROFILE", "other")])).await;
+    let secret_only = error_of(files_env(&dir, &[("AWS_PROFILE", "other")])).await;
     assert_eq!(
         secret_only.to_string(),
         "credential source profile: profile \"other\" has aws_secret_access_key and no aws_access_key_id"
     );
     assert!(!secret_only.to_string().contains("half-secret"));
-    let empty_id = error_of(home_env(&dir, &[("AWS_PROFILE", "empty")])).await;
+    let empty_id = error_of(files_env(&dir, &[("AWS_PROFILE", "empty")])).await;
     assert_eq!(
         empty_id.to_string(),
         "credential source profile: profile \"empty\" has aws_secret_access_key and no aws_access_key_id"
@@ -357,7 +427,7 @@ async fn a_profile_role_with_a_token_file_is_taken_from_sts() {
             token.display()
         ),
     );
-    let env = home_env(
+    let env = files_env(
         &dir,
         &[("AWS_PROFILE", "r"), ("AWS_ENDPOINT_URL_STS", fake.url())],
     );
@@ -391,7 +461,7 @@ async fn a_profile_role_that_sts_refuses_fails_as_the_profile() {
             token.display()
         ),
     );
-    let error = error_of(home_env(&dir, &[("AWS_ENDPOINT_URL_STS", fake.url())])).await;
+    let error = error_of(files_env(&dir, &[("AWS_ENDPOINT_URL_STS", fake.url())])).await;
     assert_eq!(
         error.to_string(),
         "credential source profile: STS AssumeRoleWithWebIdentity answered 403 AccessDenied: no"
@@ -409,7 +479,7 @@ async fn a_role_without_a_token_file_fails() {
         "[default]\nrole_arn = arn:aws:iam::1:role/r\n",
     );
     assert_eq!(
-        error_of(home_env(&dir, &[])).await.to_string(),
+        error_of(files_env(&dir, &[])).await.to_string(),
         "credential source profile: profile \"default\" has role_arn and no web_identity_token_file"
     );
 }
@@ -439,7 +509,7 @@ async fn unsupported_settings_are_refused_by_name() {
     for (text, feature) in cases {
         let dir = scratch();
         put(&dir, ".aws/config", &format!("[profile p]\n{text}"));
-        let error = error_of(home_env(&dir, &[("AWS_PROFILE", "p")])).await;
+        let error = error_of(files_env(&dir, &[("AWS_PROFILE", "p")])).await;
         assert_eq!(
             error.to_string(),
             format!(

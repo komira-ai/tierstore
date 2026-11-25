@@ -321,9 +321,14 @@ impl S3Store {
         let client = client(builder).build().map_err(S3ConfigError::Client)?;
         // The credential endpoints have a client of their own, which no proxy of the
         // environment is used for: the container and instance metadata endpoints are on the
-        // host or its link, where a proxy cannot reach.
+        // host or its link, where a proxy cannot reach. It follows no redirect: an endpoint is
+        // asked only at the address its variable names and the checks allow, and a redirect is
+        // an answer that is not 200.
         let http = || {
-            let client = client_builder(connect, idle, tls).no_proxy().build();
+            let client = client_builder(connect, idle, tls)
+                .no_proxy()
+                .redirect(reqwest::redirect::Policy::none())
+                .build();
             Ok(credentials::Http {
                 client: client.map_err(S3ConfigError::Client)?,
                 timeout: config.request_timeout,

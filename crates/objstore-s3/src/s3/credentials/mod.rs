@@ -7,8 +7,8 @@
 //! 1. [`CredentialSource::Environment`]: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and
 //!    `AWS_SESSION_TOKEN` (`env.rs`).
 //! 2. [`CredentialSource::Profile`]: the profile `AWS_PROFILE` names (or `default`) of the shared
-//!    credentials file (`AWS_SHARED_CREDENTIALS_FILE`, or `~/.aws/credentials`) and the shared
-//!    config file (`AWS_CONFIG_FILE`, or `~/.aws/config`): static keys, or a role taken with a
+//!    credentials file `AWS_SHARED_CREDENTIALS_FILE` and the shared config file
+//!    `AWS_CONFIG_FILE` (not `~/.aws`: `HOME` is not read): static keys, or a role taken with a
 //!    web identity token (`role_arn` and `web_identity_token_file`) (`profile.rs`).
 //! 3. [`CredentialSource::WebIdentity`]: the token of `AWS_WEB_IDENTITY_TOKEN_FILE` exchanged for
 //!    the credentials of the role `AWS_ROLE_ARN` with STS `AssumeRoleWithWebIdentity`, as EKS
