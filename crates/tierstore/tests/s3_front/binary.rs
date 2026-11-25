@@ -11,8 +11,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use futures::StreamExt;
 use futures::stream;
-use objstore_s3::s3::fake::FakeS3;
-use objstore_s3::s3::{Addressing, Credentials, PART_BYTES, S3Config, S3Store, S3Tuning};
+use objstore_s3::s3::{Addressing, Credentials, PART_BYTES, S3Config, S3Store, S3Tuning, fake};
 use objstore_s3::{BodyStream, ByteRange, Capabilities, ObjectKey, ObjectStore, ObjectStoreError};
 use rustix::process::{Pid, Signal, kill_process};
 use tierstore::server::build_info::{CAPABILITIES, COMMIT, VERSION};
@@ -708,8 +707,8 @@ fn a_read_only_key_file_that_cannot_be_used_is_a_start_that_says_why() {
 /// precondition.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn it_serves_over_two_s3_tiers_and_lands_a_multipart_upload_in_the_hot_one() {
-    let hot = FakeS3::start().await;
-    let cold = FakeS3::start().await;
+    let hot = fake::FakeS3::start().await;
+    let cold = fake::FakeS3::start().await;
     // A hot tier that keeps its format between starts is activated by the operator
     // (`tierstore format-epoch --activate`): the object is put in it before the node starts.
     let active = Bytes::from_static(br#"{"epoch":2,"phase":"active"}"#);
