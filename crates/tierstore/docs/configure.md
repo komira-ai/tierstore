@@ -238,7 +238,7 @@ credential_source  = "auto"
 conditional_delete = true
 ```
 
-- For AWS S3 the endpoint is `https://s3.<region>.amazonaws.com` of the bucket's region (here `https://s3-cold.example` stands for it).
+- For AWS S3 the endpoint is `s3.<region>.amazonaws.com` of the bucket's region, over `https://` (here `https://s3-cold.example` stands for it).
 - `region` is the bucket's: AWS S3 refuses a request signed for another, and with `web-identity` it also picks the STS endpoint when the environment names no region.
 - Loading the file fetches no credentials; the first request to the tier does, and a source that is set up wrongly fails that request (a client's is answered 503) with the source and the reason.
 - `credentials_file` is refused beside a `credential_source` that names a source, and `credential_profile` (the profile of the shared AWS files) is only for `profile` and `auto`.
