@@ -149,7 +149,7 @@ pub struct Snapshot {
 
 #[path = "fake_fs.rs"]
 mod fake_fs;
-pub use fake_fs::{FsTake, fs_marker_path, fs_unit_condition, fs_unit_program};
+pub use fake_fs::{FsTake, file_of, fs_marker_path, fs_pid, fs_unit_condition, fs_unit_program};
 
 #[derive(Clone)]
 struct Unit {
@@ -476,6 +476,7 @@ impl SystemdFake {
             markers: self,
             fs_units: &self.fs,
             fs_markers: &self.fs,
+            fs_processes: &self.fs,
             instances: self,
             host: self,
             clock: self,

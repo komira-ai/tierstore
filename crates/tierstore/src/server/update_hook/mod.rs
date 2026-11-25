@@ -72,8 +72,8 @@ pub use params::{
     TARGET_VERSION_KEY,
 };
 pub use ports::{
-    Clock, Family, Host, Instance, Instances, Launchd, LaunchdPorts, Lock, Markers, PortError,
-    PortKind, Reply, StateDir, SystemdPorts, UnitState, Units,
+    Clock, Exe, Family, FileId, Host, Instance, Instances, Launchd, LaunchdPorts, Lock, Markers,
+    PortError, PortKind, Processes, Reply, StateDir, SystemdPorts, UnitState, Units,
 };
 pub use probe::{Build, CacheMode, build_of, readiness};
 pub use record::{Invalid, Kind, Marker, Mode, RECORD_MAX, Record, RecordError, SCHEMA};

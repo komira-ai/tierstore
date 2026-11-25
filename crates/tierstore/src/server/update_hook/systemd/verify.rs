@@ -1,4 +1,7 @@
-//! `verify`: observes that the staged release serves, and records it.
+//! `verify`: observes that the staged release serves, and records it. On a node whose fs process
+//! the update handed over, it also checks that the new fs instance runs the binary the update
+//! installed ([`fs_exe`]); on one whose fs process it left alone, the detail says first which
+//! release that process still runs.
 
 use super::super::PUBLIC_PORT;
 use super::super::look::verified;
@@ -6,7 +9,7 @@ use super::super::params::Params;
 use super::super::ports::UnitState;
 use super::super::record::{Marker, Record};
 use super::super::report::{Done, Reason};
-use super::{Ctx, fs, next_of, unit_name};
+use super::{Ctx, fs, fs_exe, next_of, unit_name};
 
 pub(super) fn verify(c: &Ctx<'_, '_>, params: &Params, record: &Record) -> Result<Done, Done> {
     let target = &params.target_version;
@@ -47,6 +50,7 @@ pub(super) fn verify(c: &Ctx<'_, '_>, params: &Params, record: &Record) -> Resul
         }
     }
     fs::check_active(c, record, params.verify_retry_secs)?;
+    let fs_said = fs_exe::check(c, record, target)?;
     let mode = c
         .look()
         .observed(target)
@@ -55,7 +59,16 @@ pub(super) fn verify(c: &Ctx<'_, '_>, params: &Params, record: &Record) -> Resul
     if !record.has(Marker::Verified) {
         c.save(&record.with(Marker::Verified))?;
     }
-    Ok(verified(mode, target))
+    Ok(led_by(verified(mode, target), fs_said))
+}
+
+/// `done` with `first` before its detail, when there is anything to say first.
+fn led_by(mut done: Done, first: String) -> Done {
+    if !first.is_empty() {
+        let rest = done.report.detail.take().unwrap_or_default();
+        done.report.detail = Some(format!("{first}; {rest}"));
+    }
+    done
 }
 
 /// `done` deferred when it is a look at `/readyz` that was not answered ready, so that hostkeeper

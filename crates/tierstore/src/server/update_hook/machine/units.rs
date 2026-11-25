@@ -65,6 +65,33 @@ impl<'a> SystemdUnits<'a> {
     }
 }
 
+impl SystemdUnits<'_> {
+    /// The main process of the instance's unit: `systemctl show --property=MainPID --value`,
+    /// within the time limit of a look at the state. systemd prints `0` for a unit that has none,
+    /// which is `None`.
+    ///
+    /// # Errors
+    /// The program failed, or printed something that is not a number.
+    pub fn main_pid(&self, instance: Instance) -> Result<Option<u32>, PortError> {
+        let unit = self.family.unit(instance);
+        let call = Call::new(
+            &self.program,
+            &["show", "--property=MainPID", "--value", "--", unit.as_str()],
+            self.show_timeout,
+        );
+        let output = checked(run(self.runner, &call, KIND)?, &call, KIND)?;
+        let text = String::from_utf8_lossy(&output.stdout);
+        match text.trim().parse::<u32>() {
+            Ok(0) => Ok(None),
+            Ok(pid) => Ok(Some(pid)),
+            Err(_) => Err(PortError::failed(
+                KIND,
+                format!("{}: not a MainPID: {:?}", call.describe(), text.trim()),
+            )),
+        }
+    }
+}
+
 /// The state `systemctl show --property=ActiveState --value` printed, or `None` for a word that
 /// is none of the states.
 fn state_of(text: &str) -> Option<UnitState> {
