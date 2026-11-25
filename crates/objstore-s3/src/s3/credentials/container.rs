@@ -29,7 +29,7 @@ const EKS_HOST_V6: Ipv6Addr = Ipv6Addr::new(0xfd00, 0x0ec2, 0, 0, 0, 0, 0, 0x23)
 
 /// Where to ask, and with what authorization.
 pub(super) struct Endpoint {
-    pub url: Url,
+    pub url: String,
     auth: Auth,
 }
 
@@ -53,12 +53,7 @@ pub(super) fn find(env: &AwsEnv) -> Result<Found, CredentialsError> {
                 "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI does not start with /".to_owned(),
             ));
         }
-        let url = format!("http://{ECS_HOST}{relative}");
-        Url::parse(&url).map_err(|e| {
-            failed(format!(
-                "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI is not a URL path: {e}"
-            ))
-        })?
+        format!("http://{ECS_HOST}{relative}")
     } else if let Some(full) = env.var("AWS_CONTAINER_CREDENTIALS_FULL_URI") {
         let url = Url::parse(full).map_err(|e| {
             failed(format!(
@@ -66,7 +61,7 @@ pub(super) fn find(env: &AwsEnv) -> Result<Found, CredentialsError> {
             ))
         })?;
         allowed(&url)?;
-        url
+        full.to_owned()
     } else {
         return Ok(Found::Unset(
             "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI and AWS_CONTAINER_CREDENTIALS_FULL_URI are not set"
@@ -143,7 +138,7 @@ pub(super) async fn fetch(http: &Http, endpoint: &Endpoint) -> Result<Fetched, S
             Some(text.trim().to_owned())
         }
     };
-    let mut request = http.client.get(endpoint.url.clone());
+    let mut request = http.client.get(&endpoint.url);
     if let Some(token) = token {
         if token.contains(['\r', '\n']) {
             return Err("the authorization token has a line break in it".to_owned());

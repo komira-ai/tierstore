@@ -81,17 +81,15 @@
 use std::ffi::OsString;
 use std::future::Future;
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
 
 use clap::Parser;
 
-use crate::s3::{Addressing, Capabilities, Credentials, S3Config};
 use crate::{
-    Backend, Clock, DirBackend, MemoryBackend, ProxyConfig, ReconcilerConfig, S3Backend,
-    SystemClock,
+    Backend, Clock, DirBackend, MemoryBackend, ProxyConfig, ReconcilerConfig, SystemClock,
 };
 
 use super::ServerConfig;
@@ -109,19 +107,26 @@ use super::config_entry::EntryTuning;
 use super::config_interface::UpstreamTable;
 use super::config_io::IoTuning;
 use super::config_reconcile::ReconcileTuning;
+use super::config_tier::SourceSetting;
 use super::config_tuning::{HotTuning, S3Client};
 use super::deprecated;
 #[cfg(test)]
 use super::front::read_key;
 use super::front::{InvalidFlags, S3Tls, server_config};
 use super::handoff::Handoff;
-use super::keys::read_credentials;
 use super::launch::{Launch, Refused, resolve};
 use super::listen::joined;
 use super::local_cache::LocalTierFailure;
 use super::lock::check_lock_path;
 use super::oci::{self, OciAuth, OciLimits, OciMetrics, OciPrefix, Upstream};
 use super::trees::trees_setup_of;
+
+#[path = "cli_s3.rs"]
+mod s3_tier;
+pub(super) use s3_tier::S3Flags;
+#[cfg(test)]
+pub(super) use s3_tier::s3_backend;
+use s3_tier::s3_tier;
 
 /// A start-up error, for the operator.
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
@@ -239,6 +244,9 @@ pub struct Cli {
     /// `{"access_key_id": "...", "secret_access_key": "..."}`, or the access key id on the first
     /// line and the secret access key on the second. Only its owner may read it (mode 0600).
     pub hot_credentials_file: Option<PathBuf>,
+    /// Where the credentials of the hot tier come from when not from `hot_credentials_file`
+    /// (`hot_store.credential_source`, `hot_store.credential_profile`).
+    pub hot_credential_source: Option<SourceSetting>,
     /// The endpoint of the cold tier when it is `s3:<bucket>`: `http(s)://host[:port]`, no path.
     pub cold_endpoint: Option<String>,
     /// The endpoints after `cold_endpoint` when `cold_store.endpoints` lists several.
@@ -249,6 +257,8 @@ pub struct Cli {
     /// The file that holds the access key of the cold tier when it is `s3:<bucket>`, in the
     /// form of `hot_store.credentials_file`. Only its owner may read it (mode 0600).
     pub cold_credentials_file: Option<PathBuf>,
+    /// As `hot_credential_source`, for the cold tier (`cold_store.credential_source`).
+    pub cold_credential_source: Option<SourceSetting>,
     /// Whether the hot tier's conditional delete (a delete only if the content tag is the one
     /// read) is sent as a DELETE with `If-Match` (`hot_store.conditional_delete`). For an
     /// `s3` tier the default is `false` (a read of the tag, then a plain DELETE: right on every
@@ -531,29 +541,6 @@ pub(super) struct OciSetup {
     pub(super) upstream: Option<Upstream>,
 }
 
-/// The flags that say how to reach a tier that is an S3 bucket.
-pub(super) struct S3Flags<'a> {
-    pub(super) endpoint: Option<&'a str>,
-    /// The endpoints after `endpoint`, if the tier has several.
-    pub(super) more_endpoints: &'a [String],
-    pub(super) region: Option<&'a str>,
-    pub(super) credentials: Option<&'a Path>,
-    /// The tier's `conditional_delete` setting; `None` is the default of its kind.
-    pub(super) conditional_delete: Option<bool>,
-}
-
-impl S3Flags<'_> {
-    /// Whether any of the flags was given.
-    fn given(&self) -> bool {
-        let given = [
-            self.endpoint.is_some(),
-            self.region.is_some(),
-            self.credentials.is_some(),
-        ];
-        given.contains(&true)
-    }
-}
-
 impl Cli {
     /// Where the hot tier is, for the heartbeat's log lines: the endpoints of an S3 tier, joined
     /// by a comma, and for any other tier its `--hot` value.
@@ -574,6 +561,7 @@ impl Cli {
             more_endpoints: &self.hot_more_endpoints,
             region: self.hot_region.as_deref(),
             credentials: self.hot_credentials_file.as_deref(),
+            source: self.hot_credential_source.as_ref(),
             conditional_delete: self.hot_conditional_delete,
         }
     }
@@ -585,6 +573,7 @@ impl Cli {
             more_endpoints: &self.cold_more_endpoints,
             region: self.cold_region.as_deref(),
             credentials: self.cold_credentials_file.as_deref(),
+            source: self.cold_credential_source.as_ref(),
             conditional_delete: self.cold_conditional_delete,
         }
     }
@@ -654,59 +643,6 @@ pub(super) fn check_conditional_delete(
         return Err(InvalidFlags(format!("{flag} {spec:?}: {flag}-{why}")));
     }
     Ok(())
-}
-
-/// The bucket `bucket` of the S3-compatible store that `s3` says how to reach, as the tier
-/// that `flag` names with `spec`.
-fn s3_tier(
-    flag: &str,
-    spec: &str,
-    bucket: &str,
-    s3: &S3Flags<'_>,
-    limits: (Duration, &S3Client),
-) -> Result<Arc<dyn Backend>, String> {
-    let backend = s3_backend(flag, spec, bucket, s3, limits)?;
-    Ok(Arc::new(backend))
-}
-
-/// The backend of [`s3_tier`], before it is shared.
-pub(super) fn s3_backend(
-    flag: &str,
-    spec: &str,
-    bucket: &str,
-    s3: &S3Flags<'_>,
-    limits: (Duration, &S3Client),
-) -> Result<S3Backend, String> {
-    let (timeout, client) = limits;
-    let fail = |why: String| format!("{flag} {spec:?}: {why}");
-    let Some(endpoint) = s3.endpoint else {
-        return Err(fail(format!("it needs {flag}-endpoint")));
-    };
-    let Some(credentials) = s3.credentials else {
-        return Err(fail(format!("it needs {flag}-credentials-file")));
-    };
-    let credentials_flag = format!("{flag}-credentials-file");
-    let (key_id, secret) = read_credentials(&credentials_flag, credentials)?;
-    let config = S3Config {
-        endpoint: endpoint.to_owned(),
-        region: s3.region.unwrap_or(DEFAULT_REGION).to_owned(),
-        bucket: bucket.to_owned(),
-        addressing: Addressing::Auto,
-        ca_pem: None,
-        credentials: Credentials::new(key_id, secret),
-        capabilities: Capabilities::default(),
-        connect_timeout: client.connect_timeout,
-        request_timeout: timeout,
-        min_body_rate: client.min_body_rate,
-    };
-    let built = S3Backend::new_rotating(config, client.tuning, s3.more_endpoints);
-    let backend = built.map_err(|why| fail(why.to_string()))?;
-    // Off unless set: a read of the tag before the DELETE is right on every store. The store is
-    // not asked whether it enforces `If-Match` on a DELETE; the setting says.
-    let backend = backend
-        .with_conditional_delete(s3.conditional_delete.unwrap_or(false))
-        .with_chunks_waiting(client.chunks_waiting);
-    Ok(backend)
 }
 
 /// The tier a flag names, of the kinds that need no flags besides the tier's own.

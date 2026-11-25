@@ -3,12 +3,21 @@
 //! ([`AwsEnv::from_vars`]), the shared files in a scratch directory of its own, and the clock of
 //! the renewals a test's ([`TestClock`]): no test reads the host's environment or files, or waits.
 
+mod answers;
+mod chain;
 mod container;
+mod environment;
 mod fake;
+mod imds;
+mod logs;
+mod profile;
+mod renewal;
+mod signing;
+mod web_identity;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, UNIX_EPOCH};
 
 use super::answer::Http;
 use super::live::{Clock, Live};
@@ -17,7 +26,7 @@ use crate::s3::client_builder;
 use crate::s3::endpoint::tls_config;
 use crate::s3::sigv4::Utc;
 
-pub(crate) use fake::{Fake, Seen};
+pub(crate) use fake::Fake;
 
 /// A time of the tests, in seconds since the epoch: 2027-01-15T08:00:00Z.
 pub(crate) const T0: u64 = 1_800_000_000;
@@ -98,9 +107,4 @@ pub(crate) fn sts_answer(id: &str, secret: &str, token: &str, expires: u64) -> S
          </Credentials></AssumeRoleWithWebIdentityResult></AssumeRoleWithWebIdentityResponse>",
         iso(expires)
     )
-}
-
-/// A time `secs` after the epoch.
-pub(crate) fn at(secs: u64) -> SystemTime {
-    UNIX_EPOCH + Duration::from_secs(secs)
 }

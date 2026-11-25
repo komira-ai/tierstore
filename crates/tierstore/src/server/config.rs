@@ -74,7 +74,7 @@ use super::config_load::facts::FactsId;
 use super::config_load::facts::proxy_id_of;
 use super::config_policy::{Policy, check_policies};
 use super::config_reconcile::reconcile_tuning;
-pub(super) use super::config_tier::{TierParts, tier};
+pub(super) use super::config_tier::{SourceName, TierParts, tier};
 use super::config_tuning::{S3Client, hot_tuning, s3_client};
 use super::config_units::{Dur, Size};
 use super::front::{FrontSettings, S3Tls};
@@ -107,12 +107,19 @@ pub(super) const KEYS: &[(&str, &[&str])] = &[
     ),
     ("hot-region", &["hot_store.region"]),
     ("hot-credentials-file", &["hot_store.credentials_file"]),
+    ("hot-credential-source", &["hot_store.credential_source"]),
+    ("hot-credential-profile", &["hot_store.credential_profile"]),
     (
         "cold-endpoint",
         &["cold_store.endpoint", "cold_store.endpoints"],
     ),
     ("cold-region", &["cold_store.region"]),
     ("cold-credentials-file", &["cold_store.credentials_file"]),
+    ("cold-credential-source", &["cold_store.credential_source"]),
+    (
+        "cold-credential-profile",
+        &["cold_store.credential_profile"],
+    ),
     ("s3-request-timeout", &["server.s3_request_timeout"]),
     ("hot-bytes", &["hot_store.budget"]),
     ("high-water", &["hot_store.high_water"]),
@@ -275,7 +282,8 @@ pub(super) enum Kind {
     Memory,
     /// A directory of the local file system: needs `path`.
     Dir,
-    /// A bucket of an S3-compatible store: needs `bucket`, `endpoint` and `credentials_file`.
+    /// A bucket of an S3-compatible store: needs `bucket`, `endpoint`, and `credentials_file`
+    /// or a `credential_source`.
     S3,
 }
 
@@ -408,6 +416,13 @@ pub(super) struct TierTable {
     pub region: Option<String>,
     #[serde(default)]
     pub credentials_file: Option<PathBuf>,
+    /// Where the credentials of an `s3` tier come from (see `config_tier`); `file` (the default)
+    /// is `credentials_file`.
+    #[serde(default)]
+    pub credential_source: Option<SourceName>,
+    /// The profile of the shared AWS files, for `credential_source = "profile"` or `"auto"`.
+    #[serde(default)]
+    pub credential_profile: Option<String>,
     /// Whether a conditional delete is sent as a DELETE with `If-Match`; the default is the one
     /// of the kind (`true` for `memory` and `dir`, `false` for `s3`), and `false` is refused for
     /// the two that delete in one atomic step.
@@ -748,10 +763,12 @@ pub(super) fn storage(
         hot_more_endpoints: hot_parts.more_endpoints,
         hot_region: hot_parts.region,
         hot_credentials_file: hot_parts.credentials_file,
+        hot_credential_source: hot_parts.credential_source,
         cold_endpoint: cold_parts.endpoint,
         cold_more_endpoints: cold_parts.more_endpoints,
         cold_region: cold_parts.region,
         cold_credentials_file: cold_parts.credentials_file,
+        cold_credential_source: cold_parts.credential_source,
         hot_conditional_delete: hot_parts.conditional_delete,
         cold_conditional_delete: cold_parts.conditional_delete,
         s3_request_timeout: shared.s3_request_timeout,

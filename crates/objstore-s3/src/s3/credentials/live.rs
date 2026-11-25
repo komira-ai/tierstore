@@ -86,7 +86,7 @@ pub(crate) struct Renewing {
 /// The source settled on, and the keys it gave last.
 #[derive(Default)]
 struct State {
-    plan: Option<Plan>,
+    plan: Option<(Plan, CredentialSource)>,
     kept: Option<Kept>,
 }
 
@@ -224,11 +224,11 @@ impl Renewing {
     /// says why each source did not.
     async fn fetch(
         &self,
-        plan: &mut Option<Plan>,
+        plan: &mut Option<(Plan, CredentialSource)>,
         now: SystemTime,
     ) -> Result<(Fetched, CredentialSource), CredentialsError> {
-        if let Some(settled) = plan.as_ref() {
-            return Ok((self.ask(settled, now).await?, settled.from()));
+        if let Some((settled, from)) = plan.as_ref() {
+            return Ok((self.ask(settled, now).await?, *from));
         }
         let auto = self.source == CredentialSource::Auto;
         let mut unset = Vec::new();
@@ -243,7 +243,7 @@ impl Renewing {
             };
             return match self.ask(&settled, now).await {
                 Ok(fetched) => {
-                    *plan = Some(settled);
+                    *plan = Some((settled, source));
                     Ok((fetched, source))
                 }
                 Err(CredentialsError::Failed { why, .. })
@@ -262,7 +262,7 @@ impl Renewing {
     async fn ask(&self, plan: &Plan, now: SystemTime) -> Result<Fetched, CredentialsError> {
         let failed = |from: CredentialSource| move |why| CredentialsError::Failed { from, why };
         match plan {
-            Plan::Fixed(_, keys) => Ok(Fetched::fixed(keys.clone())),
+            Plan::Fixed(keys) => Ok(Fetched::fixed(keys.clone())),
             Plan::Role(role) => {
                 let region = self.env.region().unwrap_or(&self.region);
                 let fetched = sts::fetch(&self.http, role, &self.env, region, now).await;
@@ -297,7 +297,7 @@ const CHAIN: [(CredentialSource, Find); 5] = [
 /// The keys of the environment, if it has them.
 fn env_keys(env: &AwsEnv) -> Result<Found, CredentialsError> {
     Ok(match env::keys(env)? {
-        Some(keys) => Found::Plan(Plan::Fixed(CredentialSource::Environment, keys)),
+        Some(keys) => Found::Plan(Plan::Fixed(keys)),
         None => Found::Unset("AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY are not set".to_owned()),
     })
 }
@@ -305,24 +305,13 @@ fn env_keys(env: &AwsEnv) -> Result<Found, CredentialsError> {
 /// A source that is set up: what to ask it.
 pub(super) enum Plan {
     /// Keys of the environment or of a profile.
-    Fixed(CredentialSource, Keys),
+    Fixed(Keys),
     /// A role taken with a web identity token.
     Role(sts::Role),
     /// The container credentials endpoint.
     Container(container::Endpoint),
     /// The instance metadata service.
     Imds(imds::Endpoint),
-}
-
-impl Plan {
-    fn from(&self) -> CredentialSource {
-        match self {
-            Self::Fixed(from, _) => *from,
-            Self::Role(role) => role.from,
-            Self::Container(_) => CredentialSource::Container,
-            Self::Imds(_) => CredentialSource::InstanceMetadata,
-        }
-    }
 }
 
 /// Whether a source is set up.

@@ -172,6 +172,7 @@ async fn the_setting_decides_whether_an_s3_tier_sends_the_delete_with_if_match()
             more_endpoints: &[],
             region: None,
             credentials: Some(credentials.as_path()),
+            source: None,
             conditional_delete: setting,
         };
         let opened = open_tier(

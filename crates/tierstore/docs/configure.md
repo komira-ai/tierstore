@@ -20,7 +20,7 @@ Most of the table of keys is tuning that has a default for a reason. A new file 
 | `server.proxy_id` | a name of this process; give each process over the same tiers its own, and keep it across restarts. On a host that runs hostkeeper, `server.proxy_id_from_facts` (`{ path = "/var/lib/hostkeeper/facts.json", prefix = "tierstore-" }`) makes it of the prefix and the host id in hostkeeper's facts file instead; give one of the two | all |
 | `server.bucket` | the one bucket clients see | all |
 | `server.access_key_file` | the full key file | all |
-| `hot_store.kind` and, for `s3`, `hot_store.bucket`, `hot_store.endpoint` or `hot_store.endpoints`, `hot_store.credentials_file` | the hot tier; for `dir`, `hot_store.path` | storage node, three tiers |
+| `hot_store.kind` and, for `s3`, `hot_store.bucket`, `hot_store.endpoint` or `hot_store.endpoints`, `hot_store.credentials_file` (or, in an AWS account, `hot_store.credential_source`) | the hot tier; for `dir`, `hot_store.path` | storage node, three tiers |
 | `hot_store.budget` | the bytes the hot tier is meant to hold, below what the disk or bucket can hold (see "Sizing") | storage node, three tiers |
 | `cold_store.kind` and the keys it needs, as for the hot tier | the cold tier. On a build node that chains to storage nodes this is the upstream | all |
 | `local_cache.path` and `local_cache.budget` | the cache directory and its size | build node, three tiers |
@@ -215,6 +215,33 @@ credentials_file = "/etc/tierstore/cold.credentials"
 - A `[[policy]]` with `cache = true`, a `[trees]` table, a `trees` interface and the keys only `[hot_store]` has are refused: there is no cache, tree store or hot tier to use them.
 - A storage node over the same cold tier becomes this shape by removing `[hot_store]` from its file and restarting it by the hand-off; see [Turning the hot tier off](operations.md#turning-the-hot-tier-off).
 
+## A tier in an AWS account
+
+In an AWS account a tier signs with the credentials of an IAM role rather than a key in a file: `credential_source = "auto"` finds them as the AWS SDKs do, from the environment, a profile of the shared AWS files, a web identity token (EKS), the ECS or EKS Pod Identity endpoint, or the EC2 instance profile (IMDSv2), and renews them before they expire. [AWS credentials](configuration.md#aws-credentials) says what each source reads and in which order `auto` tries them; name one source in place of `auto` to use that one alone. A front over a cold bucket of AWS S3, on an EC2 instance whose role may read and write the bucket:
+
+```toml
+[[interface]]
+type   = "s3"
+params = { addresses = ["127.0.0.1:9300"] }
+
+[server]
+proxy_id        = "front-1"
+bucket          = "tierstore"
+access_key_file = "/etc/tierstore/access.key"
+
+[cold_store]
+kind               = "s3"
+bucket             = "tierstore-cold"
+endpoint           = "https://s3.eu-west-1.amazonaws.com"
+region             = "eu-west-1"
+credential_source  = "auto"
+conditional_delete = true
+```
+
+- `region` is the bucket's: AWS S3 refuses a request signed for another, and with `web-identity` it also picks the STS endpoint when the environment names no region.
+- No credentials are fetched at start; the first request to the tier fetches them, and a source that is set up wrongly fails that request (answered 503) with the source and the reason in the log.
+- `credentials_file` is refused beside a `credential_source` that names a source, and `credential_profile` (the profile of the shared AWS files) is only for `profile` and `auto`.
+
 ## Sizing budgets and water marks
 
 Every tier with a size has a budget and three water marks, percents of it. The budget is a number tierstore keeps to, not a capacity it discovers.
@@ -264,6 +291,6 @@ A key file is the access key id and the secret, in JSON or as two lines, owned b
 |---|---|
 | `server.access_key_file` | the full key: the clients that write |
 | `server.read_only_key_files` | the daemons and jobs that only read |
-| `hot_store.credentials_file` and `cold_store.credentials_file` | tierstore's own requests to its stores, not a client's key |
+| `hot_store.credentials_file` and `cold_store.credentials_file` | tierstore's own requests to its stores, not a client's key (or none: in an AWS account a tier may take a role's credentials instead, `credential_source`) |
 
 On a build node chained to storage nodes, `cold_store.credentials_file` holds a key that the storage nodes know. [Keys and roles](keys.md) says what each role may do, and covers the presigning, GC and scoped keys, rotation, and the file's forms.

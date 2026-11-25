@@ -100,14 +100,11 @@ fn profile_plan(name: &str, keys: &BTreeMap<&str, &str>) -> Result<Found, Creden
     }
     match (get("aws_access_key_id"), get("aws_secret_access_key")) {
         (Some(id), Some(secret)) => {
-            return Ok(Found::Plan(Plan::Fixed(
-                CredentialSource::Profile,
-                Keys {
-                    access_key_id: id.to_owned(),
-                    secret_access_key: secret.to_owned(),
-                    session_token: get("aws_session_token").map(str::to_owned),
-                },
-            )));
+            return Ok(Found::Plan(Plan::Fixed(Keys {
+                access_key_id: id.to_owned(),
+                secret_access_key: secret.to_owned(),
+                session_token: get("aws_session_token").map(str::to_owned),
+            })));
         }
         (Some(_), None) => {
             return Err(failed(format!(
