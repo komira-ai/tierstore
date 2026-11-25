@@ -491,7 +491,7 @@ async fn the_reports_reach_the_cache_without_a_queue() {
     over.report(Report::Attached(attach));
     over.report(Report::Fetched(fetches));
     over.report(Report::Descriptors(descriptors.clone()));
-    over.report(Report::Opens(opens.clone()));
+    over.report(Report::Opens(Box::new(opens.clone())));
     let after = reported(&told.cache);
     let _ = direct.cache.run_started(&started);
     direct.cache.tree_attached(attach);

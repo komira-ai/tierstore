@@ -535,7 +535,7 @@ fn an_opens_is_the_report_it_writes() {
         spans,
     };
     let written = report.line();
-    assert_eq!(line(&written), Ok(Request::Opens(report)));
+    assert_eq!(line(&written), Ok(Request::Opens(Box::new(report))));
     let fewer = written.rsplit_once(' ').unwrap().0.to_owned();
     let more = format!("{written} 0");
     let unnamed = written.replacen("boot-1", "", 1);

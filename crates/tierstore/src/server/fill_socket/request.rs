@@ -107,8 +107,8 @@ pub(super) enum Request {
     /// report (`local_cache/descriptors.rs`).
     Descriptors(Descriptors),
     /// How long the opens of files of the mount took, and how many wait now
-    /// (`local_cache/opens.rs`).
-    Opens(Opens),
+    /// (`local_cache/opens.rs`); boxed, as it is far larger than the other requests.
+    Opens(Box<Opens>),
 }
 
 /// A request of the mount about the placements of the node (module `mount`).
@@ -263,7 +263,7 @@ pub(super) fn parse(line: &[u8]) -> Result<Request, Refusal> {
             .map(Request::Descriptors)
             .ok_or(Refusal::Malformed),
         "opens" => Opens::parse(rest)
-            .map(Request::Opens)
+            .map(|opens| Request::Opens(Box::new(opens)))
             .ok_or(Refusal::Malformed),
         "mounted" => (text == "mounted")
             .then_some(Request::Mount(MountRequest::Mounted))

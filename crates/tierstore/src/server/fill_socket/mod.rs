@@ -296,7 +296,7 @@ async fn session((cache, trees): (LocalCache, Option<TreeStore>), stream: UnixSt
                 "ok".to_owned()
             }
             Ok(Request::Opens(report)) => {
-                cache.opens_reported(report);
+                cache.opens_reported(*report);
                 "ok".to_owned()
             }
             Err(refusal) => format!("refused {refusal}"),

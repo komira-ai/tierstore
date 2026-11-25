@@ -112,7 +112,8 @@ impl Core {
 
     /// Tells the node [`Core::opens_report`]; the caller does not wait.
     pub(in crate::server::treefs) fn report_opens(&self) {
-        self.fills.report(Report::Opens(self.opens_report()));
+        self.fills
+            .report(Report::Opens(Box::new(self.opens_report())));
     }
 }
 

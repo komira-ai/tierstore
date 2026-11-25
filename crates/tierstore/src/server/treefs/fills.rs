@@ -98,8 +98,9 @@ pub(super) enum Report {
     Fetched(Fetches),
     /// The cache files the mount holds open (`local_cache/descriptors.rs`).
     Descriptors(Descriptors),
-    /// How long the mount's opens took, and how many wait now (`local_cache/opens.rs`).
-    Opens(Opens),
+    /// How long the mount's opens took, and how many wait now (`local_cache/opens.rs`); boxed,
+    /// as it is far larger than the others.
+    Opens(Box<Opens>),
 }
 
 impl Report {
