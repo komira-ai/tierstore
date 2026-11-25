@@ -45,7 +45,7 @@ prefix = "cas/b/"
 cache  = true
 ```
 
-`[local_cache]` is the directory and the byte budget of the cache. `[cold_store]` is the remote store, reached over `http://` or `https://`; give it a key that can only read. The store is an S3-compatible store (MinIO, RustFS, or Amazon S3 at `https://s3.<region>.amazonaws.com`, which takes the bucket in the host name; any other store takes it in the path); an `https://` store's certificate is verified against the system's CA certificates. `[[policy]]` names which keys are cached: here those under `cas/b/`, and at least one policy must say `cache = true`.
+`[local_cache]` is the directory and the byte budget of the cache. `[cold_store]` is the remote store, reached over `http://` or `https://`; give it a key that can only read. The store is an S3-compatible store (MinIO, RustFS, or Amazon S3 at `s3.<region>.amazonaws.com` over `https://`, which takes the bucket in the host name; any other store takes it in the path); an `https://` store's certificate is verified against the system's CA certificates. `[[policy]]` names which keys are cached: here those under `cas/b/`, and at least one policy must say `cache = true`.
 
 ## Commands
 

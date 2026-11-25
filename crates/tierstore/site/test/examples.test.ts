@@ -118,7 +118,7 @@ test('the examples say what the code does: the hot tier is not an LRU, the cache
   const cache = text(read('docs', 'examples', 'cache-in-front-of-s3', 'index.html'));
   assert.match(cache, /evicts the least recently used objects first/);
   assert.match(cache, /http:\/\/minio\.example:9000/);
-  assert.match(cache, /Amazon S3 at `?https:\/\/s3\.<region>\.amazonaws\.com`?, which takes the bucket in the host name/);
+  assert.match(cache, /Amazon S3 at `?s3\.<region>\.amazonaws\.com`? over `?https:\/\/`?, which takes the bucket in the host name/);
   assert.match(cache, /An `?https:\/\/`? store.{1,6}s certificate must be trusted by the system.{1,6}s CA certificates/);
   assert.doesNotMatch(cache, /format-epoch|--activate/, 'a build node has no hot tier to activate');
   const both = text(read('docs', 'examples', 'cache-hot-cold', 'index.html'));

@@ -128,6 +128,7 @@ httparse 1.10.1 45190
 httpdate 1.0.3 10639
 hybrid-array 0.4.15 36801
 hyper 1.12.0 172269
+hyper-rustls 0.27.10 23240
 hyper-timeout 0.5.2 19222
 hyper-util 0.1.21 126820
 icu_collections 2.3.0 87970
@@ -233,6 +234,7 @@ rustix 1.1.5 425681
 rustls 0.23.46 386227
 rustls-native-certs 0.8.4 22129
 rustls-pki-types 1.15.1 39322
+rustls-platform-verifier 0.7.1 60698
 rustls-webpki 0.103.16 89984
 rustversion 1.0.23 21013
 ruzstd 0.9.1 106716

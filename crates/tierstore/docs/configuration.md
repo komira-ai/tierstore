@@ -7,7 +7,7 @@ tierstore is configured by one TOML file, given with `--config <path>`. A key th
 - **A storage node with a cache**: all three tables in one process. See [A cache in front of a hot and a cold store](examples/cache-hot-cold.md).
 - **A front over the cold tier**: `[cold_store]` alone, the S3 front over the cold store with nothing kept on the node. See [A front over the cold tier alone](configure.md#a-front-over-the-cold-tier-alone).
 
-Tiers today are directories or S3-compatible stores (MinIO, RustFS, Ceph, AWS S3) reached over `http://` or `https://`. An `https://` store's certificate is verified against the system's CA certificates (a tier has no key for a CA file of its own, so a private CA must be in the system's store). An AWS S3 endpoint (`https://s3.<region>.amazonaws.com`, with the bucket's region as `region`) takes the bucket in the host name, virtual-hosted style; any other store takes it in the path. Flags of earlier builds no longer set any of this; see [Moving from flags](configuration.md#moving-from-flags).
+Tiers today are directories or S3-compatible stores (MinIO, RustFS, Ceph, AWS S3) reached over `http://` or `https://`. An `https://` store's certificate is verified against the system's CA certificates (a tier has no key for a CA file of its own, so a private CA must be in the system's store). An AWS S3 endpoint (`s3.<region>.amazonaws.com` over `https://`, with the bucket's region as `region`) takes the bucket in the host name, virtual-hosted style; any other store takes it in the path. Flags of earlier builds no longer set any of this; see [Moving from flags](configuration.md#moving-from-flags).
 
 ## A file for a storage node
 

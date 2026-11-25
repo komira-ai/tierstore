@@ -51,7 +51,7 @@ prefix = "cas/b/"
 cache  = true
 ```
 
-The cold store is an S3-compatible store (MinIO, RustFS, or Amazon S3 at `https://s3.<region>.amazonaws.com`) reached over `http://` or `https://`; an `https://` store's certificate is verified against the system's CA certificates.
+The cold store is an S3-compatible store (MinIO, RustFS, or Amazon S3 at `s3.<region>.amazonaws.com` over `https://`) reached over `http://` or `https://`; an `https://` store's certificate is verified against the system's CA certificates.
 
 With `[hot_store]`, `[cold_store]` and `[local_cache]` in one file the node owns the data and takes writes. `local_cache.write_through` is true whether it is left out or given, and `false` is refused: a write passes through the cache so that its entries stay right.
 
