@@ -65,7 +65,11 @@ fn offer(lines: &[String], fds: &[BorrowedFd<'_>]) -> OwnedFd {
 
 /// The answer to an unsigned GET of `/readyz` at `addr`.
 async fn readyz(addr: &str) -> String {
-    let reply = reqwest::get(format!("http://{addr}/readyz")).await.unwrap();
+    let reply = tierstore_testkit::http::client()
+        .get(format!("http://{addr}/readyz"))
+        .send()
+        .await
+        .unwrap();
     reply.text().await.unwrap()
 }
 

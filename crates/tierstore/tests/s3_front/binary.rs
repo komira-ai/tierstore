@@ -12,11 +12,11 @@ use bytes::Bytes;
 use futures::StreamExt;
 use futures::stream;
 use objstore_s3::s3::fake::FakeS3;
-use objstore_s3::s3::{Credentials, PART_BYTES, S3Config, S3Store, S3Tuning};
+use objstore_s3::s3::{Addressing, Credentials, PART_BYTES, S3Config, S3Store, S3Tuning};
 use objstore_s3::{BodyStream, ByteRange, Capabilities, ObjectKey, ObjectStore, ObjectStoreError};
-use reqwest::Client;
 use rustix::process::{Pid, Signal, kill_process};
 use tierstore::server::build_info::{CAPABILITIES, COMMIT, VERSION};
+use tierstore_testkit::http::client as http_client;
 use tierstore_testkit::reaped::{Reaped, first_line, spawn};
 
 use crate::client::assert_refused;
@@ -95,6 +95,8 @@ impl Running {
             endpoint: format!("http://{}", self.addr),
             region: "us-east-1".to_owned(),
             bucket: "tier-bucket".to_owned(),
+            addressing: Addressing::Auto,
+            ca_pem: None,
             credentials: Credentials::new(key_id, secret),
             capabilities: Capabilities {
                 conditional_put: true,
@@ -138,7 +140,7 @@ impl Running {
 /// wait, or the connection is refused, which it is once the wait is over. The binary is asked
 /// again as soon as it has answered, and nothing is asserted about how long it takes.
 async fn until_draining(ready: &str) {
-    let client = Client::new();
+    let client = http_client();
     let asking = async {
         loop {
             match client.get(ready).send().await {
@@ -174,7 +176,7 @@ async fn it_announces_serves_and_drains_on_sigterm() {
     let first = ByteRange::new(0, 6).unwrap();
     assert_eq!(store.get_range(&k, first).await.unwrap(), "served");
     let ready = format!("http://{}/readyz", running.addr);
-    let probe = Client::new().get(&ready).send().await.unwrap();
+    let probe = http_client().get(&ready).send().await.unwrap();
     assert_eq!(probe.status(), 200);
 
     running.signal(Signal::TERM);
@@ -555,7 +557,7 @@ async fn the_start_line_and_the_gauge_name_the_commit() {
     assert_eq!(words.len(), 4, "{line}");
     assert_eq!(words[3], format!("commit={COMMIT}"), "{line}");
     let url = format!("http://{}/metricz", running.addr());
-    let body = Client::new()
+    let body = http_client()
         .get(&url)
         .send()
         .await

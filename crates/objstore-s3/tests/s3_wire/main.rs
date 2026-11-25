@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use futures::{StreamExt as _, TryStreamExt as _};
-use objstore_s3::s3::{Credentials, S3Config, S3Store};
+use objstore_s3::s3::{Addressing, Credentials, S3Config, S3Store};
 use objstore_s3::{
     ByteRange, Capabilities, KeyPrefix, ListToken, ObjectKey, ObjectStore, ObjectStoreError,
     PageSize, listing,
@@ -85,6 +85,8 @@ fn store(endpoint: String, capabilities: Capabilities) -> S3Store {
         endpoint,
         region: "us-east-1".into(),
         bucket: "test-bucket".into(),
+        addressing: Addressing::Auto,
+        ca_pem: None,
         credentials: Credentials::new("AKIDEXAMPLE", "secret"),
         capabilities,
         connect_timeout: Duration::from_secs(5),
@@ -681,6 +683,8 @@ async fn a_put_the_store_never_answers_fails_saying_it_timed_out() {
         endpoint,
         region: "us-east-1".into(),
         bucket: "test-bucket".into(),
+        addressing: Addressing::Auto,
+        ca_pem: None,
         credentials: Credentials::new("AKIDEXAMPLE", "secret"),
         capabilities: Capabilities::default(),
         connect_timeout: Duration::from_secs(5),
@@ -712,6 +716,8 @@ fn timed_store(endpoint: String, base: Duration, rate: Option<u64>) -> S3Store {
         endpoint,
         region: "us-east-1".into(),
         bucket: "test-bucket".into(),
+        addressing: Addressing::Auto,
+        ca_pem: None,
         credentials: Credentials::new("AKIDEXAMPLE", "secret"),
         capabilities: Capabilities::default(),
         connect_timeout: Duration::from_secs(5),

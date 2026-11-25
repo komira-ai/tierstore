@@ -89,7 +89,14 @@ impl Running {
         self.begin_drain();
         let url = format!("http://{}/readyz", self.bound.s3);
         let draining = async {
-            while reqwest::get(&url).await.expect("readyz").status() == 200 {
+            while tierstore_testkit::http::client()
+                .get(&url)
+                .send()
+                .await
+                .expect("readyz")
+                .status()
+                == 200
+            {
                 tokio::time::sleep(POLL).await;
             }
         };

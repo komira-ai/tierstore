@@ -18,7 +18,9 @@ use futures::StreamExt;
 use futures::channel::oneshot;
 use futures::stream;
 use objstore_s3::s3::fake::{Failure, FakeS3, part_etag};
-use objstore_s3::s3::{Credentials, OpenUpload, PartsPage, S3Config, S3Store, UploadsPage};
+use objstore_s3::s3::{
+    Addressing, Credentials, OpenUpload, PartsPage, S3Config, S3Store, UploadsPage,
+};
 use objstore_s3::{
     BodyStream, ByteRange, Capabilities, KeyPrefix, ObjectKey, ObjectStore, ObjectStoreError,
     PageSize,
@@ -55,6 +57,8 @@ fn store(endpoint: &str, capabilities: Capabilities, request_timeout: Duration) 
         endpoint: endpoint.to_owned(),
         region: "us-east-1".to_owned(),
         bucket: "test-bucket".to_owned(),
+        addressing: Addressing::Auto,
+        ca_pem: None,
         credentials: Credentials::new("AKIDEXAMPLE", "secret"),
         capabilities,
         connect_timeout: Duration::from_secs(5),

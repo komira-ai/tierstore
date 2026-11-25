@@ -9,7 +9,7 @@ use bytes::Bytes;
 use futures::StreamExt as _;
 use futures::stream;
 use objstore_s3::{ByteRange, Capabilities, KeyPrefix, ObjectKey, ObjectStore, PageSize};
-use tierstore::s3::{Credentials, S3Config};
+use tierstore::s3::{Addressing, Credentials, S3Config};
 use tierstore::server::local_cache::{CacheConfig, LocalCache, SystemDisk};
 use tierstore::{Backend, S3Backend, SystemClock};
 use tierstore_testkit::dir::TestDir;
@@ -159,6 +159,8 @@ fn cache_over(harness: &Harness) -> (TestDir, LocalCache) {
         endpoint: format!("http://{}", harness.addr),
         region: "us-east-1".to_owned(),
         bucket: BUCKET.to_owned(),
+        addressing: Addressing::Auto,
+        ca_pem: None,
         credentials: Credentials::new(KEY_ID, SECRET),
         capabilities: tierstore::s3::Capabilities::default(),
         connect_timeout: Duration::from_secs(5),

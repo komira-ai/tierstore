@@ -22,7 +22,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use clap::Parser;
 use md5::{Digest as _, Md5};
-use objstore_s3::s3::{Credentials, S3Config, S3ConfigError, S3Store};
+use objstore_s3::s3::{Addressing, Credentials, S3Config, S3ConfigError, S3Store};
 use objstore_s3::{Capabilities, KeyError, KeyPrefix, ObjectStore, ObjectStoreError};
 
 use crate::IdenticalPut;
@@ -34,7 +34,8 @@ use crate::IdenticalPut;
     about = "Runs the ObjectStore conformance suite against an S3 endpoint."
 )]
 pub struct Flags {
-    /// `http://host[:port]`, with no path.
+    /// `http://host[:port]` or `https://host[:port]`, with no path; an `https` store's
+    /// certificate is verified against the system's CA certificates.
     #[arg(long)]
     pub endpoint: String,
     /// The signing region.
@@ -168,6 +169,8 @@ fn s3_config(flags: Flags, secret: &str) -> S3Config {
         endpoint: flags.endpoint,
         region: flags.region,
         bucket: flags.bucket,
+        addressing: Addressing::Auto,
+        ca_pem: None,
         credentials: Credentials::new(flags.access_key_id, secret.trim_end_matches(['\r', '\n'])),
         capabilities: Capabilities {
             conditional_put: true,

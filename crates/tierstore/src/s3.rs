@@ -2,7 +2,7 @@
 //!
 //! The backend is an adapter and keeps one bit of configuration (how `delete_if_match` is done, below):
 //! each call of the trait is the S3 request of the same meaning, sent by the client the
-//! workspace already has (path-style addressing, SigV4, a timeout on every request), and each
+//! workspace already has (SigV4, plain HTTP or TLS, a timeout on every request), and each
 //! answer is read into this crate's [`Error`].
 //!
 //! - `put` is a PUT with `If-None-Match: *`; the 412 is [`Error::AlreadyExists`]. Create-only
@@ -76,9 +76,9 @@
 //!   part first, since S3 takes no part of unknown length. The tag of a part is the `ETag` of
 //!   the answer without its quotes, which is how the S3 front names a part to its client and
 //!   how a completion names it again. The signature of a part carries no hash of its bytes, so
-//!   the store has none to check them against; the connection is plain HTTP (the client
-//!   refuses TLS), so a part is as safe on its way as the network between the proxy and the
-//!   store.
+//!   the store has none to check them against: over plain HTTP a part is as safe on its way as
+//!   the network between the proxy and the store, and over TLS (an `https` endpoint) the
+//!   connection protects it.
 //! - `complete_upload` is CompleteMultipartUpload with `If-None-Match: *`, so a key that
 //!   exists is [`Error::AlreadyExists`] and the upload stays open. It gives the `ETag` the
 //!   answer names for the object (without its quotes), which is what `head` gives it too, and
@@ -162,7 +162,7 @@ use crate::{
 mod sha256;
 
 pub use objstore_s3::Capabilities;
-pub use objstore_s3::s3::{Credentials, S3Config, S3ConfigError, S3Tuning};
+pub use objstore_s3::s3::{Addressing, Credentials, S3Config, S3ConfigError, S3Tuning};
 
 /// The greatest byte position a `Range` names. A store reads the positions as signed 64-bit
 /// numbers and refuses or ignores a larger one, so a range is cut here before it is sent.

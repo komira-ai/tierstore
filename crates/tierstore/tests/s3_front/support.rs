@@ -7,7 +7,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use bytes::Bytes;
 use objstore_s3::Capabilities;
-use objstore_s3::s3::{Credentials, PART_BYTES, S3Config, S3Store, S3Tuning};
+use objstore_s3::s3::{Addressing, Credentials, PART_BYTES, S3Config, S3Store, S3Tuning};
 use tierstore::server::{Drained, Server, ServerConfig};
 use tierstore::{
     Backend, Clock, EntryReconciler, EntryReconcilerConfig, Error, FaultyBackend, MemoryBackend,
@@ -220,6 +220,8 @@ impl Harness {
             endpoint: format!("http://{}", self.addr),
             region: "us-east-1".to_owned(),
             bucket: BUCKET.to_owned(),
+            addressing: Addressing::Auto,
+            ca_pem: None,
             credentials: Credentials::new(KEY_ID, SECRET),
             capabilities,
             connect_timeout: Duration::from_secs(5),
@@ -235,6 +237,8 @@ impl Harness {
             endpoint: format!("http://{}", self.addr),
             region: "us-east-1".to_owned(),
             bucket: BUCKET.to_owned(),
+            addressing: Addressing::Auto,
+            ca_pem: None,
             credentials: Credentials::new(key_id, secret),
             capabilities,
             connect_timeout: Duration::from_secs(5),

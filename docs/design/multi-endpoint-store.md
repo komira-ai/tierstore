@@ -72,7 +72,8 @@ None of these is part of this design, and none is a decision against it; each wo
 - **A random choice** in place of the rotation.
 - **Least-in-flight choice**, if the endpoints differ in speed.
 - **Metrics per endpoint** and a line at start that names them.
-- **TLS** to an endpoint (not built for a single endpoint either).
+- **TLS** to an endpoint: since built for every endpoint, one or several (`https://`,
+  `crates/objstore-s3/src/s3/endpoint.rs`).
 
 ## 8. Failover on a connection that could not be made
 

@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use futures::{StreamExt, stream};
-use objstore_s3::s3::{Credentials, S3Config, S3Store, S3Tuning};
+use objstore_s3::s3::{Addressing, Credentials, S3Config, S3Store, S3Tuning};
 use objstore_s3::{BodyStream, ByteRange, Capabilities, ObjectKey, ObjectStoreError};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -99,6 +99,8 @@ fn config(endpoint: String) -> S3Config {
         endpoint,
         region: "us-east-1".into(),
         bucket: "test-bucket".into(),
+        addressing: Addressing::Auto,
+        ca_pem: None,
         credentials: Credentials::new("AKIDEXAMPLE", "secret"),
         capabilities: Capabilities {
             conditional_put: true,
@@ -738,6 +740,8 @@ async fn a_create_only_write_gives_the_etag_and_time_of_the_answer_when_it_has_t
         endpoint: "http://127.0.0.1:1".to_owned(),
         region: "us-east-1".into(),
         bucket: "test-bucket".into(),
+        addressing: Addressing::Auto,
+        ca_pem: None,
         credentials: Credentials::new("AKIDEXAMPLE", "secret"),
         capabilities: Capabilities::default(),
         connect_timeout: Duration::from_secs(5),

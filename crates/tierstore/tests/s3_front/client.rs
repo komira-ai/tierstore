@@ -188,7 +188,11 @@ async fn only_the_configured_key_is_served() {
     let read = guesser.get_range(&k, window(0, 1)).await;
     assert_refused(read, 403, "SignatureDoesNotMatch");
     let url = format!("http://{}/tier-bucket/cas/denied", h.addr);
-    let unsigned = reqwest::Client::new().put(url).body("x").send().await;
+    let unsigned = tierstore_testkit::http::client()
+        .put(url)
+        .body("x")
+        .send()
+        .await;
     let unsigned = unsigned.unwrap();
     assert_eq!(unsigned.status(), 403);
     let text = unsigned.text().await.unwrap();

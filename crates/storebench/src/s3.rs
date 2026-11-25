@@ -9,14 +9,15 @@ use std::time::Duration;
 
 use clap::Args;
 use objstore_s3::Capabilities;
-use objstore_s3::s3::{Credentials, S3Config, S3Store};
+use objstore_s3::s3::{Addressing, Credentials, S3Config, S3Store};
 
 use crate::Error;
 
 /// The flags that name the S3 store that is read.
 #[derive(Clone, Debug, Args)]
 pub struct Endpoint {
-    /// The store's S3 endpoint, `http://host:port` (no default: it names the store read).
+    /// The store's S3 endpoint, `http://host:port` or `https://host:port` (no default: it names
+    /// the store read).
     #[arg(long)]
     pub endpoint: String,
     /// The file with `MINIO_ROOT_USER=` and `MINIO_ROOT_PASSWORD=` lines.
@@ -65,6 +66,8 @@ pub fn store(
         endpoint: endpoint.to_owned(),
         region: "us-east-1".to_owned(),
         bucket: bucket.to_owned(),
+        addressing: Addressing::Auto,
+        ca_pem: None,
         credentials,
         capabilities: Capabilities::default(),
         connect_timeout: Duration::from_secs(5),
@@ -128,7 +131,7 @@ pub(crate) mod tests {
         ));
     }
 
-    /// An endpoint that is not `http://host:port` is refused before any request.
+    /// An endpoint that is not a URL is refused before any request.
     #[test]
     fn a_bad_endpoint_is_a_usage_error() {
         let err = store(

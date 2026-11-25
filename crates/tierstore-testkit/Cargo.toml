@@ -9,9 +9,11 @@ publish = false
 
 # Test support only: a dev-dependency of `tierstore` and `objstore-s3`, and of nothing else.
 # rustix makes the socket calls of `port`; libc is for the signals, `close_range` and
-# `prctl` of `reaped`.
+# `prctl` of `reaped`; reqwest and rustls make the client of `http`.
 [dependencies]
 libc.workspace = true
+reqwest = { workspace = true, features = ["rustls-no-provider"] }
+rustls.workspace = true
 rustix = { workspace = true, features = ["net", "process"] }
 
 [lints]

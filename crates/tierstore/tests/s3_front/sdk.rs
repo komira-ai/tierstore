@@ -664,7 +664,7 @@ async fn a_url_from_the_stock_presigner_is_accepted_once() {
         "{}",
         presigned.uri()
     );
-    let http = reqwest::Client::new();
+    let http = tierstore_testkit::http::client();
     let send = |body: &'static str| {
         let mut request = http.put(presigned.uri()).body(body);
         for (name, value) in presigned.headers() {

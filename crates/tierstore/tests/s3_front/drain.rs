@@ -4,7 +4,6 @@
 
 use std::time::Duration;
 
-use reqwest::Client;
 use tierstore::server::Drained;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -27,7 +26,7 @@ const SAFETY: Duration = Duration::from_secs(60);
 async fn a_drain_closes_the_idle_connections_and_the_listener_and_ends() {
     let started = Harness::start_fixed(|config| config.drain_lb_wait = LB_WAIT);
     let h = started.await;
-    let client = Client::new();
+    let client = tierstore_testkit::http::client();
     let health = format!("http://{}/healthz", h.addr);
     let probe = client.get(&health).send().await.unwrap();
     assert_eq!(probe.status(), 200);

@@ -460,7 +460,7 @@ async fn a_scoped_key_and_a_presigned_url_still_only_create_under_markers() {
         now: FIXED_MILLIS,
     };
     let url = presign_put(&AccessKey::new(presign.0, presign.1), &request).unwrap();
-    let http = reqwest::Client::new();
+    let http = tierstore_testkit::http::client();
     let first = http.put(&url).body("pack").send().await.unwrap();
     assert_eq!(first.status(), 200);
     let second = http.put(&url).body("other").send().await.unwrap();

@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use objstore_s3::s3::{Credentials, READ_RETRIES, S3Config, S3Store, S3Tuning};
+use objstore_s3::s3::{Addressing, Credentials, READ_RETRIES, S3Config, S3Store, S3Tuning};
 use objstore_s3::{ByteRange, Capabilities, ObjectKey, ObjectStore, ObjectStoreError};
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpListener;
@@ -44,6 +44,8 @@ fn config(endpoint: String) -> S3Config {
         endpoint,
         region: "us-east-1".into(),
         bucket: "test-bucket".into(),
+        addressing: Addressing::Auto,
+        ca_pem: None,
         credentials: Credentials::new("AKIDEXAMPLE", "secret"),
         capabilities: Capabilities::default(),
         connect_timeout: Duration::from_secs(5),

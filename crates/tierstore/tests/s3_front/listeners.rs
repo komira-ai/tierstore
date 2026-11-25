@@ -31,7 +31,10 @@ fn reach(at: SocketAddr) -> SocketAddr {
 
 /// A client that keeps no connection after an answer, so that nothing of it is open at the drain.
 fn client() -> Client {
-    Client::builder().pool_max_idle_per_host(0).build().unwrap()
+    tierstore_testkit::http::builder()
+        .pool_max_idle_per_host(0)
+        .build()
+        .unwrap()
 }
 
 /// The settings of a start with these tables, with a drain that waits no longer than it must.

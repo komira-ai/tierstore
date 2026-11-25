@@ -45,7 +45,7 @@ prefix = "cas/b/"
 cache  = true
 ```
 
-`[local_cache]` is the directory and the byte budget of the cache. `[cold_store]` is the remote store, reached over plain `http://`, path-style; give it a key that can only read. The store is a self-hosted S3-compatible store (MinIO, RustFS): Amazon S3 is not supported as a tier yet, and TLS to a tier is not built. `[[policy]]` names which keys are cached: here those under `cas/b/`, and at least one policy must say `cache = true`.
+`[local_cache]` is the directory and the byte budget of the cache. `[cold_store]` is the remote store, reached over `http://` or `https://`; give it a key that can only read. The store is an S3-compatible store (MinIO, RustFS, or Amazon S3 at `https://s3.<region>.amazonaws.com`, which takes the bucket in the host name; any other store takes it in the path); an `https://` store's certificate is verified against the system's CA certificates. `[[policy]]` names which keys are cached: here those under `cas/b/`, and at least one policy must say `cache = true`.
 
 ## Commands
 
@@ -71,5 +71,5 @@ aws --endpoint-url http://127.0.0.1:9400 s3api head-object --bucket tierstore --
 
 ## Limits
 
-- The remote store must be an S3-compatible store reached over `http://`: a MinIO or RustFS bucket, say. TLS to a store is not built, and Amazon S3 itself is not supported as a store yet.
+- The remote store must be an S3-compatible store reached over `http://` or `https://`: a MinIO, RustFS or Amazon S3 bucket, say. An `https://` store's certificate must be trusted by the system's CA certificates.
 - The store must give the strong read-after-write that [operations](operations.md#what-tierstore-requires-of-a-store) lists; tierstore does not test it.

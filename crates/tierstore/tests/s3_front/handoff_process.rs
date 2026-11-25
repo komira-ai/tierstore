@@ -211,11 +211,13 @@ cache  = true
 
     /// An `S3Store` for the S3 front at `addr`, with the key of the file.
     fn store_at(addr: &str) -> objstore_s3::s3::S3Store {
-        use objstore_s3::s3::{Credentials, S3Config, S3Store};
+        use objstore_s3::s3::{Addressing, Credentials, S3Config, S3Store};
         let config = S3Config {
             endpoint: format!("http://{addr}"),
             region: "us-east-1".to_owned(),
             bucket: "tier-bucket".to_owned(),
+            addressing: Addressing::Auto,
+            ca_pem: None,
             credentials: Credentials::new(BIN_KEY_ID, BIN_SECRET),
             capabilities: Capabilities {
                 conditional_put: true,
@@ -354,7 +356,10 @@ cache  = true
         let put_sent = PUT_SENT;
 
         // The download: a part of the blob is read, and the rest is left in the socket.
-        let downloads = Client::builder().pool_max_idle_per_host(0).build().unwrap();
+        let downloads = tierstore_testkit::http::builder()
+            .pool_max_idle_per_host(0)
+            .build()
+            .unwrap();
         let mut download = downloads
             .get(format!("http://{oci_at}/v2/app/blobs/sha256:{digest}"))
             .send()
@@ -415,7 +420,10 @@ cache  = true
         assert_eq!(first.exit_code().await, Some(0));
 
         // The second is the only process now: ready once its cache has the lock.
-        let client = Client::builder().pool_max_idle_per_host(0).build().unwrap();
+        let client = tierstore_testkit::http::builder()
+            .pool_max_idle_per_host(0)
+            .build()
+            .unwrap();
         let mut ready = None;
         for _ in 0..READY_POLLS {
             ready = readyz(&client, &s3_at).await;

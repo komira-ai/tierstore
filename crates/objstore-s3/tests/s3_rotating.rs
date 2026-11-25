@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use objstore_s3::s3::fake::FakeS3;
-use objstore_s3::s3::{Credentials, S3Config, S3ConfigError, S3Store, S3Tuning};
+use objstore_s3::s3::{Addressing, Credentials, S3Config, S3ConfigError, S3Store, S3Tuning};
 use objstore_s3::{Capabilities, ObjectKey, ObjectStore};
 
 fn config(endpoint: &str) -> S3Config {
@@ -20,6 +20,8 @@ fn config(endpoint: &str) -> S3Config {
         endpoint: endpoint.to_owned(),
         region: "us-east-1".to_owned(),
         bucket: "tierstore-fake".to_owned(),
+        addressing: Addressing::Auto,
+        ca_pem: None,
         credentials: Credentials::new("fake-key", "fake-secret"),
         capabilities: Capabilities {
             conditional_put: true,
@@ -101,7 +103,8 @@ async fn one_endpoint_gets_every_request_as_before() {
 }
 
 /// Asserts that an endpoint given twice is refused, also when written another way (a trailing
-/// slash), and so is a listed endpoint that is not `http://host[:port]`, naming that entry.
+/// slash), and so is a listed endpoint that is not `http://host[:port]` or `https://host[:port]`,
+/// naming that entry.
 #[tokio::test]
 async fn a_repeated_or_malformed_endpoint_in_the_list_is_refused() {
     let fake = FakeS3::start().await;
@@ -118,9 +121,9 @@ async fn a_repeated_or_malformed_endpoint_in_the_list_is_refused() {
         (slash.clone(), "given twice"),
         "same host, written with a slash"
     );
-    let tls = "https://127.0.0.1:1".to_owned();
+    let ftp = "ftp://127.0.0.1:1".to_owned();
     assert_eq!(
-        refusal(std::slice::from_ref(&tls)),
-        (tls, "TLS is not built yet; use http")
+        refusal(std::slice::from_ref(&ftp)),
+        (ftp, "the scheme must be http or https")
     );
 }

@@ -216,7 +216,7 @@ non-loopback addresses. The certificate may name the front by a DNS name, by an 
 (a DNS name is enough whatever the listen address; with none, each listen address needs an IP name).
 A key file that any user can read, a key that is not the certificate's, an expired certificate, one
 of the two keys without the other (exit 2) and a file that cannot be read (exit 1) stop the start.
-The files are read once; a new certificate takes a restart. A tier's `endpoint` is still `http://`.
+The files are read once; a new certificate takes a restart. A tier's `endpoint` may be `https://`, verified against the system's CA certificates.
 
 ## The OCI read front
 

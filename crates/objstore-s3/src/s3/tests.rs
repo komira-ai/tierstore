@@ -1,5 +1,10 @@
 use super::*;
 
+/// The TLS of a client of `http://` endpoints alone: no CA, not even the system's.
+fn plain() -> rustls::ClientConfig {
+    endpoint::tls_config(None, false).unwrap()
+}
+
 pub(super) fn r(offset: u64, len: u64) -> ByteRange {
     ByteRange::new(offset, len).unwrap()
 }
@@ -81,7 +86,7 @@ async fn idle_connection_is_dropped_after_the_timeout() {
     });
     let limit = Duration::from_secs(5);
     // Reuse: a long idle timeout keeps the connection across two requests.
-    let keeping = client_builder(limit, Duration::from_secs(60))
+    let keeping = client_builder(limit, Duration::from_secs(60), plain())
         .build()
         .unwrap();
     keeping.get(&url).send().await.unwrap();
@@ -93,7 +98,7 @@ async fn idle_connection_is_dropped_after_the_timeout() {
     );
     // Expiry: a short idle timeout and a jump of the clock far above it replace the
     // connection. The jump is tokio's clock, which the pool reads; nothing waits.
-    let dropping = client_builder(limit, Duration::from_millis(100))
+    let dropping = client_builder(limit, Duration::from_millis(100), plain())
         .build()
         .unwrap();
     dropping.get(&url).send().await.unwrap();
@@ -179,6 +184,7 @@ async fn a_connect_that_times_out_is_not_resent_but_a_refused_one_is() {
     let client = client_builder(
         Duration::from_millis(100),
         S3Tuning::default().pool_idle_timeout,
+        plain(),
     )
     .build()
     .unwrap();
@@ -214,7 +220,7 @@ async fn a_request_that_exceeds_its_client_timeout_is_not_resent() {
         std::future::pending::<()>().await;
         drop(held);
     });
-    let e = reqwest::Client::new()
+    let e = tierstore_testkit::http::client()
         .get(format!("http://{addr}/"))
         .timeout(Duration::from_millis(100))
         .send()
@@ -248,6 +254,8 @@ pub(super) fn config(endpoint: &str, bucket: &str) -> S3Config {
         endpoint: endpoint.to_owned(),
         region: "us-east-1".to_owned(),
         bucket: bucket.to_owned(),
+        addressing: Addressing::Auto,
+        ca_pem: None,
         credentials: Credentials::new("a", "s"),
         capabilities: Capabilities::default(),
         connect_timeout: Duration::from_secs(1),
@@ -257,12 +265,12 @@ pub(super) fn config(endpoint: &str, bucket: &str) -> S3Config {
 }
 
 /// Catches: an endpoint whose path, scheme or credentials would make the signed
-/// request differ from the one sent, and bucket names S3 refuses.
+/// request differ from the one sent, an `https` endpoint refused, and bucket names S3 refuses.
 #[test]
 fn config_is_checked() {
     assert!(S3Store::new(config("http://127.0.0.1:9000", "example-bucket")).is_ok());
+    assert!(S3Store::new(config("https://127.0.0.1:9000", "example-bucket")).is_ok());
     for bad in [
-        "https://127.0.0.1:9000",
         "ftp://127.0.0.1",
         "http://127.0.0.1:9000/base",
         "http://u:p@127.0.0.1:9000",
@@ -384,4 +392,93 @@ fn a_body_is_one_put_up_to_the_single_put_max_and_never_past_s3s_limit() {
     let default = S3Store::new(c).unwrap();
     assert!(default.sends_whole(SINGLE_PUT_MAX));
     assert!(!default.sends_whole(SINGLE_PUT_MAX + 1));
+}
+
+/// Asserts that a request is sent to, and signed for, the host and path of its style: in
+/// virtual-hosted style (the default for an AWS endpoint) the bucket is the first label of the host
+/// and the path is the key alone, `/` for a request for the bucket; in path style the host is the
+/// endpoint's and the path starts with the bucket. The signature is the one the signer makes for
+/// that host and path, with the region of the configuration in its scope.
+#[test]
+fn each_style_signs_the_host_and_path_it_sends_to() {
+    let key = ObjectKey::new("dir/a b").unwrap();
+    let list = [("list-type", "2".to_owned())];
+    let hosted = "my-bucket.s3.eu-west-1.amazonaws.com";
+    let aws = "s3.eu-west-1.amazonaws.com";
+    let cases = [
+        (
+            Addressing::Auto,
+            Some(&key),
+            &[][..],
+            hosted,
+            "/dir/a%20b",
+            "",
+        ),
+        (
+            Addressing::Auto,
+            None,
+            &list[..],
+            hosted,
+            "/",
+            "?list-type=2",
+        ),
+        (
+            Addressing::Path,
+            Some(&key),
+            &[][..],
+            aws,
+            "/my-bucket/dir/a%20b",
+            "",
+        ),
+        (
+            Addressing::Path,
+            None,
+            &list[..],
+            aws,
+            "/my-bucket",
+            "?list-type=2",
+        ),
+    ];
+    for (addressing, key, query, host, path, url_query) in cases {
+        let mut config = config("http://s3.eu-west-1.amazonaws.com", "my-bucket");
+        config.region = "eu-west-1".to_owned();
+        config.addressing = addressing;
+        let store = S3Store::new(config).unwrap();
+        let request = store
+            .conn
+            .signed_payload(Method::GET, key, query, Vec::new(), EMPTY_SHA256)
+            .build()
+            .unwrap();
+        assert_eq!(
+            request.url().as_str(),
+            format!("http://{host}{path}{url_query}")
+        );
+        let header = |name: &str| request.headers()[name].to_str().unwrap().to_owned();
+        let date = header("x-amz-date");
+        let signed = [
+            ("x-amz-content-sha256", EMPTY_SHA256.to_owned()),
+            ("x-amz-date", date.clone()),
+        ];
+        let expected = Signer {
+            access_key_id: "a",
+            secret_access_key: "s",
+            region: "eu-west-1",
+        }
+        .authorization(
+            &Request {
+                method: "GET",
+                host,
+                path,
+                query,
+                headers: &signed,
+                payload_sha256: EMPTY_SHA256,
+            },
+            &date,
+        );
+        assert_eq!(header("authorization"), expected, "{addressing:?} {path}");
+        assert!(
+            expected.contains("/eu-west-1/s3/aws4_request"),
+            "{expected}"
+        );
+    }
 }

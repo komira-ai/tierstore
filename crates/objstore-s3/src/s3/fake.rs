@@ -44,16 +44,20 @@
 //! many GiB of zeros costs the test nothing to hold. It checks no signature unless a test
 //! asks ([`FakeS3::require_credentials`]): then a request not signed with that key pair
 //! is refused 403, as a real store refuses a wrong key.
+//!
+//! It serves plain HTTP ([`FakeS3::start`]) or HTTPS with a certificate a test makes
+//! ([`FakeS3::start_tls`]), and takes a request in path style or, through a store that reaches
+//! it by a host name ([`FakeS3::store_resolving`]), in virtual-hosted style (`fake/tls.rs`).
 
 use std::collections::BTreeMap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use md5::{Digest, Md5};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::Notify;
 
 mod checksums;
@@ -61,6 +65,7 @@ mod cut;
 mod dates;
 mod escape;
 mod kept;
+mod tls;
 mod uploads;
 
 use self::checksums::Sums;
@@ -69,7 +74,7 @@ use self::escape::{unescape, xml_text};
 use self::kept::Kept;
 use self::uploads::{list_parts, list_uploads};
 use super::sigv4::{Request as Signed, Signer};
-use super::{Credentials, S3Config, S3Store, S3Tuning};
+use super::{Addressing, Credentials, S3Config, S3Store, S3Tuning};
 use crate::{Capabilities, ObjectKey};
 
 /// The runs bytes are cut into when kept: a run of all zeros is only counted.
@@ -213,6 +218,8 @@ struct State {
     requests: Vec<String>,
     /// The only key pair a request may be signed with, when a test set one.
     credentials: Option<(String, String)>,
+    /// The host name under which a request is virtual-hosted style ([`FakeS3::store_resolving`]).
+    hosted_under: Option<String>,
     /// The signing regions of the requests so far.
     regions: std::collections::BTreeSet<String>,
     /// The least size of a part that is not the last of its upload, when a test set one
@@ -240,6 +247,7 @@ struct State {
 #[derive(Debug, Clone)]
 pub struct FakeS3 {
     endpoint: String,
+    addr: SocketAddr,
     state: Arc<Mutex<State>>,
     /// Woken each time a request changed what the service holds ([`FakeS3::wait_for`]).
     changed: Arc<Notify>,
@@ -250,35 +258,11 @@ impl FakeS3 {
     ///
     /// # Panics
     /// No loopback port could be bound.
-    #[expect(
-        clippy::expect_used,
-        reason = "a test double: a port that cannot be bound is the failure the test reports, as documented under Panics"
-    )]
     pub async fn start() -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind loopback");
-        let endpoint = format!("http://{}", listener.local_addr().expect("address"));
-        let state = Arc::new(Mutex::new(State::default()));
-        let shared = Arc::clone(&state);
-        let changed = Arc::new(Notify::new());
-        let wake = Arc::clone(&changed);
-        tokio::spawn(async move {
-            loop {
-                let accepted = listener.accept().await;
-                let serving =
-                    accepted.map(|(sock, _)| serve(sock, Arc::clone(&shared), Arc::clone(&wake)));
-                serving.map(tokio::spawn).ok();
-            }
-        });
-        Self {
-            endpoint,
-            state,
-            changed,
-        }
+        Self::listen(None).await
     }
 
-    /// `http://127.0.0.1:<port>`.
+    /// `http://127.0.0.1:<port>`, or `https://` for a service started with [`FakeS3::start_tls`].
     #[must_use]
     pub fn endpoint(&self) -> &str {
         &self.endpoint
@@ -304,20 +288,25 @@ impl FakeS3 {
         reason = "a test double: its configuration is valid, as documented under Panics"
     )]
     pub fn store_tuned(&self, capabilities: Capabilities, tuning: S3Tuning) -> S3Store {
-        S3Store::new_tuned(
-            S3Config {
-                endpoint: self.endpoint.clone(),
-                region: "us-east-1".to_owned(),
-                bucket: "tierstore-fake".to_owned(),
-                credentials: Credentials::new("fake-key", "fake-secret"),
-                capabilities,
-                connect_timeout: Duration::from_secs(5),
-                request_timeout: Duration::from_secs(60),
-                min_body_rate: None,
-            },
-            tuning,
-        )
-        .expect("a valid configuration")
+        S3Store::new_tuned(self.config(capabilities), tuning).expect("a valid configuration")
+    }
+
+    /// The configuration of [`FakeS3::store`]: bucket `tierstore-fake` at [`FakeS3::endpoint`],
+    /// path style, trusting the system's CA certificates alone.
+    #[must_use]
+    pub fn config(&self, capabilities: Capabilities) -> S3Config {
+        S3Config {
+            endpoint: self.endpoint.clone(),
+            region: "us-east-1".to_owned(),
+            bucket: "tierstore-fake".to_owned(),
+            addressing: Addressing::Path,
+            ca_pem: None,
+            credentials: Credentials::new("fake-key", "fake-secret"),
+            capabilities,
+            connect_timeout: Duration::from_secs(5),
+            request_timeout: Duration::from_secs(60),
+            min_body_rate: None,
+        }
     }
 
     fn lock(&self) -> MutexGuard<'_, State> {
@@ -462,7 +451,11 @@ struct Request {
 }
 
 /// Serves one connection's requests, one after another, until it closes.
-async fn serve(mut sock: TcpStream, state: Arc<Mutex<State>>, changed: Arc<Notify>) -> Option<()> {
+async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
+    mut sock: S,
+    state: Arc<Mutex<State>>,
+    changed: Arc<Notify>,
+) -> Option<()> {
     let mut buf = Vec::new();
     let mut chunk = vec![0u8; RUN];
     loop {
@@ -589,9 +582,7 @@ fn handle(state: &mut State, request: &Request) -> Vec<u8> {
     }
     let body_len = request.body.len() as u64;
     state.stats.largest_body = state.stats.largest_body.max(body_len);
-    // `/bucket/key`: the key is everything after the bucket.
-    let key = request.path.trim_start_matches('/');
-    let key = unescape(key.split_once('/').map_or("", |(_, k)| k));
+    let key = tls::key_of(state, request);
     if key.len() > 1024 {
         return error("400 Bad Request", "KeyTooLongError");
     }

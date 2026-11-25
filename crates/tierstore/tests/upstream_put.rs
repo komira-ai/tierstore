@@ -32,7 +32,7 @@ use bytes::Bytes;
 use futures::{StreamExt as _, stream};
 use objstore_s3::s3::{S3Store, StoredSha256};
 use objstore_s3::{KeyPrefix, ObjectKey, ObjectStoreError, PageSize};
-use tierstore::s3::{Capabilities, Credentials, S3Config, S3Tuning};
+use tierstore::s3::{Addressing, Capabilities, Credentials, S3Config, S3Tuning};
 use tierstore::{Backend, Error, PartBody, PutOutcome, S3Backend, TreeDigest};
 use tierstore_testkit::dir::TestDir;
 use tierstore_testkit::port::own_loopback_port;
@@ -86,6 +86,8 @@ impl Minio {
             endpoint: self.endpoint.clone(),
             region: "us-east-1".to_owned(),
             bucket: "tierstore".to_owned(),
+            addressing: Addressing::Auto,
+            ca_pem: None,
             credentials: Credentials::new(USER, SECRET),
             capabilities: Capabilities {
                 conditional_put: true,

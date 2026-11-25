@@ -16,7 +16,7 @@ use super::layout::{Sidecar, meta_path, name_of};
 use super::metrics::read;
 use super::testing::{digest, never_expires, pattern};
 use super::{CacheConfig, LocalCache, SystemDisk};
-use crate::s3::{Capabilities, Credentials, S3Config, S3Tuning};
+use crate::s3::{Addressing, Capabilities, Credentials, S3Config, S3Tuning};
 use crate::{Backend, Error, FaultyBackend, Op, PartBody, PutClaim, S3Backend, TestClock};
 
 /// A body of `bytes` in pieces of a mebibyte.
@@ -62,6 +62,8 @@ fn s3_backend(s3: &FakeS3) -> Arc<S3Backend> {
         endpoint: s3.endpoint().to_owned(),
         region: "us-east-1".to_owned(),
         bucket: "tier-test".to_owned(),
+        addressing: Addressing::Auto,
+        ca_pem: None,
         credentials: Credentials::new("test-key", "test-secret"),
         capabilities: Capabilities::default(),
         connect_timeout: Duration::from_secs(5),
@@ -212,6 +214,8 @@ async fn a_put_over_s3_of_more_than_a_part_is_one_put_by_default() {
         endpoint: s3.endpoint().to_owned(),
         region: "us-east-1".to_owned(),
         bucket: "tier-test".to_owned(),
+        addressing: Addressing::Auto,
+        ca_pem: None,
         credentials: Credentials::new("test-key", "test-secret"),
         capabilities: Capabilities::default(),
         connect_timeout: Duration::from_secs(5),

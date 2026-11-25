@@ -27,9 +27,15 @@ confidence-threshold = 0.93
 # fjall (the embedded store of tierstore-index) depends on with no feature to turn it off:
 # xxhash-rust (BSL-1.0, the Boost licence: use, copy and modify with the notice kept) and
 # varint-rs (0BSD: no condition at all).
+#
+# And webpki-root-certs (CDLA-Permissive-2.0, a permissive licence for data: use, change and share
+# with the licence text kept): Mozilla's root certificates, which reqwest's `rustls-no-provider`
+# feature brings through rustls-platform-verifier as a dependency of wasm32 targets alone, so it is
+# never built here; objstore-s3 trusts the system's CA certificates (rustls-native-certs).
 exceptions = [
     { crate = "xxhash-rust", allow = ["BSL-1.0"] },
     { crate = "varint-rs", allow = ["0BSD"] },
+    { crate = "webpki-root-certs", allow = ["CDLA-Permissive-2.0"] },
 ]
 
 [licenses.private]
