@@ -6,6 +6,7 @@ use super::{MountRequest, Refusal, Request, parse};
 use crate::TreeDigest;
 use crate::server::local_cache::attaches::{Attach, Fetches, Outcome};
 use crate::server::local_cache::descriptors::Descriptors;
+use crate::server::local_cache::opens::{Opens, Spans};
 use crate::server::local_cache::trees::{PlacementId, placement_id};
 
 const SHA: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -516,6 +517,29 @@ fn a_descriptors_is_the_report_it_writes() {
         "descriptors boot-1 7 1 x",
         "descriptors  7 1 2",
     ] {
+        assert_eq!(line(text), Err(Refusal::Malformed), "{text:?}");
+    }
+}
+
+/// Asserts that an `opens` is the report it writes, and that one that is not, one of another number
+/// of buckets or with a bad mount name included, is refused as malformed.
+#[test]
+fn an_opens_is_the_report_it_writes() {
+    let mut spans = [Spans::default(); 4];
+    spans[1].ms = 30;
+    spans[1].buckets[5] = 1;
+    let report = Opens {
+        mount: "boot-1".to_owned(),
+        process: 77,
+        waiting: 2,
+        spans,
+    };
+    let written = report.line();
+    assert_eq!(line(&written), Ok(Request::Opens(report)));
+    let fewer = written.rsplit_once(' ').unwrap().0.to_owned();
+    let more = format!("{written} 0");
+    let unnamed = written.replacen("boot-1", "", 1);
+    for text in ["opens", "opens boot-1 7 1", &fewer, &more, &unnamed] {
         assert_eq!(line(text), Err(Refusal::Malformed), "{text:?}");
     }
 }

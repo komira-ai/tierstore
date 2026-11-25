@@ -276,7 +276,10 @@ async fn a_directory_above_a_location_is_a_namespace_directory(over: Over) {
         assert_eq!(core.opendir(at), Err(Errno::Acces));
         assert_eq!(core.readlink(at), Err(Errno::Inval));
         assert_eq!(core.open(at, false).unwrap_err(), Errno::IsDir);
-        assert_eq!(core.blob_file(at).unwrap_err(), Errno::IsDir);
+        assert_eq!(
+            core.blob_file(at, &mut core.open_begins()).unwrap_err(),
+            Errno::IsDir
+        );
         assert_eq!(core.getattr(at), Ok(jobs));
         assert_eq!(jobs.attr.perm, 0o711);
     })

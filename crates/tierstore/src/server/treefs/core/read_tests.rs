@@ -246,18 +246,41 @@ fn blob_file_gives_the_cache_file_and_the_length_of_a_file() {
     use std::os::unix::fs::FileExt as _;
     let rig = attached_uncounted("tfs-blob-file");
     let core = &rig.core;
-    let (file, length) = core.blob_file(ino::of(1, 4)).unwrap().unwrap();
+    let (file, length) = core
+        .blob_file(ino::of(1, 4), &mut core.open_begins())
+        .unwrap()
+        .unwrap();
     assert_eq!(length, 10);
     let mut bytes = [0u8; 10];
     file.file.read_exact_at(&mut bytes, 0).unwrap();
     assert_eq!(bytes.to_vec(), blob_with_length(&rig, 10));
-    assert!(core.blob_file(ino::of(1, 5)).unwrap().is_none());
+    assert!(
+        core.blob_file(ino::of(1, 5), &mut core.open_begins())
+            .unwrap()
+            .is_none()
+    );
     for dir in [ino::of(1, 2), ino::ROOT, ino::TREES] {
-        assert_eq!(core.blob_file(dir).unwrap_err(), Errno::IsDir, "{dir}");
+        assert_eq!(
+            core.blob_file(dir, &mut core.open_begins()).unwrap_err(),
+            Errno::IsDir,
+            "{dir}"
+        );
     }
-    assert_eq!(core.blob_file(ino::of(1, 8)).unwrap_err(), Errno::Inval);
-    assert_eq!(core.blob_file(ino::of(1, 99)).unwrap_err(), Errno::NoEnt);
-    assert_eq!(core.blob_file(ino::of(9, 1)).unwrap_err(), Errno::NoEnt);
+    assert_eq!(
+        core.blob_file(ino::of(1, 8), &mut core.open_begins())
+            .unwrap_err(),
+        Errno::Inval
+    );
+    assert_eq!(
+        core.blob_file(ino::of(1, 99), &mut core.open_begins())
+            .unwrap_err(),
+        Errno::NoEnt
+    );
+    assert_eq!(
+        core.blob_file(ino::of(9, 1), &mut core.open_begins())
+            .unwrap_err(),
+        Errno::NoEnt
+    );
 }
 
 /// Asserts the parent of an inode: the directory above an entry, `trees/` for the root of a tree,

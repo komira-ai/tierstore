@@ -10,6 +10,7 @@
 use std::collections::{HashMap, HashSet, hash_map::Entry};
 use std::sync::Arc;
 
+use crate::server::local_cache::opens::Source;
 use crate::tree_manifest::{EntryKind, TreeDigest};
 
 use super::{Core, Loaded, locked};
@@ -86,9 +87,11 @@ impl Core {
             if !self.current(number, token) {
                 return;
             }
+            // Not an open: where the bytes came from is not counted.
             match self.cache_file(
                 (digest, *size, source.as_ref()),
                 self.open_until(self.now()),
+                &mut Source::Cached,
             ) {
                 Ok(_) => batch.push(*digest),
                 Err(reason) => {

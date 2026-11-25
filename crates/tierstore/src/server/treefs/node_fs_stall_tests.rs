@@ -73,7 +73,7 @@ fn opens_that_wait_on_fills_never_hold_a_reader_and_cached_files_are_still_serve
 
 /// The verbs of the reports (`fills.rs`, [`Report`]): sent by a thread of the fill client, after
 /// the request they tell of and whenever that thread gets to them, never by an open.
-const REPORTS: [&str; 4] = ["started", "attached", "fetched", "descriptors"];
+const REPORTS: [&str; 5] = ["started", "attached", "fetched", "descriptors", "opens"];
 
 /// The requests the fill socket received, in order, but the reports.
 fn asked_but_reports(upstream: &Upstream) -> Vec<String> {

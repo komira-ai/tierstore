@@ -16,6 +16,7 @@ use tokio::runtime::Handle;
 use crate::server::local_cache::LocalCache;
 use crate::server::local_cache::attaches::{Attach, Fetches};
 use crate::server::local_cache::descriptors::Descriptors;
+use crate::server::local_cache::opens::Opens;
 #[cfg(any(target_os = "linux", target_os = "macos", test))]
 use crate::server::local_cache::trees::TreeStore;
 
@@ -97,6 +98,8 @@ pub(super) enum Report {
     Fetched(Fetches),
     /// The cache files the mount holds open (`local_cache/descriptors.rs`).
     Descriptors(Descriptors),
+    /// How long the mount's opens took, and how many wait now (`local_cache/opens.rs`).
+    Opens(Opens),
 }
 
 impl Report {
@@ -107,6 +110,7 @@ impl Report {
             Self::Attached(attach) => attach.line(),
             Self::Fetched(fetches) => fetches.line(),
             Self::Descriptors(descriptors) => descriptors.line(),
+            Self::Opens(opens) => opens.line(),
         }
     }
 }

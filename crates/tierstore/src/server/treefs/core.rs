@@ -52,6 +52,8 @@ use super::tree::Tree;
 use handles::Handles;
 use loaded::{Loaded, Trees};
 use memory::Reads;
+#[cfg(any(target_os = "linux", test))]
+use opens::Timing;
 use pins::PinLocks;
 
 /// How long the kernel may keep what it was told below a tree's root: the longest it keeps, about
@@ -272,6 +274,8 @@ pub(in crate::server) struct Core {
     next_handle: AtomicU64,
     /// The files of the cache the handles read, one descriptor each (`core/blob.rs`).
     open_files: blob::OpenFiles,
+    /// How long the opens took, and how many wait now (`core/opens.rs`): shared with their timings.
+    opens: Arc<opens::OpenTimes>,
     /// The lines said about the requests that failed, and the counts not said (`core/said.rs`).
     lines: said::Lines,
     /// What the trees in memory held at the last line that said it (`Core::say_memory`).
@@ -336,6 +340,7 @@ impl Core {
             #[cfg(any(target_os = "linux", test))]
             next_handle: AtomicU64::new(1),
             open_files: blob::OpenFiles::new(),
+            opens: Arc::default(),
             lines: said::Lines::default(),
             memory_said: Mutex::new(None),
             #[cfg(test)]
@@ -813,16 +818,26 @@ impl Core {
     /// for a link, [`Errno::Io`] for a blob that cannot be had.
     #[cfg(test)]
     pub(super) fn open(&self, ino: u64, writing: bool) -> Result<Opened, Errno> {
-        self.open_from(ino, writing, self.now())
+        let mut timing = self.open_begins();
+        let opened = self.open_from(ino, writing, &mut timing);
+        self.open_ends(timing, opened.is_ok());
+        opened
     }
 
-    /// [`Core::open`] of a request that began at `begun` on the core's clock (it was parked, and
-    /// waited, `fetches.rs`): its fills are answered by `fs.fetch_timeout` after `begun`.
+    /// [`Core::open`] of a request timed by `timing` (`core/opens.rs`), which began at its `begun`
+    /// on the core's clock (it may have been parked, and waited, `fetches.rs`): its fills are
+    /// answered by `fs.fetch_timeout` after `begun`, and its `source` is set where it asks the node
+    /// for the file's bytes.
     ///
     /// # Errors
     /// As [`Core::open`].
     #[cfg(any(target_os = "linux", test))]
-    pub(super) fn open_from(&self, ino: u64, writing: bool, begun: u64) -> Result<Opened, Errno> {
+    pub(super) fn open_from(
+        &self,
+        ino: u64,
+        writing: bool,
+        timing: &mut Timing,
+    ) -> Result<Opened, Errno> {
         #[cfg(test)]
         self.note("open");
         if writing {
@@ -856,8 +871,9 @@ impl Core {
                     return Ok(Opened::Adopted { fh, id });
                 }
                 let blob = (digest, *size, source.as_ref());
+                let opening = (timing.begun, &mut timing.source);
                 Handle::Cached {
-                    bytes: self.blob((&loaded, number), &entry, blob, begun)?,
+                    bytes: self.blob((&loaded, number), &entry, blob, opening)?,
                     ino,
                 }
             }
@@ -956,6 +972,7 @@ mod loaded;
 mod memory;
 #[cfg(any(target_os = "linux", test))]
 mod now;
+mod opens;
 mod pins;
 mod placed;
 mod prefetch;

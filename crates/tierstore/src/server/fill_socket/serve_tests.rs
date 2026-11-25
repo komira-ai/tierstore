@@ -14,6 +14,7 @@ use tokio::task::JoinHandle;
 
 use super::{Listening, SocketFile, pinned, serve, serve_as};
 use crate::Op;
+use crate::server::local_cache::opens::{Opens, Spans};
 use crate::server::local_cache::pack_testing::{Pack, blob_hex, fills, recency};
 use crate::server::local_cache::testing::{Rig, digest, pattern, until, wait_advancing};
 use crate::server::local_cache::{LocalCache, PinError, Tick, blob_path};
@@ -597,6 +598,46 @@ async fn a_descriptors_is_answered_ok_and_counted() {
         "tierstore_fs_open_descriptor_failures_total{mount=\"boot-1\"} 5\n",
     ] {
         assert!(metrics.contains(line), "{line}{metrics}");
+    }
+    served.stop().await;
+}
+
+/// Asserts that an `opens` is answered `ok`, by a node with no tree store, and shows in the cache's
+/// families: the histogram at what the process's totals grew by and the gauge at the last report;
+/// one of another number of buckets is refused and counts nothing.
+#[tokio::test]
+async fn an_opens_is_answered_ok_and_counted() {
+    let rig = Rig::new("tfs-opens");
+    let place = Place::new("tfs-opens");
+    let served = Served::start(&rig.cache, &place.path);
+    let mut client = Client::connect(&place.path).await;
+    let mut spans = [Spans::default(); 4];
+    spans[1].ms = 30;
+    spans[1].buckets[5] = 1;
+    let mut report = Opens {
+        mount: "boot-1".to_owned(),
+        process: 7,
+        waiting: 4,
+        spans,
+    };
+    assert_eq!(client.ask(&report.line()).await, "ok");
+    report.waiting = 1;
+    report.spans[1].ms = 70;
+    report.spans[1].buckets[5] = 2;
+    assert_eq!(client.ask(&report.line()).await, "ok");
+    let before = rig.cache.metrics();
+    report.spans[1].buckets[5] = 9;
+    let fewer = report.line().rsplit_once(' ').unwrap().0.to_owned();
+    assert_eq!(client.ask(&fewer).await, "refused malformed request");
+    let metrics = rig.cache.metrics();
+    assert_eq!(metrics, before);
+    let filled = "outcome=\"ok\",source=\"filled\"";
+    for line in [
+        format!("tierstore_fs_open_seconds_bucket{{{filled},le=\"0.05\"}} 2\n"),
+        format!("tierstore_fs_open_seconds_sum{{{filled}}} 0.07\n"),
+        "tierstore_fs_opens_waiting 1\n".to_owned(),
+    ] {
+        assert!(metrics.contains(&line), "{line}{metrics}");
     }
     served.stop().await;
 }

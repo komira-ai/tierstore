@@ -890,5 +890,8 @@ mod shared_reads;
 #[path = "node_fs_stall_tests.rs"]
 mod stall;
 
+#[path = "node_fs_open_tests.rs"]
+mod opens;
+
 #[path = "node_fs_fault_tests.rs"]
 mod faults;
