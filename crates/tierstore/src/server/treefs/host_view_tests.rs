@@ -222,3 +222,32 @@ fn the_device_of_a_mount_is_the_last_fuse_mount_at_the_path() {
     assert_eq!(at(&format!("1 2 0:3 / {MOUNTPOINT} rw - nfs4 a b\n")), None);
     assert_eq!(at(&format!("1 2 0:3 /{MOUNTPOINT} rw")), None);
 }
+
+#[test]
+fn a_mount_point_the_kernel_escapes_is_found_by_the_bytes_it_names() {
+    let at =
+        |text: &str, mountpoint: &str| device_at(text, Path::new(mountpoint)).map(str::to_owned);
+    let line = |path: &str| format!("1 2 0:7 / {path} rw - fuse.tierstore-fs x rw\n");
+    assert_eq!(
+        at(&line("/run/my\\040fs"), "/run/my fs"),
+        Some("0:7".to_owned())
+    );
+    assert_eq!(
+        at(&line("/run/a\\134b"), "/run/a\\b"),
+        Some("0:7".to_owned())
+    );
+    assert_eq!(
+        at(&line("/run/t\\011n\\012"), "/run/t\tn\n"),
+        Some("0:7".to_owned())
+    );
+    // Not an escape: too few digits, a non-octal digit, the escape itself unmatched.
+    assert_eq!(
+        at(&line("/run/a\\04"), "/run/a\\04"),
+        Some("0:7".to_owned())
+    );
+    assert_eq!(
+        at(&line("/run/a\\089"), "/run/a\\089"),
+        Some("0:7".to_owned())
+    );
+    assert_eq!(at(&line("/run/my\\040fs"), "/run/my\\040fs"), None);
+}

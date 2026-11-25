@@ -27,6 +27,7 @@
 //! account), the process cannot tell, and a node that works is not stopped for it: it is said and
 //! the start goes on.
 
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use super::start::StartError;
@@ -96,8 +97,37 @@ impl HostView {
     }
 }
 
+/// A path of a table of mounts as the bytes it names: the kernel writes a space, a tab, a newline
+/// and a backslash as `\040`, `\011`, `\012` and `\134`, three octal digits after a backslash.
+fn unescaped(field: &str) -> Vec<u8> {
+    let bytes = field.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut at = 0;
+    while at < bytes.len() {
+        let octal = bytes.get(at + 1..at + 4).filter(|digits| {
+            bytes[at] == b'\\' && digits.iter().all(|digit| (b'0'..=b'7').contains(digit))
+        });
+        match octal {
+            Some(digits) => {
+                let value = digits
+                    .iter()
+                    .fold(0u32, |sum, digit| sum * 8 + u32::from(digit - b'0'));
+                out.push(u8::try_from(value).unwrap_or(b'?'));
+                at += 4;
+            }
+            None => {
+                out.push(bytes[at]);
+                at += 1;
+            }
+        }
+    }
+    out
+}
+
 /// The device number (`major:minor`) of the FUSE mount at `mountpoint` in the text of a table of
-/// mounts; the last mount at the path counts.
+/// mounts; the last mount at the path counts. The path is compared as the kernel shows it
+/// (escapes undone), so `mountpoint` must be canonical: a symlink, `..` or `//` in it never
+/// matches the table.
 fn device_at<'a>(mountinfo: &'a str, mountpoint: &Path) -> Option<&'a str> {
     mountinfo
         .lines()
@@ -108,7 +138,7 @@ fn device_at<'a>(mountinfo: &'a str, mountpoint: &Path) -> Option<&'a str> {
             let at = fields.nth(1)?;
             let fstype = after.split(' ').next()?;
             let fuse = fstype == "fuse" || fstype.starts_with("fuse.");
-            (fuse && Path::new(at) == mountpoint).then_some(device)
+            (fuse && unescaped(at) == mountpoint.as_os_str().as_bytes()).then_some(device)
         })
         .next_back()
 }
