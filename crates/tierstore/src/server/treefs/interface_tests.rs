@@ -825,3 +825,6 @@ async fn a_start_whose_s3_address_is_taken_leaves_the_mount_it_served() {
 
 #[path = "switch_tests.rs"]
 mod switch;
+
+#[path = "interface_host_tests.rs"]
+mod host;

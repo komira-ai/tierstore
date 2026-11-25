@@ -1108,7 +1108,7 @@ the devices with `DevicePolicy=closed` and `DeviceAllow=/dev/fuse rw` instead, g
 starts in 60 seconds. The process writes where its account may, with no path to make writable; a
 drop-in of the host's that adds a path option (`ReadWritePaths=` for a cache directory, say) gives
 the service a mount namespace again, which a node whose file system is served by this process
-cannot run under. The packages write no file in
+cannot run under. A process of this layout checks it at start: it compares the mount with process 1's table of mounts (`/proc/1/mountinfo`, readable by the `tierstore` account; the link `/proc/1/ns/mnt` is not) and refuses to start, and to say `READY=1`, when the mount is not shown there. The packages write no file in
 `/etc` (no conffile, no `%config` file) and no marker, and nothing starts or enables an instance,
 so a fresh install with no configuration starts no server. The post-install step creates the
 account and, only when nothing is at `/etc/tierstore`, that directory (mode 0750, group

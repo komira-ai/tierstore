@@ -99,6 +99,8 @@ mod fetches;
 #[cfg(target_os = "linux")]
 mod handover;
 #[cfg(target_os = "linux")]
+mod host_view;
+#[cfg(target_os = "linux")]
 mod init_record;
 #[cfg(target_os = "linux")]
 mod interface;

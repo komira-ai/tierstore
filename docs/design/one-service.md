@@ -339,7 +339,7 @@ out. That is the reason the S3 unit and the fs unit differ today (`tierstore-fs@
 the table, the path options make a mount namespace too (`ReadWritePaths=`, `ReadOnlyPaths=`, `InaccessiblePaths=`,
 `BindPaths=`, `BindReadOnlyPaths=`, `TemporaryFileSystem=`, `RootDirectory=`, `PrivateUsers=`, `ProtectProc=`); the unit
 sets none, needs none (without `ProtectSystem=strict` no path has to be made writable), and P6's test refuses every one, so a
-drop-in that adds one is the operator's change, not the package's. The table is the one unit against both:
+drop-in that adds one is the operator's change, not the package's. The process checks the result at start: once it has the mount it reads `/proc/1/mountinfo` (readable by the `tierstore` account, which cannot read the namespace link `/proc/1/ns/mnt` of root's process) and refuses to start, naming both mount namespaces and the cause, when that table does not show its mount; it does not report `READY=1`. The table is the one unit against both:
 
 | Option | S3 unit today | fs unit today | One unit | Why |
 |---|---|---|---|---|

@@ -54,9 +54,10 @@ use crate::server::local_cache::trees::TreeStore;
 use super::config::FsSettings;
 use super::fills::{Calls, Reach};
 use super::handover::Offer;
+use super::host_view::HostView;
 use super::launch::{self, End, Platform, Started, ended, hang, leave_to_kernel};
 use super::run::Running;
-use super::sd::Manager;
+use super::sd::{FUSE_NAME, Manager};
 use super::start::StartError;
 use super::steps::Steps;
 
@@ -65,6 +66,8 @@ use super::steps::Steps;
 pub(in crate::server) struct Service {
     fs: Option<FsSettings>,
     platform: Platform,
+    /// Where the host's view of the mounts is read; none where a test does not check it.
+    host: Option<HostView>,
 }
 
 impl Service {
@@ -73,13 +76,27 @@ impl Service {
         Self {
             fs,
             platform: Platform::of_process(),
+            host: Some(HostView::real()),
         }
     }
 
     /// The same, on `platform`.
     #[cfg(test)]
     pub(super) fn on(fs: Option<FsSettings>, platform: Platform) -> Self {
-        Self { fs, platform }
+        Self {
+            fs,
+            platform,
+            host: None,
+        }
+    }
+
+    /// The same, with the host's view of the mounts `host` (a test's stand-in for `/proc/1`).
+    #[cfg(test)]
+    pub(super) fn seeing(self, host: HostView) -> Self {
+        Self {
+            host: Some(host),
+            ..self
+        }
     }
 
     /// Whether the file has an `fs` interface.
@@ -99,8 +116,9 @@ impl Service {
         self,
         (cache, trees): (LocalCache, Option<TreeStore>),
     ) -> Result<Taking, StartError> {
-        let Self { fs, platform } = self;
+        let Self { fs, platform, host } = self;
         let manager = platform.manager.clone();
+        let own_mountinfo = platform.kernel.mountinfo.clone();
         let Some(settings) = fs else {
             return Ok(Taking {
                 manager,
@@ -122,6 +140,26 @@ impl Service {
         })
         .await
         .unwrap_or_else(|panicked| std::panic::resume_unwind(panicked.into_panic()))?;
+        if let Some(host) = host
+            && let Err(why) = host.check(&settings.mountpoint, &own_mountinfo)
+        {
+            // A connection the store keeps, or made here, is of a mount no one can reach: the next
+            // start makes it afresh. A mount taken from an instance is given back to it.
+            if started.notice.is_none()
+                && let Err(unstored) = manager.unstore(FUSE_NAME)
+            {
+                tracing::warn!(
+                    "tierstore fs: cannot take the descriptor out of the store: {unstored}"
+                );
+            }
+            Taking {
+                manager,
+                mount: Some((settings, started)),
+            }
+            .abandon()
+            .await;
+            return Err(why);
+        }
         Ok(Taking {
             manager,
             mount: Some((settings, started)),

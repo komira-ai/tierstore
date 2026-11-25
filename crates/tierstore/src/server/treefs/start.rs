@@ -70,6 +70,24 @@ pub(in crate::server) enum StartError {
     #[cfg(target_os = "linux")]
     #[error("fs.put: {0}")]
     Put(#[from] super::put::OpenError),
+    /// The mount is in a mount namespace of this process's own, which the host does not see.
+    #[cfg(target_os = "linux")]
+    #[error(
+        "fs.mountpoint {mountpoint}: the mount is not in the host's mount namespace: this process is in \
+         {own}, process 1 is in {host}, and the table of mounts of process 1 does not show the mount; \
+         a unit option such as ReadWritePaths=, ProtectSystem= or PrivateTmp=, for example in a drop-in \
+         of the host's, gives the service a mount namespace of its own, from which a mount does not \
+         reach the host or the job runtime; remove the option and restart the unit \
+         (docs/design/one-service.md section 2.2, docs/install.md)"
+    )]
+    HostNamespace {
+        /// The mount point.
+        mountpoint: String,
+        /// This process's mount namespace, `mnt:[INODE]`, or why it is not known.
+        own: String,
+        /// Process 1's mount namespace, `mnt:[INODE]`, or why it is not known.
+        host: String,
+    },
     /// Requests of the connection stayed unanswered after a restart on a kernel that cannot send
     /// them again, and the connection was aborted so that they fail; the unit starts again.
     #[cfg(target_os = "linux")]

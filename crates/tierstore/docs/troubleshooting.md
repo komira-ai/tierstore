@@ -121,6 +121,19 @@ refusing to start: the file system of the local cache at <path> failed the <chec
 
 Both exit 3 and the unit does not restart. The first is a probe that could not be made in the opened directory; `<why>` is the system's answer. The second names a question that the file system answered wrongly, one of `create-only`, `atomic-visibility`, `raw-bytes` or `st_nlink`: a file system that overwrites on a create-only write, shows a file before it is whole, does not return the bytes written, or does not report a link count of 2 for a file with a second hard link. Put the cache on a local file system that does these properly (not a network or overlay mount that does not).
 
+### The fs mount does not reach the host
+
+A process whose file has an `[[interface]]` of type `fs` makes its FUSE mount in the mount namespace it runs in. When a drop-in of the host's gives the unit a mount namespace of its own (`ReadWritePaths=`, `ProtectSystem=`, `PrivateTmp=` and the other options of `docs/design/one-service.md` section 2.2), the mount exists only inside that namespace: the host's mount point stays an empty directory and the job runtime cannot use it. After the mount is got, the process looks at process 1's table of mounts, `/proc/1/mountinfo`, which every account may read, and a mount that table does not show fails the start:
+
+```message
+fs.mountpoint <path>: the mount is not in the host's mount namespace: this process is in <mnt:[inode]>, process 1 is in <mnt:[inode]>, and the table of mounts of process 1 does not show the mount;
+a unit option such as ReadWritePaths=, ProtectSystem= or PrivateTmp=, for example in a drop-in
+of the host's, gives the service a mount namespace of its own, from which a mount does not
+reach the host or the job runtime; remove the option and restart the unit
+```
+
+The two names are the processes' `/proc/PID/ns/mnt` links. The packaged unit runs as the `tierstore` account, which cannot read process 1's link, so the second name may read `unreadable (<why>)`; the table of mounts decides in that case. The process exits 1 without telling the service manager `READY=1` and without binding a socket (`/readyz` is never served), and takes its descriptor out of the manager's store so that the next start makes the mount afresh. Remove the option (`systemctl cat tierstore@b.service` lists the drop-ins), run `systemctl daemon-reload` and restart the unit. A host where neither the namespace nor the table of process 1 can be read (a `/proc` that hides it) is not judged: the start says it cannot tell and goes on.
+
 ## Errors a client sees
 
 | Status and code | Why |
