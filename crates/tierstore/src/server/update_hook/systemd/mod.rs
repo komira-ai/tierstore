@@ -19,7 +19,8 @@
 //!   drains and exits on its own; in a restart `live` is stopped first; on a first install
 //!   there is no `live`. It then waits for the staged release to serve, and records `swapped`.
 //!   A failure is reported and nothing is undone here: hostkeeper runs `rollback`.
-//! - `verify` observes the staged release on the public port and records `verified`.
+//! - `verify` observes the staged release on the public port and records `verified`; after a
+//!   hand-over of the fs process it also needs the new fs process to run the installed binary.
 //! - `rollback` brings the previous release back on the instance that served it (or stops the
 //!   only instance of a first install) and records nothing in flight. Before the commit only.
 //! - `cleanup` confirms afresh (it waits for `/readyz`, which the old instance, still draining
@@ -38,9 +39,11 @@
 //! The second unit, `tierstore-fs@a` and `tierstore-fs@b` ([`fs`]), is handed over in the same
 //! steps on a node where an instance of it runs, between releases that both list
 //! `handoff-fs-v1`: `cutover` starts it after the store (the new instance takes the mount from the
-//! old one), `verify` and `cleanup` need it active, `cleanup` removes the old instance's marker
-//! and neither waits for it nor stops it, `rollback` puts it back before the store, `restore`
-//! starts the recorded instance after the store and `uninstall` stops the instances that run.
+//! old one), `verify` and `cleanup` need it active, `verify` needs its process to run the binary
+//! the update installed ([`fs_exe`]) and names the release of an fs process it left alone,
+//! `cleanup` removes the old instance's marker and neither waits for it nor stops it, `rollback`
+//! puts it back before the store, `restore` starts the recorded instance after the store and
+//! `uninstall` stops the instances that run.
 //! The config hook runs the steps with [`FsPolicy::LeftAlone`], or, for the switch of a node to one
 //! process, [`FsPolicy::Switch`]: `prepare` records the switch (`fs_switch`, with `fs_live` naming
 //! the instance that runs), `cutover` removes both fs markers once the new instance serves and
@@ -55,6 +58,7 @@ mod boot;
 mod cleanup;
 mod cutover;
 mod fs;
+mod fs_exe;
 mod prepare;
 mod rollback;
 mod verify;

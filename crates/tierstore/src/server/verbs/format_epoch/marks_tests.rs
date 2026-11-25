@@ -630,7 +630,7 @@ fn the_marks_bucket_of_an_s3_hot_tier_is_the_named_one_or_the_default_and_never_
         let mut all = vec!["--hot-credentials-file", credentials.as_str()];
         all.extend_from_slice(flags);
         let cli = cli(&all);
-        cli.hot.open_marks(cli.marks_bucket.as_deref())
+        cli.hot.open_marks(None, cli.marks_bucket.as_deref())
     };
     assert_eq!(
         with(&[]).unwrap().map(|(name, _)| name),

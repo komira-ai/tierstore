@@ -31,12 +31,15 @@ md-5.workspace = true
 # `ClientConfig` built here on ring, the provider of the rest of the workspace (`s3::endpoint`).
 reqwest = { workspace = true, features = ["rustls-no-provider"] }
 roxmltree.workspace = true
+# The JSON credentials of the container endpoint and the instance metadata service.
+serde.workspace = true
+serde_json.workspace = true
 # The TLS client of an `https` endpoint, and the system's CA certificates it trusts.
 rustls.workspace = true
 rustls-native-certs.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["rt", "time"] }
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
 # The TLS of the loopback service (`testkit`).
 tokio-rustls = { workspace = true, optional = true }
 tracing.workspace = true

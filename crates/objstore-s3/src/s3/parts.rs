@@ -303,11 +303,12 @@ impl Conn {
         source: BodyStream,
     ) -> Result<Response, ObjectStoreError> {
         let source = Arc::new(Mutex::new(source.fuse()));
-        self.failing_over(|| {
+        self.failing_over(|keys| {
             let pulse = Arc::new(Pulse::default());
             let body = Streamed::sharing(Arc::clone(&source), len, Arc::clone(&pulse));
             let request = self
                 .signed_payload(
+                    &keys,
                     Method::PUT,
                     Some(key),
                     query,

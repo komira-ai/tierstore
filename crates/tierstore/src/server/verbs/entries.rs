@@ -70,7 +70,7 @@ pub(super) fn run(
         What::Ls { hot } => (hot, None),
         What::Show { hot, key } => (hot, Some(key.as_str())),
     };
-    let result = match hot.open() {
+    let result = match hot.source().and_then(|source| hot.open(source.as_ref())) {
         Ok(tier) => block_on(print(tier.as_ref(), clock.now(), key, out)),
         Err(why) => Err(why),
     };

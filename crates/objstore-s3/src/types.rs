@@ -314,6 +314,10 @@ pub enum ObjectStoreError {
     /// reader that prints the chain does not print it twice.
     #[error("request to the store failed: {}", Causes(.0.as_ref()))]
     Transport(std::sync::Arc<dyn std::error::Error + Send + Sync>),
+    /// No credentials could be had to sign the request with, so it was not sent (an S3 store
+    /// whose credentials come from a source: [`crate::s3::Credentials::from_source`]).
+    #[error("{0}")]
+    Credentials(crate::s3::CredentialsError),
     /// The body of a [`put_stream`](crate::ObjectStore::put_stream) failed, or gave more
     /// or fewer bytes than declared: nothing was stored. The text says which.
     #[error("the body of a streamed write failed: {0}")]

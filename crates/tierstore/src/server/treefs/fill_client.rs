@@ -1,10 +1,11 @@
 //! The client of the fill socket (`server/fill_socket`): one line out, one line back, over
 //! connections kept for the next request. The requests of this process: `fill` (a blob inside an
-//! upstream object, or the whole object `cas/l/<sha256>` of a manifest), `touch` (not answered),
+//! upstream object, or the whole object `cas/l/<sha256>` of a manifest), `fill-tree` (the new
+//! manifests of a tree, which a node of a release before it refuses as unknown), `touch` (not answered),
 //! the pin requests, `put` (a staged file of the put directory, answered in JSON), and the
 //! questions about the placements of the node (`place`, `mounted`, `image`, `flat`, `span`,
-//! `unplace`), and the reports `started`, `attached`, `fetched`, `descriptors` and `opens`, which
-//! a thread of its own sends (see [`FillClient::send_report`]). It is one of the two ways of [`Fills`]: the
+//! `unplace`), and the reports `started`, `attached`, `fetched`, `levels`, `descriptors` and `opens`,
+//! which a thread of its own sends (see [`FillClient::send_report`]). It is one of the two ways of [`Fills`]: the
 //! one of the process `tierstore fs`.
 //!
 //! A request that meets a closed socket, or a connection that went away (the S3 instance of the
@@ -27,13 +28,14 @@ use std::io::{BufRead as _, BufReader, Write as _};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 
+use crate::server::local_cache::TreeFilled;
 use crate::server::local_cache::trees::FlatTree;
 use crate::{Clock, TreeDigest};
 use std::sync::mpsc::{SyncSender, sync_channel};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
-use super::fills::{Fills, Report};
+use super::fills::{Fills, Report, TreeAnswer};
 use super::locked;
 
 /// The answer of a fill socket to a request it does not know: a node of an earlier release.
@@ -356,9 +358,10 @@ impl FillClient {
         serde_json::from_str(&answer).map_err(|_| answer)
     }
 
-    /// Sends the report `line` to the node (`started`, `attached`, `fetched`, `descriptors`,
-    /// `opens`: the node's metrics, `local_cache/starts.rs`, `local_cache/attaches.rs`,
-    /// `local_cache/descriptors.rs` and `local_cache/opens.rs`); the caller does not wait. A report is sent by a thread of its
+    /// Sends the report `line` to the node (`started`, `attached`, `fetched`, `levels`,
+    /// `descriptors`, `opens`: the node's metrics, `local_cache/starts.rs`,
+    /// `local_cache/attaches.rs`, `local_cache/descriptors.rs` and `local_cache/opens.rs`); the
+    /// caller does not wait. A report is sent by a thread of its
     /// own, over connections of its own, so that the request it tells of, such as the first of a
     /// job's command, never waits on the socket. A report that finds [`REPORTS_QUEUED`] reports
     /// waiting is dropped, and one the socket does not take is lost, as is one a node of a release
@@ -396,6 +399,19 @@ impl Fills for FillClient {
     /// Asks for the whole object `cas/l/<sha256>` to be put in the cache, answered by `until`.
     fn fill_manifest(&self, sha256: &str, until: Until<'_>) -> Result<(), FillFailure> {
         self.fill(&format!("fill {sha256}"), Some(until))
+    }
+
+    /// Asks for the new manifests of the tree `root` to be put in the cache, within the time left
+    /// before `until`, which the node is given in the request and the answer is waited for.
+    fn fill_tree(&self, root: &TreeDigest, until: Until<'_>) -> TreeAnswer {
+        let ms = u64::try_from(until.left().as_millis()).unwrap_or(u64::MAX);
+        match self.ask(&format!("fill-tree {root} {ms}"), (true, None), Some(until)) {
+            Ok(answer) if answer == UNKNOWN => TreeAnswer::Unknown,
+            Ok(answer) => {
+                TreeFilled::parse(&answer).map_or(TreeAnswer::Failed(answer), TreeAnswer::Filled)
+            }
+            Err(error) => TreeAnswer::Failed(error.to_string()),
+        }
     }
 
     /// Asks for the blob `sha256` of `size` bytes at `offset` of the upstream object `key` to be

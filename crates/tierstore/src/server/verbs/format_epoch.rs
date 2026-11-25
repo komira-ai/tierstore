@@ -162,10 +162,13 @@ pub(super) fn run(
         Ok(cli) => cli,
         Err(status) => return status,
     };
-    let opened = cli
-        .hot
-        .open()
-        .and_then(|hot| Ok((hot, cli.hot.open_marks(cli.marks_bucket.as_deref())?)));
+    let opened = cli.hot.source().and_then(|source| {
+        let hot = cli.hot.open(source.as_ref())?;
+        let marks = cli
+            .hot
+            .open_marks(source.as_ref(), cli.marks_bucket.as_deref())?;
+        Ok((hot, marks))
+    });
     let result = match opened {
         Ok((hot, marks)) => block_on(act(
             Work {

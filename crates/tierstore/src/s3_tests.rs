@@ -108,6 +108,14 @@ fn answers_of_the_client_are_the_errors_the_trait_documents() {
     };
     let conflict = map_error(racing, "k");
     assert!(conflict.is_unavailable(), "{conflict}");
+    // No credentials to sign with: nothing was sent, and the source may answer later.
+    let unsigned = ObjectStoreError::Credentials(CredentialsError::NoSource("none".to_owned()));
+    let unsigned = map_error(unsigned, "k");
+    assert!(unsigned.is_unavailable(), "{unsigned}");
+    assert_eq!(
+        unsigned.to_string(),
+        Error::Unavailable("no credential source is set up: none".to_owned()).to_string()
+    );
     let odd = map_error(ObjectStoreError::Protocol("odd".to_owned()), "k");
     assert!(odd.to_string().contains("odd"), "{odd}");
 }

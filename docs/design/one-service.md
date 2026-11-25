@@ -300,11 +300,11 @@ over a method of the cache or the tree store (read in code). The file system's c
 
 | Fill-socket request | The call |
 |---|---|
-| `fill <sha256> <size> from <key> @ <offset>`, `fill <sha256>` | `LocalCache::fill_blob`, `fill_manifest` |
+| `fill <sha256> <size> from <key> @ <offset>`, `fill <sha256>`, `fill-tree <sha256> <ms>` | `LocalCache::fill_blob`, `fill_manifest`, `fill_tree` |
 | `touch`, `pin`, `unpin`, `pins-live` | `LocalCache::touch_blobs`, `pin`, `unpin`, `pins_live` |
 | `put <key> <sha256> <size> from <path>` | `fill_socket::put::answer`'s body: open the staged file once and stream it through `LocalCache::put_stream_sha256` (read once, hashed and stored in one pass, no size cap: B16) |
 | `place`, `mounted`, `flat`, `image`, `span`, `unplace`, `places-live` | `TreeStore::mount_place` and `attach`, `mount_paths`, `flat`, `mount_tree`, `fetch_span`, `detach`, `holds_live` |
-| the reports `started`, `attached`, `fetched`, `descriptors`, `opens` | `LocalCache::run_started`, `tree_attached`, `manifests_fetched`, `descriptors_reported`, `opens_reported` |
+| the reports `started`, `attached`, `fetched`, `levels`, `descriptors`, `opens` | `LocalCache::run_started`, `tree_attached`, `manifests_fetched`, `tree_levels`, `descriptors_reported`, `opens_reported` |
 
 - **Threads.** The FUSE readers are blocking threads (`fs.threads`, 16 by default), and the cache is async. A reader blocks
   on the call through the runtime's handle; the readers are not runtime threads, so the wait cannot starve the runtime

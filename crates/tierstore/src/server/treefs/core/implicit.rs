@@ -1,7 +1,8 @@
 //! Trees that resolve on lookup: a lookup of `trees/<digest>` that no run has attached reads the
 //! tree's manifests (the root `cas/l/<digest>` through the fill socket's `fill <digest>`, which
 //! checks the bytes against the digest and takes at most 64 MiB, where the cache does not hold
-//! them), flattens it, and attaches it with no run: an implicit attachment. It is detached when no
+//! them; the new manifests of a new tree by one `fill-tree <digest>` first, `core/placed.rs`),
+//! flattens it, and attaches it with no run: an implicit attachment. It is detached when no
 //! request has named the tree or one of its inodes for `fs.tree_idle_secs`, by a thread that looks
 //! every quarter of that time (at least a second, at most a minute apart).
 //!
@@ -94,7 +95,8 @@ impl Core {
     /// Reads the tree `digest`, unless it is in memory, and attaches it with no run; its number.
     /// The time from the start of the lookup to its answer, on the core's clock, is reported to the
     /// node with the outcome (`attached`, for `tierstore_fs_tree_attach_seconds`) and said on
-    /// stderr with the manifests the read fetched.
+    /// stderr with the manifests the read fetched, by level, and its `fill-tree`
+    /// (`Fetched::by_level`).
     fn attach_implicitly(&self, digest: TreeDigest) -> Result<u64, Errno> {
         let start = self.now();
         let fetched = Fetched::default();
@@ -109,12 +111,13 @@ impl Core {
         let counts = fetched.counts();
         tracing::info!(
             "tierstore fs: lookup of {digest}: {} in {ms} ms; {} manifests: {} from the cache, \
-             {} filled, {} not had",
+             {} filled, {} not had{}",
             outcome.word(),
             counts.manifests(),
             counts.cache,
             counts.filled,
             counts.failed,
+            fetched.by_level(),
         );
         attached
     }

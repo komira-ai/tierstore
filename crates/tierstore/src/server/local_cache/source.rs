@@ -10,7 +10,10 @@
 //!   the filesystem process opens its file at the path the layout gives the name ([`blob_path`]).
 //! - [`LocalCache::fill_manifest`] fills the object `cas/l/<sha256>`, up to
 //!   [`WHOLE_FILL_LIMIT`], the file a tree's manifest is: the caller knows its hash and not its
-//!   size.
+//!   size. Each such fill is timed on the cache's clock, from the request to its answer
+//!   (`tierstore_cache_manifest_fill_seconds`, `attaches.rs`).
+//! - [`LocalCache::fill_tree`] fills the new manifests of a tree, going down from its root
+//!   itself, so that the filesystem process crosses the socket once for them (`tree_fill.rs`).
 //! - [`LocalCache::touch_blobs`] counts blobs as used now, for the cache's order of eviction.
 //!
 //! These fills have a pool of permits of their own (`fill_socket_concurrency`) and wait for one
@@ -34,9 +37,15 @@ use tokio::sync::watch;
 
 use crate::Error;
 
+use super::attaches::Via;
 use super::fill::{Class, Ended, Filled, Pending, Plan, Stop};
 use super::layout::{Name, Origin, data_path, name_of};
 use super::{Inner, LocalCache, Mode, locked};
+
+#[path = "tree_fill.rs"]
+mod tree_fill;
+
+pub(in crate::server) use tree_fill::TreeFilled;
 
 /// A blob that lies inside an object of the upstream.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -257,6 +266,12 @@ impl LocalCache {
     /// # Errors
     /// Why nothing was kept: see [`FillError`].
     pub(in crate::server) async fn fill_manifest(&self, sha256: &str) -> Result<(), FillError> {
+        self.fill_manifest_via(sha256, Via::Fill).await
+    }
+
+    /// [`LocalCache::fill_manifest`], asked for by `via`: timed on the cache's clock, from the
+    /// request to its answer, as a fill of that way.
+    async fn fill_manifest_via(&self, sha256: &str, via: Via) -> Result<(), FillError> {
         let key = object_key(sha256);
         let name = name_of(&key);
         let wanted = Wanted {
@@ -264,7 +279,11 @@ impl LocalCache {
             name,
             plan: Plan::Manifest,
         };
-        self.inner.source_fill(wanted).await
+        let start = self.inner.clock.now();
+        let filled = self.inner.source_fill(wanted).await;
+        let ms = self.inner.clock.now().saturating_sub(start);
+        self.manifest_filled(via, ms);
+        filled
     }
 
     /// Counts the blobs and whole objects of these digests as used now, for the order of

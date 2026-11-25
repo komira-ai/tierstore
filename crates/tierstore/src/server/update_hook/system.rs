@@ -11,7 +11,7 @@ use super::config_hook::{Common, GUARD_FILE, GUARD_UNIT, Running, launchd_step, 
 use super::look::POLL_INTERVAL;
 use super::machine::{
     CONFIG_STATE_FILE, GuardUnit, LaunchctlJobs, LaunchdTimes, LoopbackInstances, MarkerFiles,
-    MonotonicClock, Runner, StateFiles, SystemHost, SystemRunner, SystemdUnits,
+    MonotonicClock, ProcFiles, Runner, StateFiles, SystemHost, SystemRunner, SystemdUnits,
 };
 use super::params::{Params, ServiceManager};
 use super::ports::{Family, LaunchdPorts, SystemdPorts};
@@ -110,11 +110,14 @@ pub(super) fn run_on(config: &SystemConfig<'_>, invocation: &Invocation, params:
                 .with_program(config.systemctl)
                 .of(Family::Fs);
             let fs_markers = MarkerFiles::new(under(&config.root, MARKER_DIR)).of(Family::Fs);
+            let fs_processes =
+                ProcFiles::new(&fs_units, config.root.clone(), runner, CAPABILITIES_TIMEOUT);
             let ports = SystemdPorts {
                 units: &units,
                 markers: &markers,
                 fs_units: &fs_units,
                 fs_markers: &fs_markers,
+                fs_processes: &fs_processes,
                 instances: &instances,
                 host: &host,
                 clock: &clock,
@@ -186,11 +189,14 @@ pub(super) fn config_run_on(
                 .with_program(config.systemctl)
                 .of(Family::Fs);
             let fs_markers = MarkerFiles::new(under(&config.root, MARKER_DIR)).of(Family::Fs);
+            let fs_processes =
+                ProcFiles::new(&fs_units, config.root.clone(), runner, CAPABILITIES_TIMEOUT);
             let ports = SystemdPorts {
                 units: &units,
                 markers: &markers,
                 fs_units: &fs_units,
                 fs_markers: &fs_markers,
+                fs_processes: &fs_processes,
                 instances: &instances,
                 host: &running,
                 clock: &clock,

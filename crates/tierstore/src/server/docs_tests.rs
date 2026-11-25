@@ -86,6 +86,8 @@ const FOREIGN_FLAGS: &[&str] = &[
     "--hot-endpoint",
     "--hot-region",
     "--hot-credentials-file",
+    "--hot-credential-source",
+    "--hot-credential-profile",
     "--s3-request-timeout",
 ];
 

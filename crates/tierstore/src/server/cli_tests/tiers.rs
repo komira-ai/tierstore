@@ -10,7 +10,9 @@ use futures::StreamExt as _;
 use objstore_s3::s3::fake::FakeS3;
 use tierstore_testkit::dir::TestDir;
 
+use crate::s3::CredentialSource;
 use crate::server::cli::{S3Flags, dir_tier, open_tier, s3_backend};
+use crate::server::config_tier::SourceSetting;
 use crate::server::config_tuning::S3Client;
 
 /// Asserts that the chunk sizes of the settings reach a `dir:<path>` tier as `open_tier` makes
@@ -28,6 +30,7 @@ async fn a_dir_tier_takes_its_chunk_sizes_from_the_settings() {
         more_endpoints: &[],
         region: None,
         credentials: None,
+        source: None,
         conditional_delete: None,
     };
     let body: Vec<u8> = (0..2500_u32).map(|at| (at % 251) as u8).collect();
@@ -71,6 +74,7 @@ fn an_s3_tier_takes_its_chunks_waiting_from_the_settings() {
         more_endpoints: &[],
         region: None,
         credentials: Some(credentials.as_path()),
+        source: None,
         conditional_delete: None,
     };
     let timeout = Duration::from_secs(30);
@@ -119,6 +123,7 @@ async fn an_s3_tier_sends_its_requests_to_its_endpoints_in_turn() {
         more_endpoints: &more,
         region: None,
         credentials: Some(credentials.as_path()),
+        source: None,
         conditional_delete: None,
     };
     let client = S3Client::default();
@@ -141,5 +146,34 @@ async fn an_s3_tier_sends_its_requests_to_its_endpoints_in_turn() {
     assert_eq!(
         services[1].requests(),
         ["PUT /tierstore-fake/k1?", "PUT /tierstore-fake/k4?"]
+    );
+}
+
+/// Asserts that a tier whose credentials come from a source opens with no key file and asks
+/// nothing of the source or the store when it opens, and that a key file given beside a source is
+/// refused, with the message exactly.
+#[test]
+fn an_s3_tier_takes_its_credentials_from_a_source_or_a_file_not_both() {
+    let setting = SourceSetting {
+        source: CredentialSource::Container,
+        profile: None,
+    };
+    let mut flags = S3Flags {
+        endpoint: Some("http://127.0.0.1:9"),
+        more_endpoints: &[],
+        region: None,
+        credentials: None,
+        source: Some(&setting),
+        conditional_delete: None,
+    };
+    let limits = (Duration::from_secs(30), &S3Client::default());
+    assert!(s3_backend("--cold", "s3:tier-test", "tier-test", &flags, limits).is_ok());
+    let file = std::path::Path::new("/nonexistent/credentials");
+    flags.credentials = Some(file);
+    let refused = s3_backend("--cold", "s3:tier-test", "tier-test", &flags, limits);
+    assert_eq!(
+        refused.err().unwrap(),
+        "--cold \"s3:tier-test\": --cold-credentials-file is not for --cold-credential-source \
+         container"
     );
 }

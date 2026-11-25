@@ -50,7 +50,7 @@ use crate::server::local_cache::trees::{FileSpan, MountPlace, MountTree, TreeSto
 use crate::server::local_cache::{Blob, FillError, LocalCache, Mode};
 
 use super::fill_client::{AskError, FillFailure, Place, PlacedTree, Until};
-use super::fills::{Fills, Report};
+use super::fills::{Fills, Report, TreeAnswer};
 
 /// Why a request got no answer.
 #[derive(Debug, PartialEq, Eq)]
@@ -210,6 +210,20 @@ impl Fills for InProcess {
         )
     }
 
+    /// The cache's fill of the tree, within the time this request waits.
+    fn fill_tree(&self, root: &TreeDigest, until: Until<'_>) -> TreeAnswer {
+        let (wait, late) = match self.wait(Some(until)) {
+            Ok(wait) => wait,
+            Err(spent) => return TreeAnswer::Failed(spent.to_string()),
+        };
+        let (cache, root) = (self.cache.clone(), *root);
+        match self.call(wait, async move { cache.fill_tree(&root, wait).await }) {
+            Ok(Ok(filled)) => TreeAnswer::Filled(filled),
+            Ok(Err(why)) => TreeAnswer::Failed(why.to_string()),
+            Err(missed) => TreeAnswer::Failed(unfilled(&missed, late)),
+        }
+    }
+
     fn fill_blob(
         &self,
         (sha256, size): (&str, u64),
@@ -361,6 +375,7 @@ impl Fills for InProcess {
             }
             Report::Attached(attach) => self.cache.tree_attached(attach),
             Report::Fetched(fetches) => self.cache.manifests_fetched(&fetches),
+            Report::Levels(levels) => self.cache.tree_levels(levels),
             Report::Descriptors(descriptors) => self.cache.descriptors_reported(descriptors),
             Report::Opens(opens) => self.cache.opens_reported(*opens),
         }

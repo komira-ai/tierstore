@@ -438,10 +438,11 @@ histogram_quantile(0.99, sum by (le) (rate(tierstore_request_to_start_seconds_bu
 
 A lookup of `trees/<digest>` that no run has attached reads the tree's manifests and attaches it
 (see [the virtual build file system](operations.md#the-virtual-build-file-system)). `tierstore fs`
-reports to the node, on the fill socket, how long each such attach took and where the manifests of
-each read of a tree came from, and the node's cache counts the reports in its block. The families
-are on every process with a cache, with a `# TYPE` line, and stay at zero on a node whose mount
-reports nothing. The buckets of both histograms are `0.001`, `0.002`, `0.005`, `0.01`, `0.025`,
+reports to the node, on the fill socket, how long each such attach took, where the manifests of
+each read of a tree came from and how many levels and rounds of fills each read took, and the node's
+cache counts the reports in its block; the node also times each fill of a manifest it makes itself.
+The families are on every process with a cache, with a `# TYPE` line, and stay at zero on a node
+whose mount reports nothing. The buckets of the histograms are `0.001`, `0.002`, `0.005`, `0.01`, `0.025`,
 `0.05`, `0.1`, `0.25`, `0.5`, `1`, `2.5`, `5`, `10`, `30`, `60`, `300` and `+Inf` seconds.
 
 | name | type | labels | what it says |
@@ -455,18 +456,33 @@ reports nothing. The buckets of both histograms are `0.001`, `0.002`, `0.005`, `
 | `tierstore_fs_manifest_fill_seconds_bucket` | counter | `le` | the fills at or under `le` seconds |
 | `tierstore_fs_manifest_fill_seconds_sum` | counter | none | their seconds |
 | `tierstore_fs_manifest_fill_seconds_count` | counter | none | the fills |
+| `tierstore_fs_tree_levels_total` | counter | none | the levels of the trees read from their manifests (a tree that is a root alone has 1), summed over the reads; one `levels` report per read |
+| `tierstore_fs_tree_fill_rounds_total` | counter | none | the rounds of fills over the fill socket those reads waited for one after another: one for each level in which a read filled a manifest, and one for each `fill-tree` it asked, summed |
+| `tierstore_cache_manifest_fill_seconds` | histogram | `via`: `fill`, `tree`; `le` on `_bucket` | one sample per fill of a manifest this node made: the seconds from the request to its answer on the node's own clock (a permit of the fill socket's pool, the upstream's answers, the write into the cache), to the millisecond. `fill` is a `fill <sha256>` of the fill socket or the same call made in process; `tree` is a manifest filled for a `fill-tree` |
+| `tierstore_cache_manifest_fill_seconds_bucket` | counter | `via`, `le` | those fills at or under `le` seconds |
+| `tierstore_cache_manifest_fill_seconds_sum` | counter | `via` | their seconds |
+| `tierstore_cache_manifest_fill_seconds_count` | counter | `via` | those fills |
 
-A read fetches the manifests of a level of the tree at once, up to 16, before the level below, so
-the attach of a tree whose manifests the cache does not hold takes about one fill for each level,
-not one for each directory. The fills of a level overlap, so their seconds add up to more than the
-attach took.
+A read of a tree whose root manifest the cache does not hold first asks the node to fill the tree's
+new manifests itself (`fill-tree`, see [the fill socket](operations.md#the-fill-socket)): the node
+goes down the tree in its cache, a level at a time, and answers once, so the socket is crossed once
+for the tree. The read then fetches the manifests of a level of the tree at once, up to 16, before
+the level below, filling through the socket what it does not find in the cache: on a node of a
+release before `fill-tree`, every new manifest, so the attach of a tree whose manifests the cache
+does not hold takes about one fill for each level, not one for each directory. The fills of a level
+overlap, so their seconds add up to more than the attach took.
 
 What they do not count: a report that was lost, as a `started` is lost (above); a lookup of a tree
 that was attached already; a placement's tree, which is read whole with no manifest. Each attach is
-also said on stderr: `tierstore fs: lookup of <digest>: ok in 12 ms; 40 manifests: 38 from the
-cache, 2 filled, 0 not had`.
+also said on stderr, with the levels of the read, the fills of each and the slowest of them, and
+the `fill-tree` if the read asked one: `tierstore fs: lookup of <digest>: ok in 12 ms; 40
+manifests: 40 from the cache, 0 filled, 0 not had; 4 levels; fills by level: 0 0 0 0, slowest ms
+by level: 0 0 0 0; fill-tree ok in 9 ms, 8 ms at the node, fills by level: 1 1 1 0`. The answer of
+a node of a release before the request is said as `fill-tree unknown to the node in <ms> ms`, and
+any other answer as `fill-tree failed in <ms> ms: <words>`.
 
-The share of the manifests read that needed a fill, over an hour:
+The share of the manifests read that needed a fill of the read's own, over an hour (a manifest the
+node filled for a `fill-tree` is read from the cache, and counts as `cache`):
 
 ```promql
 sum(increase(tierstore_fs_manifest_fetch_total{result="fill"}[1h])) / sum(increase(tierstore_fs_manifest_fetch_total[1h]))
@@ -476,6 +492,21 @@ The median attach, over an hour:
 
 ```promql
 histogram_quantile(0.5, sum by (le) (rate(tierstore_fs_tree_attach_seconds_bucket{outcome="ok"}[1h])))
+```
+
+The rounds of fills over the socket an attach waited for, on average, over an hour: one for each
+level with a new manifest where the node fills them one at a time, about one where it fills the
+tree's new manifests itself:
+
+```promql
+sum(increase(tierstore_fs_tree_fill_rounds_total[1h])) / sum(increase(tierstore_fs_tree_attach_seconds_count[1h]))
+```
+
+What the fill socket adds to a fill of a manifest, over an hour: the mount's mean time for its
+fills, less the node's for the same fills.
+
+```promql
+sum(increase(tierstore_fs_manifest_fill_seconds_sum[1h])) / sum(increase(tierstore_fs_manifest_fill_seconds_count[1h])) - sum(increase(tierstore_cache_manifest_fill_seconds_sum{via="fill"}[1h])) / sum(increase(tierstore_cache_manifest_fill_seconds_count{via="fill"}[1h]))
 ```
 
 ### Build node: the mount's descriptors

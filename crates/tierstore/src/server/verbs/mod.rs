@@ -31,6 +31,7 @@ use std::time::Duration;
 use clap::{Args, Parser};
 
 use super::cli::{S3Flags, open_tier, parse_duration};
+use super::config_tier::{SourceName, SourceSetting};
 use super::config_tuning::S3Client;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use super::update_hook;
@@ -75,19 +76,41 @@ pub(super) struct Hot {
     /// The file that holds the access key of the hot tier when it is `s3:<bucket>`.
     #[arg(long)]
     hot_credentials_file: Option<PathBuf>,
+    /// Where the credentials of an `s3:<bucket>` hot tier come from: `file` (the default, the key
+    /// of `--hot-credentials-file`), or a source of AWS credentials: `auto`, `environment`,
+    /// `profile`, `web-identity`, `container` or `instance-metadata`.
+    #[arg(long, value_enum)]
+    hot_credential_source: Option<SourceName>,
+    /// The profile of the shared AWS files, in place of the one `AWS_PROFILE` names, for
+    /// `--hot-credential-source profile` or `auto`.
+    #[arg(long)]
+    hot_credential_profile: Option<String>,
     /// The limit on a request to an `s3:<bucket>` tier: a number and `ms`, `s`, `m` or `h`.
     #[arg(long, default_value = "60s", value_parser = parse_duration)]
     s3_request_timeout: Duration,
 }
 
 impl Hot {
-    /// The hot tier the flags name.
-    fn open(&self) -> Result<Arc<dyn Backend>, VerbError> {
+    /// The credential source the flags name, if it is not the file: what [`Hot::open`] and
+    /// [`Hot::open_marks`] are given.
+    ///
+    /// # Errors
+    /// [`VerbError::Refused`] for a profile given with a source that reads none.
+    fn source(&self) -> Result<Option<SourceSetting>, VerbError> {
+        let name = self.hot_credential_source.unwrap_or(SourceName::File);
+        SourceSetting::of(name, self.hot_credential_profile.as_deref())
+            .map_err(|why| VerbError::Refused(format!("--hot-credential-profile: {why}")))
+    }
+
+    /// The hot tier the flags name, with the credentials of `source` for an `s3:<bucket>` tier
+    /// (or of the key file, for none).
+    fn open(&self, source: Option<&SourceSetting>) -> Result<Arc<dyn Backend>, VerbError> {
         let s3 = S3Flags {
             endpoint: self.hot_endpoint.as_deref(),
             more_endpoints: &[],
             region: self.hot_region.as_deref(),
             credentials: self.hot_credentials_file.as_deref(),
+            source,
             conditional_delete: None,
         };
         // The verbs take no configuration file, so the S3 client has its defaults.
@@ -108,13 +131,17 @@ type MarksTier = (String, Arc<dyn Backend>);
 impl Hot {
     /// The marks bucket of the hot store, with the name the format record gives it: for an
     /// `s3:<bucket>` hot tier the bucket `named` or `<bucket>-marks`, with the endpoint, region and
-    /// credentials of the hot tier; for `memory` a map of its own. A `dir:<path>` tier has none
+    /// credentials of the hot tier (those of `source`, as for [`Hot::open`]); for `memory` a map of its own. A `dir:<path>` tier has none
     /// (`None`) in this release.
     ///
     /// # Errors
     /// [`VerbError::Refused`] for a name that is empty or is the hot bucket, for a name given to a
     /// hot tier that is not an `s3` one, and as [`Hot::open`].
-    fn open_marks(&self, named: Option<&str>) -> Result<Option<MarksTier>, VerbError> {
+    fn open_marks(
+        &self,
+        source: Option<&SourceSetting>,
+        named: Option<&str>,
+    ) -> Result<Option<MarksTier>, VerbError> {
         let (name, spec) = match (self.hot.strip_prefix("s3:"), named) {
             (Some(bucket), named) => {
                 let marks = named.map_or_else(|| format!("{bucket}-marks"), str::to_owned);
@@ -140,6 +167,7 @@ impl Hot {
             more_endpoints: &[],
             region: self.hot_region.as_deref(),
             credentials: self.hot_credentials_file.as_deref(),
+            source,
             conditional_delete: None,
         };
         let tier = open_tier(
@@ -220,6 +248,8 @@ pub(super) fn answer(args: &[OsString]) -> Option<ExitCode> {
     }
 }
 
+#[cfg(test)]
+mod credentials_tests;
 #[cfg(test)]
 mod testing;
 #[cfg(test)]
