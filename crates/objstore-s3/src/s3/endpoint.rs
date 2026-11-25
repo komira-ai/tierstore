@@ -5,7 +5,8 @@
 //! TLS is rustls on ring, the provider of the rest of the workspace. The server's certificate is
 //! verified, always: against the system's CA certificates, and those of [`S3Config::ca_pem`]
 //! besides, for a store whose certificate a private CA issued. Nothing turns the check off.
-//! The system's certificates are read when the store is made, and only if an endpoint is `https`.
+//! The system's certificates are read when the store is made, and only if an endpoint is `https`:
+//! a store of `http` endpoints alone builds on a host that has none.
 //!
 //! [`S3Config::ca_pem`]: super::S3Config::ca_pem
 
@@ -106,16 +107,19 @@ pub(super) fn target_of(
     })
 }
 
-/// The TLS client of the store: it trusts the certificates of `ca_pem` and, when `system` is
-/// set, the system's.
+/// The system's CA certificates, those that can be read; none on a host that has none.
+pub(super) fn system_roots() -> Vec<CertificateDer<'static>> {
+    rustls_native_certs::load_native_certs().certs
+}
+
+/// The TLS client of the store: it trusts the certificates of `ca_pem` and those of `system`
+/// (the system's, for a store with an `https` endpoint; none for a store of `http` alone).
 pub(super) fn tls_config(
     ca_pem: Option<&[u8]>,
-    system: bool,
+    system: Vec<CertificateDer<'static>>,
 ) -> Result<ClientConfig, S3ConfigError> {
     let mut roots = rustls::RootCertStore::empty();
-    if system {
-        roots.add_parsable_certificates(rustls_native_certs::load_native_certs().certs);
-    }
+    roots.add_parsable_certificates(system);
     if let Some(pem) = ca_pem {
         let certs = CertificateDer::pem_slice_iter(pem)
             .collect::<Result<Vec<_>, _>>()

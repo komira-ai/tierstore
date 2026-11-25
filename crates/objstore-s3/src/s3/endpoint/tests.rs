@@ -158,25 +158,25 @@ fn ca_pem() -> String {
 /// Asserts that `ca_pem` is checked when the store is made: text with no certificate, a
 /// certificate block that is not base64, and one whose bytes are not a certificate are each refused
 /// as such, and a CA certificate, alone or after another, is taken. Nothing reads the system's CA
-/// certificates here (`system` is off).
+/// certificates here (`system` is empty).
 #[test]
 fn ca_pem_must_hold_certificates() {
     assert!(matches!(
-        tls_config(Some(b"no certificate here\n"), false),
+        tls_config(Some(b"no certificate here\n"), Vec::new()),
         Err(S3ConfigError::CaPemEmpty)
     ));
     let not_base64 = b"-----BEGIN CERTIFICATE-----\n!!!!\n-----END CERTIFICATE-----\n";
     assert!(matches!(
-        tls_config(Some(not_base64), false),
+        tls_config(Some(not_base64), Vec::new()),
         Err(S3ConfigError::CaPem(_))
     ));
     let not_a_certificate = b"-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n";
     assert!(matches!(
-        tls_config(Some(not_a_certificate), false),
+        tls_config(Some(not_a_certificate), Vec::new()),
         Err(S3ConfigError::CaCertificate(_))
     ));
     let two = format!("{}{}", ca_pem(), ca_pem());
-    let config = tls_config(Some(two.as_bytes()), false).unwrap();
+    let config = tls_config(Some(two.as_bytes()), Vec::new()).unwrap();
     assert_eq!(config.alpn_protocols, vec![b"http/1.1".to_vec()]);
-    assert!(tls_config(None, false).is_ok());
+    assert!(tls_config(None, Vec::new()).is_ok());
 }

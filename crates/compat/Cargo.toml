@@ -36,3 +36,11 @@ workspace = true
 [package.metadata.buildrules]
 # Policy only: `actions = { name = ["lint", "test"] }`, `default-action`, `[package.metadata.buildrules.lint]`.
 # Absent keys inherit [workspace.metadata.buildrules]. See docs/contract.md.
+# The farm lane's `//:ci` (docs/farm.md) checks the format of, builds and lints this package but does
+# not run its tests: `tests/s3.rs` builds the previous release's S3 client, which is built on
+# reqwest's defaults, and with the rustls of this release's client those read the system's CA
+# certificates and refuse to build where there are none, as in a farm action. They run in ci.yml
+# alone.
+
+[package.metadata.buildrules.actions]
+ci = ["fmt", "lint"]

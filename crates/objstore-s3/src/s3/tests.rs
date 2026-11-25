@@ -2,7 +2,7 @@ use super::*;
 
 /// The TLS of a client of `http://` endpoints alone: no CA, not even the system's.
 fn plain() -> rustls::ClientConfig {
-    endpoint::tls_config(None, false).unwrap()
+    endpoint::tls_config(None, Vec::new()).unwrap()
 }
 
 pub(super) fn r(offset: u64, len: u64) -> ByteRange {
@@ -481,4 +481,37 @@ fn each_style_signs_the_host_and_path_it_sends_to() {
             "{expected}"
         );
     }
+}
+
+/// Asserts that the system's CA certificates are read only for a store with an `https` endpoint:
+/// a store of `http` endpoints alone builds without reading them (on a host that has none, a
+/// sandbox say, it builds all the same), and a store with one `https` endpoint among `http` ones
+/// reads them once and, given `ca_pem`, builds when the system has none to give.
+/// Catches: a client that loads the system's CA certificates for a plain-HTTP store, which fails
+/// to build where there are none.
+#[test]
+fn only_a_store_with_an_https_endpoint_reads_the_systems_ca_certificates() {
+    let reads = std::cell::Cell::new(0);
+    let none = || {
+        reads.set(reads.get() + 1);
+        Vec::new()
+    };
+    let also = ["http://127.0.0.2:9000".to_owned()];
+    let http = config("http://127.0.0.1:9000", "example-bucket");
+    S3Store::build(http, S3Tuning::default(), &also, |b| b, none).unwrap();
+    assert_eq!(
+        reads.get(),
+        0,
+        "an http store read the system's CA certificates"
+    );
+
+    let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+    params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+    let ca = params
+        .self_signed(&rcgen::KeyPair::generate().unwrap())
+        .unwrap();
+    let mut https = config("https://127.0.0.1:9000", "example-bucket");
+    https.ca_pem = Some(ca.pem().into_bytes());
+    S3Store::build(https, S3Tuning::default(), &also, |b| b, none).unwrap();
+    assert_eq!(reads.get(), 1);
 }

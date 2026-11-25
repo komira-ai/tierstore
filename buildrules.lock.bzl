@@ -7,7 +7,7 @@ TARGET = "x86_64-unknown-linux-gnu"
 CARGO_LOCK_SHA256 = "d4d4605af07190dfcf2524a7054328eb3b4f59673fe5db2617b06e8d2eac27bf"
 MANIFEST_SHA256 = {
     "Cargo.toml": "1c30134f13dde3ad58756713b6d5e638c76afd8c72e1c4a07747f4d60fa548ef",
-    "crates/compat/Cargo.toml": "5be583ccc281ca41987a17278a5e3e01a5fd5c9ed42f7601c57f956a33044071",
+    "crates/compat/Cargo.toml": "2dcc26addb2d1913c5e6dc0470634d6b6617b2b06b7544a7d042b44a13ed606a",
     "crates/coverage-gate/Cargo.toml": "bb00915e8794b425cba2f2a40d749eecc891c65939d260904969d052ac138b95",
     "crates/fsbench/Cargo.toml": "e6b927e5ad2d2127014fb0e339f0eeb4c854ff4a846ab16680cdca255aeba75e",
     "crates/objstore-conformance/Cargo.toml": "f44ac79f50952b4ebe2cb6b07257a1df3ec001c22c287a5ae28b187a0c5c7d88",
@@ -187,7 +187,7 @@ PACKAGES = {
             "clippy": ["-D", "clippy::unwrap_used", "-D", "clippy::expect_used", "-D", "clippy::disallowed_types", "-D", "clippy::disallowed_methods", "-D", "clippy::disallowed_macros"],
         },
         "actions": {
-            "ci": ["fmt", "lint", "test"],
+            "ci": ["fmt", "lint"],
         },
         "deny_warnings": True,
         "default_action": "ci",

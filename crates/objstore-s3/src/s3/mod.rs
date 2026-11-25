@@ -78,7 +78,7 @@ use crate::{
     BodyStream, ByteRange, Capabilities, ContentBoundPut, KeyPrefix, ListPage, ListToken,
     ObjectKey, ObjectStore, ObjectStoreError, PageSize,
 };
-use endpoint::{Target, target_of, tls_config};
+use endpoint::{Target, system_roots, target_of, tls_config};
 use sigv4::{EMPTY_SHA256, Request, Signer, Utc};
 use streamed::{check_partial, too_long};
 
@@ -305,16 +305,18 @@ impl S3Store {
         tuning: S3Tuning,
         also: &[String],
     ) -> Result<Self, S3ConfigError> {
-        Self::build(config, tuning, also, |builder| builder)
+        Self::build(config, tuning, also, |builder| builder, system_roots)
     }
 
     /// As [`S3Store::new_rotating`], with `client` given the client builder to change before it
-    /// is built (the loopback service's tests resolve a host name to it).
+    /// is built (the loopback service's tests resolve a host name to it), and `roots` the reader
+    /// of the system's CA certificates, called only when an endpoint is `https`.
     fn build(
         config: S3Config,
         tuning: S3Tuning,
         also: &[String],
         client: impl FnOnce(reqwest::ClientBuilder) -> reqwest::ClientBuilder,
+        roots: impl FnOnce() -> Vec<rustls::pki_types::CertificateDer<'static>>,
     ) -> Result<Self, S3ConfigError> {
         if !valid_bucket(&config.bucket) {
             return Err(S3ConfigError::Bucket(config.bucket));
@@ -330,8 +332,12 @@ impl S3Store {
             }
             targets.push(target);
         }
-        let system_roots = targets.iter().any(Target::is_tls);
-        let tls = tls_config(config.ca_pem.as_deref(), system_roots)?;
+        let system = if targets.iter().any(Target::is_tls) {
+            roots()
+        } else {
+            Vec::new()
+        };
+        let tls = tls_config(config.ca_pem.as_deref(), system)?;
         let builder = client_builder(config.connect_timeout, tuning.pool_idle_timeout, tls);
         let client = client(builder).build().map_err(S3ConfigError::Client)?;
         let conn = Conn {

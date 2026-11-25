@@ -8,6 +8,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Notify;
 use tokio_rustls::TlsAcceptor;
 
+use super::super::endpoint::system_roots;
 use super::super::{S3Config, S3ConfigError, S3Store, S3Tuning};
 use super::escape::unescape;
 use super::{FakeS3, Request, State, serve};
@@ -65,9 +66,9 @@ impl FakeS3 {
         self.lock().hosted_under = Some(name.to_owned());
         let hosted = format!("{}.{name}", config.bucket);
         let addr = self.addr;
-        S3Store::build(config, S3Tuning::default(), &[], |client| {
-            client.resolve(name, addr).resolve(&hosted, addr)
-        })
+        let resolving =
+            |client: reqwest::ClientBuilder| client.resolve(name, addr).resolve(&hosted, addr);
+        S3Store::build(config, S3Tuning::default(), &[], resolving, system_roots)
     }
 }
 

@@ -47,7 +47,7 @@ A farm action has its declared inputs and nothing else: no network, no `PATH` bu
 busybox, no git checkout, not root, no `/dev/fuse`, and a `TMPDIR` about 98 bytes deep, too deep
 for a Unix socket's path below it (komira-ai/buildrules#170). buildrules' test gate also refuses a
 test target that has an `#[ignore]`d test (an ignored test is a test that never runs) or that lists
-no test at all. So the tests of nine members run in ci.yml alone. They are format-checked, built
+no test at all. So the tests of ten members run in ci.yml alone. They are format-checked, built
 and linted on the farm, and each says so in its `[package.metadata.buildrules.actions]`
 (`ci = ["fmt", "lint"]`), with the reason:
 
@@ -58,6 +58,7 @@ and linted on the farm, and each says so in its `[package.metadata.buildrules.ac
 | `fsbench` | its benchmark tests mount FUSE file systems |
 | `tierstore-testkit` | the tests of its socket directories bind a Unix socket under `TMPDIR` (#170) |
 | `tierstore-mount-client` | its lifecycle test binds a Unix socket under `TMPDIR` (#170) |
+| `tierstore-compat` | `tests/s3.rs` builds the previous release's S3 client on reqwest's defaults, which (with the rustls this release's client turns on) read the system's CA certificates and refuse to build where there are none, as in a farm action; this release's client reads them only for an `https` endpoint |
 | `tierstore-model` | `tests/matrix.rs` holds two `#[ignore]`d runs of the whole model, run by hand |
 | `tierstore-measure` | its one integration test is for systems other than Linux, so on Linux its target lists no test; and its measurements read block devices, `/proc` and `/sys` |
 | `tierstore-list` | `tests/golden.rs` holds the `#[ignore]`d `regenerate`, which rewrites the golden fixtures when run by hand |
