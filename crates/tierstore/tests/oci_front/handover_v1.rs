@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use objstore_s3::s3::fake::FakeS3;
-use objstore_s3::s3::{Credentials, S3Config, S3Store};
+use objstore_s3::s3::{Addressing, Credentials, S3Config, S3Store};
 use objstore_s3::{Capabilities, ObjectKey, ObjectStore};
 
 use crate::cache_node::{Launch, Node, counter, pattern, pull_whole_at, seed};
@@ -155,6 +155,8 @@ fn s3_client(at: &str) -> S3Store {
         endpoint: format!("http://{at}"),
         region: "us-east-1".to_owned(),
         bucket: "tier-bucket".to_owned(),
+        addressing: Addressing::Auto,
+        ca_pem: None,
         credentials: Credentials::new("AKIDCACHE", "cache-secret-0123456789"),
         capabilities: Capabilities {
             conditional_put: true,

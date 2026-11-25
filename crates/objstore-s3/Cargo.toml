@@ -15,7 +15,8 @@ publish.workspace = true
 [features]
 # `testkit`: `s3::fake`, an S3 service on loopback that keeps multipart uploads, for
 # other crates' tests (and this one's, through the dev-dependency on itself).
-testkit = ["tokio/net", "tokio/io-util", "tokio/sync"]
+# With `tokio-rustls`, the service also serves HTTPS (`FakeS3::start_tls`).
+testkit = ["dep:tokio-rustls", "tokio/net", "tokio/io-util", "tokio/sync"]
 
 [dependencies]
 base64.workspace = true
@@ -26,16 +27,25 @@ hmac.workspace = true
 # The body of a part streamed to the store (`s3::parts`).
 http-body.workspace = true
 md-5.workspace = true
-reqwest.workspace = true
+# TLS through rustls with no crypto provider of reqwest's own: the client is handed a rustls
+# `ClientConfig` built here on ring, the provider of the rest of the workspace (`s3::endpoint`).
+reqwest = { workspace = true, features = ["rustls-no-provider"] }
 roxmltree.workspace = true
+# The TLS client of an `https` endpoint, and the system's CA certificates it trusts.
+rustls.workspace = true
+rustls-native-certs.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt", "time"] }
+# The TLS of the loopback service (`testkit`).
+tokio-rustls = { workspace = true, optional = true }
 tracing.workspace = true
 
 [dev-dependencies]
 # `http::Response` for the unit test that builds a `reqwest::Response`.
 http.workspace = true
+# A test CA and the certificates of the loopback service's HTTPS.
+rcgen.workspace = true
 # Loopback ports nothing can take (tierstore_testkit::port).
 tierstore-testkit.workspace = true
 objstore-s3 = { workspace = true, features = ["testkit"] }

@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bytes::Bytes;
-use objstore_s3::s3::{Credentials, ObjectHead, S3Config, S3Store};
+use objstore_s3::s3::{Addressing, Credentials, ObjectHead, S3Config, S3Store};
 use objstore_s3::{Capabilities, KeyPrefix, ObjectKey, ObjectStoreError, PageSize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -91,6 +91,8 @@ fn store_with(endpoint: String, capabilities: Capabilities) -> S3Store {
         endpoint,
         region: "us-east-1".into(),
         bucket: "test-bucket".into(),
+        addressing: Addressing::Auto,
+        ca_pem: None,
         credentials: Credentials::new("AKIDEXAMPLE", "secret"),
         capabilities,
         connect_timeout: Duration::from_secs(5),

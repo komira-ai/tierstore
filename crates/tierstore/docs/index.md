@@ -11,7 +11,7 @@ A file has one of four shapes; a file without a cold tier is refused. Pick by wh
 - [A cache in front of a hot and a cold store](examples/cache-hot-cold.md): a storage node that is also read heavily by its own machine: a cache, a hot directory and a cold remote store in one process.
 - [A front over the cold tier alone](configure.md#a-front-over-the-cold-tier-alone): the S3 front over a cold store, keeping nothing on its machine.
 
-Tiers today are directories or self-hosted S3-compatible stores (MinIO, RustFS) reached over `http://`. AWS S3 is not supported as a tier yet, and TLS to tiers is not built.
+Tiers today are directories or S3-compatible stores (MinIO, RustFS, Ceph, AWS S3) reached over `http://` or `https://`. An `https://` store's certificate is verified against the system's CA certificates (a tier has no key for a CA file of its own, so a private CA must be in the system's store). An AWS S3 endpoint (`s3.<region>.amazonaws.com` over `https://`, with the bucket's region as `region`) takes the bucket in the host name, virtual-hosted style; any other store takes it in the path.
 
 ## The smallest working file
 

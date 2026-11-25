@@ -370,7 +370,7 @@ async fn missing_objects_ranges_past_the_end_and_taken_keys_are_told_apart() {
 #[tokio::test]
 async fn the_fake_refuses_what_s3_refuses() {
     let s3 = FakeS3::start().await;
-    let client = reqwest::Client::new();
+    let client = tierstore_testkit::http::client();
     let url = |path: &str| format!("{}/tierstore-fake/cas/k{path}", s3.endpoint());
     let complete = |id: &str, body: String| {
         client
@@ -452,7 +452,11 @@ async fn a_store_without_conditional_writes_replaces_a_key() {
         "{}/tierstore-fake/cas/replaced?uploadId=never",
         s3.endpoint()
     );
-    let refused = reqwest::Client::new().delete(unknown).send().await.unwrap();
+    let refused = tierstore_testkit::http::client()
+        .delete(unknown)
+        .send()
+        .await
+        .unwrap();
     assert_eq!(refused.status(), 404);
     assert!(refused.text().await.unwrap().contains("NoSuchUpload"));
 }
@@ -463,7 +467,7 @@ async fn a_store_without_conditional_writes_replaces_a_key() {
 #[tokio::test]
 async fn the_fake_lists_uploads_of_a_bucket_and_not_of_a_key() {
     let s3 = FakeS3::start().await;
-    let client = reqwest::Client::new();
+    let client = tierstore_testkit::http::client();
     let bucket = client
         .get(format!("{}/tierstore-fake?uploads", s3.endpoint()))
         .send()

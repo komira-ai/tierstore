@@ -1,7 +1,9 @@
-//! An [`ObjectStore`] over the S3 REST API: path-style addressing, SigV4 signing,
-//! plain HTTP.
+//! An [`ObjectStore`] over the S3 REST API: SigV4 signing, over plain HTTP or over TLS, with the
+//! bucket in the path or in the host name ([`Addressing`]; `endpoint.rs`).
 //!
-//! Written against S3 as MinIO and RustFS serve it. It signs every payload it has (the store
+//! Written against S3 as MinIO and RustFS serve it, and as AWS serves it. An `https` endpoint's
+//! certificate is verified against the system's CA certificates and those of
+//! [`S3Config::ca_pem`]; nothing turns the check off. It signs every payload it has (the store
 //! checks the body against the signed hash; a part streamed from a source, whose hash is
 //! not known when the request is signed, is sent with `UNSIGNED-PAYLOAD`, see `parts.rs`),
 //! refuses a ranged read answered with
@@ -29,11 +31,10 @@
 //! A create-only write can name the SHA-256 of its body for the store to check, and a HEAD reads
 //! the digest an object was written with back (`checksum.rs`):
 //! [`S3Store::put_stream_new_sha256`] and [`S3Store::head_sha256`].
-//!
-//! Not built yet: TLS (an `https` endpoint is refused).
 
 mod bound;
 mod checksum;
+mod endpoint;
 #[cfg(feature = "testkit")]
 pub mod fake;
 mod multipart;
@@ -48,6 +49,7 @@ mod tuning;
 mod xml;
 
 pub use checksum::StoredSha256;
+pub use endpoint::Addressing;
 pub use multipart::{
     MAX_PART_BYTES, MAX_PARTS, MIN_PART_BYTES, PART_BYTES, SINGLE_PUT_MAX, part_size, part_size_of,
 };
@@ -67,7 +69,7 @@ use base64::Engine as _;
 use bytes::{Bytes, BytesMut};
 use md5::Md5;
 use reqwest::header::{AUTHORIZATION, CONTENT_RANGE};
-use reqwest::{Method, Response, StatusCode, Url};
+use reqwest::{Method, Response, StatusCode};
 use sha2::{Digest, Sha256};
 use tokio::time::Instant;
 
@@ -76,6 +78,7 @@ use crate::{
     BodyStream, ByteRange, Capabilities, ContentBoundPut, KeyPrefix, ListPage, ListToken,
     ObjectKey, ObjectStore, ObjectStoreError, PageSize,
 };
+use endpoint::{Target, system_roots, target_of, tls_config};
 use sigv4::{EMPTY_SHA256, Request, Signer, Utc};
 use streamed::{check_partial, too_long};
 
@@ -169,12 +172,20 @@ impl fmt::Debug for Credentials {
 /// Where and how to reach one bucket.
 #[derive(Clone, Debug)]
 pub struct S3Config {
-    /// `http://host[:port]`, with no path.
+    /// `http://host[:port]` or `https://host[:port]`, with no path: for AWS S3,
+    /// `https://s3.<region>.amazonaws.com`.
     pub endpoint: String,
-    /// The signing region (MinIO and RustFS accept `us-east-1` unless configured).
+    /// The signing region, the region of the credential scope of every request (MinIO and
+    /// RustFS accept `us-east-1` unless configured; AWS S3 wants the bucket's region).
     pub region: String,
     /// The bucket this store addresses.
     pub bucket: String,
+    /// How a request names the bucket: by default virtual-hosted style for an AWS S3 endpoint
+    /// and path style for any other ([`Addressing::Auto`]).
+    pub addressing: Addressing,
+    /// PEM certificates an `https` endpoint's certificate may be issued by, besides the
+    /// system's: the CA of a private store. `None` trusts the system's alone.
+    pub ca_pem: Option<Vec<u8>>,
     /// The key pair requests are signed with.
     pub credentials: Credentials,
     /// What the bucket supports, as the operator declares it; the conformance suite
@@ -199,7 +210,8 @@ pub struct S3Config {
 /// Why an [`S3Config`] was refused.
 #[derive(Debug, thiserror::Error)]
 pub enum S3ConfigError {
-    /// The endpoint is not `http://host[:port]`.
+    /// The endpoint is not `http://host[:port]` or `https://host[:port]`, or cannot be
+    /// addressed as [`S3Config::addressing`] says.
     #[error("endpoint {endpoint:?}: {why}")]
     Endpoint {
         /// The refused endpoint.
@@ -212,6 +224,18 @@ pub enum S3ConfigError {
         "bucket name {0:?} must be 3 to 63 of a-z 0-9 . - and start and end with a letter or digit"
     )]
     Bucket(String),
+    /// [`S3Config::ca_pem`] is not PEM.
+    #[error("ca_pem: not PEM certificates")]
+    CaPem(#[source] rustls::pki_types::pem::Error),
+    /// [`S3Config::ca_pem`] holds no certificate.
+    #[error("ca_pem: it holds no certificate")]
+    CaPemEmpty,
+    /// A certificate of [`S3Config::ca_pem`] cannot be read as a certificate to trust.
+    #[error("ca_pem: a certificate that cannot be read")]
+    CaCertificate(#[source] rustls::Error),
+    /// The TLS client could not be set up.
+    #[error("setting up TLS")]
+    Tls(#[source] rustls::Error),
     /// The HTTP client could not be built.
     #[error("building the HTTP client")]
     Client(#[source] reqwest::Error),
@@ -222,13 +246,6 @@ pub struct S3Store {
     /// Shared with a multipart upload's abort, which may run after its write was
     /// dropped.
     conn: Arc<Conn>,
-}
-
-/// One endpoint of the store.
-struct Target {
-    base: Url,
-    /// `host[:port]` as the `Host` header carries it.
-    host: String,
 }
 
 /// What every request to the bucket needs: the client, the addresses, the signing key.
@@ -266,13 +283,15 @@ impl fmt::Debug for S3Store {
 }
 
 impl S3Store {
-    /// A store for `config.bucket`. Does no I/O.
+    /// A store for `config.bucket`. Does no network I/O; with an `https` endpoint it reads the
+    /// system's CA certificates.
     pub fn new(config: S3Config) -> Result<Self, S3ConfigError> {
         Self::new_tuned(config, S3Tuning::default())
     }
 
     /// A store for `config.bucket` with the idle-connection and read-retry settings `tuning`
-    /// gives. Does no I/O.
+    /// gives. Does no network I/O; with an `https` endpoint it reads the system's CA
+    /// certificates.
     pub fn new_tuned(config: S3Config, tuning: S3Tuning) -> Result<Self, S3ConfigError> {
         Self::new_rotating(config, tuning, &[])
     }
@@ -286,9 +305,25 @@ impl S3Store {
         tuning: S3Tuning,
         also: &[String],
     ) -> Result<Self, S3ConfigError> {
+        Self::build(config, tuning, also, |builder| builder, system_roots)
+    }
+
+    /// As [`S3Store::new_rotating`], with `client` given the client builder to change before it
+    /// is built (the loopback service's tests resolve a host name to it), and `roots` the reader
+    /// of the system's CA certificates, called only when an endpoint is `https`.
+    fn build(
+        config: S3Config,
+        tuning: S3Tuning,
+        also: &[String],
+        client: impl FnOnce(reqwest::ClientBuilder) -> reqwest::ClientBuilder,
+        roots: impl FnOnce() -> Vec<rustls::pki_types::CertificateDer<'static>>,
+    ) -> Result<Self, S3ConfigError> {
+        if !valid_bucket(&config.bucket) {
+            return Err(S3ConfigError::Bucket(config.bucket));
+        }
         let mut targets: Vec<Target> = Vec::with_capacity(1 + also.len());
         for endpoint in std::iter::once(&config.endpoint).chain(also) {
-            let target = target_of(endpoint)?;
+            let target = target_of(endpoint, &config.bucket, config.addressing)?;
             if targets.iter().any(|t| t.host == target.host) {
                 return Err(S3ConfigError::Endpoint {
                     endpoint: endpoint.clone(),
@@ -297,12 +332,14 @@ impl S3Store {
             }
             targets.push(target);
         }
-        if !valid_bucket(&config.bucket) {
-            return Err(S3ConfigError::Bucket(config.bucket));
-        }
-        let client = client_builder(config.connect_timeout, tuning.pool_idle_timeout)
-            .build()
-            .map_err(S3ConfigError::Client)?;
+        let system = if targets.iter().any(Target::is_tls) {
+            roots()
+        } else {
+            Vec::new()
+        };
+        let tls = tls_config(config.ca_pem.as_deref(), system)?;
+        let builder = client_builder(config.connect_timeout, tuning.pool_idle_timeout, tls);
+        let client = client(builder).build().map_err(S3ConfigError::Client)?;
         let conn = Conn {
             client,
             targets,
@@ -321,40 +358,18 @@ impl S3Store {
     }
 }
 
-/// The endpoint `endpoint` names, if it is `http://host[:port]`.
-fn target_of(endpoint: &str) -> Result<Target, S3ConfigError> {
-    let bad = |why| S3ConfigError::Endpoint {
-        endpoint: endpoint.to_owned(),
-        why,
-    };
-    let base = Url::parse(endpoint).map_err(|_| bad("not a URL"))?;
-    match base.scheme() {
-        "http" => {}
-        "https" => return Err(bad("TLS is not built yet; use http")),
-        _ => return Err(bad("the scheme must be http")),
-    }
-    if !base.username().is_empty() || base.password().is_some() {
-        return Err(bad("credentials belong in `credentials`, not the URL"));
-    }
-    if base.path() != "/" || base.query().is_some() || base.fragment().is_some() {
-        return Err(bad("path-style addressing needs an endpoint with no path"));
-    }
-    // An `http` URL always has a host, and the userinfo was refused above, so the
-    // authority is the host with its port, if it is not the scheme's default.
-    let host = base.authority().to_owned();
-    Ok(Target { base, host })
-}
-
-/// A client builder with the given limits and idle pool timeout. `request_timeout` is
-/// not a client-wide limit: that would bound the whole of a long read. Each request
-/// sets its own (`Conn::send`, `Conn::send_read`).
+/// A client builder with the given limits and idle pool timeout, speaking TLS as `tls` says.
+/// `request_timeout` is not a client-wide limit: that would bound the whole of a long read. Each
+/// request sets its own (`Conn::send`, `Conn::send_read`).
 fn client_builder(
     connect_timeout: Duration,
     pool_idle_timeout: Duration,
+    tls: rustls::ClientConfig,
 ) -> reqwest::ClientBuilder {
     reqwest::Client::builder()
         .connect_timeout(connect_timeout)
         .pool_idle_timeout(pool_idle_timeout)
+        .tls_backend_preconfigured(tls)
 }
 
 /// A send that failed, and whether it did so before the store could have seen the request.
@@ -537,11 +552,18 @@ impl Conn {
         mut headers: Vec<(&'static str, String)>,
         payload: &str,
     ) -> reqwest::RequestBuilder {
+        let target = self.next_target();
         // The key is percent-encoded here, once, and that text is both signed and sent: `Url`
-        // keeps an escape it is given as it is (it would leave a bare `%` or `+` alone).
+        // keeps an escape it is given as it is (it would leave a bare `%` or `+` alone). In
+        // virtual-hosted style the bucket is in the host, and a request for the bucket is `/`.
         let path = match key {
-            Some(k) => format!("/{}/{}", self.bucket, sigv4::encode_key_path(k.as_str())),
-            None => format!("/{}", self.bucket),
+            Some(k) => format!(
+                "{}/{}",
+                target.bucket_path,
+                sigv4::encode_key_path(k.as_str())
+            ),
+            None if target.bucket_path.is_empty() => "/".to_owned(),
+            None => target.bucket_path.clone(),
         };
         #[expect(
             clippy::disallowed_methods,
@@ -549,7 +571,6 @@ impl Conn {
         )]
         let now = SystemTime::now();
         let amz_date = Utc::of(now, false).amz();
-        let target = self.next_target();
         headers.push(("x-amz-content-sha256", payload.to_owned()));
         headers.push(("x-amz-date", amz_date.clone()));
         let authorization = Signer {

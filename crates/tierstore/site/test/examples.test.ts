@@ -111,14 +111,15 @@ test('each example is a page with what it is for, a diagram, the file, the comma
   }
 });
 
-test('the examples say what the code does: the hot tier is not an LRU, the cache is, a hot tier needs activating, a tier is reached over http and S3 itself is not a tier yet', () => {
+test('the examples say what the code does: the hot tier is not an LRU, the cache is, a hot tier needs activating, a tier is reached over http or https, Amazon S3 included', () => {
   const dir = text(read('docs', 'examples', 'directory-as-bucket', 'index.html'));
   assert.match(dir, /evicts the objects that were written \(or copied back\) longest ago, and only those that the cold tier already holds\. It is not an LRU/);
   assert.match(dir, /tierstore's own flat layout: names are percent-encoded and a 32-byte tag comes before each body\. It cannot serve a tree of files that already exists/);
   const cache = text(read('docs', 'examples', 'cache-in-front-of-s3', 'index.html'));
   assert.match(cache, /evicts the least recently used objects first/);
   assert.match(cache, /http:\/\/minio\.example:9000/);
-  assert.match(cache, /Amazon S3 itself is not supported as a store yet/);
+  assert.match(cache, /Amazon S3 at `?s3\.<region>\.amazonaws\.com`? over `?https:\/\/`?, which takes the bucket in the host name/);
+  assert.match(cache, /An `?https:\/\/`? store.{1,6}s certificate must be trusted by the system.{1,6}s CA certificates/);
   assert.doesNotMatch(cache, /format-epoch|--activate/, 'a build node has no hot tier to activate');
   const both = text(read('docs', 'examples', 'cache-hot-cold', 'index.html'));
   assert.match(both, /`?local_cache\.write_through`? is true whether it is left out or given, and `?false`? is refused/);
@@ -180,7 +181,7 @@ test('the landing page starts with Configure tierstore: one smallest file, each 
   }
   const pick = html.slice(html.indexOf('id="pick-a-shape"'), html.indexOf('id="the-smallest-working-file"'));
   for (const name of EXAMPLES) assert.ok(pick.includes(`href="/docs/examples/${name}/"`), `${name} is not linked in Pick a shape`);
-  assert.match(text(pick), /AWS S3 is not supported as a tier yet, and TLS to tiers is not built/);
+  assert.match(text(pick), /S3-compatible stores \(MinIO, RustFS, Ceph, AWS S3\) reached over `?http:\/\/`? or `?https:\/\/`?/);
   assert.doesNotMatch(text(first), /format-epoch|--activate/, 'the first start of a new hot tier writes its format itself');
 });
 

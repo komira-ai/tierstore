@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use objstore_s3::s3::fake::FakeS3;
-use objstore_s3::s3::{Credentials, S3Config, S3Store};
+use objstore_s3::s3::{Addressing, Credentials, S3Config, S3Store};
 use objstore_s3::{ByteRange, Capabilities, ObjectKey, ObjectStore};
 use reqwest::Client;
 use rustix::process::{Pid, Signal, kill_process};
@@ -106,7 +106,7 @@ async fn a_build_node_reads_through_an_upstream_and_refuses_writes() {
     assert!(put.is_err());
     assert!(fake.object_len(&other).is_none());
 
-    let metrics = Client::new()
+    let metrics = tierstore_testkit::http::client()
         .get(format!("http://{}/metricz", running.addr()))
         .send()
         .await
@@ -442,6 +442,8 @@ impl Started {
             endpoint: format!("http://{}", self.addr),
             region: "us-east-1".to_owned(),
             bucket: "tier-bucket".to_owned(),
+            addressing: Addressing::Auto,
+            ca_pem: None,
             credentials: Credentials::new(BIN_KEY_ID, BIN_SECRET),
             capabilities: Capabilities {
                 conditional_put: true,
@@ -488,7 +490,7 @@ async fn a_second_build_node_takes_the_lock_when_the_first_is_killed() {
     let config = node_file(&files, fake.endpoint(), &upstream_key, &cache_dir);
     let first = started(&config);
     let second = started(&config);
-    let client = Client::new();
+    let client = tierstore_testkit::http::client();
     assert_eq!(readyz(&client, &first.addr).await, "ready read-write");
     assert_eq!(readyz(&client, &second.addr).await, "ready read-only");
     // What the first leaves when it dies in the middle of its work: a sidecar whose data file is

@@ -16,7 +16,10 @@ use crate::files::{Files, Tables, oci_interface, socket_dir};
 
 /// A client that keeps no connection after an answer, so that each call is a new connection.
 fn client() -> Client {
-    Client::builder().pool_max_idle_per_host(0).build().unwrap()
+    tierstore_testkit::http::builder()
+        .pool_max_idle_per_host(0)
+        .build()
+        .unwrap()
 }
 
 /// The settings of a start with these tables, with a drain that waits no longer than it must.

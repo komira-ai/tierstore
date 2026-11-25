@@ -3,7 +3,7 @@
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
-use reqwest::{Client, Method, Response};
+use reqwest::{Method, Response};
 use tierstore::Backend;
 
 use crate::signer::encode;
@@ -29,7 +29,7 @@ pub async fn send(
     };
     let url = format!("http://{}{}{query}", h.addr, encode(path, b"/"));
     let method = Method::from_bytes(method.as_bytes()).unwrap();
-    let mut request = Client::new().request(method, url);
+    let mut request = tierstore_testkit::http::client().request(method, url);
     for (name, value) in headers.iter().filter(|(name, _)| name != "host") {
         request = request.header(name.as_str(), value.as_str());
     }
@@ -137,10 +137,14 @@ async fn a_head_and_a_range_are_answered_as_s3_answers() {
 async fn requests_that_are_not_properly_signed_are_refused() {
     let h = Harness::start_fixed(|_| {}).await;
     let url = format!("http://{}/tier-bucket/k", h.addr);
-    let unsigned = Client::new().get(&url).send().await.unwrap();
+    let unsigned = tierstore_testkit::http::client()
+        .get(&url)
+        .send()
+        .await
+        .unwrap();
     assert_eq!(unsigned.status(), 403);
     assert!(text(unsigned).await.contains("<Code>AccessDenied</Code>"));
-    let basic = Client::new()
+    let basic = tierstore_testkit::http::client()
         .get(&url)
         .header("authorization", "Basic eDp5");
     let basic = basic.send().await.unwrap();
@@ -166,7 +170,11 @@ async fn the_probes_are_open_and_the_unknown_is_refused() {
     let h = Harness::start_fixed(|_| {}).await;
     for path in ["healthz", "readyz"] {
         let url = format!("http://{}/{path}", h.addr);
-        let probe = Client::new().get(url).send().await.unwrap();
+        let probe = tierstore_testkit::http::client()
+            .get(url)
+            .send()
+            .await
+            .unwrap();
         assert_eq!(probe.status(), 200);
     }
     let signed = h.signed("GET", "/other/k", &[], &[], b"");

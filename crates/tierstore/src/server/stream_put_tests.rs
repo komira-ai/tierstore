@@ -22,7 +22,7 @@ use sha2::Sha256;
 use tierstore_testkit::dir::TestDir;
 
 use crate::journal::is_reserved;
-use crate::s3::{Capabilities, Credentials, S3Config};
+use crate::s3::{Addressing, Capabilities, Credentials, S3Config};
 use crate::{
     Backend, ByteRange, DirBackend, Error, Listed, Meta, Op, PartBody, ProxyConfig, S3Backend,
     TestClock,
@@ -576,6 +576,8 @@ fn s3_backend(s3: &FakeS3) -> Arc<S3Backend> {
         endpoint: s3.endpoint().to_owned(),
         region: "us-east-1".to_owned(),
         bucket: "tier-test".to_owned(),
+        addressing: Addressing::Auto,
+        ca_pem: None,
         credentials: Credentials::new("test-key", "test-secret"),
         capabilities: Capabilities::default(),
         connect_timeout: Duration::from_secs(5),

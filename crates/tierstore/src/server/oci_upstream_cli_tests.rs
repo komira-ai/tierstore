@@ -245,7 +245,11 @@ async fn the_bound_front_pulls_a_missing_blob_from_the_upstream() {
     let serving = tokio::spawn(listener.serve(stopped));
     let url = format!("http://{addr}/v2/library/app/blobs/{digest}");
     for _ in 0..2 {
-        let reply = reqwest::get(&url).await.expect("an answer");
+        let reply = tierstore_testkit::http::client()
+            .get(&url)
+            .send()
+            .await
+            .expect("an answer");
         assert_eq!(reply.status(), 200);
         assert_eq!(reply.bytes().await.expect("a body"), content.as_slice());
     }
@@ -253,7 +257,11 @@ async fn the_bound_front_pulls_a_missing_blob_from_the_upstream() {
         "http://{addr}/v2/library/app/blobs/sha256:{}",
         "0".repeat(64)
     );
-    let reply = reqwest::get(&missing).await.expect("an answer");
+    let reply = tierstore_testkit::http::client()
+        .get(&missing)
+        .send()
+        .await
+        .expect("an answer");
     assert_eq!(reply.status(), 404);
     assert_eq!(registry.seen().len(), 2);
     stop.send(true).expect("a front still serving");

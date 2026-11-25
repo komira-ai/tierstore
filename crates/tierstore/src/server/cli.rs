@@ -17,7 +17,7 @@
 //! the multipart uploads in progress, in a directory of the local file system (see
 //! [`DirBackend`](crate::DirBackend)), so that they outlive a restart; the directory is made if
 //! it does not exist. A tier `s3:<bucket>` is a bucket of an S3-compatible store (see
-//! [`S3Backend`]), which the keys of the tier say how to reach, in the table of the tier: `hot_store.endpoint` or `cold_store.endpoint` (`http://host[:port]`), or `endpoints` in place of it (a list whose addresses the requests go to in turn),
+//! [`S3Backend`]), which the keys of the tier say how to reach, in the table of the tier: `hot_store.endpoint` or `cold_store.endpoint` (`http://host[:port]` or `https://host[:port]`, whose certificate is verified against the system's CA certificates; an AWS S3 endpoint takes the bucket in the host name, any other in the path), or `endpoints` in place of it (a list whose addresses the requests go to in turn),
 //! `hot_store.region` or `cold_store.region` (the signing region, `us-east-1` if not given), and
 //! `hot_store.credentials_file` or `cold_store.credentials_file` (required: a file only its owner may
 //! read, in the form of `server.access_key_file` below; a secret in the config file would be
@@ -88,7 +88,7 @@ use std::time::Duration;
 
 use clap::Parser;
 
-use crate::s3::{Capabilities, Credentials, S3Config};
+use crate::s3::{Addressing, Capabilities, Credentials, S3Config};
 use crate::{
     Backend, Clock, DirBackend, MemoryBackend, ProxyConfig, ReconcilerConfig, S3Backend,
     SystemClock,
@@ -227,8 +227,7 @@ pub struct Cli {
     /// and `cold_store.credentials_file`). Multipart uploads go straight to it, part by part, so it
     /// must do them; all three kinds do.
     pub cold: String,
-    /// The endpoint of the hot tier when it is `s3:<bucket>`: `http://host[:port]`, with no
-    /// path. TLS is not built yet.
+    /// The endpoint of the hot tier when it is `s3:<bucket>`: `http(s)://host[:port]`, no path.
     pub hot_endpoint: Option<String>,
     /// The endpoints after `hot_endpoint` when `hot_store.endpoints` lists several: each request
     /// goes to the next of all of them in turn.
@@ -240,8 +239,7 @@ pub struct Cli {
     /// `{"access_key_id": "...", "secret_access_key": "..."}`, or the access key id on the first
     /// line and the secret access key on the second. Only its owner may read it (mode 0600).
     pub hot_credentials_file: Option<PathBuf>,
-    /// The endpoint of the cold tier when it is `s3:<bucket>`: `http://host[:port]`, with no
-    /// path. TLS is not built yet.
+    /// The endpoint of the cold tier when it is `s3:<bucket>`: `http(s)://host[:port]`, no path.
     pub cold_endpoint: Option<String>,
     /// The endpoints after `cold_endpoint` when `cold_store.endpoints` lists several.
     pub cold_more_endpoints: Vec<String>,
@@ -693,6 +691,8 @@ pub(super) fn s3_backend(
         endpoint: endpoint.to_owned(),
         region: s3.region.unwrap_or(DEFAULT_REGION).to_owned(),
         bucket: bucket.to_owned(),
+        addressing: Addressing::Auto,
+        ca_pem: None,
         credentials: Credentials::new(key_id, secret),
         capabilities: Capabilities::default(),
         connect_timeout: client.connect_timeout,

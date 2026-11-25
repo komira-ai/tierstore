@@ -1,6 +1,6 @@
 //! The `ObjectStore` trait, the keys, ranges and pages it speaks in, and its S3 backend
-//! ([`s3`]: path-style SigV4 over plain HTTP, multipart, conditional writes), with a loopback
-//! S3 service for tests ([`s3::fake`], feature `testkit`).
+//! ([`s3`]: SigV4 over plain HTTP or TLS, path-style or virtual-hosted-style, multipart,
+//! conditional writes), with a loopback S3 service for tests ([`s3::fake`], feature `testkit`).
 //!
 //! The crate depends on no other crate of its repository; `tierstore` adapts its S3 client. What a caller needs of a store is in
 //! [`ObjectStore`]; what a store may additionally claim (conditional writes, Object Lock) is in

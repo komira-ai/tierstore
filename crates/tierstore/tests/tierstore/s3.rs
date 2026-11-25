@@ -10,7 +10,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use futures::stream;
 use objstore_s3::s3::fake::{FakeS3, part_etag};
-use tierstore::s3::{Capabilities, Credentials, S3Config, S3Tuning};
+use tierstore::s3::{Addressing, Capabilities, Credentials, S3Config, S3Tuning};
 use tierstore::{Backend, ByteRange, Error, PartBody, ProxyConfig, S3Backend, SystemClock};
 
 use crate::conformance;
@@ -27,6 +27,8 @@ pub fn config(endpoint: &str) -> S3Config {
         endpoint: endpoint.to_owned(),
         region: "us-east-1".to_owned(),
         bucket: "tier-test".to_owned(),
+        addressing: Addressing::Auto,
+        ca_pem: None,
         credentials: Credentials::new("test-key", "test-secret"),
         capabilities: Capabilities::default(),
         connect_timeout: Duration::from_secs(5),
@@ -234,11 +236,17 @@ fn part_tag(bytes: &[u8]) -> String {
 }
 
 /// Asserts that a configuration the client refuses is refused by the backend, before any
-/// request.
+/// request, naming why; and that an `https` endpoint is taken.
 #[test]
 fn a_configuration_the_client_refuses_is_refused() {
-    let refused = S3Backend::new(config("https://127.0.0.1:9000")).unwrap_err();
-    assert!(refused.to_string().contains("TLS"), "{refused}");
+    let refused = S3Backend::new(config("ftp://127.0.0.1:9000")).unwrap_err();
+    assert!(
+        refused
+            .to_string()
+            .contains("the scheme must be http or https"),
+        "{refused}"
+    );
+    assert!(S3Backend::new(config("https://127.0.0.1:9000")).is_ok());
 }
 
 /// Asserts that a ranged read of a key that is not there is `NotFound`, for a range S3 is

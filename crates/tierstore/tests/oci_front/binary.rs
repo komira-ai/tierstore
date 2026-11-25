@@ -8,7 +8,7 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use bytes::Bytes;
-use objstore_s3::s3::{Credentials, S3Config, S3Store};
+use objstore_s3::s3::{Addressing, Credentials, S3Config, S3Store};
 use objstore_s3::{Capabilities, ObjectKey, ObjectStore};
 use rustix::process::{Pid, Signal, kill_process};
 use tierstore::server::Drained;
@@ -134,6 +134,8 @@ pub fn store(addr: SocketAddr) -> S3Store {
         endpoint: format!("http://{addr}"),
         region: "us-east-1".to_owned(),
         bucket: "tier-bucket".to_owned(),
+        addressing: Addressing::Auto,
+        ca_pem: None,
         credentials: Credentials::new(KEY_ID, SECRET),
         capabilities: Capabilities {
             conditional_put: true,
@@ -193,7 +195,9 @@ async fn an_object_put_over_s3_is_pulled_by_digest_over_https() {
         let reply = conn.request("GET", &path, &[]).await.expect("an answer");
         assert_eq!(reply.status, 200);
         assert!(reply.body == content);
-        let metrics = reqwest::get(format!("http://{}/metricz", bound.s3))
+        let metrics = tierstore_testkit::http::client()
+            .get(format!("http://{}/metricz", bound.s3))
+            .send()
             .await
             .expect("metricz");
         assert_eq!(metrics.status(), 200);
@@ -218,7 +222,9 @@ async fn without_the_flags_there_is_no_front() {
     let files = files("oci-binary-off");
     let drained = serving(files.flags(false), |bound| async move {
         assert_eq!(bound.oci, None);
-        let metrics = reqwest::get(format!("http://{}/metricz", bound.s3))
+        let metrics = tierstore_testkit::http::client()
+            .get(format!("http://{}/metricz", bound.s3))
+            .send()
             .await
             .expect("metricz");
         assert_eq!(metrics.status(), 200);
@@ -320,7 +326,9 @@ async fn a_loopback_front_without_a_certificate_serves_plain_http() {
         let reply = conn.request("GET", &path, &[]).await.expect("an answer");
         assert_eq!(reply.status, 200);
         assert!(reply.body == content);
-        let metrics = reqwest::get(format!("http://{}/metricz", bound.s3))
+        let metrics = tierstore_testkit::http::client()
+            .get(format!("http://{}/metricz", bound.s3))
+            .send()
             .await
             .expect("metricz");
         let text = metrics.text().await.expect("text");
@@ -340,7 +348,9 @@ async fn metricz_says_https_when_the_front_has_a_certificate() {
     let files = files("oci-binary-https-mode");
     let drained = serving(files.flags(true), |bound| async move {
         assert_eq!(bound.oci_mode, Some(OciMode::Https));
-        let metrics = reqwest::get(format!("http://{}/metricz", bound.s3))
+        let metrics = tierstore_testkit::http::client()
+            .get(format!("http://{}/metricz", bound.s3))
+            .send()
             .await
             .expect("metricz");
         let text = metrics.text().await.expect("text");

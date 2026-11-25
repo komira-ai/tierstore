@@ -8,7 +8,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use futures::{StreamExt as _, stream};
 use objstore_s3::s3::fake::{Failure, FakeS3};
-use objstore_s3::s3::{Credentials, S3Config, S3Tuning, StoredSha256};
+use objstore_s3::s3::{Addressing, Credentials, S3Config, S3Tuning, StoredSha256};
 use objstore_s3::{Capabilities, ObjectKey, ObjectStore as _, ObjectStoreError};
 
 use super::{compare, refused, same};
@@ -30,6 +30,8 @@ fn backend(s3: &FakeS3, single_put_max: u64) -> S3Backend {
         endpoint: s3.endpoint().to_owned(),
         region: "us-east-1".to_owned(),
         bucket: "tier-test".to_owned(),
+        addressing: Addressing::Auto,
+        ca_pem: None,
         credentials: Credentials::new("test-key", "test-secret"),
         capabilities: Capabilities::default(),
         connect_timeout: Duration::from_secs(5),

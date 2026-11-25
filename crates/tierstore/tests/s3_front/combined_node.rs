@@ -3,7 +3,6 @@
 
 use bytes::Bytes;
 use objstore_s3::{ByteRange, ObjectKey, ObjectStore};
-use reqwest::Client;
 use rustix::process::Signal;
 
 use crate::binary::{run, start};
@@ -81,7 +80,7 @@ async fn a_combined_node_puts_reads_deletes_and_exits_0_on_sigterm() {
     assert!(root.join("hot").read_dir().unwrap().next().is_some());
     assert!(root.join("cache").join("obj").is_dir());
 
-    let metrics = Client::new()
+    let metrics = tierstore_testkit::http::client()
         .get(format!("http://{}/metricz", running.addr()))
         .send()
         .await

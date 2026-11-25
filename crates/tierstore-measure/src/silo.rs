@@ -12,7 +12,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use futures::StreamExt as _;
-use objstore_s3::s3::{Credentials, S3Config, S3Store};
+use objstore_s3::s3::{Addressing, Credentials, S3Config, S3Store};
 use objstore_s3::{ByteRange, Capabilities, KeyPrefix, ListToken, ObjectKey, PageSize};
 use serde::Serialize;
 
@@ -54,6 +54,8 @@ pub fn store(endpoint: &str, bucket: &str, creds: Credentials) -> Result<S3Store
         endpoint: endpoint.to_string(),
         region: "us-east-1".into(),
         bucket: bucket.to_string(),
+        addressing: Addressing::Auto,
+        ca_pem: None,
         credentials: creds,
         capabilities: Capabilities::default(),
         connect_timeout: Duration::from_secs(5),

@@ -17,7 +17,7 @@ use bytes::Bytes;
 use futures::StreamExt;
 use futures::stream;
 use objstore_s3::s3::fake::FakeS3;
-use objstore_s3::s3::{Credentials, S3Config, S3Store, S3Tuning};
+use objstore_s3::s3::{Addressing, Credentials, S3Config, S3Store, S3Tuning};
 use objstore_s3::{ByteRange, Capabilities, ObjectKey, ObjectStore, ObjectStoreError};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -27,6 +27,8 @@ fn config(endpoint: &str) -> S3Config {
         endpoint: endpoint.to_owned(),
         region: "us-east-1".to_owned(),
         bucket: "tierstore-fake".to_owned(),
+        addressing: Addressing::Auto,
+        ca_pem: None,
         credentials: Credentials::new("fake-key", "fake-secret"),
         capabilities: Capabilities {
             conditional_put: true,

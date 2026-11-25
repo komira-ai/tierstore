@@ -16,7 +16,7 @@ use base64::Engine as _;
 use bytes::Bytes;
 use futures::StreamExt as _;
 use objstore_s3::s3::fake::{Failure, FakeS3};
-use objstore_s3::s3::{Credentials, S3Config, S3Store, S3Tuning, StoredSha256};
+use objstore_s3::s3::{Addressing, Credentials, S3Config, S3Store, S3Tuning, StoredSha256};
 use objstore_s3::{
     BodyStream, Capabilities, ContentBoundPut, ObjectKey, ObjectStore as _, ObjectStoreError,
 };
@@ -430,6 +430,8 @@ fn wire_store(endpoint: String) -> S3Store {
         endpoint,
         region: "us-east-1".into(),
         bucket: "test-bucket".into(),
+        addressing: Addressing::Auto,
+        ca_pem: None,
         credentials: Credentials::new("AKIDEXAMPLE", "secret"),
         capabilities: CONDITIONAL,
         connect_timeout: Duration::from_secs(5),

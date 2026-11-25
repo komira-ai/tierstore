@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use objstore_s3::s3::{Credentials, S3Config, S3Store};
+use objstore_s3::s3::{Addressing, Credentials, S3Config, S3Store};
 use objstore_s3::{ByteRange, Capabilities, ObjectKey, ObjectStore};
 use tierstore_testkit::dir::TestDir;
 use tokio::sync::oneshot;
@@ -108,6 +108,8 @@ pub(super) fn client(addr: SocketAddr) -> S3Store {
         endpoint: format!("http://{addr}"),
         region: "us-east-1".to_owned(),
         bucket: "tier-bucket".to_owned(),
+        addressing: Addressing::Auto,
+        ca_pem: None,
         credentials: Credentials::new(KEY_ID, SECRET),
         capabilities: Capabilities {
             conditional_put: true,
@@ -122,7 +124,11 @@ pub(super) fn client(addr: SocketAddr) -> S3Store {
 
 /// The text an unsigned GET of `path` is answered with, and its status.
 pub(super) async fn probe(addr: SocketAddr, path: &str) -> (u16, String) {
-    let reply = reqwest::get(format!("http://{addr}{path}")).await.unwrap();
+    let reply = tierstore_testkit::http::client()
+        .get(format!("http://{addr}{path}"))
+        .send()
+        .await
+        .unwrap();
     (reply.status().as_u16(), reply.text().await.unwrap())
 }
 

@@ -88,7 +88,10 @@ rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem
 # The measured alternative to fjall behind the same `Index` (tierstore-index, 10.2): a
 # copy-on-write B-tree. MIT OR Apache-2.0.
 redb = "4.6.0"
-# Plain HTTP only: TLS brings a crypto provider, added with the first TLS endpoint.
+# No default features: `objstore-s3` turns on `rustls-no-provider` and hands the client a rustls
+# configuration built on ring, so no second crypto provider (aws-lc) is built. With that feature
+# on, a client built on reqwest's defaults needs a process-wide rustls provider: the tests that
+# build one install ring first.
 reqwest = { version = "0.13.5", default-features = false }
 ring = "0.17.14"
 roxmltree = "0.21.1"

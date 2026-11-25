@@ -51,7 +51,7 @@ prefix = "cas/b/"
 cache  = true
 ```
 
-The cold store is a self-hosted S3-compatible store (MinIO, RustFS) reached over `http://`: Amazon S3 is not supported as a tier yet, and TLS to a tier is not built.
+The cold store is an S3-compatible store (MinIO, RustFS, or Amazon S3 at `s3.<region>.amazonaws.com` over `https://`) reached over `http://` or `https://`; an `https://` store's certificate is verified against the system's CA certificates.
 
 With `[hot_store]`, `[cold_store]` and `[local_cache]` in one file the node owns the data and takes writes. `local_cache.write_through` is true whether it is left out or given, and `false` is refused: a write passes through the cache so that its entries stay right.
 
@@ -77,7 +77,7 @@ aws --endpoint-url http://127.0.0.1:9300 s3api get-object --bucket tierstore --k
 
 ## Limits
 
-- The cold store must be an S3-compatible store reached over `http://` (a MinIO or RustFS bucket, say) or a directory. TLS to a tier is not built, and Amazon S3 itself is not supported as a tier yet.
+- The cold store must be an S3-compatible store reached over `http://` or `https://` (a MinIO, RustFS or Amazon S3 bucket, say) or a directory. An `https://` store's certificate must be trusted by the system's CA certificates.
 - The cache path may not be the directory of a `dir` tier, nor inside one.
 - A hot tier that is a directory uses tierstore's own flat layout and cannot serve an existing tree of files.
 - The tiers are not tested at the start; the requirements of [operations](operations.md#what-tierstore-requires-of-a-store) are documented, not checked.

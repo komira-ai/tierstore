@@ -278,8 +278,9 @@ fn an_s3_tier_is_built_from_the_flags_of_its_tier() {
 
 /// Asserts that an S3 tier that its flags do not describe is refused with a message that names
 /// the flag: no endpoint, no credentials file, a file that is missing, that others can read or
-/// that lacks a line, an endpoint that is not valid (TLS is not built), and a bucket name that
-/// is not one; and that the flags of an S3 tier are refused for a tier of another kind.
+/// that lacks a line, an endpoint that is not valid (a scheme that is not http or https), and a
+/// bucket name that is not one; that an https endpoint is taken; and that the flags of an S3
+/// tier are refused for a tier of another kind.
 #[test]
 fn an_s3_tier_that_its_flags_do_not_describe_is_refused() {
     let dir = TestDir::under(std::env::temp_dir(), "tierstore-s3-refused");
@@ -317,9 +318,21 @@ fn an_s3_tier_that_its_flags_do_not_describe_is_refused() {
     let typed = refused("s3:bucket", http, Some(&misspelled));
     assert!(typed.contains("--cold-credentials-file"), "{typed}");
     assert!(typed.contains("access_key_id"), "{typed}");
-    let tls = refused("s3:bucket", Some("https://127.0.0.1:9000"), Some(&good));
-    assert!(tls.contains("TLS"), "{tls}");
-    assert!(tls.contains("--cold"), "{tls}");
+    let scheme = refused("s3:bucket", Some("ftp://127.0.0.1:9000"), Some(&good));
+    assert!(
+        scheme.contains("the scheme must be http or https"),
+        "{scheme}"
+    );
+    assert!(scheme.contains("--cold"), "{scheme}");
+    let https = S3Flags {
+        endpoint: Some("https://127.0.0.1:9000"),
+        more_endpoints: &[],
+        region: None,
+        credentials: Some(&good),
+        conditional_delete: None,
+    };
+    let opened = open_tier("--cold", "s3:bucket", &https, timeout, &S3Client::default());
+    assert!(opened.is_ok(), "an https endpoint is taken");
     let name = refused("s3:Not_A_Bucket", http, Some(&good));
     assert!(name.contains("bucket name"), "{name}");
 

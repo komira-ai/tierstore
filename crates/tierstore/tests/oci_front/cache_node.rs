@@ -237,7 +237,11 @@ cache  = true
     /// The text of `/metricz`.
     pub(crate) async fn metrics(&self) -> String {
         let url = format!("http://{}/metricz", self.s3);
-        let reply = reqwest::get(url).await.expect("metricz");
+        let reply = tierstore_testkit::http::client()
+            .get(url)
+            .send()
+            .await
+            .expect("metricz");
         assert_eq!(reply.status(), 200);
         reply.text().await.expect("text")
     }
@@ -401,7 +405,14 @@ async fn a_build_node_says_connection_close_on_the_registry_front_in_the_drain()
     node.signal_stop();
     let url = format!("http://{}/readyz", node.s3);
     let draining = async {
-        while reqwest::get(&url).await.expect("readyz").status() == 200 {
+        while tierstore_testkit::http::client()
+            .get(&url)
+            .send()
+            .await
+            .expect("readyz")
+            .status()
+            == 200
+        {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     };

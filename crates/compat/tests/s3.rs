@@ -14,7 +14,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use futures::{StreamExt, stream};
 use objstore_s3::s3::fake::FakeS3;
-use tierstore::s3::{Capabilities, Credentials, S3Config};
+use tierstore::s3::{Addressing, Capabilities, Credentials, S3Config};
 use tierstore::{Backend, ByteRange, PartBody, S3Backend};
 use tierstore_compat::{CHUNK, chunked, patterned};
 use tierstore_prev::s3 as prev_s3;
@@ -25,10 +25,17 @@ use tierstore_prev::{
 
 /// Both releases' clients of the service at `endpoint`.
 fn both(endpoint: &str) -> (S3Backend, PrevS3) {
+    // The release before builds its client on reqwest's defaults. With the `rustls-no-provider`
+    // feature this release's client turns on, those look for a process-wide rustls provider, as
+    // in any binary that links the two: ring is installed (a second install is refused, and the
+    // provider stays ring). This release's client brings its own and needs none.
+    drop(rustls::crypto::ring::default_provider().install_default());
     let now = S3Config {
         endpoint: endpoint.to_owned(),
         region: "us-east-1".to_owned(),
         bucket: "tier-test".to_owned(),
+        addressing: Addressing::Auto,
+        ca_pem: None,
         credentials: Credentials::new("test-key", "test-secret"),
         capabilities: Capabilities::default(),
         connect_timeout: Duration::from_secs(5),
