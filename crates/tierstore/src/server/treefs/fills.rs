@@ -117,7 +117,7 @@ impl Report {
 }
 
 /// What the node answered to a fill of a tree's new manifests (`fill-tree`,
-/// `local_cache/source/tree_fill.rs`).
+/// `local_cache/tree_fill.rs`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum TreeAnswer {
     /// It filled them: what it did, on its clock.

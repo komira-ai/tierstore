@@ -34,7 +34,7 @@
 //! `<path>` of a `started`, the rest of the line after the verb. A
 //! `<placement>` is thirty-two lower-case hex digits. A `span` has the words of a `fill` of a blob.
 //! The `<sha256>` of a `fill-tree` is the root manifest of a tree, and `<ms>` the milliseconds
-//! the request may take (`local_cache/source/tree_fill.rs`).
+//! the request may take (`local_cache/tree_fill.rs`).
 //! The words of an `attached`, a `fetched` and a `levels` are those of
 //! [`Attach`](crate::server::local_cache::attaches::Attach),
 //! [`Fetches`](crate::server::local_cache::attaches::Fetches) and

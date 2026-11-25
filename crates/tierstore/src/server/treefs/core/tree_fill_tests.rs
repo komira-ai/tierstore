@@ -87,7 +87,7 @@ impl Node {
 
 /// The answer of a node of this release to `fill-tree <root>`: the manifests of the rig's
 /// upstream the cache directory `cache` does not hold, put there a level at a time from the root,
-/// a directory the cache holds not gone into, as `local_cache/source/tree_fill.rs` does; `ok 3`
+/// a directory the cache holds not gone into, as `local_cache/tree_fill.rs` does; `ok 3`
 /// and the manifests filled at each level, or the words of the first that the upstream does not
 /// have.
 fn descend(upstream: &Upstream, cache: &Path, root: &str) -> String {

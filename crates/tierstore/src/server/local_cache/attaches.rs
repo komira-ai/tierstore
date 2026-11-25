@@ -17,7 +17,7 @@
 //! - **Levels.** The same read sends, after its `fetched`, `levels <levels> <rounds>`: how many
 //!   levels of the tree it went down (1 for a tree that is a root alone), and its rounds of fills
 //!   over the fill socket, each waited for before the next: one for each level in which it filled
-//!   a manifest, and one for a `fill-tree` it asked (`source/tree_fill.rs`). They add to
+//!   a manifest, and one for a `fill-tree` it asked (`local_cache/tree_fill.rs`). They add to
 //!   `tierstore_fs_tree_levels_total` and `tierstore_fs_tree_fill_rounds_total`, so that the
 //!   rounds of an attach can be held against its time.
 //!

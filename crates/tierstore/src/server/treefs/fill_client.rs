@@ -358,8 +358,8 @@ impl FillClient {
         serde_json::from_str(&answer).map_err(|_| answer)
     }
 
-    /// Sends the report `line` to the node (`started`, `attached`, `fetched`, `descriptors`: the
-    /// node's metrics, `local_cache/starts.rs`, `local_cache/attaches.rs` and
+    /// Sends the report `line` to the node (`started`, `attached`, `fetched`, `levels`,
+    /// `descriptors`: the node's metrics, `local_cache/starts.rs`, `local_cache/attaches.rs` and
     /// `local_cache/descriptors.rs`); the caller does not wait. A report is sent by a thread of its
     /// own, over connections of its own, so that the request it tells of, such as the first of a
     /// job's command, never waits on the socket. A report that finds [`REPORTS_QUEUED`] reports

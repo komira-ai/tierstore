@@ -35,7 +35,7 @@
 //! manifests it filled at each level), or the words of `TreeFillError` (a fill's failure and the
 //! digest, `cannot read <digest>: ...`, `tree too large: ...`, `tree too deep: ...`, `spent`);
 //! a node of a release before it answers `refused unknown request`, and the mount reads the tree
-//! one manifest at a time (`local_cache/source/tree_fill.rs`).
+//! one manifest at a time (`local_cache/tree_fill.rs`).
 //! A `touch` is never answered. The pin requests are answered `ok <pinned> <refused> <absent>`
 //! (`pin`: the blobs now pinned by the tree, the blobs refused for the cache's `pin_limit`, the
 //! blobs the cache does not hold), `ok <blobs>` (`unpin`: the blobs the tree had pinned) and
