@@ -543,6 +543,46 @@ Any open that found no descriptor in the last hour:
 increase(tierstore_fs_open_descriptor_failures_total[1h]) > 0
 ```
 
+### Build node: the opens of files
+
+`tierstore fs` times every open of a file of a tree, from the arrival of its request to its answer
+on the mount's clock, to the millisecond, and counts the opens waiting for an answer. Over FUSE that
+is an `OPEN`, answered at once by the reader that read it or parked until the node answers a fill;
+over NFS, which has no open, it is the fill of the file's descriptor that the first read of the file
+starts, from that read's arrival. The mount reports the counts to the node, on the fill socket, at
+each look for idle trees (every quarter of `fs.tree_idle_secs`, at most a minute apart: a minute by
+default) and when its readers stop for a hand-over or a restart, as running totals of the process;
+the node adds what each process's totals grew by since its previous report, so a report that was
+lost loses nothing the next one carries, and the two processes of a hand-over, reporting in turns,
+are each counted once. The families are on every process with a cache, with a `# TYPE` line, and
+stay at zero on a node whose mount reports nothing. The buckets are those of the attach histogram
+above. The node keeps at most 64 mounts, as for the descriptors.
+
+| name | type | labels | what it says |
+|---|---|---|---|
+| `tierstore_fs_open_seconds` | histogram | `outcome`: `ok`, `error`; `source`: `cached`, `filled`; `le` on `_bucket` | one sample per open of a file of a tree: the seconds from its request's arrival to its answer. `ok` is an open answered with a handle, `error` one answered with an error (`EIO` for a fill that failed, `EISDIR`, `EROFS` and the like). `filled` is an open that asked the node for the file's bytes (a fill of its blob, or the span of a pack) and waited for the answer; `cached` is one that had them without asking the node |
+| `tierstore_fs_open_seconds_bucket` | counter | `outcome`, `source`, `le` | the opens of that outcome and source at or under `le` seconds |
+| `tierstore_fs_open_seconds_sum` | counter | `outcome`, `source` | their seconds |
+| `tierstore_fs_open_seconds_count` | counter | `outcome`, `source` | the opens of that outcome and source |
+| `tierstore_fs_opens_waiting` | gauge | none | the opens begun and not yet answered at the mount's last report, summed over the mounts |
+
+What they do not count: a report that was lost, as a `started` is lost (above), so the gauge may be
+a minute old and the histogram behind by the opens since the last report that arrived; a read of a
+file that is open, which is answered from the descriptor it holds; a read of a handle the process
+before a hand-over gave out, which opens the file again for that read. A node of an earlier release
+answers the report `refused unknown request`, which the mount ignores, and no open waits for it: the
+report is sent by a thread of its own, and an open only adds to counters of its process.
+
+A high p99 of `source="filled"` with a growing `tierstore_fs_opens_waiting` is a build that waits on
+the node's fills: the processes held in an open are those opens (see
+[operations](operations.md#the-virtual-build-file-system)).
+
+The 99th percentile of an open over five minutes, by source:
+
+```promql
+histogram_quantile(0.99, sum by (source, le) (rate(tierstore_fs_open_seconds_bucket[5m])))
+```
+
 ## Cache queries (v1)
 
 All of these use a `5m` window. Every `sum` is outside the `rate`. Shorten the window to see a

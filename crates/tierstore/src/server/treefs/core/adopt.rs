@@ -12,6 +12,7 @@ use super::super::backing::{Adopted, Guard, Saved};
 use super::super::handle;
 use super::super::ino;
 use super::{Core, Errno, Handle};
+use crate::server::local_cache::opens::Source;
 use crate::tree_manifest::EntryKind;
 use std::path::Path;
 
@@ -87,7 +88,8 @@ impl Core {
                     (&loaded, number),
                     &entry,
                     (digest, *size, source.as_ref()),
-                    self.now(),
+                    // A read of a handle of the process before: not an open, not counted.
+                    (self.now(), &mut Source::Cached),
                 )?,
                 ino,
             }),

@@ -30,6 +30,7 @@ use std::sync::Mutex;
 
 use super::attaches::Attaches;
 use super::descriptors::Held;
+use super::opens::Opened;
 use super::{LocalCache, locked};
 
 /// The family, with a `# TYPE` line, and its three series, each written out for `docs/metrics.md`.
@@ -77,6 +78,8 @@ pub(super) struct Starts {
     pub(super) attaches: Attaches,
     /// The descriptors the mounts report (`descriptors`).
     pub(super) descriptors: Held,
+    /// The opens of files the mounts report (`opens`).
+    pub(super) opens: Opened,
 }
 
 impl Starts {
@@ -133,7 +136,8 @@ impl Starts {
     }
 
     /// The family in the Prometheus text format: cumulative buckets, the sum in seconds and the
-    /// count, all of one moment; then the families of the mounts' reports (`attaches`).
+    /// count, all of one moment; then the families of the mounts' reports (`attaches`,
+    /// `descriptors`, `opens`).
     pub(super) fn render(&self) -> String {
         let state = locked(&self.state);
         let mut text = format!("# TYPE {REQUEST_TO_START} histogram\n");
@@ -148,6 +152,7 @@ impl Starts {
         let _ = writeln!(text, "{COUNT} {}", state.count);
         text.push_str(&self.attaches.render());
         text.push_str(&self.descriptors.render());
+        text.push_str(&self.opens.render());
         text
     }
 }

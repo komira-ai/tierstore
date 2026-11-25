@@ -237,9 +237,9 @@ fn number(word: &str) -> Option<u64> {
     word.parse().ok()
 }
 
-/// A histogram of spans in milliseconds over [`BOUNDS_MS`].
+/// A histogram of spans in milliseconds over [`BOUNDS_MS`]; `opens.rs` keeps its own of these.
 #[derive(Debug, Default)]
-struct Histogram {
+pub(super) struct Histogram {
     /// The spans in each bucket, not cumulated.
     buckets: [u64; BUCKETS],
     count: u64,
@@ -248,7 +248,7 @@ struct Histogram {
 
 impl Histogram {
     /// Adds the spans whose buckets are `buckets` and whose sum is `sum_ms`.
-    fn add(&mut self, buckets: &[u64; BUCKETS], sum_ms: u64) {
+    pub(super) fn add(&mut self, buckets: &[u64; BUCKETS], sum_ms: u64) {
         for (mine, more) in self.buckets.iter_mut().zip(buckets) {
             *mine = mine.saturating_add(*more);
         }
@@ -259,7 +259,7 @@ impl Histogram {
 
     /// The series of the histogram `name`, with `label` (`outcome="ok",`, or nothing) before `le`
     /// in its buckets and alone on its sum and count.
-    fn render(&self, text: &mut String, names: [&str; 3], label: &str) {
+    pub(super) fn render(&self, text: &mut String, names: [&str; 3], label: &str) {
         let [bucket, sum, count] = names;
         let mut below = 0u64;
         for (bound, n) in BOUNDS_MS.iter().zip(self.buckets) {

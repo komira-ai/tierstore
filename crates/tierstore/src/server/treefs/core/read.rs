@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 use crate::tree_manifest::EntryKind;
 
+use super::opens::Timing;
 use super::{Core, DirItem, Entry, Errno, TREE_TTL, ino};
 
 /// The bytes of a file of a tree: `size` bytes of `file` from `base`. The file is the cache file
@@ -100,7 +101,9 @@ impl Core {
         if wanted == 0 {
             return Ok(Vec::new());
         }
-        let (bytes, _) = self.blob_file(ino)?.ok_or(Errno::Io)?;
+        let (bytes, _) = self
+            .blob_file(ino, &mut self.open_begins())?
+            .ok_or(Errno::Io)?;
         // `wanted` is at most `size`, a `u32`.
         bytes
             .read(offset, wanted as usize)
@@ -110,13 +113,16 @@ impl Core {
     /// The bytes of the file `ino` and its length, filled first through the fill socket if the
     /// cache does not hold them; `None` for a file of no bytes, which has no blob. A frontend
     /// that keeps descriptors open reads them with [`FileBytes::read`], and does not come back for
-    /// as long as it keeps the descriptor.
+    /// as long as it keeps the descriptor. The fills are answered by `fs.fetch_timeout` after the
+    /// `begun` of `timing`, whose `source` is set where the node is asked for the bytes
+    /// (`core/opens.rs`).
     ///
     /// # Errors
     /// As [`Core::read_ino`], but for the bytes.
     pub(in crate::server::treefs) fn blob_file(
         &self,
         ino: u64,
+        timing: &mut Timing,
     ) -> Result<Option<(FileBytes, u64)>, Errno> {
         #[cfg(test)]
         self.note("blob_file");
@@ -140,7 +146,8 @@ impl Core {
             return Ok(None);
         }
         let blob = (digest, length, source.as_ref());
-        let file = self.blob((&loaded, number), &entry, blob, self.now())?;
+        let opening = (timing.begun, &mut timing.source);
+        let file = self.blob((&loaded, number), &entry, blob, opening)?;
         Ok(Some((file, length)))
     }
 

@@ -147,6 +147,7 @@ pub mod large;
 pub(super) mod layout;
 mod listing;
 mod metrics;
+pub(super) mod opens;
 mod pin_set;
 mod pins;
 mod prefetch;

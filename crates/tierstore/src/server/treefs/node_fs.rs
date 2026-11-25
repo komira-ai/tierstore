@@ -44,6 +44,10 @@
 //! answered an INTERRUPT `EINTR` first), what the core counted for it (the lookup of a LOOKUP or of
 //! a READDIRPLUS's entries, the open of an OPEN) is given back, so that no tree is held in memory
 //! by a lookup the kernel never forgets.
+//!
+//! Every OPEN is timed from its arrival to its answer, on the reader or on a thread of the
+//! fetches, and counted as waiting meanwhile (`core/opens.rs`); the stop of the readers tells the
+//! node of the opens once they are all answered ([`NodeFs::drain`]).
 
 use std::io;
 use std::num::NonZeroUsize;
@@ -194,12 +198,18 @@ fn lookup(core: &Core, parent: u64, name: &[u8], replier: Replier) {
     }
 }
 
-/// Answers the OPEN of `node` with what `core` opened.
-fn answer_open(core: &Core, node: u64, opened: Result<Opened, core::Errno>, replier: Replier) {
+/// Answers the OPEN of `node` with what `core` opened; whether that is a handle, whether or not the
+/// kernel takes it (an open whose answer is not taken was made all the same).
+fn answer_open(
+    core: &Core,
+    node: u64,
+    opened: Result<Opened, core::Errno>,
+    replier: Replier,
+) -> bool {
     let (fh, out) = match opened {
         Err(error) => {
             send(replier, Err(errno(error)));
-            return;
+            return false;
         }
         Ok(Opened::Cached(fh)) => (
             fh,
@@ -224,7 +234,7 @@ fn answer_open(core: &Core, node: u64, opened: Result<Opened, core::Errno>, repl
                     )
                 });
                 send(replier, Err(Errno::EIO));
-                return;
+                return false;
             };
             (
                 fh,
@@ -239,6 +249,7 @@ fn answer_open(core: &Core, node: u64, opened: Result<Opened, core::Errno>, repl
     if !send(replier, Ok(out.as_bytes())) {
         core.release(fh);
     }
+    true
 }
 
 impl NodeFs {
@@ -255,9 +266,12 @@ impl NodeFs {
         })
     }
 
-    /// Waits until every request parked on the fetches is answered (`Fetches::drain`).
+    /// Waits until every request parked on the fetches is answered (`Fetches::drain`), then tells
+    /// the node of the opens (`core/opens.rs`): the stop of the readers for a hand-over or a
+    /// restart, after which this process answers no more opens.
     pub(super) fn drain(&self) {
         self.fetches.drain();
+        self.core.report_opens();
     }
 
     /// The requests parked on the fetches and not answered yet.
@@ -376,15 +390,19 @@ impl Fs for NodeFs {
             }
             Operation::Open(arg) => {
                 let writing = arg.flags & O_ACCMODE != 0;
+                // Timed and waiting from now to the answer (`core/opens.rs`).
+                let timing = self.core.open_begins();
                 let Some(opened) = self.core.open_now(node, writing) else {
                     // Parked, and answered by `fs.fetch_timeout` from now.
-                    let begun = self.core.now();
                     return self.park(move |core| {
-                        let opened = core.open_from(node, writing, begun);
-                        answer_open(core, node, opened, replier);
+                        let mut timing = timing;
+                        let opened = core.open_from(node, writing, &mut timing);
+                        let ok = answer_open(core, node, opened, replier);
+                        core.open_ends(timing, ok);
                     });
                 };
-                answer_open(&self.core, node, opened, replier);
+                let ok = answer_open(&self.core, node, opened, replier);
+                self.core.open_ends(timing, ok);
             }
             Operation::Read(arg) if self.core.read_reopens(arg.fh) => {
                 return self.park(move |core| {

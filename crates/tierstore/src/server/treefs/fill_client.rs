@@ -4,8 +4,8 @@
 //! manifests of a tree, which a node of a release before it refuses as unknown), `touch` (not answered),
 //! the pin requests, `put` (a staged file of the put directory, answered in JSON), and the
 //! questions about the placements of the node (`place`, `mounted`, `image`, `flat`, `span`,
-//! `unplace`), and the reports `started`, `attached`, `fetched`, `levels` and `descriptors`, which a thread
-//! of its own sends (see [`FillClient::send_report`]). It is one of the two ways of [`Fills`]: the
+//! `unplace`), and the reports `started`, `attached`, `fetched`, `levels`, `descriptors` and `opens`,
+//! which a thread of its own sends (see [`FillClient::send_report`]). It is one of the two ways of [`Fills`]: the
 //! one of the process `tierstore fs`.
 //!
 //! A request that meets a closed socket, or a connection that went away (the S3 instance of the
@@ -359,8 +359,9 @@ impl FillClient {
     }
 
     /// Sends the report `line` to the node (`started`, `attached`, `fetched`, `levels`,
-    /// `descriptors`: the node's metrics, `local_cache/starts.rs`, `local_cache/attaches.rs` and
-    /// `local_cache/descriptors.rs`); the caller does not wait. A report is sent by a thread of its
+    /// `descriptors`, `opens`: the node's metrics, `local_cache/starts.rs`,
+    /// `local_cache/attaches.rs`, `local_cache/descriptors.rs` and `local_cache/opens.rs`); the
+    /// caller does not wait. A report is sent by a thread of its
     /// own, over connections of its own, so that the request it tells of, such as the first of a
     /// job's command, never waits on the socket. A report that finds [`REPORTS_QUEUED`] reports
     /// waiting is dropped, and one the socket does not take is lost, as is one a node of a release
