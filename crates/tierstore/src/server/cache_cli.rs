@@ -876,6 +876,7 @@ async fn run_cache_imaging(
         more_endpoints: &tier.more_endpoints,
         region: tier.region.as_deref(),
         credentials: tier.credentials_file.as_deref(),
+        source: tier.credential_source.as_ref(),
         conditional_delete: tier.conditional_delete,
     };
     let upstream = open_tier(

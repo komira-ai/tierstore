@@ -100,7 +100,10 @@ refuses a key file that its group or others can read):
   with two keys that have one id is refused with exit status 2;
 - `/etc/tierstore/hot.credentials` and `/etc/tierstore/cold.credentials`: the keys `tierstore`
   signs its requests to the two stores with (`hot_store.credentials_file`,
-  `cold_store.credentials_file`). The two tiers may be two stores, and have a key each.
+  `cold_store.credentials_file`). The two tiers may be two stores, and have a key each. A tier
+  in an AWS account may have no key file and take an IAM role's credentials instead
+  (`credential_source`, see the configuration guide's "AWS credentials"); the `AWS_*` variables
+  a source reads are then set in the unit's environment, never on its command line.
 
 Every one of these files holds its key in one of two forms, and the process tells them apart by
 the first byte of the file that is not white space: `{` is JSON, anything else is two lines.

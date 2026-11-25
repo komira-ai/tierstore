@@ -249,6 +249,15 @@ fn only_a_stall_or_timeout_is_not_resent() {
     assert!(is_retryable(&reset));
 }
 
+/// Keys of the id `id` and the secret `s`, with the session token `token`.
+pub(super) fn keys(id: &str, token: Option<&str>) -> credentials::Keys {
+    credentials::Keys {
+        access_key_id: id.to_owned(),
+        secret_access_key: "s".to_owned(),
+        session_token: token.map(str::to_owned),
+    }
+}
+
 pub(super) fn config(endpoint: &str, bucket: &str) -> S3Config {
     S3Config {
         endpoint: endpoint.to_owned(),
@@ -446,7 +455,14 @@ fn each_style_signs_the_host_and_path_it_sends_to() {
         let store = S3Store::new(config).unwrap();
         let request = store
             .conn
-            .signed_payload(Method::GET, key, query, Vec::new(), EMPTY_SHA256)
+            .signed_payload(
+                &keys("a", None),
+                Method::GET,
+                key,
+                query,
+                Vec::new(),
+                EMPTY_SHA256,
+            )
             .build()
             .unwrap();
         assert_eq!(

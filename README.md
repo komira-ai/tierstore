@@ -121,7 +121,9 @@ kind = "dir"
 path = "/srv/tierstore/cold"
 ```
 
-Either tier may instead be `kind = "s3"` with a `bucket`, an `endpoint` and a `credentials_file`. An `[[interface]]` of type
+Either tier may instead be `kind = "s3"` with a `bucket`, an `endpoint` and a `credentials_file`, or, in an AWS account, a
+`credential_source` that takes an IAM role's credentials the way the AWS SDKs do (environment, shared profile, web identity, ECS or
+EKS container credentials, or the EC2 instance profile over IMDSv2), renewed before they expire. An `[[interface]]` of type
 `oci` adds the OCI registry front (read-only unless it asks for keys).
 
 ### Build node

@@ -162,7 +162,10 @@ use crate::{
 mod sha256;
 
 pub use objstore_s3::Capabilities;
-pub use objstore_s3::s3::{Addressing, Credentials, S3Config, S3ConfigError, S3Tuning};
+pub use objstore_s3::s3::{
+    Addressing, AwsEnv, CredentialSource, Credentials, CredentialsError, S3Config, S3ConfigError,
+    S3Tuning,
+};
 
 /// The greatest byte position a `Range` names. A store reads the positions as signed 64-bit
 /// numbers and refuses or ignores a larger one, so a range is cut here before it is sent.
@@ -407,6 +410,9 @@ fn map_error(error: ObjectStoreError, key: &str) -> Error {
         ObjectStoreError::NotFound(_) => Error::NotFound(key),
         ObjectStoreError::AlreadyExists(_) => Error::AlreadyExists(key),
         ObjectStoreError::Transport(_) => Error::Unavailable(message),
+        // No credentials to sign with: the source could not be reached, refused, or is set up
+        // wrongly. Nothing was sent, and a later call may find the source answering again.
+        ObjectStoreError::Credentials(_) => Error::Unavailable(message),
         // 409 `ConditionalRequestConflict`: another write of the key was in flight when this
         // conditional write arrived (S3 and MinIO both answer it for two writers racing a
         // create-only put). Neither the store's documentation nor its answer says which writer

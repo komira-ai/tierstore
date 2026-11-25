@@ -1,11 +1,102 @@
 //! What a tier table of the configuration file says about its tier: the spec of `--hot` or
 //! `--cold`, the S3 keys, the `conditional_delete` key and the marks bucket, checked against the
 //! kind of the tier.
+//!
+//! The credentials of an `s3` tier are the key of `credentials_file` (`credential_source =
+//! "file"`, the default), or come from a source of AWS credentials, found as the AWS SDKs find
+//! them (`objstore_s3::s3::Credentials::from_source`): `auto` (the first of the others that is
+//! set up), `environment`, `profile`, `web-identity`, `container` or `instance-metadata`. A source
+//! takes no `credentials_file`, and `credential_profile` (the profile of the shared AWS files, in
+//! place of the one `AWS_PROFILE` names) is only for `profile` and `auto`.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
+use serde::Deserialize;
+
 use super::config::{ConfigError, Kind, TierTable, invalid, refuse, require};
+use crate::s3::{AwsEnv, CredentialSource, Credentials};
+
+/// The values of `credential_source` (and of the verbs' `--hot-credential-source`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum SourceName {
+    /// The key of `credentials_file`.
+    File,
+    /// The first of the sources below that is set up, in this order.
+    Auto,
+    /// `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and `AWS_SESSION_TOKEN`.
+    Environment,
+    /// A profile of the shared AWS config and credentials files.
+    Profile,
+    /// `AWS_WEB_IDENTITY_TOKEN_FILE` and `AWS_ROLE_ARN`, exchanged with STS.
+    WebIdentity,
+    /// The credentials endpoint of an ECS task or an EKS pod.
+    Container,
+    /// The EC2 instance profile, from the instance metadata service (IMDSv2).
+    InstanceMetadata,
+}
+
+impl SourceName {
+    /// The source, or `None` for [`SourceName::File`].
+    pub(crate) fn source(self) -> Option<CredentialSource> {
+        Some(match self {
+            Self::File => return None,
+            Self::Auto => CredentialSource::Auto,
+            Self::Environment => CredentialSource::Environment,
+            Self::Profile => CredentialSource::Profile,
+            Self::WebIdentity => CredentialSource::WebIdentity,
+            Self::Container => CredentialSource::Container,
+            Self::InstanceMetadata => CredentialSource::InstanceMetadata,
+        })
+    }
+}
+
+/// The credentials of an `s3` tier that come from a source of AWS credentials, not a file.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SourceSetting {
+    pub source: CredentialSource,
+    /// The profile in place of the one `AWS_PROFILE` names; only with `profile` and `auto`.
+    pub profile: Option<String>,
+}
+
+impl SourceSetting {
+    /// The setting of `name` with the profile `profile`, if `name` is a source: `None` for
+    /// `file`.
+    ///
+    /// # Errors
+    /// The profile, for a source that reads no profile; the text says why, for the key or flag
+    /// the caller names.
+    pub(crate) fn of(name: SourceName, profile: Option<&str>) -> Result<Option<Self>, String> {
+        let source = name.source();
+        let reads_profile = matches!(
+            source,
+            Some(CredentialSource::Profile | CredentialSource::Auto)
+        );
+        if profile.is_some() && !reads_profile {
+            return Err("only for the credential sources \"profile\" and \"auto\"".to_owned());
+        }
+        Ok(source.map(|source| Self {
+            source,
+            profile: profile.map(str::to_owned),
+        }))
+    }
+
+    /// The credentials of the source, found in the provider-standard environment of this
+    /// process (the `AWS_*` variables and `HOME`).
+    pub(crate) fn credentials(&self) -> Credentials {
+        self.credentials_in(AwsEnv::from_process())
+    }
+
+    /// The credentials of the source, found in `env`, with the profile of the setting.
+    fn credentials_in(&self, env: AwsEnv) -> Credentials {
+        let env = match &self.profile {
+            Some(profile) => env.with_profile(profile),
+            None => env,
+        };
+        Credentials::from_source(self.source, env)
+    }
+}
 
 /// What a tier table says about the tier: the spec of `--hot` or `--cold`, and the endpoint,
 /// region and credentials file of its S3 flags.
@@ -24,6 +115,8 @@ pub(super) struct TierParts {
     pub more_endpoints: Vec<String>,
     pub region: Option<String>,
     pub credentials_file: Option<PathBuf>,
+    /// The credentials of an `s3` tier with a `credential_source` other than `file`.
+    pub credential_source: Option<SourceSetting>,
     /// The `conditional_delete` key; `None` is the default of the kind.
     pub conditional_delete: Option<bool>,
 }
@@ -35,6 +128,8 @@ pub(super) fn tier(name: &str, table: &TierTable) -> Result<TierParts, ConfigErr
         ("endpoints", table.endpoints.is_some()),
         ("region", table.region.is_some()),
         ("credentials_file", table.credentials_file.is_some()),
+        ("credential_source", table.credential_source.is_some()),
+        ("credential_profile", table.credential_profile.is_some()),
     ];
     let bucket = ("bucket", table.bucket.is_some());
     let path = ("path", table.path.is_some());
@@ -43,17 +138,18 @@ pub(super) fn tier(name: &str, table: &TierTable) -> Result<TierParts, ConfigErr
         table.conditional_delete == Some(false),
     );
     let marks_named = ("marks_bucket", table.marks_bucket.is_some());
-    let (spec, marks, endpoints) = match (table.kind, &table.path, &table.bucket) {
+    let (spec, marks, endpoints, credential_source) = match (table.kind, &table.path, &table.bucket)
+    {
         (Kind::Memory, ..) => {
-            let keys = [path, bucket, s3_only[0], s3_only[1], s3_only[2], s3_only[3]];
-            refuse(name, "not for kind \"memory\"", &keys)?;
+            refuse(name, "not for kind \"memory\"", &[path, bucket])?;
+            refuse(name, "not for kind \"memory\"", &s3_only)?;
             refuse(name, DELETE_OFF, &[delete_off])?;
             refuse(name, MARKS_ONLY_S3, &[marks_named])?;
-            ("memory".to_owned(), "memory".to_owned(), Vec::new())
+            ("memory".to_owned(), "memory".to_owned(), Vec::new(), None)
         }
         (Kind::Dir, path_value, _) => {
-            let keys = [bucket, s3_only[0], s3_only[1], s3_only[2], s3_only[3]];
-            refuse(name, "not for kind \"dir\"", &keys)?;
+            refuse(name, "not for kind \"dir\"", &[bucket])?;
+            refuse(name, "not for kind \"dir\"", &s3_only)?;
             refuse(name, DELETE_OFF, &[delete_off])?;
             refuse(name, MARKS_ONLY_S3, &[marks_named])?;
             let path = require(name, "path", path_value.as_ref())?;
@@ -62,15 +158,21 @@ pub(super) fn tier(name: &str, table: &TierTable) -> Result<TierParts, ConfigErr
                 format!("dir:{}", path.display()),
                 format!("dir:{}", marks.display()),
                 Vec::new(),
+                None,
             )
         }
         (Kind::S3, _, bucket_value) => {
             refuse(name, "not for kind \"s3\"", &[path])?;
             let bucket = require(name, "bucket", bucket_value.as_ref())?;
             let endpoints = endpoints(name, table)?;
-            require(name, "credentials_file", table.credentials_file.as_ref())?;
+            let source = credential_source(name, table)?;
             let marks = marks_bucket(name, bucket, table.marks_bucket.as_deref())?;
-            (format!("s3:{bucket}"), format!("s3:{marks}"), endpoints)
+            (
+                format!("s3:{bucket}"),
+                format!("s3:{marks}"),
+                endpoints,
+                source,
+            )
         }
     };
     let mut endpoints = endpoints.into_iter();
@@ -81,8 +183,32 @@ pub(super) fn tier(name: &str, table: &TierTable) -> Result<TierParts, ConfigErr
         more_endpoints: endpoints.collect(),
         region: table.region.clone(),
         credentials_file: table.credentials_file.clone(),
+        credential_source,
         conditional_delete: table.conditional_delete,
     })
+}
+
+/// The credential source of the `s3` tier `name`: `None` for the key of `credentials_file`, which
+/// is then needed; a source takes no `credentials_file`.
+fn credential_source(name: &str, table: &TierTable) -> Result<Option<SourceSetting>, ConfigError> {
+    let source_name = table.credential_source.unwrap_or(SourceName::File);
+    let profile = table.credential_profile.as_deref();
+    let setting = SourceSetting::of(source_name, profile)
+        .map_err(|why| invalid(&format!("{name}.credential_profile"), why))?;
+    match (&setting, &table.credentials_file) {
+        (None, file) => {
+            require(name, "credentials_file", file.as_ref())?;
+        }
+        (Some(setting), Some(_)) => {
+            let why = format!(
+                "not with credential_source = \"{}\": the credentials come from the one or the other",
+                setting.source
+            );
+            return Err(invalid(&format!("{name}.credentials_file"), why));
+        }
+        (Some(_), None) => {}
+    }
+    Ok(setting)
 }
 
 /// The endpoints of an `s3` tier: the one `endpoint`, or the entries of `endpoints`, which is not
@@ -156,3 +282,7 @@ fn marks_directory(path: &Path) -> PathBuf {
 #[cfg(test)]
 #[path = "config_tier_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "config_credentials_tests.rs"]
+mod credentials_tests;

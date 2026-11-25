@@ -11,8 +11,8 @@ A client signs each request with an access key (SigV4, in the `Authorization` he
 | presigning | `server.presign_key_files` | sign presigned PUT URLs, each good for one object under the key's prefix, and nothing else |
 | GC | `server.gc_key_files` | a scoped key with a list, a delete and an abort right on one prefix: list, head, delete and abort uploads under it, and nothing else; it never reads a body |
 | scoped | `server.scoped_key_files` | read, create and delete under the prefixes its file lists, and nothing else; also signs presigned GET URLs for objects under its read prefixes |
-| hot tier credential | `hot_store.credentials_file` | not a client key: what tierstore signs its own requests to an `s3` hot tier with |
-| cold tier credential | `cold_store.credentials_file` | not a client key: the same for an `s3` cold tier |
+| hot tier credential | `hot_store.credentials_file` | not a client key: what tierstore signs its own requests to an `s3` hot tier with, unless `hot_store.credential_source` takes an IAM role's credentials instead ([AWS credentials](configuration.md#aws-credentials)) |
+| cold tier credential | `cold_store.credentials_file` | not a client key: the same for an `s3` cold tier (or `cold_store.credential_source`) |
 
 Only the full key is required. The read-only, presigning, GC, scoped keys of the file are lists, one file for each key. A tier that is a directory needs no credential file.
 
@@ -87,7 +87,7 @@ A build node takes two experimental calls that warm its cache before a job (see 
 
 The server reads its key files once, at start. To rotate a key, write the new file, then restart the unit: it drains first (see [operations](operations.md)). There is no reload.
 
-A change to the tier credentials takes the same restart.
+A change to the tier credentials takes the same restart. Credentials a tier takes from an AWS source (`credential_source`) are renewed by the process before they expire, with no restart; a change of the source, or of the variables it reads, takes the restart.
 
 ## Presigned GET URLs
 

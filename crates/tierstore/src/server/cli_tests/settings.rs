@@ -298,6 +298,7 @@ fn an_s3_tier_that_its_flags_do_not_describe_is_refused() {
             more_endpoints: &[],
             region: None,
             credentials,
+            source: None,
             conditional_delete: None,
         };
         let opened = open_tier("--cold", spec, &flags, timeout, &S3Client::default());
@@ -329,6 +330,7 @@ fn an_s3_tier_that_its_flags_do_not_describe_is_refused() {
         more_endpoints: &[],
         region: None,
         credentials: Some(&good),
+        source: None,
         conditional_delete: None,
     };
     let opened = open_tier("--cold", "s3:bucket", &https, timeout, &S3Client::default());
@@ -347,6 +349,7 @@ fn an_s3_tier_that_its_flags_do_not_describe_is_refused() {
             more_endpoints: &[],
             region,
             credentials,
+            source: None,
             conditional_delete: None,
         };
         let opened = open_tier("--hot", "memory", &flags, timeout, &S3Client::default());
@@ -359,6 +362,7 @@ fn an_s3_tier_that_its_flags_do_not_describe_is_refused() {
         more_endpoints: &[],
         region: None,
         credentials: None,
+        source: None,
         conditional_delete: None,
     };
     assert!(open_tier("--hot", "memory", &none, timeout, &S3Client::default()).is_ok());
