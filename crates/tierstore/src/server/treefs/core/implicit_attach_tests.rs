@@ -65,7 +65,8 @@ fn said(log: &Logged) -> Vec<String> {
 /// answered; then the 8 below those), so the lookup waits for 3 fills and not 13, with 8 in flight
 /// at most; and that it reports the attach (`attached ok 65`: 5, 20 and 40 ms for the three levels
 /// on the rig's clock) and the 13 manifests, all filled, with the fill of each in its bucket
-/// (`fetched`), and says them on stderr.
+/// (`fetched`), and its 3 levels and 4 rounds (the 3 levels of fills, and the `fill-tree` the
+/// rig's node refused as unknown: `levels`), and says them on stderr by level.
 #[test]
 fn a_lookup_fetches_a_level_of_manifests_at_once_and_reports_the_attach() {
     let rig = Rig::new("tfs-imp-levels", wide());
@@ -104,16 +105,18 @@ fn a_lookup_fetches_a_level_of_manifests_at_once_and_reports_the_attach() {
         reports(&rig, "fetched", 1),
         ["fetched 0 13 0 405 0 0 1 0 4 8 0 0 0 0 0 0 0 0 0 0 0"]
     );
+    assert_eq!(reports(&rig, "levels", 1), ["levels 3 4"]);
     let line = format!(
         "tierstore fs: lookup of {root}: ok in 65 ms; 13 manifests: 0 from the cache, \
-         13 filled, 0 not had"
+         13 filled, 0 not had; 3 levels; fills by level: 1 4 8, slowest ms by level: 5 20 40; \
+         fill-tree unknown to the node in 0 ms"
     );
     assert_eq!(said(&log), [line]);
 }
 
 /// Asserts that a lookup of a tree whose manifests the cache holds reads them all from the cache
-/// and asks the fill socket for none, and reports so: a second core over the cache the first
-/// filled.
+/// and asks the fill socket for none, not even a `fill-tree`, and reports so: a second core over
+/// the cache the first filled.
 #[test]
 fn a_lookup_of_a_tree_the_cache_holds_reports_its_manifests_from_the_cache() {
     let rig = Rig::new("tfs-imp-cached", wide());
@@ -134,9 +137,10 @@ fn a_lookup_of_a_tree_the_cache_holds_reports_its_manifests_from_the_cache() {
         reports(&rig, "fetched", 2)[1],
         "fetched 13 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0"
     );
+    assert_eq!(reports(&rig, "levels", 2)[1], "levels 3 0");
     let line = format!(
         "tierstore fs: lookup of {root}: ok in 0 ms; 13 manifests: 13 from the cache, \
-         0 filled, 0 not had"
+         0 filled, 0 not had; 3 levels; fills by level: 0 0 0, slowest ms by level: 0 0 0"
     );
     assert_eq!(said(&log), [line]);
 }

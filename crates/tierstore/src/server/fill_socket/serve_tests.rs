@@ -600,3 +600,60 @@ async fn a_descriptors_is_answered_ok_and_counted() {
     }
     served.stop().await;
 }
+
+/// Asserts that a `fill-tree` over the socket fills the new manifests of the tree and is answered
+/// once, `ok`, the milliseconds on the cache's clock (none moved) and the manifests filled at each
+/// level: a root over one directory, both put in the cache; a root the upstream does not have is
+/// answered with the words of its fill and its digest; a fill given no time is `spent`; and a
+/// `levels` report is answered `ok` and counted.
+#[tokio::test]
+async fn a_fill_tree_over_the_socket_fills_the_tree_and_is_answered_once() {
+    use crate::server::local_cache::manifest_path;
+    use crate::tree_manifest::TreeDigest;
+    use crate::tree_manifest_tests::{dir, file, manifest};
+
+    let rig = Rig::new("tfs-fill-tree");
+    let place = Place::new("tfs-fill-tree");
+    let below = manifest(&[file("f", 1)]);
+    let below_digest = TreeDigest::of(below.as_bytes());
+    let root = manifest(&[dir("d", &below_digest)]);
+    let root_digest = TreeDigest::of(root.as_bytes());
+    for text in [&below, &root] {
+        let key = format!("cas/l/{}", TreeDigest::of(text.as_bytes()));
+        rig.put(&key, text.as_bytes()).await;
+    }
+    let served = Served::start(&rig.cache, &place.path);
+    let mut client = Client::connect(&place.path).await;
+    let asked = format!("fill-tree {root_digest} 60000");
+    assert_eq!(client.ask(&asked).await, "ok 0 1 1");
+    for digest in [root_digest, below_digest] {
+        assert!(manifest_path(&rig.config.path, &digest.to_string()).exists());
+    }
+    let absent = TreeDigest::of(b"no tree");
+    let asked = format!("fill-tree {absent} 60000");
+    assert_eq!(
+        client.ask(&asked).await,
+        format!("upstream 404 at {absent}")
+    );
+    let gate = rig.tamper.hold_heads();
+    let other = manifest(&[file("g", 1)]);
+    let other_digest = TreeDigest::of(other.as_bytes());
+    rig.put(&format!("cas/l/{other_digest}"), other.as_bytes())
+        .await;
+    assert_eq!(
+        client.ask(&format!("fill-tree {other_digest} 0")).await,
+        "spent"
+    );
+    gate.add_permits(1);
+    assert_eq!(client.ask("levels 9 1").await, "ok");
+    let text = rig.cache.metrics();
+    assert!(
+        text.contains("\ntierstore_fs_tree_levels_total 9\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("\ntierstore_fs_tree_fill_rounds_total 1\n"),
+        "{text}"
+    );
+    served.stop().await;
+}

@@ -210,7 +210,7 @@ impl Upstream {
 
     /// The answer to a line, or none for a request that is not answered: after the gate of its
     /// verb, if a test has closed one.
-    fn answer(&self, line: &str) -> Option<String> {
+    pub(in crate::server) fn answer(&self, line: &str) -> Option<String> {
         locked(&self.requests).push(line.to_owned());
         let verb = line.split(' ').next().unwrap_or_default();
         let gate = locked(&self.verbs).get(verb).cloned();
@@ -249,9 +249,9 @@ impl Upstream {
             "put" => Some(self.puts.answer(line)),
             // This upstream has no placements.
             "place" => Some("none".to_owned()),
-            // Nor images: it answers as a node of the release before them, and the mount asks
-            // `flat` instead.
-            "image" => Some("refused unknown request".to_owned()),
+            // Nor images, nor fills of trees: it answers as a node of the release before them, and
+            // the mount asks `flat` instead, or fills the manifests of a tree one at a time.
+            "image" | "fill-tree" => Some("refused unknown request".to_owned()),
             "mounted" => Some("[]".to_owned()),
             "pin" => {
                 Self::enter(&self.pins, &self.pins_changed);

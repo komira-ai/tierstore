@@ -54,7 +54,7 @@ impl Store {
     }
 
     fn waves(&self, root: &TreeDigest, width: usize) -> Result<Vec<TreeEntry>, TreeError> {
-        flatten_in_waves(root, width, |digest| self.get(digest))
+        flatten_in_waves(root, width, |digest, _| self.get(digest))
     }
 
     /// A chain of `levels` manifests, each holding one directory `d` that is the next, the last
@@ -205,6 +205,13 @@ impl<'a> Rounds<'a> {
         self.in_flight.fetch_sub(1, Ordering::SeqCst);
         got
     }
+
+    /// [`Rounds::fetch`] of a manifest the flatten says is of the level `at`, which must be the
+    /// level the manifest is listed at.
+    fn fetch_at(&self, digest: &TreeDigest, at: usize) -> Result<Vec<u8>, String> {
+        assert_eq!(self.level[digest], at, "the level the fetch was given");
+        self.fetch(digest)
+    }
 }
 
 /// Asserts that a tree of 5 levels of distinct manifests, 1, 2, 4, 8 and 16 of them, takes 5
@@ -228,7 +235,7 @@ fn a_tree_costs_one_round_of_fetches_for_each_level() {
     let _ = store.take_asked();
 
     let rounds = Rounds::new(&store, &root, WIDTH);
-    let entries = flatten_in_waves(&root, WIDTH, |digest| rounds.fetch(digest));
+    let entries = flatten_in_waves(&root, WIDTH, |digest, at| rounds.fetch_at(digest, at));
     assert_eq!(entries.unwrap(), serial);
     assert!(!rounds.gave_up.load(Ordering::SeqCst));
     assert_eq!(rounds.rounds.load(Ordering::SeqCst), 5);
@@ -243,7 +250,7 @@ fn a_level_is_fetched_by_at_most_width_at_once() {
     let mut store = Store::default();
     let root = store.binary(4, "");
     let rounds = Rounds::new(&store, &root, 3);
-    let entries = flatten_in_waves(&root, 3, |digest| rounds.fetch(digest));
+    let entries = flatten_in_waves(&root, 3, |digest, at| rounds.fetch_at(digest, at));
     assert_eq!(entries.unwrap(), store.serial(&root).unwrap());
     assert!(!rounds.gave_up.load(Ordering::SeqCst));
     assert_eq!(rounds.most.load(Ordering::SeqCst), 3);
@@ -349,7 +356,10 @@ fn the_entry_limit_is_judged_as_flatten_judges_it() {
     let leaf = full_leaf(&mut store);
     let dirs: Vec<String> = (0..4095).map(|i| dir(&format!("{i:05}"), &leaf)).collect();
     let full = store.put(manifest(&dirs));
-    let held = gather(&full, WIDTH, &|digest: &TreeDigest| store.get(digest)).unwrap();
+    let held = gather(&full, WIDTH, &|digest: &TreeDigest, _: usize| {
+        store.get(digest)
+    })
+    .unwrap();
     assert_eq!(held.len(), 2);
     let mut children = dirs.clone();
     children.push(file("zzzzz", 1));
@@ -378,7 +388,7 @@ fn a_chain_of_wide_manifests_is_refused_as_the_entries_pass_the_limit() {
         levels.push(TreeDigest::of(text.as_bytes()));
     }
     let asked = AtomicUsize::new(0);
-    let fetch = |digest: &TreeDigest| -> Result<Vec<u8>, String> {
+    let fetch = |digest: &TreeDigest, _: usize| -> Result<Vec<u8>, String> {
         asked.fetch_add(1, Ordering::SeqCst);
         let level = levels.iter().position(|d| d == digest).unwrap();
         let next = level.checked_sub(1).map(|n| &levels[n]);
@@ -403,7 +413,7 @@ fn a_fetch_that_panics_on_a_helper_panics_the_flatten() {
     let other = store.put(manifest(&[file("g", 1)]));
     let root = store.put(manifest(&[dir("a", &leaf), dir("b", &other)]));
     let begun = AtomicUsize::new(0);
-    let fetch = |digest: &TreeDigest| -> Result<Vec<u8>, String> {
+    let fetch = |digest: &TreeDigest, _: usize| -> Result<Vec<u8>, String> {
         if *digest != root {
             begun.fetch_add(1, Ordering::SeqCst);
             if std::thread::current().name() == Some(HELPER) {
