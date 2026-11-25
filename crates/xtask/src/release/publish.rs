@@ -198,8 +198,14 @@ pub fn publish(
     create.extend(files.iter().map(|f| dir.join(f).display().to_string()));
     let mut attempt = 1;
     while let Err(e) = gh.run(&create) {
-        if attempt == CREATE_ATTEMPTS || !server_error(&e.to_string()) {
+        if !server_error(&e.to_string()) {
             return Err(e);
+        }
+        if attempt == CREATE_ATTEMPTS {
+            return Err(Error::Failed(format!(
+                "{} (the last of {CREATE_ATTEMPTS} attempts, each a server error)",
+                e.to_string().trim_end()
+            )));
         }
         // GitHub may have made the draft, and some of its assets, before it failed: the next
         // attempt starts from no draft, as the first did.

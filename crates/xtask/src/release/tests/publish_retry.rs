@@ -73,7 +73,13 @@ fn three_server_errors_fail_the_publish_with_the_last_and_publish_nothing() {
         (failed_with("504"), true),
     ]);
     let e = publish_in(&gh, &dir, "v0.3.0").expect_err("three server errors");
-    assert_eq!(e.to_string(), failed_with("504"));
+    assert_eq!(
+        e.to_string(),
+        format!(
+            "{} (the last of 3 attempts, each a server error)",
+            failed_with("504")
+        )
+    );
     assert_eq!(verbs(&gh), ["create", "delete", "create", "create"]);
     // The draft the last attempt left is the next run's to replace
     // (`publish_replaces_a_draft_a_failed_run_left`); nothing is published.
@@ -99,6 +105,22 @@ fn a_create_github_refuses_with_a_client_error_is_not_tried_again() {
         assert_eq!(verbs(&gh), ["create"], "{message}");
         assert!(gh.releases.borrow().is_empty());
     }
+}
+
+#[test]
+fn a_client_error_after_a_server_error_ends_the_attempts() {
+    // Catches: a 4xx on the second attempt tried a third time, or reported as the server
+    // error of the first.
+    let dir = scratch("publish-retry-then-422");
+    assets(&dir);
+    let gh = FakeGh::default();
+    gh.create_fails
+        .borrow_mut()
+        .extend([(failed_with("500"), false), (failed_with("422"), false)]);
+    let e = publish_in(&gh, &dir, "v0.3.0").expect_err("client error");
+    assert_eq!(e.to_string(), failed_with("422"));
+    assert_eq!(verbs(&gh), ["create", "create"]);
+    assert!(gh.releases.borrow().is_empty());
 }
 
 #[test]
