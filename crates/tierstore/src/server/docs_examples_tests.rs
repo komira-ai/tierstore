@@ -34,6 +34,7 @@ const PAGES: &[(&str, &[Shape])] = &[
             Shape::Combined,
             Shape::Cache,
             Shape::Cold,
+            Shape::Cold,
         ],
     ),
 ];

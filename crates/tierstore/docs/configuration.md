@@ -351,25 +351,6 @@ Both tables have `kind` and the keys it needs. `kind` is `memory` (no other key)
 | `hot_store.conditional_delete` | boolean; `false` for `s3`, `true` for `memory` and `dir` | whether a conditional delete of the hot tier is sent as a DELETE with `If-Match` (`true`) or as a read of the tag before a plain DELETE (`false`). Set it `true` for a store that enforces `If-Match` on a DELETE, such as Amazon S3. `false` is refused for `memory` and `dir`, which delete conditionally in one atomic step. tierstore does not ask the store; see [operations](operations.md#conditional-delete) |
 | `cold_store.conditional_delete` | boolean; as for the hot tier | the same, for the cold tier |
 
-### AWS credentials
-
-An `s3` tier in an AWS account signs with the credentials of an IAM role, found as the AWS SDKs find them, when its `credential_source` names a source. Each source reads the variables AWS defines for it, from the environment of the process (the service unit's `Environment=`, or what ECS, EKS or the host sets), and nothing else of the environment is read:
-
-| `credential_source` | What it reads |
-|---|---|
-| `environment` | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and, for temporary keys, `AWS_SESSION_TOKEN` |
-| `profile` | the profile `credential_profile` names (or `AWS_PROFILE`, or `default`) of the shared credentials file `AWS_SHARED_CREDENTIALS_FILE` and the shared config file `AWS_CONFIG_FILE` (one of the two is enough; `~/.aws` is not looked in, since `HOME` is not read and the service has no home to read): `aws_access_key_id` and `aws_secret_access_key` (and `aws_session_token`), or `role_arn` with `web_identity_token_file` (and `role_session_name`). A profile that takes its role with `source_profile` or `credential_source`, `credential_process`, and IAM Identity Center (`sso_session`, `sso_start_url`) are refused by name |
-| `web-identity` | the token of `AWS_WEB_IDENTITY_TOKEN_FILE`, exchanged with STS `AssumeRoleWithWebIdentity` for the credentials of the role `AWS_ROLE_ARN` (session `AWS_ROLE_SESSION_NAME`), as EKS sets it up for a service account with an IAM role. STS is asked at `AWS_ENDPOINT_URL_STS`, or at the regional endpoint of `AWS_REGION`, `AWS_DEFAULT_REGION` or the tier's `region`. The token file is read again at each exchange |
-| `container` | the credentials endpoint of an ECS task (`AWS_CONTAINER_CREDENTIALS_RELATIVE_URI`) or of EKS Pod Identity (`AWS_CONTAINER_CREDENTIALS_FULL_URI`, `https`, or `http` to a loopback address or the agent's), with the token of `AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE` (read again at each fetch) or `AWS_CONTAINER_AUTHORIZATION_TOKEN` |
-| `instance-metadata` | the role of the EC2 instance profile, from the instance metadata service with an IMDSv2 session token; there is no fall-back to IMDSv1. `AWS_EC2_METADATA_SERVICE_ENDPOINT` (or `AWS_EC2_METADATA_SERVICE_ENDPOINT_MODE=IPv6`) moves it, and `AWS_EC2_METADATA_DISABLED=true` turns it off. In a container on EC2 the instance's metadata hop limit must let the reply reach it (2 for a container with its own network) |
-| `auto` | the first of the five above, in that order, that is set up |
-
-`auto` passes over a source that is not set up (none of its variables is set, no file has the profile) and stops at one that is set up and fails, with that source's error, so a broken setup is never answered with another role. The instance metadata service can only be known to be there by asking it: when `auto` comes to it and it does not answer with credentials, the error says why each source was passed over. The source `auto` settles on is the one every renewal asks.
-
-The credentials are fetched by the first request to the tier (a storage node's start reads the format object of its hot tier, so for the hot tier that is at start), not when the file is loaded. Temporary credentials (all but static keys) are kept until 5 minutes before they expire (half their lifetime, for credentials that last under 10 minutes), and the next request then fetches new ones; one fetch serves all the requests waiting on it. A fetch that fails while the credentials kept have more than a minute left is logged as a warning, the kept ones go on signing, and the next fetch is tried 10 seconds later; while a renewal is in flight, requests sign with the kept ones and do not wait for it. A fetch that fails with no credentials that may sign is not tried again for 10 seconds: the requests in between fail with its error. A request is never signed with credentials that have a minute or less left: it fails instead, and the client is answered 503. The session token is sent with each request, signed (`x-amz-security-token`).
-
-The process logs which source gave credentials and when they expire, never a key, a secret, a session token or a token of a file; no message carries one.
-
 Only `[hot_store]` has these, since only a process with a hot tier has them:
 
 | Key | Type, default | What |
@@ -436,6 +417,25 @@ Only `[hot_store]` has these, since only a process with a hot tier has them:
 | `hot_store.deadline_margin` | duration, `10s` | the time taken off `departure` for `is_live`, and the time `Bounded` must find left before it sends a destroying call, which it also cuts at that time. The puts and deletes made on entries use `Bounded` |
 
 The water marks are percents from 1 to 100. The start refuses `low_water` at or above `high_water`, `high_water` above `critical`, and a `usage_stale_after` at or below `lease_ttl`. It refuses a `tombstone_hold` below `lease_ttl` plus `lease_margin` and a `lock_lease` below 120 s. It refuses `retry_max` below `retry_min`, `step_retry_max` below `step_retry_min`, `delete_poll_max` or `delete_wait` below `delete_poll_min`, a `proxy_usage_stale_after` at or below `usage_interval`, a `held_ttl` that is set at or below `lease_ttl` or `departure`, and a value outside the range of its key, naming the key. It also refuses a `heartbeat` or a `deadline_margin` of zero, a `departure` under six times `heartbeat`, a `deadline_margin` over a quarter of `departure`, naming the values.
+
+## AWS credentials
+
+An `s3` tier in an AWS account signs with the credentials of an IAM role, found as the AWS SDKs find them, when its `credential_source` names a source. Each source reads the variables AWS defines for it, from the environment of the process (the service unit's `Environment=`, or what ECS, EKS or the host sets), and nothing else of the environment is read:
+
+| `credential_source` | What it reads |
+|---|---|
+| `environment` | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and, for temporary keys, `AWS_SESSION_TOKEN` |
+| `profile` | the profile `credential_profile` names (or `AWS_PROFILE`, or `default`) of the shared credentials file `AWS_SHARED_CREDENTIALS_FILE` and the shared config file `AWS_CONFIG_FILE` (one of the two is enough; `~/.aws` is not looked in, since `HOME` is not read and the service has no home to read): `aws_access_key_id` and `aws_secret_access_key` (and `aws_session_token`), or `role_arn` with `web_identity_token_file` (and `role_session_name`). A profile that takes its role with `source_profile` or `credential_source`, `credential_process`, and IAM Identity Center (`sso_session`, `sso_start_url`) are refused by name |
+| `web-identity` | the token of `AWS_WEB_IDENTITY_TOKEN_FILE`, exchanged with STS `AssumeRoleWithWebIdentity` for the credentials of the role `AWS_ROLE_ARN` (session `AWS_ROLE_SESSION_NAME`), as EKS sets it up for a service account with an IAM role. STS is asked at `AWS_ENDPOINT_URL_STS`, or at the regional endpoint of `AWS_REGION`, `AWS_DEFAULT_REGION` or the tier's `region`. The token file is read again at each exchange |
+| `container` | the credentials endpoint of an ECS task (`AWS_CONTAINER_CREDENTIALS_RELATIVE_URI`) or of EKS Pod Identity (`AWS_CONTAINER_CREDENTIALS_FULL_URI`, `https`, or `http` to a loopback address or the agent's), with the token of `AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE` (read again at each fetch) or `AWS_CONTAINER_AUTHORIZATION_TOKEN` |
+| `instance-metadata` | the role of the EC2 instance profile, from the instance metadata service with an IMDSv2 session token; there is no fall-back to IMDSv1. `AWS_EC2_METADATA_SERVICE_ENDPOINT` (or `AWS_EC2_METADATA_SERVICE_ENDPOINT_MODE=IPv6`) moves it, and `AWS_EC2_METADATA_DISABLED=true` turns it off. In a container on EC2 the instance's metadata hop limit must let the reply reach it (2 for a container with its own network) |
+| `auto` | the first of the five above, in that order, that is set up |
+
+`auto` passes over a source that is not set up (none of its variables is set, no file has the profile) and stops at one that is set up and fails, with that source's error, so a broken setup is never answered with another role. The instance metadata service can only be known to be there by asking it: when `auto` comes to it and it does not answer with credentials, the error says why each source was passed over. The source `auto` settles on is the one every renewal asks.
+
+The credentials are fetched by the first request to the tier (a storage node's start reads the format object of its hot tier, so for the hot tier that is at start), not when the file is loaded. Temporary credentials (all but static keys) are kept until 5 minutes before they expire (half their lifetime, for credentials that last under 10 minutes), and the next request then fetches new ones; one fetch serves all the requests waiting on it. A fetch that fails while the credentials kept have more than a minute left is logged as a warning, the kept ones go on signing, and the next fetch is tried 10 seconds later; while a renewal is in flight, requests sign with the kept ones and do not wait for it. A fetch that fails with no credentials that may sign is not tried again for 10 seconds: the requests in between fail with its error. A request is never signed with credentials that have a minute or less left: it fails instead, and the client is answered 503. The session token is sent with each request, signed (`x-amz-security-token`).
+
+The process logs which source gave credentials and when they expire, never a key, a secret, a session token or a token of a file; no message carries one.
 
 ## `[local_cache]`
 
