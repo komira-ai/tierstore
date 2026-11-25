@@ -250,6 +250,42 @@ pub(crate) struct Handed {
     pub(crate) control: Option<std::os::unix::net::UnixListener>,
 }
 
+impl Handed {
+    /// The offer in two parts: the file system's (the NFS front's sockets, their copies, and the
+    /// control socket), for the start of the NFS front, and the rest (the S3 and OCI sockets, their
+    /// copies, and the cache lock), for the fronts'. The copies of the rest are what a control
+    /// socket of the fronts offers a successor, which takes no NFS socket from it.
+    pub(crate) fn split_fs(self) -> (Self, Inherited) {
+        let Self {
+            mut inherited,
+            control,
+        } = self;
+        let (nfs_copies, copies) = std::mem::take(&mut inherited.copies)
+            .into_iter()
+            .partition(|socket| socket.front == super::Front::Nfs);
+        inherited.copies = copies;
+        let fs = Inherited {
+            s3: Vec::new(),
+            oci: Vec::new(),
+            nfs: std::mem::take(&mut inherited.nfs),
+            s3_addrs: Vec::new(),
+            oci_addrs: Vec::new(),
+            nfs_addrs: std::mem::take(&mut inherited.nfs_addrs),
+            copies: nfs_copies,
+            ready: None,
+            mount: None,
+            lock: None,
+        };
+        (
+            Self {
+                inherited: fs,
+                control,
+            },
+            inherited,
+        )
+    }
+}
+
 /// A close-on-exec copy of standard input, where the image that executed this one left its offer.
 ///
 /// # Errors

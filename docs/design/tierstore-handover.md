@@ -142,8 +142,9 @@ input, the one descriptor not close-on-exec. The new image reads the offer there
 `ready` or `bye`: the image that wrote it is gone), serves on the sockets, and takes the write role with the lock it was
 handed. An offer it refuses fails its start, and launchd's next start binds the addresses itself. A macOS build lists
 `handoff-exec-v1` for it. The NFS front's part (`Running::hand_to_image` and `Running::start_handed` in
-`server/treefs/nfs/run.rs`, with the `control <path>` line) is built for the one process that serves the file system, which
-serves it on Linux only so far.
+`server/treefs/nfs/run.rs`, with the `control <path>` line) is what the one process of a Mac whose file has an `fs`
+interface adds to that offer (`server/treefs/nfs/interface.rs`): it serves the file system there by its NFS front, as it
+serves it on Linux by FUSE.
 
 Not built yet: the proxy id that does not derive from a port. No package sets either key, and the macOS package is not to
 set `server.handoff_socket`: an update of a Mac is the hand-over to the next image when both releases list `handoff-exec-v1`

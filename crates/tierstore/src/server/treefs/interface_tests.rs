@@ -185,6 +185,7 @@ fn start(settings: CacheSettings, upstream: Arc<dyn Backend>, system: OnSystem) 
 fn start_on(settings: CacheSettings, upstream: Arc<dyn Backend>, platform: Platform) -> Started {
     let system = OnSystem {
         service: Some(Service::on(settings.fs.clone(), platform)),
+        nfs: None,
     };
     start(settings, upstream, system)
 }
@@ -736,6 +737,7 @@ async fn a_build_node_says_ready_to_its_service_manager_with_or_without_a_mount(
     let on_platform = platform(&manager, None, node.kernel(false));
     let system = OnSystem {
         service: Some(Service::on(None, on_platform)),
+        nfs: None,
     };
     let mut started = start(settings, memory(), system);
     let addresses = within("the node serves", &mut started.bound).await.unwrap();
@@ -758,6 +760,7 @@ async fn a_build_node_says_ready_to_its_service_manager_with_or_without_a_mount(
                 clock: Arc::new(Mono::new()),
             },
         )),
+        nfs: None,
     };
     let settings = settings_from_text(&node.node.text("", ""), QUICK)
         .unwrap()

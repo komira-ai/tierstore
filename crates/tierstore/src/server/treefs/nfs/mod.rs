@@ -11,9 +11,12 @@
 //! - `fdcache`: the open cache files of the files read lately.
 //! - `mount`: the mount and unmount commands, behind a runner a test replaces.
 //! - `run`: the process around it.
+//! - `interface`: the front as the `fs` interface of the one process, started and stopped by the
+//!   start of a build node (`cache_cli.rs`), with a core that calls the node's cache.
 //!
-//! The frontend is built and tested on every target; the process serves it on macOS only, where
-//! Linux has FUSE (`run.rs` of the parent).
+//! The frontend is built and tested on every target; a process serves it on macOS only (`tierstore
+//! fs`, and the one process whose file has an `fs` interface), where Linux has FUSE (`run.rs` and
+//! `interface.rs` of the parent).
 
 mod boot;
 pub(in crate::server) mod config;
@@ -21,6 +24,7 @@ mod error;
 mod fdcache;
 mod fs;
 mod handle;
+mod interface;
 mod mount;
 mod run;
 
@@ -35,5 +39,7 @@ mod wire_tests;
 
 #[cfg(not(target_os = "linux"))]
 pub(in crate::server) use error::NfsError;
+#[cfg(any(target_os = "macos", test))]
+pub(in crate::server) use interface::{NfsServed, NfsService};
 #[cfg(not(target_os = "linux"))]
 pub(in crate::server) use run::serve;

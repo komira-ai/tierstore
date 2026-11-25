@@ -1,5 +1,7 @@
 //! The process of `tierstore fs` on macOS: the neutral start (`start.rs`), the NFS and MOUNT
-//! protocols on a loopback socket, the mount, and the wait for the signal that ends it.
+//! protocols on a loopback socket, the mount, and the wait for the signal that ends it. The `fs`
+//! interface of the one process starts and leaves the same front (`interface.rs`), with a core that
+//! calls the node's cache, and no hand-off socket of its own.
 //!
 //! A start, in order: the mount user's number is found; if `fs.nfs.handoff_socket` is given, a
 //! running instance is asked for its listening socket (`handoff`); the neutral start is done (the
@@ -32,7 +34,7 @@
 //! `fs.nfs.handoff_ready_wait` after `done`, this one has handed nothing over: it serves on, takes
 //! attaches again, and binds its control socket again where the next had replaced it.
 //!
-//! On a Mac the process can hand over to the next image of its own program instead
+//! On a Mac the one process hands over to the next image of its own program instead
 //! (`docs/design/one-service.md` section 3.4, `handoff/exec.rs`): [`Running::hand_to_image`] stops
 //! accepting (the listening socket stays open, so new connections wait in its backlog), answers the
 //! requests it has read, shuts down the write side of each connection and waits for the clients to
@@ -78,7 +80,7 @@ pub(super) type Serve = for<'a> fn(
 ) -> BoxFuture<'a, std::io::Result<()>>;
 
 /// The server of the protocol.
-fn handle<'a>(
+pub(super) fn handle<'a>(
     listener: &'a NFSTcpListener<TreeNfs>,
     ending: BoxFuture<'static, ()>,
 ) -> BoxFuture<'a, std::io::Result<()>> {
@@ -158,13 +160,7 @@ impl Running {
     ///
     /// # Errors
     /// As [`Running::start`].
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the one process serves the fs interface on Linux; its start on macOS serves the NFS front from a handed offer (one-service.md section 3.4)"
-        )
-    )]
+    #[cfg(test)]
     pub(super) async fn start_handed(
         settings: &FsSettings,
         runner: Arc<dyn Runner>,
@@ -174,7 +170,7 @@ impl Running {
         handed: Handed,
     ) -> Result<Self, NfsError> {
         let ways = (runner, euid, patience, epoch);
-        Self::start_from(settings, ways, handle, Some(handed)).await
+        Self::start_from((settings, &Reach::Socket), ways, handle, Some(handed)).await
     }
 
     /// [`Running::start`], with `serve` as what serves the listening socket.
@@ -189,16 +185,20 @@ impl Running {
         epoch: u32,
         serve: Serve,
     ) -> Result<Self, NfsError> {
-        Self::start_from(settings, (runner, euid, patience, epoch), serve, None).await
+        let ways = (runner, euid, patience, epoch);
+        Self::start_from((settings, &Reach::Socket), ways, serve, None).await
     }
 
-    /// [`Running::start_serving`], from what `handed` holds when the image before this one handed
-    /// it over.
+    /// [`Running::start_serving`], with a core that asks the node's cache and tree store by
+    /// `reach` (the fill socket of `tierstore fs`, or calls of the one process that holds them),
+    /// and from what `handed` holds when the image before this one handed it over. With `reach`
+    /// of calls it runs on a thread that may block: the attachments are made again through the
+    /// cache, whose answers are worked out on the runtime.
     ///
     /// # Errors
     /// As [`Running::start`].
-    async fn start_from(
-        settings: &FsSettings,
+    pub(super) async fn start_from(
+        (settings, reach): (&FsSettings, &Reach),
         (runner, euid, patience, epoch): (Arc<dyn Runner>, u32, Option<Patience>, u32),
         serve: Serve,
         handed: Option<Handed>,
@@ -230,12 +230,7 @@ impl Running {
             }
             (None, None) => (None, None),
         };
-        let setup = Setup::start(
-            (settings, &Reach::Socket),
-            false,
-            Identity::Boot(epoch),
-            control,
-        )?;
+        let setup = Setup::start((settings, reach), false, Identity::Boot(epoch), control)?;
         let reopened = setup.reopened;
         let listen = |source| NfsError::Listen {
             address: nfs.listen,
@@ -412,13 +407,6 @@ impl Running {
     ///
     /// # Errors
     /// [`NfsError::Start`] when the control socket's descriptor cannot be copied.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the one process serves the fs interface on Linux; on macOS it hands its NFS front over (one-service.md section 3.4)"
-        )
-    )]
     pub(super) async fn hand_to_image(mut self) -> Result<Handing, NfsError> {
         // Taken once: this consumes the instance.
         let _ = self.next.take().map(|next| next.send(()));
@@ -704,6 +692,10 @@ mod exec_tests;
 #[cfg(test)]
 #[path = "handoff_tests.rs"]
 mod handoff_tests;
+// The `fs` interface of the one process (`interface.rs`), over the fake mount command of `tests`.
+#[cfg(test)]
+#[path = "interface_tests.rs"]
+mod interface_tests;
 #[cfg(test)]
 #[path = "ready_tests.rs"]
 mod ready_tests;

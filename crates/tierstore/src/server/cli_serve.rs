@@ -18,8 +18,8 @@ use super::drain::late_of;
 use super::first_beat::wait_first_beat;
 use super::first_format::first_format;
 use super::handoff::{
-    Front, Handoff, HandoffError, Inherited, MAX_SOCKETS, Offer, Offered, Own, Socket, Want,
-    check_control_path, offered, read_handed, take,
+    Front, Handoff, HandoffError, Inherited, MAX_SOCKETS, Offer, Offered, Socket, Want,
+    check_control_path, offered, take,
 };
 use super::listen::{bind_all_with, duplicates, local_addrs};
 use super::lock::Received;
@@ -335,21 +335,11 @@ pub(super) struct Bound {
     pub(super) lock: Option<Received>,
 }
 
-/// The offer a start was handed by the image it was executed from (`handoff/exec.rs`): the
-/// descriptor it is on, and the path of the start's cache lock, if it has a cache.
-pub(super) struct HandedOffer<'a> {
-    /// The descriptor of the offer: the start's standard input, as it found it.
-    pub(super) fd: std::os::fd::OwnedFd,
-    /// The lock file of the start's cache.
-    pub(super) lock: Option<&'a std::path::Path>,
-}
-
 /// Sockets a start has already got before [`bind_fronts`].
-pub(super) enum Got<'a> {
-    /// The offer the image this start was executed from handed over.
-    Handed(HandedOffer<'a>),
-    /// The sockets of the running instance, already accepted: the start of a switch accepts them
-    /// once it holds the mount ([`ask_sockets`]).
+pub(super) enum Got {
+    /// The sockets of the running instance, already accepted (the start of a switch accepts them
+    /// once it holds the mount, [`ask_sockets`]), or those of the offer the image this start was
+    /// executed from handed over, read and checked as a taker checks an offer.
     Taken(Box<Inherited>),
 }
 
@@ -387,11 +377,10 @@ fn before_asking(handoff: &Handoff, sockets: usize) -> Result<(), HandingError> 
 /// takes the sockets of the instance that answers on the control socket, if their addresses are
 /// `s3` and the OCI setup's, and binds with `bind_own` (and binds the OCI front) only where none
 /// answers; then it makes the control socket, offering a copy of each. Without `handoff` it binds
-/// and makes no control socket. With `handed` (a start executed by the image it replaces, on a
-/// Mac) the sockets, and the cache lock, are those of the offer that image handed over, checked as
-/// a taker checks an offer, and none is asked of a running instance; a control socket is then made
-/// as after a take. With sockets already `Taken` (the start of a switch, [`ask_sockets`]) none is
-/// asked either. `s3` is every address the S3 front serves, in the order
+/// and makes no control socket. With sockets already `Taken` (the start of a switch,
+/// [`ask_sockets`], or a start executed by the image it replaces, on a Mac, which read the offer
+/// that image handed over) none is asked of a running instance, and a control socket is then made
+/// as after a take. `s3` is every address the S3 front serves, in the order
 /// `bind_own` binds them: a node with a local cache adds loopback sockets to the configured ones.
 /// `backend` is what the OCI front reads from.
 ///
@@ -405,12 +394,12 @@ fn before_asking(handoff: &Handoff, sockets: usize) -> Result<(), HandingError> 
 ///
 /// # Errors
 /// A hand-off that is refused, mismatched, not ended in time, or whose control socket cannot be
-/// made, or a handed offer this start refuses ([`HandingError::Handoff`]); an address that `bind_own` cannot bind
+/// made ([`HandingError::Handoff`]); an address that `bind_own` cannot bind
 /// ([`HandingError::Start`]) or the OCI front cannot ([`HandingError::Oci`]); a socket whose
 /// address cannot be read or that cannot be copied ([`HandingError::Sockets`]).
 pub(super) async fn bind_fronts(
     handoff: Option<&Handoff>,
-    got: Option<Got<'_>>,
+    got: Option<Got>,
     s3: &[SocketAddr],
     bind_own: impl FnOnce() -> Result<Vec<TcpListener>, Error>,
     mut oci: Option<OciSetup>,
@@ -429,13 +418,6 @@ pub(super) async fn bind_fronts(
     };
     let taken = match (got, handoff) {
         (Some(Got::Taken(inherited)), _) => Some(*inherited),
-        (Some(Got::Handed(handed)), _) => {
-            let own = Own {
-                control: None,
-                lock: handed.lock,
-            };
-            Some(read_handed(handed.fd, &want, &own).await?.inherited)
-        }
         (None, Some(handoff)) => take(handoff, &want).await?,
         (None, None) => None,
     };
