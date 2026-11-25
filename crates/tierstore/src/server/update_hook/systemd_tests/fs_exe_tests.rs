@@ -3,6 +3,7 @@
 //! named in the detail with the release it still runs and the one the update installed.
 
 use std::path::Path;
+use std::process::ExitCode;
 
 use crate::server::update_hook::{
     Instance, Marker, Reason, Record, SERVICE_BINARY, Step, UnitState,
@@ -12,6 +13,8 @@ use super::fake::{
     NEW, NEWER, OLD, SystemdFake, assert_failed, assert_ok, detail, file_of, fs_pid, params,
     version_of,
 };
+
+use super::cutover_tests::on_the_command_line;
 
 use Step::{Cleanup, Cutover, Prepare, Verify};
 
@@ -294,4 +297,79 @@ fn a_record_without_fs_keys_verifies_as_before() {
     assert_ok(&done);
     assert_eq!(detail(&done), serves(NEW));
     assert!(process_looks(&fake).is_empty());
+}
+
+/// Asserts the same through the verb hostkeeper runs, `update-hook verify --params <file>`, with
+/// the systemd steps over the fake: a new fs instance whose process runs the replaced binary
+/// exits 1 with the report line `not_ready`, class `release`, reversible, and the detail naming
+/// the unit, the pid, both paths and both files, exactly; one whose binary cannot be read exits 1
+/// with `host_failed`, class `environment`; once the process runs the installed binary the verb
+/// exits 0 with no reason. Catches a check whose failure is lost or changed on its way to the
+/// exit status and the report line.
+#[test]
+fn update_hook_verify_on_the_command_line_fails_a_replaced_fs_binary() {
+    let fake = SystemdFake::fs_installed();
+    let p = params(NEW, Some(OLD));
+    fake.drive(&p, &[Prepare, Cutover]);
+    fake.set_fs_unit(Instance::B, UnitState::Active, Some(OLD));
+    let (old, new) = (file_of(Path::new(OLD)), file_of(Path::new(NEW)));
+    let (code, line) = on_the_command_line(&fake, "verify", "tierstore-hook-verify-replaced");
+    assert_eq!(format!("{code:?}"), format!("{:?}", ExitCode::from(1)));
+    assert_eq!(line["reason"], "not_ready", "{line}");
+    assert_eq!(line["class"], "release", "{line}");
+    assert_eq!(line["reversible"], true, "{line}");
+    assert_eq!(line["promotion_pending"], false, "{line}");
+    assert_eq!(
+        line["detail"],
+        format!(
+            "tierstore-fs@b (pid 4102) runs {SERVICE_BINARY} (deleted) (device {}, inode {}), not \
+             the binary the update installed, {SERVICE_BINARY} (device {}, inode {}): it is still \
+             on an older release",
+            old.dev, old.ino, new.dev, new.ino
+        )
+    );
+    assert!(!fake.record().has(Marker::Verified));
+
+    fake.set_fs_unit(Instance::B, UnitState::Active, Some(NEW));
+    fake.fail_on(Some("fs_proc.exe"));
+    let (code, line) = on_the_command_line(&fake, "verify", "tierstore-hook-verify-unreadable");
+    fake.fail_on(None);
+    assert_eq!(format!("{code:?}"), format!("{:?}", ExitCode::from(1)));
+    assert_eq!(line["reason"], "host_failed", "{line}");
+    assert_eq!(line["class"], "environment", "{line}");
+    assert_eq!(line["reversible"], true, "{line}");
+    assert_eq!(
+        line["detail"],
+        "the binary that tierstore-fs@b (pid 4102) runs cannot be read: host: injected failure"
+    );
+
+    let (code, line) = on_the_command_line(&fake, "verify", "tierstore-hook-verify-installed");
+    assert_eq!(format!("{code:?}"), format!("{:?}", ExitCode::from(0)));
+    assert!(line.get("reason").is_none(), "{line}");
+    assert_eq!(line["detail"], serves(NEW));
+    assert!(fake.record().has(Marker::Verified));
+}
+
+/// Asserts that through the verb, `update-hook verify --params <file>`, an update that left the
+/// fs process alone exits 0 with no reason, reversible, and the report line's detail says first,
+/// exactly, which release the fs process still runs and which the update installed. Catches the
+/// sentence lost between the step and the line hostkeeper logs.
+#[test]
+fn update_hook_verify_on_the_command_line_names_both_releases_of_a_left_alone_fs_process() {
+    let fake = left_alone();
+    let (code, line) = on_the_command_line(&fake, "verify", "tierstore-hook-verify-left-alone");
+    assert_eq!(format!("{code:?}"), format!("{:?}", ExitCode::from(0)));
+    assert!(line.get("reason").is_none(), "{line}");
+    assert_eq!(line["reversible"], true, "{line}");
+    assert_eq!(
+        line["detail"],
+        format!(
+            "tierstore-fs@a (pid 4101) still runs release {}, and the update installed {}: it was \
+             left on its release; {}",
+            version_of(OLD),
+            version_of(NEW),
+            serves(NEW)
+        )
+    );
+    assert!(fake.record().has(Marker::Verified));
 }
