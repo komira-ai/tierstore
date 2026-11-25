@@ -141,3 +141,7 @@ impl Fetched {
         said
     }
 }
+
+#[cfg(test)]
+#[path = "fetched_tests.rs"]
+mod tests;

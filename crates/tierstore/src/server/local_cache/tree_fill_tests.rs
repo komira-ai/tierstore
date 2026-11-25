@@ -222,20 +222,27 @@ async fn a_directory_the_cache_holds_is_not_gone_into() {
 
 /// Asserts that a directory the tree holds in two places is filled and counted once: one new
 /// manifest under two names of the root, and again one level further down, asked of the upstream
-/// once and counted at the level it was first met.
+/// once and counted at the level it was first met; an empty directory beside them is filled and
+/// has nothing below it.
 #[tokio::test]
 async fn a_directory_met_twice_is_filled_once() {
     let rig = Rig::new("ttree-fill-twice");
     let mut upstream = Upstream::of(&rig);
     let shared = upstream.put(&[file("x", 1)]).await;
+    let empty = upstream.put(&[]).await;
     let mid = upstream.put(&[dir("again", &shared)]).await;
     let root = upstream
-        .put(&[dir("a", &shared), dir("b", &shared), dir("m", &mid)])
+        .put(&[
+            dir("a", &shared),
+            dir("b", &shared),
+            dir("e", &empty),
+            dir("m", &mid),
+        ])
         .await;
     let filled = rig.cache.fill_tree(&root, LONG).await.unwrap();
-    assert_eq!(filled.levels, [1, 2]);
+    assert_eq!(filled.levels, [1, 3]);
     assert_eq!(heads_of(&rig, &shared), 1);
-    assert_eq!(rig.calls(Op::Head), 3);
+    assert_eq!(rig.calls(Op::Head), 4);
     assert_eq!(from_the_cache(&rig, &root), upstream.flattened(&root));
 }
 

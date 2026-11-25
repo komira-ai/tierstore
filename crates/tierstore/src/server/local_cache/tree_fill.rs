@@ -128,13 +128,17 @@ const LIMITS: Limits = Limits {
 /// The manifest in the file at `path`, of `digest`: at most [`MAX_MANIFEST_BYTES`] and one more
 /// byte read, so that a larger file is refused by its size and not read whole.
 fn read_manifest(path: &std::path::Path, digest: &TreeDigest) -> Result<TreeManifest, String> {
-    let mut bytes = Vec::new();
-    let file = std::fs::File::open(path).map_err(|why| why.to_string())?;
-    let _ = file
-        .take(MAX_MANIFEST_BYTES as u64 + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|why| why.to_string())?;
+    let bytes = bounded(path).map_err(|why| why.to_string())?;
     parse_manifest(&bytes, digest).map_err(|why| why.to_string())
+}
+
+/// The bytes of the file at `path`, at most [`MAX_MANIFEST_BYTES`] and one more.
+fn bounded(path: &std::path::Path) -> std::io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    let _ = std::fs::File::open(path)?
+        .take(MAX_MANIFEST_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    Ok(bytes)
 }
 
 impl LocalCache {
