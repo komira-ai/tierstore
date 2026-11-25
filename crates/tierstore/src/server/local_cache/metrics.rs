@@ -659,7 +659,8 @@ impl LocalCache {
     /// The text of `/metricz`: the counters, the bytes in the cache (the entries by extents
     /// counted by the bytes they have filled) and the free space of the file system now, then
     /// the counters of the entries by extents, then `tierstore_request_to_start_seconds` and the
-    /// families of what the mounts report of their attaches (`attaches`).
+    /// families of what the mounts report of their attaches (`attaches`), their descriptors
+    /// (`descriptors`) and their opens (`opens`).
     #[must_use]
     pub fn metrics(&self) -> String {
         let inner = &self.inner;

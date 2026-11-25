@@ -202,7 +202,9 @@ impl TreeNfs {
 
     /// The receiver of the fill of `id`: one blocking task fills a blob however many reads ask for
     /// it, so a client that is told JUKEBOX and asks again, or eight threads that read one cold
-    /// header, wait for the fill that is on and do not start another.
+    /// header, wait for the fill that is on and do not start another. That fill is the open of the
+    /// file, timed from the read that started it to the descriptor or its failure, and waiting
+    /// meanwhile (`core/opens.rs`).
     fn fill_of(&self, id: fileid3) -> watch::Receiver<Fill> {
         let mut filling = locked(&self.filling);
         if let Some(done) = filling.get(&id) {
@@ -215,10 +217,14 @@ impl TreeNfs {
             Arc::clone(&self.fds),
             Arc::clone(&self.filling),
         );
+        let timing = core.open_begins();
         // The blocking task starts now, not when the watcher is first polled.
         let blocking = tokio::task::spawn_blocking(move || {
-            let (file, _) = core.blob_file(id)?.ok_or(Errno::Io)?;
-            let file = Arc::new(file);
+            let mut timing = timing;
+            let got = core.blob_file(id, &mut timing);
+            let got = got.and_then(|file| file.ok_or(Errno::Io));
+            core.open_ends(timing, got.is_ok());
+            let file = Arc::new(got?.0);
             fds.insert(id, Arc::clone(&file));
             Ok::<_, Errno>(file)
         });
@@ -465,3 +471,7 @@ fn namespace(id: fileid3) -> bool {
 #[cfg(test)]
 #[path = "fs_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "opens_tests.rs"]
+mod opens_tests;

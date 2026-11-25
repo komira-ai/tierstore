@@ -377,6 +377,7 @@ impl Fills for InProcess {
             Report::Fetched(fetches) => self.cache.manifests_fetched(&fetches),
             Report::Levels(levels) => self.cache.tree_levels(levels),
             Report::Descriptors(descriptors) => self.cache.descriptors_reported(descriptors),
+            Report::Opens(opens) => self.cache.opens_reported(*opens),
         }
     }
 

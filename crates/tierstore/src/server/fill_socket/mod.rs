@@ -49,8 +49,9 @@
 //! in one line of JSON (see [`mount`]). A `started` (the mount first looked into a tree, see
 //! `local_cache/starts.rs`) is answered `ok`, by a node with no tree store too, and so are an
 //! `attached`, a `fetched` and a `levels` (what the mount reports of its attaches, see
-//! `local_cache/attaches.rs`), and a `descriptors` (what it reports of its open cache files, see
-//! `local_cache/descriptors.rs`).
+//! `local_cache/attaches.rs`), a `descriptors` (what it reports of its open cache files, see
+//! `local_cache/descriptors.rs`), and an `opens` (how long its opens of files took, see
+//! `local_cache/opens.rs`).
 
 pub(in crate::server) mod mount;
 pub(in crate::server) mod put;
@@ -307,6 +308,10 @@ async fn session((cache, trees): (LocalCache, Option<TreeStore>), stream: UnixSt
             }
             Ok(Request::Descriptors(report)) => {
                 cache.descriptors_reported(report);
+                "ok".to_owned()
+            }
+            Ok(Request::Opens(report)) => {
+                cache.opens_reported(*report);
                 "ok".to_owned()
             }
             Err(refusal) => format!("refused {refusal}"),

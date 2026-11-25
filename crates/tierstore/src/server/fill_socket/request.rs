@@ -21,6 +21,7 @@
 //! fetched <cache> <filled> <failed> <ms> <n>.. where the manifests of a read of a tree came from
 //! levels <levels> <rounds>                     the levels of a read of a tree, its rounds of fills
 //! descriptors <mount> <process> <held> <short> the cache files the mount holds open; its opens short of descriptors
+//! opens <mount> <process> <waiting> <n>..      how long the mount's opens took; how many wait now
 //! ```
 //!
 //! A digest is sixty-four lower-case hex digits; a number is decimal digits only; a mount and a
@@ -43,7 +44,10 @@
 //! numbers. The words
 //! of a `descriptors` are those of
 //! [`Descriptors`](crate::server::local_cache::descriptors::Descriptors): a mount name and two
-//! numbers.
+//! numbers. The words of an `opens` are those of
+//! [`Opens`](crate::server::local_cache::opens::Opens): a mount name, two numbers, and for each
+//! pair of an outcome and a source the milliseconds and one number for each bucket of the
+//! histogram.
 
 use std::path::PathBuf;
 
@@ -52,6 +56,7 @@ use crate::journal::is_reserved;
 use crate::server::local_cache::attaches::{Attach, Fetches, Levels};
 use crate::server::local_cache::descriptors::Descriptors;
 use crate::server::local_cache::layout::is_digest;
+use crate::server::local_cache::opens::Opens;
 use crate::server::local_cache::trees::{Location, PlacementId, placement_id};
 
 /// The longest line a request may be, in bytes: a `touch` of about a thousand digests.
@@ -112,6 +117,9 @@ pub(super) enum Request {
     /// The cache files the mount holds open, and the opens short of descriptors since its last
     /// report (`local_cache/descriptors.rs`).
     Descriptors(Descriptors),
+    /// How long the opens of files of the mount took, and how many wait now
+    /// (`local_cache/opens.rs`); boxed, as it is far larger than the other requests.
+    Opens(Box<Opens>),
 }
 
 /// A request of the mount about the placements of the node (module `mount`).
@@ -274,6 +282,9 @@ pub(super) fn parse(line: &[u8]) -> Result<Request, Refusal> {
             .ok_or(Refusal::Malformed),
         "descriptors" => Descriptors::parse(rest)
             .map(Request::Descriptors)
+            .ok_or(Refusal::Malformed),
+        "opens" => Opens::parse(rest)
+            .map(|opens| Request::Opens(Box::new(opens)))
             .ok_or(Refusal::Malformed),
         "mounted" => (text == "mounted")
             .then_some(Request::Mount(MountRequest::Mounted))

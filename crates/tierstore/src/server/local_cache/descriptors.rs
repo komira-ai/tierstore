@@ -87,7 +87,7 @@ impl Descriptors {
 }
 
 /// The number `word` writes in decimal digits, with no sign; none for anything else.
-fn number(word: &str) -> Option<u64> {
+pub(super) fn number(word: &str) -> Option<u64> {
     if word.is_empty() || !word.bytes().all(|byte| byte.is_ascii_digit()) {
         return None;
     }

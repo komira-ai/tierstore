@@ -419,7 +419,12 @@ impl Running {
             .listener_fd()
             .map_err(io("copying the control socket"))?;
         let core = Arc::clone(&self._setup.core);
-        let held = tokio::task::spawn_blocking(move || core.hold(true)).await;
+        // Every request read is answered: the node is told of the opens of this image.
+        let held = tokio::task::spawn_blocking(move || {
+            core.hold(true);
+            core.report_opens();
+        })
+        .await;
         held.map_err(|why| io("holding the file system")(std::io::Error::other(why.to_string())))?;
         let kept = self
             .kept

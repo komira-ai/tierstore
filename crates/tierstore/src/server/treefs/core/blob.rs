@@ -45,6 +45,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
 use crate::server::local_cache::blob_path;
+use crate::server::local_cache::opens::Source;
 use crate::tree_manifest::{BlobSource, EntryKind, TreeDigest, TreeEntry};
 
 use super::super::attach::Failure;
@@ -315,13 +316,15 @@ impl Core {
         }
     }
 
-    /// The cache file of a blob, filled by `until` if the cache does not hold it; why not, in the
-    /// words of the fill socket's answer, or `io: ` (`no descriptor: `) and what the system said.
-    /// A file that cannot be opened for lack of descriptors is not filled.
+    /// The cache file of a blob, filled by `until` if the cache does not hold it, which sets
+    /// `asked` to [`Source::Filled`]; why not, in the words of the fill socket's answer, or `io: `
+    /// (`no descriptor: `) and what the system said. A file that cannot be opened for lack of
+    /// descriptors is not filled.
     pub(super) fn cache_file(
         &self,
         (digest, size, source): (&TreeDigest, u64, Option<&BlobSource>),
         until: Until<'_>,
+        asked: &mut Source,
     ) -> Result<Arc<File>, String> {
         let sha = digest.to_string();
         let path = blob_path(&self.settings.cache_path, &sha);
@@ -330,6 +333,7 @@ impl Core {
             Err(error) if lacks_descriptors(&error).is_some() => return Err(unopened(&error)),
             Err(_) => {}
         }
+        *asked = Source::Filled;
         let filled = match source {
             Some(source) => {
                 self.fills
@@ -344,14 +348,17 @@ impl Core {
     }
 
     /// The span of the pack that a file of a placed tree is, which the node fills first if it does
-    /// not hold it; why not, as [`Core::cache_file`].
+    /// not hold it: asked of the node, which sets `asked` to [`Source::Filled`]; why not, as
+    /// [`Core::cache_file`].
     fn span_file(
         &self,
         (digest, size, source): (&TreeDigest, u64, Option<&BlobSource>),
         until: Until<'_>,
+        asked: &mut Source,
     ) -> Result<FileBytes, String> {
         let source = source.ok_or("the file has no source")?;
         let sha = digest.to_string();
+        *asked = Source::Filled;
         let (base, path) =
             self.fills
                 .span((&sha, size), (&source.key, source.offset), Some(until))?;
@@ -367,7 +374,8 @@ impl Core {
     /// span of the pack, which the tree store pins. A fill that fails for a reason that can pass
     /// is asked again while time is left before the one end of the open, `fs.fetch_timeout`
     /// after `begun` (module docs). The span a placed tree is given is kept with the tree
-    /// (`Loaded::keep_span`), for the opens that follow while its pack is open.
+    /// (`Loaded::keep_span`), for the opens that follow while its pack is open. `asked` is set to
+    /// [`Source::Filled`] once a try asks the node for the bytes (`core/opens.rs`).
     ///
     /// # Errors
     /// [`Errno::Io`] for bytes that cannot be had: recorded on the attachments of the tree and
@@ -377,17 +385,17 @@ impl Core {
         (loaded, number): (&Loaded, u64),
         entry: &TreeEntry,
         blob: (&TreeDigest, u64, Option<&BlobSource>),
-        begun: u64,
+        (begun, asked): (u64, &mut Source),
     ) -> Result<FileBytes, Errno> {
         let until = self.open_until(begun);
         let mut tries = 0;
         let reason = loop {
             tries += 1;
             let got = if loaded.tree.location().is_some() {
-                self.span_file(blob, until)
+                self.span_file(blob, until, asked)
                     .inspect(|bytes| loaded.keep_span(blob.0, bytes))
             } else {
-                self.cache_file(blob, until).map(|file| {
+                self.cache_file(blob, until, asked).map(|file| {
                     self.pin_once((loaded, number), blob.0);
                     FileBytes::whole(file, blob.1)
                 })

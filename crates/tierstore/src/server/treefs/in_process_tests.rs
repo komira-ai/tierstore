@@ -13,6 +13,7 @@ use super::InProcess;
 use crate::server::fill_socket;
 use crate::server::local_cache::attaches::{Attach, Fetches, Levels, Outcome};
 use crate::server::local_cache::descriptors::Descriptors;
+use crate::server::local_cache::opens::{Opens, Spans};
 use crate::server::local_cache::pack_testing::{Pack, blob_hex, fills, recency};
 use crate::server::local_cache::testing::{Rig, until};
 use crate::server::local_cache::trees::TreeStore;
@@ -452,9 +453,9 @@ fn reported(cache: &LocalCache) -> Vec<String> {
 }
 
 /// Asserts that each report made in process is in the cache's metrics when the call returns,
-/// with no thread or queue between: the metrics after `started`, `attached`, `fetched`, `levels`
-/// and `descriptors` are those of a cache told the same by its own calls, and differ from a cache told
-/// nothing.
+/// with no thread or queue between: the metrics after `started`, `attached`, `fetched`, `levels`,
+/// `descriptors` and `opens` are those of a cache told the same by its own calls, and differ from a
+/// cache told nothing.
 #[tokio::test]
 async fn the_reports_reach_the_cache_without_a_queue() {
     const RUN: &str = "mount-provider/6167656e74/6a732e31";
@@ -481,6 +482,15 @@ async fn the_reports_reach_the_cache_without_a_queue() {
         held: 12,
         short: 3,
     };
+    let mut spans = [Spans::default(); 4];
+    spans[1].ms = 30;
+    spans[1].buckets[5] = 1;
+    let opens = Opens {
+        mount: MOUNT.to_owned(),
+        process: 4242,
+        waiting: 2,
+        spans,
+    };
     let levels = Levels {
         levels: 4,
         rounds: 1,
@@ -492,12 +502,14 @@ async fn the_reports_reach_the_cache_without_a_queue() {
     over.report(Report::Fetched(fetches));
     over.report(Report::Levels(levels));
     over.report(Report::Descriptors(descriptors.clone()));
+    over.report(Report::Opens(Box::new(opens.clone())));
     let after = reported(&told.cache);
     let _ = direct.cache.run_started(&started);
     direct.cache.tree_attached(attach);
     direct.cache.manifests_fetched(&fetches);
     direct.cache.tree_levels(levels);
     direct.cache.descriptors_reported(descriptors);
+    direct.cache.opens_reported(opens);
     assert_eq!(after, reported(&direct.cache));
     assert_ne!(after, before);
     assert_eq!(told.cache.run_started(&started), None);
