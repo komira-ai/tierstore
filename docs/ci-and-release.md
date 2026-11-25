@@ -749,6 +749,17 @@ runner has. The output is still `target/<triple>/release/tierstore`, so every la
   any entry that is not a regular file or directory is refused, and the directory appears in one
   rename. To move to another zig, change the version and both digests together (the digests are in
   `https://ziglang.org/download/index.json` and beside each cargo-zigbuild file; recompute them).
+- The zig tarball is kept in the actions cache under the key `zig-<arch>-linux-<version>-<sha256>`
+  and fetched with `fetch --cache <file>`: when the restored file's SHA-256 is the pin it is
+  installed with no download (the step's line says `ok: the cache hit: ...`); a file of other
+  bytes is refused, nothing installed and nothing downloaded. When the file is not there, each
+  `--url` is tried in turn (two of Zig's community mirrors, `pkg.earth` and `zig.linus.dev`, then
+  ziglang.org), in three rounds 0 s, 10 s and 30 s apart, each attempt given up after 5 minutes;
+  the first download whose SHA-256 is the pin is written to the file and installed (`ok: the cache
+  missed: ...`, naming each failed attempt), and a mirror serving other bytes is one more failed
+  attempt. A miss on main is saved, so every pull request then restores it; a push restores
+  nothing (as for the cargo cache) and downloads. The workflow lint holds the key to the job's
+  pin, and the save to main's miss.
 - `GLIBC_FLOOR` in the `env` (2.28) is the target's version and the `--max` of `release
   check-glibc`, and is `FLOOR` of `crates/xtask/src/release/glibc.rs`, which the Debian package's
   `libc6 (>= 2.28)` and the RPM package's `glibc >= 2.28` use; the workflow lint

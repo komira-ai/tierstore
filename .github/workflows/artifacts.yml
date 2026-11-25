@@ -227,9 +227,28 @@ jobs:
       # (`required-features`), and `-p tierstore --bins` without it builds no binary and says
       # nothing.
       # zig and cargo-zigbuild, pinned by URL and SHA-256. zig is a directory (its compiler and
-      # its library files), installed whole under $HOME/zig.
+      # its library files), installed whole under $HOME/zig. Its tarball is kept in the actions
+      # cache under a key of its version and SHA-256 (`cargo xtask fetch --cache`,
+      # crates/xtask/src/fetch.rs): installed from the restored file when its SHA-256 is the pin,
+      # with no download; else fetched from two of Zig's community mirrors and then ziglang.org,
+      # in turn, in three rounds 10 s and 30 s apart, each attempt given up after 5 minutes, and
+      # checked against the same SHA-256. A miss on main is saved, and every pull request then
+      # restores it. A push restores nothing, as for the cargo cache above, and downloads.
+      - name: Restore the zig tarball
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: zig-cache
+        with:
+          path: ${{ runner.temp }}/zig-cache
+          key: zig-x86_64-linux-${{ env.ZIG_VERSION }}-${{ env.ZIG_SHA256_X86_64_LINUX }}
+          lookup-only: ${{ github.event_name == 'push' }}
       - name: Install zig (pinned version and checksum)
-        run: cargo xtask fetch --url "https://ziglang.org/download/$ZIG_VERSION/zig-x86_64-linux-$ZIG_VERSION.tar.xz" --sha256 "$ZIG_SHA256_X86_64_LINUX" --out "$HOME/zig" --extract tar.xz --tree
+        run: cargo xtask fetch --cache "$RUNNER_TEMP/zig-cache/zig-x86_64-linux-$ZIG_VERSION.tar.xz" --url "https://pkg.earth/zig/zig-x86_64-linux-$ZIG_VERSION.tar.xz" --url "https://zig.linus.dev/zig/zig-x86_64-linux-$ZIG_VERSION.tar.xz" --url "https://ziglang.org/download/$ZIG_VERSION/zig-x86_64-linux-$ZIG_VERSION.tar.xz" --sha256 "$ZIG_SHA256_X86_64_LINUX" --out "$HOME/zig" --extract tar.xz --tree
+      - name: Save the zig tarball
+        if: ${{ github.ref == 'refs/heads/main' && steps.zig-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/zig-cache
+          key: ${{ steps.zig-cache.outputs.cache-primary-key }}
       - name: Install cargo-zigbuild (pinned version and checksum)
         run: cargo xtask fetch --url "https://github.com/rust-cross/cargo-zigbuild/releases/download/v$ZIGBUILD_VERSION/cargo-zigbuild-$TARGET.tar.xz" --sha256 "$ZIGBUILD_SHA256_X86_64_LINUX" --out "$HOME/.cargo/bin/cargo-zigbuild" --extract tar.xz --member "cargo-zigbuild-$TARGET/cargo-zigbuild"
       - run: PATH="$HOME/zig:$PATH" zig version
@@ -351,9 +370,28 @@ jobs:
       # (`required-features`), and `-p tierstore --bins` without it builds no binary and says
       # nothing.
       # zig and cargo-zigbuild, pinned by URL and SHA-256. zig is a directory (its compiler and
-      # its library files), installed whole under $HOME/zig.
+      # its library files), installed whole under $HOME/zig. Its tarball is kept in the actions
+      # cache under a key of its version and SHA-256 (`cargo xtask fetch --cache`,
+      # crates/xtask/src/fetch.rs): installed from the restored file when its SHA-256 is the pin,
+      # with no download; else fetched from two of Zig's community mirrors and then ziglang.org,
+      # in turn, in three rounds 10 s and 30 s apart, each attempt given up after 5 minutes, and
+      # checked against the same SHA-256. A miss on main is saved, and every pull request then
+      # restores it. A push restores nothing, as for the cargo cache above, and downloads.
+      - name: Restore the zig tarball
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: zig-cache
+        with:
+          path: ${{ runner.temp }}/zig-cache
+          key: zig-aarch64-linux-${{ env.ZIG_VERSION }}-${{ env.ZIG_SHA256_AARCH64_LINUX }}
+          lookup-only: ${{ github.event_name == 'push' }}
       - name: Install zig (pinned version and checksum)
-        run: cargo xtask fetch --url "https://ziglang.org/download/$ZIG_VERSION/zig-aarch64-linux-$ZIG_VERSION.tar.xz" --sha256 "$ZIG_SHA256_AARCH64_LINUX" --out "$HOME/zig" --extract tar.xz --tree
+        run: cargo xtask fetch --cache "$RUNNER_TEMP/zig-cache/zig-aarch64-linux-$ZIG_VERSION.tar.xz" --url "https://pkg.earth/zig/zig-aarch64-linux-$ZIG_VERSION.tar.xz" --url "https://zig.linus.dev/zig/zig-aarch64-linux-$ZIG_VERSION.tar.xz" --url "https://ziglang.org/download/$ZIG_VERSION/zig-aarch64-linux-$ZIG_VERSION.tar.xz" --sha256 "$ZIG_SHA256_AARCH64_LINUX" --out "$HOME/zig" --extract tar.xz --tree
+      - name: Save the zig tarball
+        if: ${{ github.ref == 'refs/heads/main' && steps.zig-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/zig-cache
+          key: ${{ steps.zig-cache.outputs.cache-primary-key }}
       - name: Install cargo-zigbuild (pinned version and checksum)
         run: cargo xtask fetch --url "https://github.com/rust-cross/cargo-zigbuild/releases/download/v$ZIGBUILD_VERSION/cargo-zigbuild-$TARGET.tar.xz" --sha256 "$ZIGBUILD_SHA256_AARCH64_LINUX" --out "$HOME/.cargo/bin/cargo-zigbuild" --extract tar.xz --member "cargo-zigbuild-$TARGET/cargo-zigbuild"
       - run: PATH="$HOME/zig:$PATH" zig version
