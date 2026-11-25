@@ -39,13 +39,37 @@ const LINUX_GLIBC_DEFECTS: &[(&str, &str, &str, &str)] = &[
         X86,
         "--sha256 \"$ZIG_SHA256_X86_64_LINUX\"",
         "--sha256 \"$ZIG_SHA256_AARCH64_LINUX\"",
-        "linux-x86_64: does not run `cargo xtask fetch --url \"https://ziglang.org",
+        "linux-x86_64: does not run `cargo xtask fetch --cache \"$RUNNER_TEMP/zig-cache/zig-x86_64-linux-",
     ),
     (
         ARM,
         "      - name: Install zig (pinned version and checksum)\n",
         "      - name: Install zig (pinned version and checksum)\n        env:\n          ZIG_VERSION: 0.1.0\n",
         "the step `Install zig (pinned version and checksum)`: sets ZIG_VERSION",
+    ),
+    (
+        X86,
+        "          key: zig-x86_64-linux-${{ env.ZIG_VERSION }}-${{ env.ZIG_SHA256_X86_64_LINUX }}\n",
+        "          key: zig-x86_64-linux-${{ env.ZIG_VERSION }}\n",
+        "linux-x86_64: does not restore the zig tarball once",
+    ),
+    (
+        ARM,
+        "          path: ${{ runner.temp }}/zig-cache\n          key: zig-aarch64",
+        "          path: ${{ runner.temp }}/zig\n          key: zig-aarch64",
+        "linux-arm64: does not restore the zig tarball once",
+    ),
+    (
+        X86,
+        "        if: ${{ github.ref == 'refs/heads/main' && steps.zig-cache.outputs.cache-hit != 'true' }}\n",
+        "        if: ${{ steps.zig-cache.outputs.cache-hit != 'true' }}\n",
+        "linux-x86_64: does not save the zig tarball once",
+    ),
+    (
+        ARM,
+        "          key: ${{ steps.zig-cache.outputs.cache-primary-key }}\n",
+        "          key: zig-aarch64-linux\n",
+        "linux-arm64: does not save the zig tarball once",
     ),
     (
         X86,
@@ -86,7 +110,9 @@ fn each_wrong_input_of_the_glibc_floor_build_of_the_linux_jobs_is_named() {
     // glibc 2.39, the failure of the first release's install checks), skips or loosens the
     // check of the binary's glibc symbol versions, takes the other architecture's zig or a
     // pin that a job shadows, or whose floor, versions or checksums in the file's `env` are
-    // not the ones the packages require and the downloads are checked against.
+    // not the ones the packages require and the downloads are checked against; and a zig cache
+    // keyed without the pin, restored or saved elsewhere than the fetch reads and writes, or
+    // saved from a pull request or under another key.
     each_named("artifacts.yml", artifacts_problems_of, LINUX_GLIBC_DEFECTS);
     let text = text_of("artifacts.yml");
     for (replace, with, says) in FILE_ENV_DEFECTS {

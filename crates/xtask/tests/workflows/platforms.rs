@@ -568,6 +568,7 @@ fn build_problems(doc: &Node, b: &Build, build: &Node) -> Vec<String> {
         ));
     }
     problems.extend(glibc_floor::pin_problems(doc, b));
+    problems.extend(glibc_floor::cache_problems(b, build));
     let uploads: Vec<(Option<&str>, Option<&str>)> = using(Some(build), UPLOAD)
         .iter()
         .map(|s| (at(s, &["with", "name"]), at(s, &["with", "path"])))

@@ -105,29 +105,9 @@ enum Verb {
     },
     /// Keep the advisories `cargo deny` reports in one GitHub issue.
     Advisories(advisories::Args),
-    /// Download a pinned file, check its SHA-256 and install it (mode 0755).
-    Fetch {
-        /// Where to download it from (HTTPS; redirects must stay on HTTPS).
-        #[arg(long)]
-        url: String,
-        /// The SHA-256 of the download (before unpacking), 64 lowercase hex digits.
-        #[arg(long)]
-        sha256: fetch::Sha256,
-        /// The file to install (with `--tree`, the directory); its parent is created when missing.
-        #[arg(long)]
-        out: PathBuf,
-        /// How the download is packed (default: it is the file).
-        #[arg(long, value_enum)]
-        extract: Option<fetch::Format>,
-        /// The file to take out of a tar (`--extract tar.gz` or `tar.xz`): its path inside
-        /// the archive.
-        #[arg(long)]
-        member: Option<PathBuf>,
-        /// Install the whole tar (`--extract tar.gz` or `tar.xz`) as the directory `--out`,
-        /// without the archive's top directory.
-        #[arg(long)]
-        tree: bool,
-    },
+    /// Download a pinned file, check its SHA-256 and install it (mode 0755); with `--cache`,
+    /// from the actions cache's copy when it is the pinned file, else from each `--url` in turn.
+    Fetch(fetch::Args),
     /// Build a target with Buck2 on the build farm: refused without the farm's worker property
     /// set, and failed unless the summary line says `local: 0` (docs/farm.md).
     FarmBuild {
@@ -641,17 +621,9 @@ fn run(cli: Cli) -> Result<Vec<String>, Error> {
             Ok(printed)
         }
         Verb::Advisories(args) => advisories::run(&args, &root, &cargo_program()),
-        Verb::Fetch {
-            url,
-            sha256,
-            out,
-            extract,
-            member,
-            tree,
-        } => {
-            let unpack = fetch::Unpack::new(extract, member, tree).map_err(Error::Usage)?;
-            let roots = fetch::host_roots();
-            Ok(vec![fetch::fetch(&url, &sha256, &unpack, &out, &roots)?])
+        Verb::Fetch(args) => {
+            let unpack = args.unpack().map_err(Error::Usage)?;
+            Ok(vec![fetch::run(&args, &unpack)?])
         }
         Verb::FarmBuild { buck2, target } => {
             Ok(vec![farm::build(&buck2, &target, &mut std::io::stderr())?])

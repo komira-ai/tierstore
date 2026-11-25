@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use super::*;
 use crate::testdir::TestDir;
 
-const TOOL: &[u8] = b"\x7fELF a pinned tool's bytes";
+pub(super) const TOOL: &[u8] = b"\x7fELF a pinned tool's bytes";
 
 /// An empty directory of its own for one test, removed when it drops.
 fn scratch(name: &str) -> TestDir {
@@ -43,7 +43,7 @@ fn gzip(bytes: &[u8]) -> Vec<u8> {
     e.finish().expect("gzip")
 }
 
-fn xz(bytes: &[u8]) -> Vec<u8> {
+pub(super) fn xz(bytes: &[u8]) -> Vec<u8> {
     let mut out = Vec::new();
     lzma_rs::xz_compress(&mut &bytes[..], &mut out).expect("xz");
     out
@@ -512,7 +512,7 @@ fn an_https_url_is_connected_to_and_a_refused_connection_is_a_download_error() {
 
 /// A tar of the directory `zig-1.0` as a toolchain archive has it: a plain file, an executable,
 /// a file in a nested directory and an empty directory.
-fn tree_tar() -> Vec<u8> {
+pub(super) fn tree_tar() -> Vec<u8> {
     let mut b = tar::Builder::new(Vec::new());
     for dir in ["zig-1.0/", "zig-1.0/lib/", "zig-1.0/lib/empty/"] {
         let mut h = tar::Header::new_gnu();
@@ -547,7 +547,7 @@ fn raw_path_tar(path: &str, kind: tar::EntryType) -> Vec<u8> {
     tar
 }
 
-fn file_mode(path: &Path) -> u32 {
+pub(super) fn file_mode(path: &Path) -> u32 {
     std::fs::metadata(path)
         .expect("metadata")
         .permissions()
