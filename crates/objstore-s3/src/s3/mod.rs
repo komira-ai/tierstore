@@ -34,6 +34,7 @@
 
 mod bound;
 mod checksum;
+mod credentials;
 mod endpoint;
 #[cfg(feature = "testkit")]
 pub mod fake;
@@ -49,6 +50,7 @@ mod tuning;
 mod xml;
 
 pub use checksum::StoredSha256;
+pub use credentials::{AwsEnv, CredentialSource, Credentials, CredentialsError};
 pub use endpoint::Addressing;
 pub use multipart::{
     MAX_PART_BYTES, MAX_PARTS, MIN_PART_BYTES, PART_BYTES, SINGLE_PUT_MAX, part_size, part_size_of,
@@ -78,6 +80,7 @@ use crate::{
     BodyStream, ByteRange, Capabilities, ContentBoundPut, KeyPrefix, ListPage, ListToken,
     ObjectKey, ObjectStore, ObjectStoreError, PageSize,
 };
+use credentials::{Keys, Live, system_clock};
 use endpoint::{Target, system_roots, target_of, tls_config};
 use sigv4::{EMPTY_SHA256, Request, Signer, Utc};
 use streamed::{check_partial, too_long};
@@ -142,33 +145,6 @@ impl fmt::Display for Stalled {
 
 impl std::error::Error for Stalled {}
 
-/// An access key pair. `Debug` never shows the secret.
-#[derive(Clone)]
-pub struct Credentials {
-    access_key_id: String,
-    secret_access_key: String,
-}
-
-impl Credentials {
-    /// A key pair.
-    #[must_use]
-    pub fn new(access_key_id: impl Into<String>, secret_access_key: impl Into<String>) -> Self {
-        Self {
-            access_key_id: access_key_id.into(),
-            secret_access_key: secret_access_key.into(),
-        }
-    }
-}
-
-impl fmt::Debug for Credentials {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Credentials")
-            .field("access_key_id", &self.access_key_id)
-            .field("secret_access_key", &"<redacted>")
-            .finish()
-    }
-}
-
 /// Where and how to reach one bucket.
 #[derive(Clone, Debug)]
 pub struct S3Config {
@@ -186,7 +162,8 @@ pub struct S3Config {
     /// PEM certificates an `https` endpoint's certificate may be issued by, besides the
     /// system's: the CA of a private store. `None` trusts the system's alone.
     pub ca_pem: Option<Vec<u8>>,
-    /// The key pair requests are signed with.
+    /// The credentials requests are signed with: a key pair, or a source of AWS credentials
+    /// ([`Credentials::from_source`]).
     pub credentials: Credentials,
     /// What the bucket supports, as the operator declares it; the conformance suite
     /// checks the declaration. `object_lock` needs a bucket created with Object Lock.
@@ -258,7 +235,7 @@ struct Conn {
     sent: AtomicUsize,
     bucket: String,
     region: String,
-    credentials: Credentials,
+    credentials: Live,
     capabilities: Capabilities,
     request_timeout: Duration,
     min_body_rate: Option<NonZeroU64>,
@@ -332,21 +309,34 @@ impl S3Store {
             }
             targets.push(target);
         }
-        let system = if targets.iter().any(Target::is_tls) {
+        // A source of credentials may be STS, over https.
+        let system = if config.credentials.renews() || targets.iter().any(Target::is_tls) {
             roots()
         } else {
             Vec::new()
         };
         let tls = tls_config(config.ca_pem.as_deref(), system)?;
-        let builder = client_builder(config.connect_timeout, tuning.pool_idle_timeout, tls);
+        let (connect, idle) = (config.connect_timeout, tuning.pool_idle_timeout);
+        let builder = client_builder(connect, idle, tls.clone());
         let client = client(builder).build().map_err(S3ConfigError::Client)?;
+        // The credential endpoints have a client of their own, which no proxy of the
+        // environment is used for: the container and instance metadata endpoints are on the
+        // host or its link, where a proxy cannot reach.
+        let http = || {
+            let client = client_builder(connect, idle, tls).no_proxy().build();
+            Ok(credentials::Http {
+                client: client.map_err(S3ConfigError::Client)?,
+                timeout: config.request_timeout,
+            })
+        };
+        let credentials = Live::new(&config.credentials, http, &config.region, system_clock())?;
         let conn = Conn {
             client,
             targets,
             sent: AtomicUsize::new(0),
             bucket: config.bucket,
             region: config.region,
-            credentials: config.credentials,
+            credentials,
             capabilities: config.capabilities,
             request_timeout: config.request_timeout,
             min_body_rate: config.min_body_rate,
@@ -438,9 +428,9 @@ impl Conn {
             hex::encode(Sha256::digest(&body))
         };
         let timeout = self.timeout_for(body.len());
-        self.failing_over(|| {
+        self.failing_over(|keys| {
             let req = self
-                .signed_payload(method.clone(), key, query, headers.clone(), &payload)
+                .signed_payload(&keys, method.clone(), key, query, headers.clone(), &payload)
                 .timeout(timeout);
             let req = if body.is_empty() {
                 req
@@ -461,9 +451,15 @@ impl Conn {
         headers: Vec<(&'static str, String)>,
     ) -> Result<Response, ObjectStoreError> {
         let resp = self
-            .failing_over(|| {
-                let req =
-                    self.signed_payload(Method::GET, Some(key), &[], headers.clone(), EMPTY_SHA256);
+            .failing_over(|keys| {
+                let req = self.signed_payload(
+                    &keys,
+                    Method::GET,
+                    Some(key),
+                    &[],
+                    headers.clone(),
+                    EMPTY_SHA256,
+                );
                 async move {
                     match self.within(req.send()).await {
                         Ok(sent) => sent.map_err(failed),
@@ -480,22 +476,30 @@ impl Conn {
         Ok(resp)
     }
 
-    /// Runs `attempt`, which signs a request for the next endpoint and sends it, again after a
-    /// failure that proves the store never saw the request ([`Failed::unsent`]), until the
-    /// sends are [`S3Tuning::endpoint_attempts`] in all. The last failure is the error, as it
-    /// is for a request sent once; any other failure ends the request at once. With one
-    /// endpoint the next send is to the same address on a new connection.
+    /// Runs `attempt`, which signs a request with the keys it is given for the next endpoint and
+    /// sends it, again after a failure that proves the store never saw the request
+    /// ([`Failed::unsent`]), until the sends are [`S3Tuning::endpoint_attempts`] in all. The last
+    /// failure is the error, as it is for a request sent once; any other failure ends the
+    /// request at once. With one endpoint the next send is to the same address on a new
+    /// connection. The keys are had again for each send, so a send never signs with keys that
+    /// expired; when none can be had, nothing is sent and the error is
+    /// [`ObjectStoreError::Credentials`].
     pub(super) async fn failing_over<F, Fut>(
         &self,
         mut attempt: F,
     ) -> Result<Response, ObjectStoreError>
     where
-        F: FnMut() -> Fut,
+        F: FnMut(Arc<Keys>) -> Fut,
         Fut: Future<Output = Result<Response, Failed>>,
     {
         let mut sends = 1;
         loop {
-            match attempt().await {
+            let keys = self
+                .credentials
+                .keys()
+                .await
+                .map_err(ObjectStoreError::Credentials)?;
+            match attempt(keys).await {
                 Ok(resp) => return Ok(resp),
                 Err(failed) if failed.unsent && sends < self.tuning.endpoint_attempts => {
                     tracing::warn!(
@@ -542,10 +546,13 @@ impl Conn {
         Ok(body.freeze())
     }
 
-    /// The signed request for a body whose hex SHA-256 is `payload` (or `UNSIGNED-PAYLOAD`),
-    /// with no limit set and no body attached. It goes to the next endpoint in turn.
+    /// The request signed with `keys` for a body whose hex SHA-256 is `payload` (or
+    /// `UNSIGNED-PAYLOAD`), with no limit set and no body attached. It goes to the next endpoint
+    /// in turn. The session token of temporary keys is sent, and signed, as
+    /// `x-amz-security-token`.
     pub(super) fn signed_payload(
         &self,
+        keys: &Keys,
         method: Method,
         key: Option<&ObjectKey>,
         query: &[(&str, String)],
@@ -573,9 +580,12 @@ impl Conn {
         let amz_date = Utc::of(now, false).amz();
         headers.push(("x-amz-content-sha256", payload.to_owned()));
         headers.push(("x-amz-date", amz_date.clone()));
+        if let Some(token) = &keys.session_token {
+            headers.push(("x-amz-security-token", token.clone()));
+        }
         let authorization = Signer {
-            access_key_id: &self.credentials.access_key_id,
-            secret_access_key: &self.credentials.secret_access_key,
+            access_key_id: &keys.access_key_id,
+            secret_access_key: &keys.secret_access_key,
             region: &self.region,
         }
         .authorization(
