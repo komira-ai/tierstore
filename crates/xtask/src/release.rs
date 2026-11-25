@@ -28,7 +28,9 @@
 //!   creates release `<tag>` at `<sha>` as a draft with every file of `<dir>`, reads the
 //!   draft's assets back and refuses unless they are exactly those files, and only then
 //!   publishes it (which is when GitHub creates the tag). A tag or a published release that
-//!   exists is refused; a draft a failed run left is replaced.
+//!   exists is refused; a draft a failed run left is replaced. A create GitHub answers with a
+//!   server error (HTTP 5xx) is tried again, up to three times in all, after removing any
+//!   draft it left.
 //!
 //! Beside them, the hostkeeper packages, which `artifacts.yml` makes and checks:
 //! `release hostkeeper-package` ([`hostkeeper_package`]) assembles the package of one platform's
