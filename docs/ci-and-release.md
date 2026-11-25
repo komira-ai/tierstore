@@ -587,7 +587,8 @@ neither held by `RELEASE_FREEZE` nor limited to code changes); the rest is the s
 job refuses a commit that is not on `main`, that lacks a successful push run of `artifacts.yml`
 and of `ci.yml`, or whose files or attestations do not check. The `publish` job creates the
 release as a draft at the commit, reads its assets back and publishes it, which creates the tag.
-A tag or release that exists is refused, and so is a commit that the highest release tag already
+A create that GitHub answers with a server error (HTTP 5xx) is tried again, up to three times in
+all, after removing any draft it left; a client error (HTTP 4xx) fails the job at once. A tag or release that exists is refused, and so is a commit that the highest release tag already
 covers (no second tag is made for a released commit). The binary must say the tag you give, so a release by hand
 is made from a commit whose `artifacts.yml` run computed that same version.
 

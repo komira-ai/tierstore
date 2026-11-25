@@ -9,6 +9,8 @@ use super::publish::{is_release_tag, notes};
 use super::*;
 use crate::testdir::TestDir;
 
+mod publish_retry;
+
 const COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
 const REPO: &str = "example/tierstore";
 /// The version of the hostkeeper packages of `COMMIT`.
@@ -31,6 +33,9 @@ struct FakeGh {
     ran: RefCell<Vec<Vec<String>>>,
     /// A file `release create` silently does not attach.
     drops: Option<String>,
+    /// What each `release create`, in turn, fails with: the message, and whether GitHub made
+    /// the draft (with no asset) before it failed. A create past the last succeeds.
+    create_fails: RefCell<Vec<(String, bool)>>,
 }
 
 impl Gh for FakeGh {
@@ -51,6 +56,15 @@ impl Gh for FakeGh {
         let tag = args[2].clone();
         match verb {
             ("release", "create") => {
+                if !self.create_fails.borrow().is_empty() {
+                    let (message, left) = self.create_fails.borrow_mut().remove(0);
+                    if left {
+                        self.releases
+                            .borrow_mut()
+                            .push(json!({ "tag_name": tag, "draft": true, "assets": [] }));
+                    }
+                    return Err(Error::Failed(message));
+                }
                 let assets: Vec<Value> = args
                     .iter()
                     .skip_while(|a| *a != "--draft")

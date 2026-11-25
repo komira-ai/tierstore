@@ -51,7 +51,9 @@
 #          packages, bundles, index.json and SHA256SUMS), reads the draft's assets back, and
 #          only then publishes it, which is when GitHub creates the tag (cargo xtask release
 #          publish). A tag or a release that exists is refused; a draft a failed run left is
-#          replaced. Re-run the failed jobs of a run, not the whole run.
+#          replaced. A create GitHub answers with a server error (HTTP 5xx) is tried again, up
+#          to three times in all, after removing any draft it left. Re-run the failed jobs of a
+#          run, not the whole run.
 #
 # The order of a release (docs/design/distribution.md, section 5): the files are published to
 # TESTING, installed from there on clean machines, put on the lab, and only then promoted, as the

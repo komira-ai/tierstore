@@ -99,6 +99,21 @@ pub fn notes(repo: &str, tag: &str, commit: &str, run_id: u64, extra: &[String])
     text
 }
 
+/// How many times `release publish` asks GitHub to create the draft when GitHub answers
+/// with a server error (HTTP 5xx).
+const CREATE_ATTEMPTS: u32 = 3;
+
+/// Whether `message`, what a failed `gh` printed, reports an HTTP status of 500 to 599: an
+/// error of GitHub's, which the same request may not meet again. A 4xx is the request's own.
+pub(super) fn server_error(message: &str) -> bool {
+    message.match_indices("HTTP ").any(|(at, _)| {
+        let code = message.as_bytes().get(at + 5..at + 8);
+        let after = message.as_bytes().get(at + 8);
+        code.is_some_and(|c| c[0] == b'5' && c.iter().all(u8::is_ascii_digit))
+            && !after.is_some_and(u8::is_ascii_digit)
+    })
+}
+
 /// The names of the draft release `tag` holds as assets, or none when no draft has that tag.
 fn draft_assets(gh: &dyn Gh, repo: &str, tag: &str) -> Result<Option<Vec<String>>, Error> {
     let releases = gh.api(&format!("repos/{repo}/releases?per_page=100"))?;
@@ -181,7 +196,31 @@ pub fn publish(
         "--draft".into(),
     ];
     create.extend(files.iter().map(|f| dir.join(f).display().to_string()));
-    gh.run(&create)?;
+    let mut attempt = 1;
+    while let Err(e) = gh.run(&create) {
+        if attempt == CREATE_ATTEMPTS || !server_error(&e.to_string()) {
+            return Err(e);
+        }
+        // GitHub may have made the draft, and some of its assets, before it failed: the next
+        // attempt starts from no draft, as the first did.
+        if draft_assets(gh, repo, tag)?.is_some() {
+            gh.run(&[
+                "release".into(),
+                "delete".into(),
+                tag.into(),
+                "--repo".into(),
+                repo.into(),
+                "--yes".into(),
+            ])?;
+        }
+        printed.push(format!(
+            "creating the draft {tag} failed with a server error ({}): attempt {} of \
+             {CREATE_ATTEMPTS}",
+            e.to_string().trim_end(),
+            attempt + 1
+        ));
+        attempt += 1;
+    }
     let held = draft_assets(gh, repo, tag)?;
     if held.as_deref() != Some(files.as_slice()) {
         gh.run(&[
