@@ -460,6 +460,9 @@ fn a_tree_list_that_fails_its_shape_walk_is_eio_and_takes_no_number() {
     let digest = TreeDigest::from_hex(&cut).unwrap();
     assert_eq!(rig.core.table.find(&digest), None);
     assert_eq!(rig.core.lists.mapped.mapped().lists, 0);
+    // Its own rig: the core says a refusal of the same kind at most so often, and this one must
+    // be said.
+    let rig = Rig::new("tfs-list-bad-shape-neither", Built::of(Vec::new()));
     let neither = object(&rig, b"neither a manifest nor a tree list");
     let log = Logged::default();
     {
