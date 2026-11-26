@@ -58,6 +58,7 @@ pub(in crate::server) async fn serve_cold(
         addresses,
         offer,
         lock: _,
+        follow: _,
     } = bind_fronts(
         settings.handoff.as_ref(),
         None,
@@ -151,3 +152,7 @@ pub(in crate::server) async fn serve_cold_until_signalled(
 #[cfg(test)]
 #[path = "cold_cli_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "cold_cli_front_tests.rs"]
+mod front_tests;

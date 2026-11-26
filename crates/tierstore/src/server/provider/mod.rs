@@ -67,7 +67,7 @@ mod sources_tests;
 #[cfg(test)]
 mod start_tests;
 #[cfg(test)]
-mod testing;
+pub(in crate::server) mod testing;
 
 use std::path::PathBuf;
 use std::time::Duration;

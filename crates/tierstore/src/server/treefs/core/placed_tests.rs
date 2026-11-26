@@ -437,6 +437,95 @@ async fn a_fill_still_read_only_after_fetch_timeout_fails_with_eio() {
     assert!(opened.is_ok(), "{opened:?}");
 }
 
+over_both!(an_open_of_a_span_the_node_holds_is_answered_at_once_in_process);
+/// Asserts that the first open of a file of a placed tree whose span the node holds (filled
+/// before, as the whole pack of a job's output is on the node that wrote it) is answered at once,
+/// on the reader that took it, by a core in the node's process: not parked in the queue of the
+/// fetches, which every job of the node shares; it reads as its member of the pack, and the next
+/// open of it is answered from the span kept with the tree. Over the fill socket the open is
+/// parked, since asking would cost a round trip on the reader; and either way an open of a file
+/// whose span the node does not hold is parked, since it waits for a fill.
+async fn an_open_of_a_span_the_node_holds_is_answered_at_once_in_process(over: Over) {
+    let live = Live::over("tfs-placed-now", over).await;
+    let _ = live.place(vec![fs_at("jobs/1f3a/root")]);
+    let (tool, other) = live
+        .on_core(|core| {
+            let bin = walk(core, &["jobs", "1f3a", "root", "bin"]).attr.ino;
+            let tool = found(core, bin, "tool").attr.ino;
+            (tool, found(core, bin, "other").attr.ino)
+        })
+        .await;
+    let parked = live.on_core(move |core| core.open_now(tool, false)).await;
+    assert!(parked.is_none(), "{parked:?}");
+    live.bench.fill(0).await;
+    let read_now = move |core: &Core| {
+        let Some(Ok(Opened::Cached(fh))) = core.open_now(tool, false) else {
+            return None;
+        };
+        let bytes = core.read(fh, 0, 10_000).unwrap();
+        core.release(fh);
+        Some(bytes)
+    };
+    let (first, again) = live
+        .on_core(move |core| (read_now(core), read_now(core)))
+        .await;
+    let want = (over == Over::InProcess).then(|| live.bench.pack.content(0).to_vec());
+    assert_eq!(first, want);
+    assert_eq!(again, want);
+    let parked = live.on_core(move |core| core.open_now(other, false)).await;
+    assert!(parked.is_none(), "{parked:?}");
+}
+
+/// Asserts that an open of a file whose span the node holds is parked, not failed, when the pack's
+/// file the node names cannot be opened now (gone from the cache's directory): the open asks the
+/// span on a thread of the fetches, which fills it again.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_held_span_whose_file_does_not_open_is_parked() {
+    let live = Live::over("tfs-placed-now-gone", Over::InProcess).await;
+    let _ = live.place(vec![fs_at("jobs/1f3a/root")]);
+    let tool = live
+        .on_core(|core| {
+            walk(core, &["jobs", "1f3a", "root", "bin", "tool"])
+                .attr
+                .ino
+        })
+        .await;
+    live.bench.fill(0).await;
+    let (_, offset, size) = &live.bench.pack.blobs[0];
+    let held = live
+        .bench
+        .store
+        .held_span(&live.bench.pack.key, *offset, *size);
+    std::fs::remove_file(held.expect("the span is held").path).unwrap();
+    let parked = live.on_core(move |core| core.open_now(tool, false)).await;
+    assert!(parked.is_none(), "{parked:?}");
+}
+
+/// Asserts that a core in process answers no open at once from a cache that does not hold the
+/// write role, though the span is in the index: the index of a read-only cache is the holder's as
+/// of its last read, so the open is parked and asks the span, which waits for the write role. Once
+/// the cache takes the lock again, the same open is answered at once.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_read_only_cache_answers_no_open_at_once() {
+    let live = Live::in_process_with("tfs-placed-now-ro", |b| b.rig.locked(), SHORT).await;
+    let _ = live.place(vec![fs_at("jobs/1f3a/root")]);
+    let tool = live
+        .on_core(|core| {
+            walk(core, &["jobs", "1f3a", "root", "bin", "tool"])
+                .attr
+                .ino
+        })
+        .await;
+    live.bench.fill(0).await;
+    std::fs::remove_file(live.bench.rig.config.path.join(".lock")).unwrap();
+    assert_eq!(live.cache.tick().unwrap(), Tick::Lost);
+    let parked = live.on_core(move |core| core.open_now(tool, false)).await;
+    assert!(parked.is_none(), "{parked:?}");
+    assert_eq!(live.cache.tick().unwrap(), Tick::Took);
+    let opened = live.on_core(move |core| core.open_now(tool, false)).await;
+    assert!(matches!(opened, Some(Ok(Opened::Cached(_)))), "{opened:?}");
+}
+
 /// Asserts that a lookup of a location whose tree is attached holds the placement again when its
 /// hold was given back in between (an idle detach of another process's view, or an `unplace`
 /// that came between the lookup's `place` and its attach), so that a tree the mount serves is

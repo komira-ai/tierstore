@@ -32,6 +32,10 @@ pub(crate) struct Ask<'a> {
     /// The path of its cache's lock, when it has a cache: the lock is taken when the running
     /// instance offers the same file.
     pub(crate) lock: Option<&'a Path>,
+    /// Whether a lock offered under another path than [`lock`](Self::lock) (the running
+    /// instance's file names another cache directory) is closed, and left with the running
+    /// instance, rather than refused with `nak`: the two caches are two directories then.
+    pub(crate) leaves_another_lock: bool,
 }
 
 /// The sockets taken from a running instance, in the order it serves them, with what the taker
@@ -178,6 +182,7 @@ pub(crate) async fn take(
     let mut ask = Ask {
         mount: None,
         lock: None,
+        leaves_another_lock: false,
     };
     take_as(handoff, want, Request::Plain, &mut ask, Knobs::real()).await
 }
@@ -198,6 +203,7 @@ pub(crate) async fn take_with_ready(
     let mut ask = Ask {
         mount: None,
         lock: None,
+        leaves_another_lock: false,
     };
     take_as(handoff, want, Request::Ready, &mut ask, Knobs::real()).await
 }
@@ -451,6 +457,7 @@ impl Offered {
 ///
 /// # Errors
 /// As [`take`], for what is found before `ack`; an offer found wrong was refused with `nak`.
+#[cfg(test)]
 pub(crate) async fn offered(
     handoff: &Handoff,
     want: &Want<'_>,
@@ -458,8 +465,38 @@ pub(crate) async fn offered(
     let mut ask = Ask {
         mount: None,
         lock: None,
+        leaves_another_lock: false,
     };
     offer_of(handoff, want, (Request::Plain, &mut ask), Knobs::real()).await
+}
+
+/// Asks the instance that answers at `handoff.socket` for its listening sockets with the `ready`
+/// step (`take 1`, `ready`) and the cache lock at `lock`, and checks the offer whole without
+/// answering it, as `offered` does for `take 1` alone: what the start of a node whose file has an
+/// `fs` interface asks of the running instance on `server.handoff_socket`, so that its cache takes
+/// the write role at the running instance's `written` rather than after that instance's drain
+/// (`docs/design/one-service.md` section 3.2). The [`Inherited`] that [`Offered::accept`] gives
+/// then holds the connection for `ready` and the lock, where the running instance offered it.
+///
+/// A running instance that does not know the step is asked with `take 1` alone, as by
+/// [`take_with_ready`]: no `ready`, no lock, today's behaviour. A lock it offers of another file
+/// (its file names another cache directory than this start's) is closed and left with it
+/// ([`Ask::leaves_another_lock`]): this start's own cache is another directory, which that lock
+/// does not hold.
+///
+/// # Errors
+/// As [`take`], for what is found before `ack`; an offer found wrong was refused with `nak`.
+pub(crate) async fn offered_with_lock(
+    handoff: &Handoff,
+    want: &Want<'_>,
+    lock: &Path,
+) -> Result<Option<Offered>, HandoffError> {
+    let mut ask = Ask {
+        mount: None,
+        lock: Some(lock),
+        leaves_another_lock: true,
+    };
+    offer_of(handoff, want, (Request::Ready, &mut ask), Knobs::real()).await
 }
 
 /// The whole exchange with the running instance: `request`, and what `ask` adds to it; `knobs`
@@ -543,6 +580,8 @@ async fn offer_of(
     };
     let lock = match take_lock(&mut parts, ask.lock) {
         Ok(lock) => lock,
+        // Its descriptor is closed: the lock stays with the running instance.
+        Err(HandoffError::Mismatch { .. }) if ask.leaves_another_lock => None,
         Err(why) => return nak(&stream, why).await,
     };
     let mut inherited = match adopt(parts.sockets.into_iter(), knobs.copy) {
@@ -704,6 +743,9 @@ fn listener_of(fd: OwnedFd, front: Front) -> std::io::Result<TcpListener> {
     TcpListener::from_std(listener)
 }
 
+#[cfg(test)]
+#[path = "take_lock_tests.rs"]
+mod lock_tests;
 #[cfg(test)]
 #[path = "take_ready_tests.rs"]
 mod ready_tests;

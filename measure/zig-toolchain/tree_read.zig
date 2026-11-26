@@ -6,6 +6,13 @@
 //! list the tree's root and the whole tree, and per pass the time until the first file was read and until the last was; the tree's
 //! digest (over the sorted paths, sizes and file digests, so the same for any thread count); and the node it ran on, read from `proc`:
 //! the boot id (one per running kernel, so per node), the host name, the load average, and the mount the tree is on.
+//!
+//! So that a slow pass says where its time went, each pass also holds the time of each file split in two: its open (from the call of
+//! `open` to its return: what a file system that fetches a file's bytes at its first open spends there) and its reads (the calls of
+//! `read`, without the hashing), summed over the files, with the percentiles of the opens and of the whole files and the time of the
+//! largest file; and the node's pressure stall information (`pressure/cpu`, `pressure/io`, `pressure/memory` of `proc`) as read just
+//! before the pass and just after it, whose `total=` counters, in microseconds, say how long the node's tasks stalled on the CPU, on
+//! I/O or on memory during the pass. The report also holds the number of CPUs the program may run on.
 const std = @import("std");
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
@@ -121,13 +128,61 @@ pub const Pass = struct {
     largest: u64,
     /// SHA-256, lowercase hex, of each file's path, size and digest, in path order (`treeDigest`).
     tree_sha256: []const u8,
+    /// Nanoseconds, summed over the files, from the call of `open` to its return.
+    open_sum_ns: u64,
+    /// Nanoseconds, summed over the files, in the calls of `read` (the hashing is not in it).
+    read_sum_ns: u64,
+    /// Nanoseconds, summed over the files, from the call of `open` to the last byte hashed.
+    file_sum_ns: u64,
+    /// The percentiles (by the nearest rank) and the most of one file's open.
+    open_p50_ns: u64,
+    open_p90_ns: u64,
+    open_p99_ns: u64,
+    open_max_ns: u64,
+    /// The percentiles (by the nearest rank) and the most of one file, from the call of `open` to its last byte hashed.
+    file_p50_ns: u64,
+    file_p99_ns: u64,
+    file_max_ns: u64,
+    /// The largest file (the first in path order of that size), from the call of `open` to its last byte hashed; 0 for no file.
+    largest_ns: u64,
+    /// The node's pressure stall information, read just before the pass started and just after it ended.
+    pressure_start: Pressure,
+    pressure_end: Pressure,
 };
+
+/// The pressure stall information of the node, as `proc` shows it (each file's text, its lines `some ...` and `full ...`); a file
+/// that cannot be read is null (a kernel without it).
+pub const Pressure = struct {
+    cpu: ?[]const u8,
+    io: ?[]const u8,
+    memory: ?[]const u8,
+};
+
+pub fn pressure(a: std.mem.Allocator, proc: []const u8) Pressure {
+    return .{
+        .cpu = readTrimmed(a, proc, "pressure/cpu"),
+        .io = readTrimmed(a, proc, "pressure/io"),
+        .memory = readTrimmed(a, proc, "pressure/memory"),
+    };
+}
+
+/// The value at `percent` of `sorted` (ascending) by the nearest rank: the least value that at least `percent` of the values are at
+/// or below. 0 for no value.
+pub fn rank(sorted: []const u64, percent: u64) u64 {
+    if (sorted.len == 0) return 0;
+    const k = (sorted.len * percent + 99) / 100;
+    return sorted[@min(sorted.len, @max(k, 1)) - 1];
+}
 
 const Shared = struct {
     dir: std.fs.Dir,
     paths: []const []const u8,
     sizes: []u64,
     digests: [][32]u8,
+    /// Per file, nanoseconds: its open, its reads, and the whole file (see `Pass`).
+    open_ns: []u64,
+    read_ns: []u64,
+    file_ns: []u64,
     next: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
     start: std.time.Instant,
     first_ns: std.atomic.Value(u64) = std.atomic.Value(u64).init(std.math.maxInt(u64)),
@@ -155,32 +210,50 @@ fn worker(s: *Shared, buf: []u8) void {
 }
 
 fn readOne(s: *Shared, i: usize, buf: []u8) !void {
+    const asked = try std.time.Instant.now();
     const f = try s.dir.openFile(s.paths[i], .{});
     defer f.close();
+    const opened = try std.time.Instant.now();
     var h = Sha256.init(.{});
     var n: u64 = 0;
+    var reading: u64 = 0;
     while (true) {
+        const before = try std.time.Instant.now();
         const k = try f.read(buf);
+        reading += (try std.time.Instant.now()).since(before);
         if (k == 0) break;
         h.update(buf[0..k]);
         n += k;
     }
     h.final(&s.digests[i]);
+    const done = try std.time.Instant.now();
     s.sizes[i] = n;
-    const at = (try std.time.Instant.now()).since(s.start);
-    _ = s.first_ns.fetchMin(at, .monotonic);
+    s.open_ns[i] = opened.since(asked);
+    s.read_ns[i] = reading;
+    s.file_ns[i] = done.since(asked);
+    _ = s.first_ns.fetchMin(done.since(s.start), .monotonic);
 }
 
-/// Reads every file of `paths` (below `tree`) once, on `threads` threads (at most one per file, at least one). Its buffers (one
-/// `chunk` per thread) and results are allocated in `a`, an arena the caller frees after all the passes.
-pub fn readPass(a: std.mem.Allocator, tree: []const u8, paths: []const []const u8, threads: u32) !Pass {
+/// Reads every file of `paths` (below `tree`) once, on `threads` threads (at most one per file, at least one), and reads the node's
+/// pressure from `proc` just before and just after. Its buffers (one `chunk` per thread) and results are allocated in `a`, an arena
+/// the caller frees after all the passes.
+pub fn readPass(a: std.mem.Allocator, tree: []const u8, paths: []const []const u8, threads: u32, proc: []const u8) !Pass {
     var dir = try std.fs.cwd().openDir(tree, .{});
     defer dir.close();
+    const sizes = try a.alloc(u64, paths.len);
+    const digests = try a.alloc([32]u8, paths.len);
+    const open_ns = try a.alloc(u64, paths.len);
+    const read_ns_each = try a.alloc(u64, paths.len);
+    const file_ns = try a.alloc(u64, paths.len);
+    const pressure_start = pressure(a, proc);
     var s = Shared{
         .dir = dir,
         .paths = paths,
-        .sizes = try a.alloc(u64, paths.len),
-        .digests = try a.alloc([32]u8, paths.len),
+        .sizes = sizes,
+        .digests = digests,
+        .open_ns = open_ns,
+        .read_ns = read_ns_each,
+        .file_ns = file_ns,
         .start = try std.time.Instant.now(),
     };
     const n: usize = @max(1, @min(threads, paths.len));
@@ -195,6 +268,7 @@ pub fn readPass(a: std.mem.Allocator, tree: []const u8, paths: []const []const u
     worker(&s, bufs[0..chunk]);
     for (spawned[0..started]) |t| t.join();
     const read_ns = (try std.time.Instant.now()).since(s.start);
+    const pressure_end = pressure(a, proc);
     if (s.failure) |e| return e;
     var p = Pass{
         .threads = started + 1,
@@ -205,12 +279,41 @@ pub fn readPass(a: std.mem.Allocator, tree: []const u8, paths: []const []const u
         .empty = 0,
         .largest = 0,
         .tree_sha256 = undefined,
+        .open_sum_ns = 0,
+        .read_sum_ns = 0,
+        .file_sum_ns = 0,
+        .open_p50_ns = 0,
+        .open_p90_ns = 0,
+        .open_p99_ns = 0,
+        .open_max_ns = 0,
+        .file_p50_ns = 0,
+        .file_p99_ns = 0,
+        .file_max_ns = 0,
+        .largest_ns = 0,
+        .pressure_start = pressure_start,
+        .pressure_end = pressure_end,
     };
-    for (s.sizes) |size| {
+    for (s.sizes, open_ns, read_ns_each, file_ns) |size, o, r, f| {
         p.bytes += size;
-        p.largest = @max(p.largest, size);
+        if (size > p.largest) {
+            p.largest = size;
+            p.largest_ns = f;
+        }
         if (size == 0) p.empty += 1;
+        p.open_sum_ns += o;
+        p.read_sum_ns += r;
+        p.file_sum_ns += f;
     }
+    // The per-file times are sorted in place for their percentiles, after the sums and the largest file have read them by file.
+    std.mem.sort(u64, open_ns, {}, std.sort.asc(u64));
+    std.mem.sort(u64, file_ns, {}, std.sort.asc(u64));
+    p.open_p50_ns = rank(open_ns, 50);
+    p.open_p90_ns = rank(open_ns, 90);
+    p.open_p99_ns = rank(open_ns, 99);
+    p.open_max_ns = rank(open_ns, 100);
+    p.file_p50_ns = rank(file_ns, 50);
+    p.file_p99_ns = rank(file_ns, 99);
+    p.file_max_ns = rank(file_ns, 100);
     const d = treeDigest(paths, s.sizes, s.digests);
     const hex = std.fmt.bytesToHex(d, .lower);
     p.tree_sha256 = try a.dupe(u8, &hex);
@@ -298,11 +401,13 @@ pub fn run(parent: std.mem.Allocator, argv: []const []const u8, report: anytype)
     const started_ms = std.time.milliTimestamp();
     const l = try list(a, args.tree);
     const passes = try a.alloc(Pass, args.passes);
-    for (passes) |*p| p.* = try readPass(a, args.tree, l.files, args.threads);
+    for (passes) |*p| p.* = try readPass(a, args.tree, l.files, args.threads, args.proc);
     const value = .{
         .version = 1,
         .started_ms = started_ms,
         .threads = args.threads,
+        // The CPUs the program may run on (its affinity): a job's share of the node.
+        .cpus = std.Thread.getCpuCount() catch null,
         .dirs = l.dirs,
         .others = l.others,
         .root_ns = l.root_ns,

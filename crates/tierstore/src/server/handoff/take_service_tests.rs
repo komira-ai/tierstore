@@ -113,6 +113,7 @@ async fn an_offer_with_the_mount_hands_sockets_mount_control_and_lock_together()
     let ask = Ask {
         mount: Some(want),
         lock: Some(&lock),
+        leaves_another_lock: false,
     };
     let taken = within(
         "the take",
@@ -194,6 +195,7 @@ async fn a_lock_descriptor_of_another_file_is_refused_before_ack() {
         let ask = Ask {
             mount: None,
             lock: Some(&lock),
+            leaves_another_lock: false,
         };
         let taken = take_service(&handoff(path.clone()), &s3(&addrs), ask).await;
         assert_eq!(taken.err().unwrap().to_string(), error);
@@ -317,6 +319,7 @@ async fn a_descriptor_of_the_wrong_kind_is_refused_before_ack() {
         let ask = Ask {
             mount: Some(want),
             lock: Some(&lock),
+            leaves_another_lock: false,
         };
         let error = take_service(&handoff(path.clone()), &s3(&addrs), ask)
             .await
@@ -360,6 +363,7 @@ async fn a_taker_refuses_an_offer_from_another_user() {
     let mut ask = Ask {
         mount: None,
         lock: None,
+        leaves_another_lock: false,
     };
     let refused = take_as(
         &handoff(path.clone()),
@@ -410,6 +414,7 @@ async fn an_instance_without_a_mount_refuses_the_mount_line_and_is_asked_again_w
     let ask = Ask {
         mount: Some(want),
         lock: Some(&lock),
+        leaves_another_lock: false,
     };
     let taken = take_service(&handoff(path), &s3(&addrs), ask)
         .await
@@ -483,6 +488,7 @@ async fn an_offer_that_is_not_what_was_asked_for_is_refused_before_ack() {
     let ask = Ask {
         mount: None,
         lock: None,
+        leaves_another_lock: false,
     };
     let error = take_service(&handoff(path.clone()), &s3(&addrs), ask)
         .await
@@ -549,6 +555,7 @@ async fn an_offer_that_is_not_what_was_asked_for_is_refused_before_ack() {
         let ask = Ask {
             mount: Some(want),
             lock: None,
+            leaves_another_lock: false,
         };
         let taken = take_service(&handoff(path.clone()), &s3(&addrs), ask).await;
         assert_eq!(taken.err().unwrap().to_string(), error);
@@ -579,6 +586,7 @@ async fn an_instance_that_never_offers_is_given_up_after_the_wait_for_the_offer(
     let ask = Ask {
         mount: Some(want),
         lock: None,
+        leaves_another_lock: false,
     };
     let mut handoff = handoff(path.clone());
     handoff.wait = Duration::from_secs(10);
@@ -615,6 +623,7 @@ async fn a_mount_request_refused_for_another_reason_is_not_asked_again() {
     let ask = Ask {
         mount: Some(want),
         lock: None,
+        leaves_another_lock: false,
     };
     let addrs: [std::net::SocketAddr; 0] = [];
     let refused = take_service(&handoff(path), &s3(&addrs), ask).await;
@@ -656,6 +665,7 @@ async fn an_instance_that_never_says_done_is_given_up_after_both_waits() {
     let ask = Ask {
         mount: Some(want),
         lock: None,
+        leaves_another_lock: false,
     };
     let mut handoff = handoff(path.clone());
     handoff.wait = Duration::from_secs(10);

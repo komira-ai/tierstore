@@ -347,6 +347,23 @@ impl Fills for InProcess {
         }
     }
 
+    /// The span from the node's tree store, if the cache is read-write now and holds it; never
+    /// waited for. A read-only cache's index is its holder's as of the last time this process
+    /// read it, so a span it names is not taken: the open asks [`Fills::span`], which waits for
+    /// the write role.
+    fn span_held(
+        &self,
+        (_, size): (&str, u64),
+        (pack, offset): (&str, u64),
+    ) -> Option<(u64, PathBuf)> {
+        let trees = self.trees.as_ref()?;
+        if *self.cache.watch_mode().borrow() != Mode::ReadWrite {
+            return None;
+        }
+        let held = trees.held_span(pack, offset, size)?;
+        Some((held.offset, held.path))
+    }
+
     /// Ends the hold, once the cache is read-write; nothing is lost if it does not become so.
     fn unplace(&self, mount: &str, id: &str) {
         if self.writer().is_err() {
