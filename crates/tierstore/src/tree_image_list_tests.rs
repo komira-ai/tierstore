@@ -543,7 +543,7 @@ fn bytes_damaged_after_the_walk_read_as_absent_not_a_panic() {
 /// Asserts that bytes changed in place under a mapping, after a read through it, read as absent,
 /// not as a panic. Linux alone: whether a private mapping shows a change made to its file after it
 /// was mapped is left to the system by POSIX; Linux shows it in every page the mapping has not
-/// written (it writes none), while macOS kept the bytes of a page it had already read.
+/// written (it writes none), while macOS may keep the bytes of a page it has already read.
 #[cfg(target_os = "linux")]
 #[test]
 fn bytes_damaged_after_the_map_read_as_absent_not_a_panic() {
