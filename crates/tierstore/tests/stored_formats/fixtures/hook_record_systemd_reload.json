@@ -1,0 +1,20 @@
+{
+  "kind": "single",
+  "live": "a",
+  "markers": [
+    "swapped"
+  ],
+  "reload": {
+    "guard": false,
+    "tree_list_ram_bytes": {
+      "control_socket": "/run/tierstore-fs/control.sock",
+      "from": 536870912,
+      "mount": "4b5a6978",
+      "to": 1073741824
+    }
+  },
+  "schema": 1,
+  "to": "/var/lib/hostkeeper/packages/tierstore-config/1.1.0",
+  "updating": true,
+  "version": "0.5.0+0123456789ab"
+}

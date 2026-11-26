@@ -98,10 +98,11 @@ const MOST_TREE_IDLE_SECS: u64 = 7 * 24 * 3600;
 
 /// The bytes of tree lists the mount keeps mapped when the file leaves out
 /// `fs.tree_list_ram_bytes`: 512 MiB, about 1,700 lists of 0.3 MiB or 73 of 7 MiB.
-const DEFAULT_TREE_LIST_RAM_BYTES: u64 = 512 << 20;
+pub(in crate::server) const DEFAULT_TREE_LIST_RAM_BYTES: u64 = 512 << 20;
 
-/// The least `fs.tree_list_ram_bytes` may be: one page, which a mapping takes at least.
-const LEAST_TREE_LIST_RAM_BYTES: u64 = 4096;
+/// The least `fs.tree_list_ram_bytes` may be: one page, which a mapping takes at least. The
+/// control socket holds a value it sets to the same bound (`control.rs`).
+pub(super) const LEAST_TREE_LIST_RAM_BYTES: u64 = 4096;
 
 /// The keys of `[fs]` that an earlier release read and this one does not, each with why: a file
 /// written for that release starts with them, and each is said.

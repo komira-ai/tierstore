@@ -4,19 +4,22 @@
 //! with params that name this binary's build as the version on both sides of the update, so that
 //! the arm starts, observes, retires and hands back instances exactly as for a release. The fs
 //! process of the old layout is left alone but for the switch of a node to one process, which the
-//! arm's `prepare` records (systemd) or `switch.rs` does (a Mac).
+//! arm's `prepare` records (systemd) or `switch.rs` does (a Mac). On systemd a change that the
+//! instance that serves applies in place is not handed to the arm at all (`reload.rs`).
 
 use std::path::{Path, PathBuf};
 
 use super::super::args::Step;
 use super::super::params::{Params, Previous};
-use super::super::ports::{Guard, Host, Instance, LaunchdPorts, PortError, StateDir, SystemdPorts};
-use super::super::record::{Marker, Record};
+use super::super::ports::{
+    Control, Guard, Host, Instance, LaunchdPorts, PortError, StateDir, SystemdPorts,
+};
+use super::super::record::{Marker, Record, Reload};
 use super::super::report::{Done, Reason};
 use super::super::shape::{FS_INTERFACE, fs_interface};
 use super::super::systemd::FsPolicy;
 use super::super::{DIR_TIER_KIND, FS_LAUNCHD_LABEL, HANDOFF_SOCKET_KEY, HOT_STORE_TABLE};
-use super::{staged_copy, switch};
+use super::{reload, staged_copy, switch};
 
 /// The network guard's unit on a Linux node.
 pub const GUARD_UNIT: &str = "tierstore-guard.service";
@@ -196,12 +199,21 @@ pub struct Common<'a> {
     pub build: &'a str,
 }
 
-/// What `prepare`'s own part decided: the arm's params, and whether the change is the switch of
-/// a node to one process (the staged file has an `fs` interface, the file that serves has none,
-/// and the file service of the old layout runs).
+/// What `prepare`'s own part decided: the arm's params, whether the change is the switch of a node
+/// to one process (the staged file has an `fs` interface, the file that serves has none, and the
+/// file service of the old layout runs), and, on systemd, what of it the instance that serves
+/// applies in place, when that is all of it.
 struct Prepared {
     params: Params,
     switch: bool,
+    reload: Option<Reload>,
+}
+
+/// Whether the package changes the guard's file: the staged copy is not the installed one.
+fn guard_changed(host: &dyn Host, params: &Params) -> Result<bool, Done> {
+    let installed = host.config(Path::new(GUARD_FILE))?;
+    let staged = host.config(&staged_copy(&params.staged_release, Path::new(GUARD_FILE)))?;
+    Ok(installed != staged)
 }
 
 /// The refusal of a change that would drop or move a mount (design 3.6): the taker would say
@@ -276,6 +288,18 @@ fn prepare_params(
             ));
         }
     }
+    // A Mac restarts its one job for every config update.
+    let reload = match serving
+        .as_deref()
+        .filter(|_| !mac)
+        .and_then(|s| reload::of(s, &text))
+    {
+        Some(reload) => Some(Reload {
+            guard: guard_changed(ports_host, params)?,
+            ..reload
+        }),
+        None => None,
+    };
     Ok(Prepared {
         params: arm_params(
             params,
@@ -284,6 +308,7 @@ fn prepare_params(
             restart || (switch && switch_restarts),
         ),
         switch,
+        reload,
     })
 }
 
@@ -300,7 +325,7 @@ fn fs_runs(ports: &SystemdPorts<'_>) -> Result<bool, Done> {
 /// A config package that is the node's first has no files to go back to: hostkeeper takes the
 /// package, and with it the files, off the node. The instances stay as they are; the record
 /// says nothing is in flight, with the instance that runs as the one that serves.
-fn no_previous(serving: Option<Instance>) -> Done {
+pub(super) fn no_previous(serving: Option<Instance>) -> Done {
     let detail = serving.map_or_else(
         || "nothing to go back to: no earlier config package".to_owned(),
         |instance| {
@@ -314,15 +339,18 @@ fn no_previous(serving: Option<Instance>) -> Done {
 }
 
 /// The steps on a node of two systemd instances. `ports.state` is the config hook's record, and
-/// `ports.host` a [`Running`] host.
+/// `ports.host` a [`Running`] host; `control` reaches the control socket of the instance that
+/// serves, for a change it applies in place.
 pub fn systemd_step(
     step: Step,
     params: &Params,
     ports: &SystemdPorts<'_>,
     guard: &dyn Guard,
+    control: &dyn Control,
     common: &Common<'_>,
 ) -> Done {
-    systemd_attempt(step, params, ports, guard, common).unwrap_or_else(std::convert::identity)
+    systemd_attempt(step, params, ports, guard, control, common)
+        .unwrap_or_else(std::convert::identity)
 }
 
 fn systemd_attempt(
@@ -330,6 +358,7 @@ fn systemd_attempt(
     params: &Params,
     ports: &SystemdPorts<'_>,
     guard: &dyn Guard,
+    control: &dyn Control,
     common: &Common<'_>,
 ) -> Result<Done, Done> {
     let config = config_file(params)?.to_path_buf();
@@ -340,11 +369,27 @@ fn systemd_attempt(
     };
     let left = FsPolicy::LeftAlone;
     let plain = arm_params(params, common.build, &config, false);
+    // A step after `prepare` of an update applied in place is the reload's own, not the arm's.
+    let act = reload::Act {
+        ports,
+        guard,
+        control,
+        params: &plain,
+        first: params.previous.is_none(),
+    };
+    let in_place = || -> Result<Option<Done>, Done> {
+        Ok(reload::open(ports.state)?.map(|opened| reload::run(step, &opened, &act)))
+    };
     match step {
         Step::Restore => Err(not_a_step()),
         Step::Uninstall => Ok(uninstalled()),
         Step::Prepare => {
             let prepared = prepare_params(params, ports.host, common, &|| fs_runs(ports), false)?;
+            if let Some(reload) = prepared.reload
+                && let Some(done) = reload::prepare(params, ports, common.build, reload)?
+            {
+                return Ok(done);
+            }
             let policy = if prepared.switch {
                 FsPolicy::Switch
             } else {
@@ -353,20 +398,26 @@ fn systemd_attempt(
             Ok(arm(step, &prepared.params, policy))
         }
         Step::Cutover => {
+            if let Some(done) = in_place()? {
+                return Ok(done);
+            }
             guard.reload()?;
             Ok(arm(step, &plain, left))
         }
         Step::Verify => {
             checked(ports.host, common.release, "installed", &config)?;
-            Ok(arm(step, &plain, left))
+            Ok(in_place()?.unwrap_or_else(|| arm(step, &plain, left)))
         }
-        Step::Rollback if params.previous.is_none() => systemd_first_back(ports, &plain),
-        Step::Rollback => {
-            guard.reload()?;
-            Ok(arm(step, &plain, left))
-        }
+        Step::Rollback => match in_place()? {
+            Some(done) => Ok(done),
+            None if params.previous.is_none() => systemd_first_back(ports, &plain),
+            None => {
+                guard.reload()?;
+                Ok(arm(step, &plain, left))
+            }
+        },
         Step::Cleanup => {
-            let done = arm(step, &plain, left);
+            let done = in_place()?.unwrap_or_else(|| arm(step, &plain, left));
             if done.outcome == super::super::report::Outcome::Success {
                 write_back(ports.state, common.service)?;
             }

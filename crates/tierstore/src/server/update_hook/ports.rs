@@ -1,7 +1,7 @@
 //! What the steps do to the machine, as ports: the two systemd instances of each of the two
 //! templates and their start markers, the process of an fs instance and the binary it runs, the
-//! launchd job, the instances' HTTP answers, what the host says of itself, the clock and the state
-//! directory.
+//! launchd job, the instances' HTTP answers and the control socket of the one that serves, what the
+//! host says of itself, the clock and the state directory.
 //!
 //! Each port is a small trait; the steps take a [`SystemdPorts`] or a [`LaunchdPorts`] and never
 //! reach for the machine themselves. Tests keep the machine's world in a fake. Nothing here reads
@@ -454,6 +454,18 @@ pub trait Guard {
     /// # Errors
     /// The program failed.
     fn reload(&self) -> Result<(), PortError>;
+}
+
+/// The control socket of the `fs` interface of the instance that serves (`treefs/control.rs`):
+/// only the config hook asks it, to apply a change of its configuration in place.
+pub trait Control {
+    /// Sends the one request `line` on the Unix socket `socket` (the path the node's file names)
+    /// and returns the one line it is answered with, without its newline.
+    ///
+    /// # Errors
+    /// No answer: the socket cannot be reached, the request cannot be written, or no whole line
+    /// is read back.
+    fn ask(&self, socket: &Path, line: &str) -> Result<String, PortError>;
 }
 
 /// Everything a step of the systemd arm may touch.

@@ -137,8 +137,8 @@ mod steps;
 mod nfs;
 
 pub(super) use config::{
-    DEFAULT_CONTROL_SOCKET, DEFAULT_MOUNTPOINT, DEFAULT_RUNTIME_DIR, FsSettings, FsTable, Lookup,
-    id_of, load,
+    DEFAULT_CONTROL_SOCKET, DEFAULT_MOUNTPOINT, DEFAULT_RUNTIME_DIR, DEFAULT_TREE_LIST_RAM_BYTES,
+    FsSettings, FsTable, Lookup, id_of, load,
 };
 #[cfg(test)]
 pub(super) use config::{builders, from_text};

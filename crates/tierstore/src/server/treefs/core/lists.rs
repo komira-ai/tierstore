@@ -27,6 +27,11 @@
 //! it is mapped past the cap, counted, and said at warn once in `SAY_EVERY_MS` (`core/said.rs`);
 //! the next release a detach allows brings the total under the cap again.
 //!
+//! The cap is the file's at start, and the control socket sets another while the mount serves
+//! (`set tree_list_ram_bytes`, `control.rs`; a config update that changes only it applies it so):
+//! a raised cap only lets more lists in, and a lowered one releases at once the lists it can, as
+//! before a new list is mapped, and leaves those that are held to the next release.
+//!
 //! What the mount holds mapped, the cap, and the lists released and mapped past the cap are told
 //! to the node at each look (`treelists`, `local_cache/tree_lists.rs`), and said in the line of
 //! the trees in memory (`core/memory.rs`).
@@ -48,6 +53,8 @@ use super::{Core, Errno, Loaded, locked};
 pub(super) struct Lists {
     /// The lists in memory, by digest: the tree store's where it is in this process.
     pub(super) mapped: Arc<MappedLists>,
+    /// `fs.tree_list_ram_bytes`: the file's at start, or the one the control socket set since.
+    ram: AtomicU64,
     /// The lists released to make room under the cap, since the process started.
     cap: AtomicU64,
     /// The lists the sweep for idle trees released, since the process started.
@@ -71,12 +78,19 @@ pub(super) struct Said {
 }
 
 impl Lists {
-    /// The budget of a mount that shares `mapped` with the tree store of its process.
-    pub(super) fn new(mapped: Arc<MappedLists>) -> Self {
+    /// The budget of a mount that shares `mapped` with the tree store of its process, and keeps at
+    /// most `ram` bytes of lists mapped.
+    pub(super) fn new(mapped: Arc<MappedLists>, ram: u64) -> Self {
         Self {
             mapped,
+            ram: AtomicU64::new(ram),
             ..Self::default()
         }
+    }
+
+    /// `fs.tree_list_ram_bytes` now.
+    fn ram(&self) -> u64 {
+        self.ram.load(Ordering::Acquire)
     }
 
     /// Counts `trees` that the sweep for idle trees took out of memory, those of them that are
@@ -100,7 +114,7 @@ impl Core {
     /// (module docs); whether it fits. Called with no lock of the core held, before the list is
     /// mapped.
     pub(super) fn make_room(&self, need: u64) -> bool {
-        let cap = self.settings.tree_list_ram_bytes;
+        let cap = self.lists.ram();
         // Each release takes a tree out of memory, so there are never more than there are trees;
         // a tree a request attached again in the meantime is not released twice for one list.
         // (Counted first: the trees of a look in the head of the loop would be held through it.)
@@ -173,6 +187,21 @@ impl Core {
         released
     }
 
+    /// Makes `bytes` the cap of the lists mapped from now on: the lists over it that nothing holds
+    /// are released at once, the least recently named first, and the node is told the new cap
+    /// (`treelists`). The caller holds `bytes` to the bound of the file.
+    pub(in crate::server::treefs) fn set_tree_list_ram_bytes(&self, bytes: u64) {
+        self.lists.ram.store(bytes, Ordering::Release);
+        // What fits under the cap with nothing more to map: none may fit, when every list is held.
+        let _ = self.make_room(0);
+        self.report_tree_lists();
+    }
+
+    /// The id of the mount: the `mount` label of its gauges on the node.
+    pub(in crate::server::treefs) fn mount_id(&self) -> &str {
+        &self.settings.mount_id
+    }
+
     /// Whether a tree of the mount in memory shows the list `tree` now.
     pub(super) fn shown(&self, tree: &TreeDigest) -> bool {
         let Some(list) = self.lists.mapped.get(tree) else {
@@ -191,7 +220,7 @@ impl Core {
     pub(super) fn over_cap(&self, tree: &TreeDigest) {
         let _ = self.lists.over_cap.fetch_add(1, Ordering::AcqRel);
         let mapped = self.lists.mapped.mapped().bytes;
-        let cap = self.settings.tree_list_ram_bytes;
+        let cap = self.lists.ram();
         self.say_failed((0, Failing::Lists), Some(tree), &|| {
             format!(
                 "tierstore fs: tree list {tree} mapped past fs.tree_list_ram_bytes: {mapped} of \
@@ -222,7 +251,7 @@ impl Core {
             process: u64::from(std::process::id()),
             mapped: mapped.lists,
             bytes: mapped.bytes,
-            cap: self.settings.tree_list_ram_bytes,
+            cap: self.lists.ram(),
             totals: self.lists.totals(),
         }));
     }
@@ -236,7 +265,7 @@ impl Core {
         *looked = (totals.cap, totals.idle);
         Said {
             mapped: self.lists.mapped.mapped(),
-            cap: self.settings.tree_list_ram_bytes,
+            cap: self.lists.ram(),
             released: (totals.cap - cap, totals.idle - idle),
         }
     }

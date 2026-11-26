@@ -72,11 +72,13 @@ pub use params::{
     TARGET_VERSION_KEY,
 };
 pub use ports::{
-    Clock, Exe, Family, FileId, Host, Instance, Instances, Launchd, LaunchdPorts, Lock, Markers,
-    PortError, PortKind, Processes, Reply, StateDir, SystemdPorts, UnitState, Units,
+    Clock, Control, Exe, Family, FileId, Host, Instance, Instances, Launchd, LaunchdPorts, Lock,
+    Markers, PortError, PortKind, Processes, Reply, StateDir, SystemdPorts, UnitState, Units,
 };
 pub use probe::{Build, CacheMode, build_of, readiness};
-pub use record::{Invalid, Kind, Marker, Mode, RECORD_MAX, Record, RecordError, SCHEMA};
+pub use record::{
+    Invalid, Kind, ListCap, Marker, Mode, RECORD_MAX, Record, RecordError, Reload, SCHEMA,
+};
 pub use report::{Class, Done, MAX_REASON_LEN, Outcome, Reason, Report, is_reason_token};
 
 /// The first argument that selects the verb.

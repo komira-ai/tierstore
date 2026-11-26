@@ -1,5 +1,6 @@
 //! What is read off an instance's answers.
 
+use super::probe::tree_list_ram_bytes_of;
 use super::{Build, CacheMode, PortError, PortKind, Reply, build_of, readiness};
 
 fn reply(status: u16, body: &str) -> Result<Reply, PortError> {
@@ -99,4 +100,46 @@ fn the_reader_reads_the_gauge_the_server_renders() {
     assert_eq!(without.slot, None);
     assert!(without.is(VERSION));
     assert!(without.is(&format!("{VERSION}+{COMMIT}")));
+}
+
+/// Asserts that the cap of the tree lists is read off the gauge of the one mount asked for, among
+/// the gauges of other mounts and other families whose names begin alike, and that a mount with no
+/// sample, or a sample that is not a whole number, gives none. Catches a read-back that takes the
+/// gauge of a mount of an earlier process, which the node still shows.
+#[test]
+fn the_cap_of_the_tree_lists_is_read_off_the_gauge_of_its_mount() {
+    let text = "# TYPE tierstore_fs_tree_list_ram_bytes gauge\n\
+tierstore_fs_tree_list_ram_bytes_other{mount=\"m2\"} 7\n\
+tierstore_fs_tree_list_ram_bytes{mount=\"m1\"} 4096\n\
+tierstore_fs_tree_list_ram_bytes{mount=\"m2\"} 1073741824\n\
+tierstore_fs_tree_list_ram_bytes{mount=\"m3\"} lots\n\
+tierstore_fs_tree_list_ram_bytes 9\n";
+    assert_eq!(tree_list_ram_bytes_of(text, "m2"), Some(1 << 30));
+    assert_eq!(tree_list_ram_bytes_of(text, "m1"), Some(4096));
+    assert_eq!(tree_list_ram_bytes_of(text, "m3"), None);
+    assert_eq!(tree_list_ram_bytes_of(text, "m4"), None);
+    assert_eq!(tree_list_ram_bytes_of("", "m1"), None);
+}
+
+/// Asserts that the reader reads the gauge as the node renders it on `/metricz` from the mounts'
+/// reports (`local_cache/tree_lists.rs`): the cap of each mount, by its id. Catches a node and a
+/// hook that no longer agree on the family or its label.
+#[test]
+fn the_reader_reads_the_cap_the_node_renders() {
+    use crate::server::local_cache::testing::Rig;
+    use crate::server::local_cache::tree_lists::{Totals, TreeLists};
+    let rig = Rig::new("probe-tree-lists");
+    for (mount, cap) in [("0f1e2d3c", 8192), ("4b5a6978", 1 << 30)] {
+        rig.cache.tree_lists_reported(TreeLists {
+            mount: mount.to_owned(),
+            process: 1,
+            mapped: 0,
+            bytes: 0,
+            cap,
+            totals: Totals::default(),
+        });
+    }
+    let metrics = rig.cache.metrics();
+    assert_eq!(tree_list_ram_bytes_of(&metrics, "0f1e2d3c"), Some(8192));
+    assert_eq!(tree_list_ram_bytes_of(&metrics, "4b5a6978"), Some(1 << 30));
 }

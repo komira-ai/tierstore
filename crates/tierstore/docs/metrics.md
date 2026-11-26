@@ -604,7 +604,7 @@ The node keeps at most 64 mounts, as for the descriptors.
 |---|---|---|---|
 | `tierstore_fs_tree_lists_mapped` | gauge | `mount`: the mount's id | the tree lists mapped in that mount's process at its last report, each once (the tree store's too, where it is in that process) |
 | `tierstore_fs_tree_list_mapped_bytes` | gauge | `mount` | the bytes of those mappings, in whole pages: what is budgeted against the cap |
-| `tierstore_fs_tree_list_ram_bytes` | gauge | `mount` | the cap, `fs.tree_list_ram_bytes` |
+| `tierstore_fs_tree_list_ram_bytes` | gauge | `mount` | the cap, `fs.tree_list_ram_bytes`, or the one the control socket set since the start (reported at once) |
 | `tierstore_fs_tree_list_releases_total` | counter | `mount`; `why`: `cap`, `idle` | the lists that mount released: `cap` to make room for a list under the cap, `idle` at the sweep for idle trees |
 | `tierstore_fs_tree_list_over_cap_total` | counter | `mount` | the lists mapped past the cap because every list mapped was held (a run attaches it, or a request reads it) |
 
