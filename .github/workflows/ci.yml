@@ -14,19 +14,26 @@
 # farm.yml builds the same workspace a second way, with Buck2 through buildrules on the build farm;
 # it is advisory, and this workflow stays the gate (docs/farm.md).
 #
-# The pull request and the push to main run the same jobs. A push to main also saves the Cargo
-# cache; a pull request only restores it. Artifacts.yml builds and signs the release files on
+# The pull request, the merge queue's run and the push to main run the same jobs. `lint` and `test`
+# are the required checks of main's merge queue: the queue builds each pull request merged with the
+# ones ahead of it (the `merge_group` event, on a `gh-readonly-queue/main/...` branch) and lands it
+# when both pass on that commit. The workflow lint holds this file to what the queue needs
+# (crates/xtask/tests/workflows/merge_queue.rs): the trigger, these two jobs and no other, each
+# reporting under its own name with no `if:`, nothing written, no queue run cancelled. A push to
+# main also saves the Cargo cache; a pull request and a queue run only restore it. Artifacts.yml builds and signs the release files on
 # the same push, and release.yml refuses a commit that has no green run of this workflow.
 name: ci
 
 on:
   pull_request:
+  merge_group:
   push:
     branches: [main]
 
 permissions: {}
 
-# A pull request's newer run replaces its older one; a push to main always runs to its end.
+# A pull request's newer run replaces its older one; a push to main and a merge queue's run each
+# have a group of their own (the run id) and always run to their end.
 concurrency:
   group: ci-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
