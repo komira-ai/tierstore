@@ -45,7 +45,7 @@ use super::{Inner, LocalCache, Mode, locked};
 #[path = "tree_fill.rs"]
 mod tree_fill;
 
-pub(in crate::server) use tree_fill::TreeFilled;
+pub(in crate::server) use tree_fill::{TreeFilled, is_list};
 
 /// A blob that lies inside an object of the upstream.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -3,7 +3,8 @@
 //! the cache holds not gone into; the manifests left in the cache directory, flattened as the
 //! mount flattens them; a missing manifest, root or child, failing with its digest; the limits
 //! judged with no level below the one that passes them fetched; the time the request was given;
-//! the words of the answer; and each fill timed on the cache's clock.
+//! the words of the answer; each fill timed on the cache's clock; and a root that is a version 2
+//! tree list filled alone, with nothing below it looked for.
 //!
 //! The rounds are counted as events, not as time: every HEAD of the upstream (the first call of a
 //! fill of a manifest) is held at a gate, and the test lets each level through once all of its
@@ -402,4 +403,60 @@ fn the_answer_of_a_fill_reads_back_and_no_other_answer_does() {
     ] {
         assert_eq!(TreeFilled::parse(other), None, "{other:?}");
     }
+}
+
+/// The bytes of a version 2 tree list of one empty file, `name`.
+fn tree_list(name: &str) -> Vec<u8> {
+    crate::TreeList {
+        entries: vec![crate::ListEntry {
+            path: name.to_owned(),
+            kind: crate::ListKind::File {
+                mode: crate::Mode::new(0o644).unwrap(),
+                size: 0,
+                source: None,
+                sha256: Some(TreeDigest::of(b"")),
+            },
+        }],
+    }
+    .encode_v2()
+    .unwrap()
+}
+
+/// Asserts that a fill of a tree stops at a root that is a version 2 tree list: the list is asked
+/// of the upstream once, kept in the cache directory as it is, and counted as the one level of the
+/// answer, with nothing else asked; asked again, the list the cache holds is read, counted as no
+/// fill, and nothing is asked. A list below a root is not looked for: a manifest whose directory
+/// names a list the cache does not hold fails the fill as a read of that list as a manifest.
+#[tokio::test]
+async fn fill_tree_stops_at_a_root_that_is_a_tree_list() {
+    let rig = Rig::new("ttree-fill-list");
+    let bytes = tree_list("one");
+    let list = TreeDigest::of(&bytes);
+    rig.put(&object_key(&list.to_string()), &bytes).await;
+    let filled = rig.cache.fill_tree(&list, LONG).await.unwrap();
+    assert_eq!(filled.levels, [1]);
+    let kept = std::fs::read(manifest_path(&rig.config.path, &list.to_string())).unwrap();
+    assert_eq!(kept, bytes);
+    assert_eq!(heads_of(&rig, &list), 1);
+    assert_eq!(rig.calls(Op::Head), 1);
+    let again = rig.cache.fill_tree(&list, LONG).await.unwrap();
+    assert_eq!(again.levels, [0]);
+    assert_eq!(rig.calls(Op::Head), 1);
+
+    let below = tree_list("two");
+    let other = TreeDigest::of(&below);
+    rig.put(&object_key(&other.to_string()), &below).await;
+    let mut upstream = Upstream::of(&rig);
+    let root = upstream.put(&[dir("sub", &other)]).await;
+    let failed = rig.cache.fill_tree(&root, LONG).await.unwrap_err();
+    assert!(
+        matches!(&failed, TreeFillError::Read { digest, .. } if *digest == other),
+        "{failed:?}"
+    );
+    assert!(
+        failed
+            .to_string()
+            .starts_with(&format!("cannot read {other}: malformed manifest: ")),
+        "{failed}"
+    );
 }

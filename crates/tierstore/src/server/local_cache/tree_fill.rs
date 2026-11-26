@@ -23,6 +23,12 @@
 //! fill ends by the time the request was given ([`TreeFillError::Spent`]); the fills it started
 //! go on, as every fill does when its caller stops waiting.
 //!
+//! A root that is a version 2 tree list (its file begins with [`TREE_LIST_V2_MAGIC`]) has no
+//! manifests below it: the list is the whole tree, in the one object. The fill stops once the root
+//! is in the cache and answers its one level, so the mount reads the list from the cache directory
+//! with no other request (`treefs/core/placed.rs`). A list below the root is not looked for: it is
+//! read as a manifest, and refused as one.
+//!
 //! The answer to the socket is `ok <ms> <filled> [<filled> ...]`: the milliseconds the fill took
 //! on the cache's clock, and the manifests it filled at each level it went down, the root's first
 //! ([`TreeFilled`]); or the words of a [`TreeFillError`]. Either way the mount then reads the
@@ -36,6 +42,7 @@ use std::time::Duration;
 
 use futures::StreamExt as _;
 
+use crate::TREE_LIST_V2_MAGIC;
 use crate::tree_manifest::{
     EntryKind, MAX_DEPTH, MAX_ENTRIES, MAX_MANIFEST_BYTES, TreeDigest, TreeError, TreeManifest,
     parse_manifest,
@@ -132,6 +139,34 @@ fn read_manifest(path: &std::path::Path, digest: &TreeDigest) -> Result<TreeMani
     parse_manifest(&bytes, digest).map_err(|why| why.to_string())
 }
 
+/// What a fill of a tree met at one digest: a manifest, read from its file, or, at the root, a
+/// version 2 tree list, which has nothing below it.
+enum Met {
+    /// The manifest.
+    Manifest(Arc<TreeManifest>),
+    /// A tree list at the root.
+    List,
+}
+
+/// What [`Met`] the file at `path` of the object `digest` is: a tree list if it is the `root` and
+/// begins with [`TREE_LIST_V2_MAGIC`], else the manifest it is read as (a file that cannot be read
+/// fails as that read).
+fn met(path: &std::path::Path, digest: &TreeDigest, root: bool) -> Result<Met, String> {
+    if root && is_list(path).unwrap_or(false) {
+        return Ok(Met::List);
+    }
+    read_manifest(path, digest).map(|manifest| Met::Manifest(Arc::new(manifest)))
+}
+
+/// Whether the file at `path` begins with [`TREE_LIST_V2_MAGIC`]: its first bytes only are read.
+pub(in crate::server) fn is_list(path: &std::path::Path) -> std::io::Result<bool> {
+    let mut first = Vec::with_capacity(TREE_LIST_V2_MAGIC.len());
+    let _ = std::fs::File::open(path)?
+        .take(TREE_LIST_V2_MAGIC.len() as u64)
+        .read_to_end(&mut first)?;
+    Ok(first == TREE_LIST_V2_MAGIC)
+}
+
 /// The bytes of the file at `path`, at most [`MAX_MANIFEST_BYTES`] and one more.
 fn bounded(path: &std::path::Path) -> std::io::Result<Vec<u8>> {
     let mut bytes = Vec::new();
@@ -192,10 +227,15 @@ impl LocalCache {
             let mut fetches = futures::stream::iter(fetches).buffered(FILL_SOCKET_CONCURRENCY);
             let (mut below, mut filled) = (Vec::new(), 0u64);
             while let Some(got) = fetches.next().await {
-                let Some((manifest, fetched)) = got? else {
+                let Some((met, fetched)) = got? else {
                     continue;
                 };
                 filled += u64::from(fetched);
+                let manifest = match met {
+                    Met::Manifest(manifest) => manifest,
+                    // Only the root is read as a list: the tree is that one object.
+                    Met::List => return Ok(vec![filled]),
+                };
                 let children = manifest.children.len() as u64;
                 opened = opened.saturating_add(children);
                 if opened > limits.entries {
@@ -222,12 +262,12 @@ impl LocalCache {
 
     /// The manifest `digest`, filled if the cache does not hold it and read from its file, and
     /// whether it was filled; none for one the cache holds, unless it is the root, which is read
-    /// either way.
+    /// either way, and is a tree list if its file begins as one ([`Met`]).
     async fn new_manifest(
         &self,
         digest: TreeDigest,
         root: bool,
-    ) -> Result<Option<(Arc<TreeManifest>, bool)>, TreeFillError> {
+    ) -> Result<Option<(Met, bool)>, TreeFillError> {
         let hex = digest.to_string();
         let held = self.inner.present(&name_of(&object_key(&hex))).await;
         if held && !root {
@@ -239,9 +279,9 @@ impl LocalCache {
                 .map_err(|error| TreeFillError::Fill { digest, error })?;
         }
         let path = data_path(&self.inner.config.path, &hex);
-        let read = tokio::task::spawn_blocking(move || read_manifest(&path, &digest)).await;
+        let read = tokio::task::spawn_blocking(move || met(&path, &digest, root)).await;
         let read = read.unwrap_or_else(|why| Err(why.to_string()));
-        read.map(|manifest| Some((Arc::new(manifest), !held)))
+        read.map(|met| Some((met, !held)))
             .map_err(|why| TreeFillError::Read { digest, why })
     }
 }

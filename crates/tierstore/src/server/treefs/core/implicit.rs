@@ -2,7 +2,10 @@
 //! tree's manifests (the root `cas/l/<digest>` through the fill socket's `fill <digest>`, which
 //! checks the bytes against the digest and takes at most 64 MiB, where the cache does not hold
 //! them; the new manifests of a new tree by one `fill-tree <digest>` first, `core/placed.rs`),
-//! flattens it, and attaches it with no run: an implicit attachment. It is detached when no
+//! flattens it, and attaches it with no run: an implicit attachment. A root that is a version 2
+//! tree list (its first bytes are `TSTREE\0\0`) is the whole tree, named by the list's own digest:
+//! it is read as the list, mapped and walked for its shape, and nothing below it is read
+//! (`core/placed.rs`). It is detached when no
 //! request has named the tree or one of its inodes for `fs.tree_idle_secs`, by a thread that looks
 //! every quarter of that time (at least a second, at most a minute apart).
 //!

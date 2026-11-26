@@ -436,7 +436,8 @@ histogram_quantile(0.99, sum by (le) (rate(tierstore_request_to_start_seconds_bu
 
 ### Build node: tree attach on a lookup
 
-A lookup of `trees/<digest>` that no run has attached reads the tree's manifests and attaches it
+A lookup of `trees/<digest>` that no run has attached reads the tree's manifests (or the one tree
+list it is) and attaches it
 (see [the virtual build file system](operations.md#the-virtual-build-file-system)). `tierstore fs`
 reports to the node, on the fill socket, how long each such attach took, where the manifests of
 each read of a tree came from and how many levels and rounds of fills each read took, and the node's

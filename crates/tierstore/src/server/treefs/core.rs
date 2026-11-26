@@ -429,7 +429,7 @@ impl Core {
             ino: ino::of(number, entry.index),
             kind,
             size,
-            // A placed tree's modes are served as stored.
+            // A placed tree's modes, and a tree list's, are served as stored.
             perm: tree.mode(entry.index).unwrap_or(perm),
             nlink,
             uid: self.settings.owner.0,

@@ -1,6 +1,8 @@
 //! A placement whose tree is an image, end to end through the core: the fake fill socket answers
 //! `place` and `image`, the image file is in the tree's directory of the rig's cache directory, and
-//! a file's bytes are a span the fake answers.
+//! a file's bytes are a span the fake answers. And a version 2 tree list named by its digest under
+//! `trees/`, which the fake fills as the object `cas/l/<digest>` and, as a node of a release before
+//! `fill-tree`, leaves the read to fill: read as the list, or refused, and never as a manifest.
 
 use super::{Errno, key_of};
 use crate::TreeDigest;
@@ -9,7 +11,8 @@ use crate::server::local_cache::trees::image_path;
 use crate::server::treefs::core::blob::descriptor_tests::descriptors_on;
 use crate::server::treefs::core::{Entry, Kind, Looked};
 use crate::server::treefs::ino;
-use crate::server::treefs::testing::{Built, Rig, image_bytes, open_cached};
+use crate::server::treefs::testing::{Built, Logged, Rig, image_bytes, logged, open_cached, sha};
+use crate::tree_manifest::{TreeError, flatten_in_waves};
 
 const ID: &str = "0123456789abcdef0123456789abcdef";
 
@@ -392,5 +395,113 @@ fn the_first_look_into_each_placed_tree_is_reported_once_and_nothing_else_is() {
     assert_eq!(
         rig.upstream.asked("started"),
         ["started jobs", "started jobs2"]
+    );
+}
+
+/// Puts `bytes` in the rig's upstream as the object `cas/l/<their digest>`, where a manifest would
+/// be; their digest.
+fn object(rig: &Rig, bytes: &[u8]) -> String {
+    let digest = sha(bytes);
+    let mut built = rig.upstream.built.lock().unwrap();
+    let _ = built.manifests.insert(digest.clone(), bytes.to_vec());
+    digest
+}
+
+/// The fills of whole objects (`fill <sha256>`) the rig's fake was asked, in order.
+fn whole_fills(rig: &Rig) -> Vec<String> {
+    let fills = rig.upstream.asked("fill");
+    fills
+        .into_iter()
+        .filter(|line| !line.contains(" from "))
+        .collect()
+}
+
+/// Asserts that a tree list a node of the release before `fill-tree` leaves to the read is
+/// attached from the read's one whole fill of it: the fake refuses the `fill-tree`, the read asks
+/// `fill <digest>` once and nothing else, and the tree is the list, with no location, mapped once.
+#[test]
+fn a_tree_list_from_a_node_before_fill_tree_is_attached_from_the_reads_one_fill() {
+    let rig = Rig::new("tfs-list-old-node", Built::of(Vec::new()));
+    let list = object(&rig, &image_bytes());
+    let Ok(Looked::Found(root)) = rig.core.lookup(ino::TREES, &list) else {
+        panic!("the list's root");
+    };
+    assert_eq!(rig.upstream.asked("fill-tree").len(), 1);
+    assert_eq!(whole_fills(&rig), [format!("fill {list}")]);
+    let (number, index) = ino::split(root.attr.ino);
+    assert_eq!(index, 0);
+    let loaded = rig.core.tree(number).unwrap();
+    assert_eq!((loaded.tree.len(), loaded.tree.location()), (7, None));
+    assert!(loaded.tree.list().is_some());
+    assert_eq!(rig.core.lists.mapped.mapped().lists, 1);
+}
+
+/// Asserts that a tree list that fails its shape walk is `EIO` and takes no tree number: an object
+/// that begins with the list's magic and hashes to its digest but is cut short, asked twice, is
+/// `EIO` both times, refused as a tree list (not as a manifest) in the words said, with no number
+/// in the table and nothing mapped; and that an object of the same digest form that is not a list
+/// at all is refused as a malformed manifest, `EIO` too, as before.
+#[test]
+fn a_tree_list_that_fails_its_shape_walk_is_eio_and_takes_no_number() {
+    let rig = Rig::new("tfs-list-bad-shape", Built::of(Vec::new()));
+    let bytes = image_bytes();
+    let short = &bytes[..bytes.len() / 2];
+    assert!(crate::is_tree_list_v2(short));
+    let cut = object(&rig, short);
+    let log = Logged::default();
+    {
+        let _logging = logged(&log, tracing::Level::WARN);
+        assert_eq!(rig.core.lookup(ino::TREES, &cut).err(), Some(Errno::Io));
+    }
+    let said = log.text();
+    let walked = format!("tierstore fs: cannot attach {cut} on a lookup: the tree list {cut}: ");
+    assert!(said.contains(&walked), "{said}");
+    assert_eq!(rig.core.lookup(ino::TREES, &cut).err(), Some(Errno::Io));
+    let digest = TreeDigest::from_hex(&cut).unwrap();
+    assert_eq!(rig.core.table.find(&digest), None);
+    assert_eq!(rig.core.lists.mapped.mapped().lists, 0);
+    // Its own rig: the core says a refusal of the same kind at most so often, and this one must
+    // be said.
+    let rig = Rig::new("tfs-list-bad-shape-neither", Built::of(Vec::new()));
+    let neither = object(&rig, b"neither a manifest nor a tree list");
+    let log = Logged::default();
+    {
+        let _logging = logged(&log, tracing::Level::WARN);
+        assert_eq!(rig.core.lookup(ino::TREES, &neither).err(), Some(Errno::Io));
+    }
+    let said = log.text();
+    assert!(said.contains("malformed manifest"), "{said}");
+    assert!(!said.contains("the tree list"), "{said}");
+    let digest = TreeDigest::from_hex(&neither).unwrap();
+    assert_eq!(rig.core.table.find(&digest), None);
+}
+
+/// Asserts that a tree list given to the manifest reader is refused, not misread (B8, the reader of
+/// a release before this one on the new name form): the reader every release before this one runs
+/// for a root, `flatten_in_waves` over `parse_manifest`, refuses the list's bytes as a malformed
+/// manifest, so an older mount answers the lookup `EIO`; and this release, which still runs that
+/// reader below a root, refuses a manifest tree whose directory names a list: `EIO`, with no
+/// tree number and nothing mapped.
+#[test]
+fn a_tree_list_given_to_the_manifest_reader_is_refused_not_misread() {
+    let bytes = image_bytes();
+    let list = TreeDigest::of(&bytes);
+    let fetch = |_: &TreeDigest, _: usize| -> Result<Vec<u8>, String> { Ok(bytes.clone()) };
+    let read = flatten_in_waves(&list, 16, fetch);
+    assert!(matches!(read, Err(TreeError::Malformed(_))), "{read:?}");
+
+    let rig = Rig::new("tfs-list-below", Built::of(Vec::new()));
+    let below = object(&rig, &bytes);
+    let manifest = serde_json::json!({"v": 1, "children": [
+        {"name": "sub", "kind": "dir", "sha256": below, "size": bytes.len()},
+    ]});
+    let root = object(&rig, &serde_json::to_vec(&manifest).unwrap());
+    assert_eq!(rig.core.lookup(ino::TREES, &root).err(), Some(Errno::Io));
+    let digest = TreeDigest::from_hex(&root).unwrap();
+    assert_eq!(rig.core.table.find(&digest), None);
+    assert_eq!(rig.core.lists.mapped.mapped().lists, 0);
+    assert_eq!(
+        whole_fills(&rig),
+        [format!("fill {root}"), format!("fill {below}")]
     );
 }
