@@ -19,8 +19,9 @@ use crate::server::local_cache::TreeFilled;
 use crate::server::local_cache::attaches::{Attach, Fetches, Levels};
 use crate::server::local_cache::descriptors::Descriptors;
 use crate::server::local_cache::opens::Opens;
+use crate::server::local_cache::tree_lists::TreeLists;
 #[cfg(any(target_os = "linux", target_os = "macos", test))]
-use crate::server::local_cache::trees::TreeStore;
+use crate::server::local_cache::trees::{MappedLists, TreeStore};
 
 use super::config::FsSettings;
 use super::fill_client::{AskError, FillClient, FillFailure, PAUSE, Place, PlacedTree, Until};
@@ -105,6 +106,8 @@ pub(super) enum Report {
     /// How long the mount's opens took, and how many wait now (`local_cache/opens.rs`); boxed,
     /// as it is far larger than the others.
     Opens(Box<Opens>),
+    /// The tree lists the mount holds mapped (`local_cache/tree_lists.rs`).
+    TreeLists(TreeLists),
 }
 
 impl Report {
@@ -117,6 +120,7 @@ impl Report {
             Self::Levels(levels) => levels.line(),
             Self::Descriptors(descriptors) => descriptors.line(),
             Self::Opens(opens) => opens.line(),
+            Self::TreeLists(lists) => lists.line(),
         }
     }
 }
@@ -240,6 +244,12 @@ pub(super) trait Fills: Send + Sync {
 
     /// Tells the node `report`, for its metrics; the caller does not wait for it.
     fn report(&self, report: Report);
+
+    /// The tree lists the node's tree store holds in memory, which the core shares where the store
+    /// is in this process; none over the fill socket, where the core keeps its own.
+    fn lists(&self) -> Option<Arc<MappedLists>> {
+        None
+    }
 
     /// Waits `pause`: a sleep, or what a test puts in its place.
     fn pause(&self, pause: Duration);

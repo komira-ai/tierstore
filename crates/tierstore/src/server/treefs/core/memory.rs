@@ -39,7 +39,10 @@
 //!
 //! At each look for idle trees the trees in memory are said on stderr at info, when they have
 //! changed since the line before: how many, how many of them attached, their entries and an
-//! estimate of the bytes they hold ([`Core::say_memory`]).
+//! estimate of the bytes they hold on the heap, and the tree lists mapped, their bytes against
+//! `fs.tree_list_ram_bytes`, and the lists released for the cap and idle since the look before
+//! (`core/lists.rs`, [`Core::say_memory`]). A tree that is a list also leaves memory before it is
+//! idle when the cap needs its room (`Core::make_room`), with the steps of [`Core::drop_idle`].
 //!
 //! Every read of a tree after the first in this process is said on stderr at info, with its
 //! entries, its time, and the requests that waited for it. A read that took
@@ -61,7 +64,7 @@ use super::fetched::Fetched;
 use super::ino;
 use super::placed::Unread;
 use super::said::Failing;
-use super::{Core, Errno, Loaded, locked};
+use super::{Core, Errno, Loaded, lists, locked};
 
 /// A read that took at least this long, in milliseconds of the core's clock, is said at warn.
 const SLOW_READ_MS: u64 = 1_000;
@@ -83,11 +86,14 @@ pub(super) struct Footprint {
     entries: u64,
     /// The bytes they hold on the heap, estimated (`Tree::heap_bytes`).
     bytes: u64,
+    /// The tree lists mapped, the cap, and the lists released since the look before
+    /// (`core/lists.rs`).
+    lists: lists::Said,
 }
 
 /// A tree taken out of memory, and the map it was taken out of, which [`Core::free`] frees after
 /// every lock is released.
-struct Gone {
+pub(super) struct Gone {
     number: u64,
     map: Arc<HashMap<u64, Arc<Loaded>>>,
     loaded: Arc<Loaded>,
@@ -275,6 +281,12 @@ impl Core {
         self.reads.waiting.load(Ordering::Acquire)
     }
 
+    /// The trees in memory.
+    #[cfg(test)]
+    pub(in crate::server::treefs) fn trees_in_memory(&self) -> usize {
+        self.trees.len()
+    }
+
     /// The times the tree `number` was read in this process.
     #[cfg(test)]
     pub(super) fn times_read(&self, number: u64) -> u64 {
@@ -315,7 +327,7 @@ impl Core {
     /// Takes out of the map the tree `number`, which the caller has marked as removed, unless a
     /// lookup has put it back since: what is to be freed after every lock is released
     /// ([`Core::free`]).
-    fn unmap(&self, number: u64, loaded: Arc<Loaded>) -> Option<Gone> {
+    pub(super) fn unmap(&self, number: u64, loaded: Arc<Loaded>) -> Option<Gone> {
         #[cfg(test)]
         if let Some(hook) = locked(&self.hooks.marked).as_ref() {
             hook(self);
@@ -330,7 +342,7 @@ impl Core {
 
     /// Frees the tree `gone`, with no lock of the core held, and says the counts of its failures
     /// not said yet.
-    fn free(&self, gone: Gone) {
+    pub(super) fn free(&self, gone: Gone) {
         let Gone {
             number,
             map,
@@ -384,18 +396,25 @@ impl Core {
         }
     }
 
-    /// What the trees in memory hold now.
+    /// What the trees in memory hold now, and the lists mapped and released since the look
+    /// before, which this look is.
     pub(super) fn footprint(&self) -> Footprint {
         let trees = self.trees.all();
         let state = self.state();
-        trees
-            .iter()
-            .fold(Footprint::default(), |sum, (number, loaded)| Footprint {
+        let lists = self.lists_said();
+        trees.iter().fold(
+            Footprint {
+                lists,
+                ..Footprint::default()
+            },
+            |sum, (number, loaded)| Footprint {
                 trees: sum.trees + 1,
                 attached: sum.attached + usize::from(state.attachments.is_attached(*number)),
                 entries: sum.entries + loaded.tree.len() as u64,
                 bytes: sum.bytes + loaded.tree.heap_bytes(),
-            })
+                lists,
+            },
+        )
     }
 
     /// Says on stderr at info what the trees in memory hold, unless it is what the line before
@@ -431,21 +450,30 @@ impl Core {
                 .collect()
         };
         drop(all);
+        self.lists.idle(gone.iter().map(|gone| &gone.loaded));
         let dropped = gone.len();
         gone.into_iter().for_each(|gone| self.free(gone));
         dropped
     }
 }
 
-/// The line that says what the trees in memory hold: their bytes in MiB, rounded up.
+/// The line that says what the trees in memory hold, and the tree lists mapped: bytes in MiB,
+/// rounded up.
 fn memory_line(now: Footprint) -> String {
+    let lists = now.lists;
+    let (cap, idle) = lists.released;
     format!(
-        "tierstore fs: {} {} in memory, {} of them attached: {} entries, about {} MiB",
+        "tierstore fs: {} {} in memory, {} of them attached: {} entries, about {} MiB; tree \
+         lists: {} mapped, {} MiB of {} MiB; {cap} released for the cap and {idle} idle since the \
+         last sweep",
         now.trees,
         if now.trees == 1 { "tree" } else { "trees" },
         now.attached,
         now.entries,
         now.bytes.div_ceil(1 << 20),
+        lists.mapped.lists,
+        lists.mapped.bytes.div_ceil(1 << 20),
+        lists.cap.div_ceil(1 << 20),
     )
 }
 

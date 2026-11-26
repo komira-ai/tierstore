@@ -39,6 +39,7 @@ fn the_needed_keys_alone_give_the_defaults() {
         recover_wait: Duration::from_secs(30),
         reattach_concurrency: 16,
         tree_idle: Duration::from_secs(900),
+        tree_list_ram_bytes: 536_870_912,
         allow_other: true,
         nfs: crate::server::treefs::nfs::config::NfsSettings::default(),
         put: None,
@@ -82,6 +83,42 @@ fn every_key_is_taken_when_it_is_set() {
         from_text(&own, &builders).unwrap().control_socket,
         PathBuf::from("/elsewhere.sock")
     );
+}
+
+/// Asserts that a file that leaves out `fs.tree_list_ram_bytes` keeps 512 MiB of tree lists
+/// mapped.
+#[test]
+fn tree_list_ram_bytes_defaults_to_512_mib() {
+    let got = from_text(&fs(""), &builders).unwrap();
+    assert_eq!(got.tree_list_ram_bytes, 512 * 1024 * 1024);
+}
+
+/// Asserts that `fs.tree_list_ram_bytes` is read as it is set: 2 GiB, and a page, the least.
+#[test]
+fn tree_list_ram_bytes_reads_2_gib() {
+    let two = from_text(&fs("tree_list_ram_bytes = 2147483648\n"), &builders).unwrap();
+    assert_eq!(two.tree_list_ram_bytes, 2 << 30);
+    let page = from_text(&fs("tree_list_ram_bytes = 4096\n"), &builders).unwrap();
+    assert_eq!(page.tree_list_ram_bytes, 4096);
+}
+
+/// Asserts that `fs.tree_list_ram_bytes` under a page is refused at start, by name, and nothing is
+/// taken of the file.
+#[test]
+fn tree_list_ram_bytes_under_a_page_is_refused_by_name() {
+    for (value, want) in [
+        (
+            "4095",
+            "fs.tree_list_ram_bytes: 4095 is not between 4096 and 18446744073709551615",
+        ),
+        (
+            "0",
+            "fs.tree_list_ram_bytes: 0 is not between 4096 and 18446744073709551615",
+        ),
+    ] {
+        let text = fs(&format!("tree_list_ram_bytes = {value}\n"));
+        assert_eq!(refused(&text), want, "{value}");
+    }
 }
 
 /// Asserts each refusal and that it names the key.

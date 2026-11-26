@@ -1,5 +1,6 @@
 //! A tree served straight from its version 2 tree list (the `TSTREE` image): the bytes of the list,
-//! checked once by the walk of [`TreeListV2`], and read in place from then on.
+//! checked once by the walk of [`TreeListV2`], and read in place from then on, by the server as a
+//! [`ListImage`](crate::tree_image_list::ListImage), on the heap or mapped from the list's file.
 //!
 //! The list already is the tree. Its entries are in breadth-first order with each directory's
 //! children next to one another and sorted by name, so an entry's number is its index (the root
@@ -13,35 +14,31 @@
 //! A file is read at its own span, the key, offset and size of its record: two files of one
 //! digest at two spans are two reads, both checked against the digest.
 
-#[cfg(feature = "server")]
 use std::ops::Range;
 use std::sync::Arc;
 
 use bytes::Bytes;
 
+#[cfg(feature = "server")]
+use crate::ListRange;
 use crate::tree_list_v2::{RECORD_LEN, TreeListV2, TreeListV2Error};
 use crate::tree_list_v2_build::{Counted, Spans};
 use crate::{ListSpan, TreeLimits};
-// The reading of an image in place is the server's (the tree store and the mount).
-#[cfg(feature = "server")]
-use crate::tree_list_v2::{KIND_DIR, KIND_FILE};
-#[cfg(feature = "server")]
-use crate::tree_list_v2_build::Record;
-#[cfg(feature = "server")]
-use crate::{ListRange, Mode, TreeDigest};
 
-/// A version 2 tree list whose every entry was checked, held whole and read in place.
+/// A version 2 tree list whose every entry was checked, held whole on the heap. The server reads
+/// it in place as a [`ListImage`](crate::tree_image_list::ListImage), on the heap or mapped from
+/// its file.
 pub struct TreeImage {
     /// The whole list, as it is stored.
     bytes: Bytes,
-    /// The entry records, 32 bytes each.
-    entries: Bytes,
-    /// The SHA-256 of each entry, 32 bytes each.
+    /// Where the entry records are in the list, 32 bytes each.
+    entries: Range<usize>,
+    /// Where the SHA-256 of each entry is, 32 bytes each.
     #[cfg(feature = "server")]
-    digests: Bytes,
-    /// The names and link targets.
+    digests: Range<usize>,
+    /// Where the names and link targets are.
     #[cfg(feature = "server")]
-    names: Bytes,
+    names: Range<usize>,
     /// The keys of the packs, shared by the spans of their files.
     keys: Vec<Arc<str>>,
     /// The ranges of the packs the list's writer says the tree reads.
@@ -64,41 +61,6 @@ impl std::fmt::Debug for TreeImage {
 }
 
 #[cfg(feature = "server")]
-/// One entry of a [`TreeImage`], read from its record.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ImageEntry<'a> {
-    /// Its index: its number in the tree, the root being 0.
-    pub index: u32,
-    /// The index of the directory that holds it; none for the root.
-    pub parent: Option<u32>,
-    /// Its name; empty for the root.
-    pub name: &'a str,
-    /// What it is.
-    pub kind: ImageKind<'a>,
-}
-
-#[cfg(feature = "server")]
-/// What an entry of a [`TreeImage`] is.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum ImageKind<'a> {
-    /// A directory: its mode and the indices of its children, in name order.
-    Dir { mode: Mode, children: Range<u32> },
-    /// A regular file.
-    File {
-        /// Its mode: the permission bits, setuid, setgid and sticky.
-        mode: Mode,
-        /// Its length.
-        size: u64,
-        /// The SHA-256 of its bytes.
-        sha256: TreeDigest,
-        /// Where its bytes are, the key of a pack and the offset in it; none for an empty file.
-        span: Option<(&'a Arc<str>, u64)>,
-    },
-    /// A symbolic link, and what it says.
-    Symlink { target: &'a str },
-}
-
-#[cfg(feature = "server")]
 /// The limits a tree is checked against when only its shape matters, as in the mount, which
 /// serves the trees the node's tree store accepted under the node's own limits.
 const SHAPE: TreeLimits = TreeLimits {
@@ -106,6 +68,12 @@ const SHAPE: TreeLimits = TreeLimits {
     max_depth: usize::MAX,
     max_dir_entries: usize::MAX,
 };
+
+/// Where `part`, a slice of `whole`, is in it.
+fn within(whole: &[u8], part: &[u8]) -> Range<usize> {
+    let start = part.as_ptr().addr() - whole.as_ptr().addr();
+    start..start + part.len()
+}
 
 impl TreeImage {
     /// Opens the version 2 tree list `bytes` and walks it once ([`TreeListV2::open`], then the
@@ -143,11 +111,11 @@ impl TreeImage {
         let list = TreeListV2::open(&bytes)?;
         let (_, counted) = list.walk(limits, spans, on_span)?;
         Ok(Self {
-            entries: bytes.slice_ref(list.entries),
+            entries: within(&bytes, list.entries),
             #[cfg(feature = "server")]
-            digests: bytes.slice_ref(list.digests),
+            digests: within(&bytes, list.digests),
             #[cfg(feature = "server")]
-            names: bytes.slice_ref(list.names),
+            names: within(&bytes, list.names),
             #[cfg(feature = "server")]
             ranges: list.ranges().collect(),
             keys: list.keys,
@@ -201,160 +169,16 @@ impl TreeImage {
         self.ranges.iter().cloned()
     }
 
-    fn record(&self, index: u32) -> Option<Record> {
-        let start = (index as usize).checked_mul(RECORD_LEN)?;
-        let bytes = self.entries.get(start..start + RECORD_LEN)?;
-        Some(Record::of(bytes))
+    /// Where the entry records, the digests and the names are in the list.
+    pub(crate) fn sections(&self) -> [Range<usize>; 3] {
+        [
+            self.entries.clone(),
+            self.digests.clone(),
+            self.names.clone(),
+        ]
     }
-
-    /// The bytes `start..start + len` of the names, as text: the walk checked every name and
-    /// target to be text within the names.
-    fn text(&self, start: u64, len: u64) -> &str {
-        let range = usize::try_from(start)
-            .ok()
-            .zip(usize::try_from(len).ok())
-            .and_then(|(start, len)| self.names.get(start..start.checked_add(len)?));
-        range
-            .and_then(|bytes| std::str::from_utf8(bytes).ok())
-            .unwrap_or_default()
-    }
-
-    /// The name of the entry of `record`.
-    fn name(&self, record: Record) -> &str {
-        self.text(u64::from(record.name_off), u64::from(record.name_len))
-    }
-
-    /// The entry `index`; none past the last.
-    pub(crate) fn entry(&self, index: u32) -> Option<ImageEntry<'_>> {
-        let record = self.record(index)?;
-        let kind = match record.kind {
-            KIND_DIR => {
-                // The walk checked the children to be within the entries, which number fewer
-                // than 2^32.
-                let first = record.x;
-                let count = u32::try_from(record.a).unwrap_or(0);
-                ImageKind::Dir {
-                    mode: record.mode(),
-                    children: first..first.saturating_add(count),
-                }
-            }
-            KIND_FILE => {
-                let start = index as usize * RECORD_LEN;
-                let mut sha256 = [0; 32];
-                sha256.copy_from_slice(&self.digests[start..start + RECORD_LEN]);
-                let span = (record.b > 0)
-                    .then(|| self.keys.get(record.x as usize))
-                    .flatten()
-                    .map(|key| (key, record.a));
-                ImageKind::File {
-                    mode: record.mode(),
-                    size: record.b,
-                    sha256: TreeDigest::from_bytes(sha256),
-                    span,
-                }
-            }
-            _ => ImageKind::Symlink {
-                target: self.text(record.a, record.b),
-            },
-        };
-        Some(ImageEntry {
-            index,
-            parent: (index != 0).then_some(record.parent),
-            name: self.name(record),
-            kind,
-        })
-    }
-
-    /// The indices of the children of the directory `dir`, in name order; empty for anything
-    /// else.
-    pub(crate) fn children(&self, dir: u32) -> Range<u32> {
-        match self.entry(dir).map(|entry| entry.kind) {
-            Some(ImageKind::Dir { children, .. }) => children,
-            _ => 0..0,
-        }
-    }
-
-    /// The name of the entry `index`, which the caller got from this tree.
-    pub(crate) fn name_of(&self, index: u32) -> &str {
-        self.record(index)
-            .map(|record| self.name(record))
-            .unwrap_or_default()
-    }
-
-    /// Whether the entry `index` is a directory.
-    pub(crate) fn is_dir(&self, index: u32) -> bool {
-        self.record(index)
-            .is_some_and(|record| record.kind == KIND_DIR)
-    }
-
-    /// The index of the child of `dir` called `name`: a binary search of its children, which
-    /// are sorted by name, bytewise.
-    pub(crate) fn child(&self, dir: u32, name: &str) -> Option<u32> {
-        let children = self.children(dir);
-        let (mut low, mut high) = (children.start, children.end);
-        while low < high {
-            let middle = low + (high - low) / 2;
-            match self.name_of(middle).as_bytes().cmp(name.as_bytes()) {
-                std::cmp::Ordering::Less => low = middle + 1,
-                std::cmp::Ordering::Greater => high = middle,
-                std::cmp::Ordering::Equal => return Some(middle),
-            }
-        }
-        None
-    }
-
-    /// The index of the first child of `dir` whose name sorts after `after`: where a listing
-    /// that goes on from `after` begins.
-    pub(crate) fn children_after(&self, dir: u32, after: &str) -> Range<u32> {
-        let children = self.children(dir);
-        let (mut low, mut high) = (children.start, children.end);
-        while low < high {
-            let middle = low + (high - low) / 2;
-            if self.name_of(middle).as_bytes() <= after.as_bytes() {
-                low = middle + 1;
-            } else {
-                high = middle;
-            }
-        }
-        low..children.end
-    }
-
-    /// The entry the path `path` (names joined by `/`; empty for the root) leads to.
-    ///
-    /// # Errors
-    /// [`ImagePathError::NotADirectory`] for a name below a file or a link, and
-    /// [`ImagePathError::NotFound`] for a name a directory does not have.
-    pub(crate) fn find(&self, path: &str) -> Result<u32, ImagePathError> {
-        let mut at = 0;
-        for name in path.split('/').filter(|_| !path.is_empty()) {
-            if !self.is_dir(at) {
-                return Err(ImagePathError::NotADirectory);
-            }
-            at = self.child(at, name).ok_or(ImagePathError::NotFound)?;
-        }
-        Ok(at)
-    }
-
-    /// The entry the path `path` leads to, as [`TreeImage::find`] finds it.
-    ///
-    /// # Errors
-    /// As [`TreeImage::find`].
-    pub(crate) fn find_entry(&self, path: &str) -> Result<ImageEntry<'_>, ImagePathError> {
-        // `find` gives the index of an entry of the image.
-        self.entry(self.find(path)?).ok_or(ImagePathError::NotFound)
-    }
-}
-
-#[cfg(feature = "server")]
-/// Why a path of a [`TreeImage`] leads nowhere.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ImagePathError {
-    /// A name of the path is below a file or a link.
-    NotADirectory,
-    /// A directory of the path has no child of the name.
-    NotFound,
 }
 
 #[cfg(test)]
 #[path = "tree_image_tests.rs"]
-mod tests;
+pub(crate) mod tests;

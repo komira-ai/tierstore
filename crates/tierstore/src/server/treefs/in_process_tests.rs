@@ -16,6 +16,7 @@ use crate::server::local_cache::descriptors::Descriptors;
 use crate::server::local_cache::opens::{Opens, Spans};
 use crate::server::local_cache::pack_testing::{Pack, blob_hex, fills, recency};
 use crate::server::local_cache::testing::{Rig, until};
+use crate::server::local_cache::tree_lists::{Totals, TreeLists};
 use crate::server::local_cache::trees::TreeStore;
 use crate::server::local_cache::trees::testing::{Bench, fs_at};
 use crate::server::local_cache::{LocalCache, Mode, Tick};
@@ -454,8 +455,8 @@ fn reported(cache: &LocalCache) -> Vec<String> {
 
 /// Asserts that each report made in process is in the cache's metrics when the call returns,
 /// with no thread or queue between: the metrics after `started`, `attached`, `fetched`, `levels`,
-/// `descriptors` and `opens` are those of a cache told the same by its own calls, and differ from a
-/// cache told nothing.
+/// `descriptors`, `opens` and `treelists` are those of a cache told the same by its own calls, and
+/// differ from a cache told nothing.
 #[tokio::test]
 async fn the_reports_reach_the_cache_without_a_queue() {
     const RUN: &str = "mount-provider/6167656e74/6a732e31";
@@ -495,6 +496,18 @@ async fn the_reports_reach_the_cache_without_a_queue() {
         levels: 4,
         rounds: 1,
     };
+    let lists = TreeLists {
+        mount: MOUNT.to_owned(),
+        process: 4242,
+        mapped: 2,
+        bytes: 8192,
+        cap: 1 << 29,
+        totals: Totals {
+            cap: 1,
+            idle: 2,
+            over_cap: 3,
+        },
+    };
     let over = in_process(&told.cache, None, LONG);
     let started = format!("{RUN}/0");
     over.report(Report::Started(started.clone()));
@@ -503,6 +516,7 @@ async fn the_reports_reach_the_cache_without_a_queue() {
     over.report(Report::Levels(levels));
     over.report(Report::Descriptors(descriptors.clone()));
     over.report(Report::Opens(Box::new(opens.clone())));
+    over.report(Report::TreeLists(lists.clone()));
     let after = reported(&told.cache);
     let _ = direct.cache.run_started(&started);
     direct.cache.tree_attached(attach);
@@ -510,6 +524,7 @@ async fn the_reports_reach_the_cache_without_a_queue() {
     direct.cache.tree_levels(levels);
     direct.cache.descriptors_reported(descriptors);
     direct.cache.opens_reported(opens);
+    direct.cache.tree_lists_reported(lists);
     assert_eq!(after, reported(&direct.cache));
     assert_ne!(after, before);
     assert_eq!(told.cache.run_started(&started), None);

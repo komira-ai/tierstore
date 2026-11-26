@@ -594,14 +594,19 @@ async fn an_image_directory_that_does_not_hold_up_is_dropped_and_removed() {
                 ready: false,
             })
             .unwrap();
-        damage(&tree_path(&bench.rig, &made.tree), &bench.image_bytes());
-        let store = Bench::reopen(bench.rig.reopen());
+        // The store that mapped the image is gone first, as at a restart: nothing changes an
+        // image in place while a mapping reads it (`tree_image_list.rs`).
+        let bytes = bench.image_bytes();
+        let Bench { rig, store, .. } = bench;
+        drop(store);
+        damage(&tree_path(&rig, &made.tree), &bytes);
+        let store = Bench::reopen(rig.reopen());
         assert_eq!(store.sizes(), (1, 1), "{name}");
         assert!(store.placement(&made.placement).is_none(), "{name}");
         assert!(store.placement(&other.placement).is_some(), "{name}");
-        assert!(!tree_path(&bench.rig, &made.tree).exists(), "{name}");
+        assert!(!tree_path(&rig, &made.tree).exists(), "{name}");
         assert!(
-            !placement_file(&bench.rig.config.path, &made.placement).exists(),
+            !placement_file(&rig.config.path, &made.placement).exists(),
             "{name}"
         );
     }

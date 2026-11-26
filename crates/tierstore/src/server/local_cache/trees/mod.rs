@@ -3,7 +3,8 @@
 //! A **tree** is a directory structure whose files are spans of cached packs. It is made by one
 //! call, [`TreeStore::create`], from the records and files [`build_tree`](crate::build_tree)
 //! makes of a request, or by [`TreeStore::create_image`] from a version 2 tree list, which is the
-//! tree as it is (an **image**: [`TreeImage`](crate::TreeImage)), and it appears at one or more
+//! tree as it is (an **image**: [`TreeImage`](crate::TreeImage), kept mapped from the tree's image
+//! file and shared with the mount of this process, `mapped.rs`), and it appears at one or more
 //! **locations**: a bucket and key prefix of the S3 front, or a path under the mount of
 //! `tierstore fs`. A tree and the places it appears at are separate things: the tree is content
 //! (its digest), a **placement** is that tree at a set of locations, and a placement is what
@@ -68,6 +69,7 @@ mod flat;
 mod keys;
 mod life;
 mod location;
+mod mapped;
 mod read;
 mod start;
 mod state;
@@ -89,6 +91,8 @@ mod keys_tests;
 mod life_tests;
 #[cfg(test)]
 mod location_tests;
+#[cfg(test)]
+mod mapped_image_tests;
 #[cfg(test)]
 mod read_tests;
 #[cfg(test)]
@@ -112,6 +116,7 @@ pub(in crate::server) use flat::{
 pub use keys::TreeKey;
 pub use life::{LifeError, PlacementInfo, ReadHold, SweepReport};
 pub use location::{Located, Location, LocationError, PlacementId};
+pub(in crate::server) use mapped::{Mapped, MappedLists};
 pub use read::{FileSpan, Kind, Listing, ReadError, Resolved, Stat};
 pub(in crate::server) use table::{TreesTable, check_trees};
 
@@ -140,12 +145,18 @@ impl TreeStore {
             root,
             staged: AtomicU64::new(0),
             state: Mutex::new(State::default()),
+            lists: Arc::default(),
         });
         let store = Self { shared };
         if enabled {
             store.load()?;
         }
         Ok(store)
+    }
+
+    /// The tree lists the store holds in memory, which a mount of this process shares.
+    pub(in crate::server) fn lists(&self) -> &Arc<MappedLists> {
+        &self.shared.lists
     }
 
     /// The settings the store was opened with.

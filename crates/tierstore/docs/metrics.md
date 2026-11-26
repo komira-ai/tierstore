@@ -583,6 +583,45 @@ The 99th percentile of an open over five minutes, by source:
 histogram_quantile(0.99, sum by (source, le) (rate(tierstore_fs_open_seconds_bucket[5m])))
 ```
 
+### Build node: the mapped tree lists
+
+`tierstore fs` reads the tree of a placement that is a version 2 tree list from a read-only mapping
+of its image file, one mapping per list however many of its trees show it, shared with the node's
+tree store where the mount runs in the node's process. It keeps the bytes of those mappings, in
+whole pages and each list once, under `fs.tree_list_ram_bytes` (512 MiB by default): before a list
+is attached it releases, the least recently used first, the lists that no run attaches and no
+request is reading, and a list that still does not fit is mapped past the cap and counted (see
+[operations](operations.md#the-virtual-build-file-system)). The mount reports to the node, on the
+fill socket, at each look for idle trees (every quarter of `fs.tree_idle_secs`, at most a minute
+apart: a minute by default) and when its readers stop for a hand-over or a restart, the lists mapped
+in its process now and their bytes, the cap, and as running totals of the process the lists it
+released and those it mapped past the cap; the node adds what each process's totals grew by since
+its previous report, so a report that was lost loses no release the next one carries. The families
+are on every process with a cache, with a `# TYPE` line, and have no series until a mount reports.
+The node keeps at most 64 mounts, as for the descriptors.
+
+| name | type | labels | what it says |
+|---|---|---|---|
+| `tierstore_fs_tree_lists_mapped` | gauge | `mount`: the mount's id | the tree lists mapped in that mount's process at its last report, each once (the tree store's too, where it is in that process) |
+| `tierstore_fs_tree_list_mapped_bytes` | gauge | `mount` | the bytes of those mappings, in whole pages: what is budgeted against the cap |
+| `tierstore_fs_tree_list_ram_bytes` | gauge | `mount` | the cap, `fs.tree_list_ram_bytes` |
+| `tierstore_fs_tree_list_releases_total` | counter | `mount`; `why`: `cap`, `idle` | the lists that mount released: `cap` to make room for a list under the cap, `idle` at the sweep for idle trees |
+| `tierstore_fs_tree_list_over_cap_total` | counter | `mount` | the lists mapped past the cap because every list mapped was held (a run attaches it, or a request reads it) |
+
+What they do not count: a report that was lost, so a gauge may be a minute old; the trees of
+manifests, whose memory is in the line of the trees in memory
+([operations](operations.md#the-virtual-build-file-system)); the lists the tree store of the node
+maps where the mount runs in a process of its own (`tierstore fs`), which are mapped, and counted
+nowhere, in the node's process. A release of a list the tree store also holds (its placement still
+has a lease or another holder) frees no bytes until the store lets it go too. A node of an earlier
+release answers the report `refused unknown request`, which the mount ignores.
+
+A mount whose held lists alone pass its cap, over the last hour:
+
+```promql
+increase(tierstore_fs_tree_list_over_cap_total[1h]) > 0
+```
+
 ## Cache queries (v1)
 
 All of these use a `5m` window. Every `sum` is outside the `rate`. Shorten the window to see a

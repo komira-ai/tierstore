@@ -1,14 +1,16 @@
-//! Tests of the tree image: the entries, the lookups and the counts it reads in place from the
-//! bytes of a version 2 tree list, what it refuses, and the spans the walk hands out for it.
+//! Tests of the tree image: the counts, keys and ranges the walk of a version 2 tree list reads,
+//! what it refuses, and the spans it hands out. The reads of a list in place, on the heap and
+//! mapped, are tested in `tree_image_list_tests.rs`, over the lists these helpers make.
 
 use super::*;
 
-use crate::tree_list::{EMPTY_SHA256, ListEntry, ListKind, TreeList};
+use crate::tree_image_list::{ImagePathError, ListImage};
+use crate::tree_list::{ListEntry, ListKind, TreeList};
 use crate::tree_list_v2::EntryFault;
-use crate::{BlobSource, RecordError};
+use crate::{BlobSource, Mode, RecordError, TreeDigest};
 
 /// A digest whose bytes differ from one another, which `byte` names.
-fn digest(byte: u8) -> TreeDigest {
+pub(crate) fn digest(byte: u8) -> TreeDigest {
     let mut bytes = [0u8; 32];
     for (at, value) in bytes.iter_mut().enumerate() {
         *value = byte.wrapping_add((at as u8).wrapping_mul(17));
@@ -16,7 +18,7 @@ fn digest(byte: u8) -> TreeDigest {
     TreeDigest::from_bytes(bytes)
 }
 
-fn file(path: &str, mode: u16, size: u64, key: &str, offset: u64, sha: u8) -> ListEntry {
+pub(crate) fn file(path: &str, mode: u16, size: u64, key: &str, offset: u64, sha: u8) -> ListEntry {
     ListEntry {
         path: path.to_owned(),
         kind: ListKind::File {
@@ -31,7 +33,7 @@ fn file(path: &str, mode: u16, size: u64, key: &str, offset: u64, sha: u8) -> Li
     }
 }
 
-fn empty_file(path: &str) -> ListEntry {
+pub(crate) fn empty_file(path: &str) -> ListEntry {
     ListEntry {
         path: path.to_owned(),
         kind: ListKind::File {
@@ -43,7 +45,7 @@ fn empty_file(path: &str) -> ListEntry {
     }
 }
 
-fn dir(path: &str, mode: u16) -> ListEntry {
+pub(crate) fn dir(path: &str, mode: u16) -> ListEntry {
     ListEntry {
         path: path.to_owned(),
         kind: ListKind::Dir {
@@ -52,7 +54,7 @@ fn dir(path: &str, mode: u16) -> ListEntry {
     }
 }
 
-fn link(path: &str, target: &str) -> ListEntry {
+pub(crate) fn link(path: &str, target: &str) -> ListEntry {
     ListEntry {
         path: path.to_owned(),
         kind: ListKind::Symlink {
@@ -61,14 +63,14 @@ fn link(path: &str, target: &str) -> ListEntry {
     }
 }
 
-fn encode(entries: Vec<ListEntry>) -> Vec<u8> {
+pub(crate) fn encode(entries: Vec<ListEntry>) -> Vec<u8> {
     TreeList { entries }.encode_v2().unwrap()
 }
 
 /// The list most tests read. Entries: 0 root, 1 `d` (0700), 2 `f` (04755, 3 bytes, `k2` at 10),
 /// 3 `g` (empty), 4 `h` (5 bytes, `k1` at 0), 5 `i` (5 bytes, `k1` at 100, the digest of `h`),
 /// 6 `l` (a link to `d/x`), 7 `d/x` (the span of `h`), 8 `d/y` (empty), 9 `d/z` (a link to `x`).
-fn sample() -> Vec<u8> {
+pub(crate) fn sample() -> Vec<u8> {
     encode(vec![
         dir("d", 0o700),
         file("f", 0o4755, 3, "k2", 10, 2),
@@ -82,138 +84,33 @@ fn sample() -> Vec<u8> {
     ])
 }
 
-fn image() -> TreeImage {
+pub(crate) fn image() -> TreeImage {
     TreeImage::open(Bytes::from(sample()), &TreeLimits::default(), |_| {}).unwrap()
 }
 
-fn le32(bytes: &[u8], at: usize) -> usize {
+pub(crate) fn le32(bytes: &[u8], at: usize) -> usize {
     u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap()) as usize
 }
 
 /// Where entry `index` begins: the records are at the offset the header holds at 16.
-fn rec(bytes: &[u8], index: usize) -> usize {
+pub(crate) fn rec(bytes: &[u8], index: usize) -> usize {
     le32(bytes, 16) + index * 32
 }
 
-fn set_name(bytes: &mut [u8], index: usize, offset: u32, len: u8) {
+pub(crate) fn set_name(bytes: &mut [u8], index: usize, offset: u32, len: u8) {
     let at = rec(bytes, index);
     bytes[at + 4..at + 8].copy_from_slice(&offset.to_le_bytes());
     bytes[at + 14] = len;
 }
 
-fn set_kind(bytes: &mut [u8], index: usize, kind: u8) {
+pub(crate) fn set_kind(bytes: &mut [u8], index: usize, kind: u8) {
     let at = rec(bytes, index);
     bytes[at + 13] = (kind << 4) | (bytes[at + 13] & 0x0f);
 }
 
-fn set_size(bytes: &mut [u8], index: usize, size: u64) {
+pub(crate) fn set_size(bytes: &mut [u8], index: usize, size: u64) {
     let at = rec(bytes, index);
     bytes[at + 24..at + 32].copy_from_slice(&size.to_le_bytes());
-}
-
-/// Asserts that an image of a tree of every kind has the entries the list holds, each read from
-/// its record: the root with no parent and no name, a directory with its mode and children, a
-/// file with its mode, size, digest and span, an empty file with no span, and links with targets.
-#[test]
-fn an_entry_of_each_kind_is_read_from_its_record() {
-    let image = image();
-    let k1 = Arc::<str>::from("k1");
-    let k2 = Arc::<str>::from("k2");
-    let entry = |index| image.entry(index).unwrap();
-
-    assert_eq!(
-        entry(0),
-        ImageEntry {
-            index: 0,
-            parent: None,
-            name: "",
-            kind: ImageKind::Dir {
-                mode: Mode::DIR,
-                children: 1..7
-            },
-        }
-    );
-    assert_eq!(
-        entry(1),
-        ImageEntry {
-            index: 1,
-            parent: Some(0),
-            name: "d",
-            kind: ImageKind::Dir {
-                mode: Mode::new(0o700).unwrap(),
-                children: 7..10
-            },
-        }
-    );
-    assert_eq!(
-        entry(2),
-        ImageEntry {
-            index: 2,
-            parent: Some(0),
-            name: "f",
-            kind: ImageKind::File {
-                mode: Mode::new(0o4755).unwrap(),
-                size: 3,
-                sha256: digest(2),
-                span: Some((&k2, 10)),
-            },
-        }
-    );
-    assert_eq!(
-        entry(3),
-        ImageEntry {
-            index: 3,
-            parent: Some(0),
-            name: "g",
-            kind: ImageKind::File {
-                mode: Mode::FILE,
-                size: 0,
-                sha256: TreeDigest::from_bytes(EMPTY_SHA256),
-                span: None,
-            },
-        }
-    );
-    assert_eq!(
-        entry(5).kind,
-        ImageKind::File {
-            mode: Mode::FILE,
-            size: 5,
-            sha256: digest(1),
-            span: Some((&k1, 100)),
-        }
-    );
-    assert_eq!(
-        entry(6),
-        ImageEntry {
-            index: 6,
-            parent: Some(0),
-            name: "l",
-            kind: ImageKind::Symlink { target: "d/x" },
-        }
-    );
-    assert_eq!(
-        entry(9),
-        ImageEntry {
-            index: 9,
-            parent: Some(1),
-            name: "z",
-            kind: ImageKind::Symlink { target: "x" },
-        }
-    );
-}
-
-/// Asserts that an index past the last entry, and the largest index, are no entry, and that the
-/// lookups by index of such an entry answer as for nothing.
-#[test]
-fn an_index_past_the_end_is_no_entry() {
-    let image = image();
-    assert_eq!(image.len(), 10);
-    assert_eq!(image.entry(10), None);
-    assert_eq!(image.entry(u32::MAX), None);
-    assert_eq!(image.name_of(10), "");
-    assert_eq!(image.name_of(u32::MAX), "");
-    assert!(!image.is_dir(10));
-    assert_eq!(image.children(10), 0..0);
 }
 
 /// Asserts that the counts, keys, ranges, bytes and length of an image are those of its list:
@@ -248,10 +145,11 @@ fn a_list_of_no_entries_is_the_root_alone() {
     .unwrap();
     assert_eq!(image.len(), 1);
     assert!(image.is_empty());
-    assert!(image.children(0).is_empty());
     assert_eq!((image.files(), image.file_bytes()), (0, 0));
-    assert_eq!(image.find(""), Ok(0));
-    assert_eq!(image.find("a"), Err(ImagePathError::NotFound));
+    let list = ListImage::heap(&image);
+    assert!(list.children(0).is_empty());
+    assert_eq!(list.find(""), Ok(0));
+    assert_eq!(list.find("a"), Err(ImagePathError::NotFound));
 }
 
 /// Asserts that the sizes of files are summed with saturation at `u64::MAX`, the files still
@@ -269,135 +167,6 @@ fn the_bytes_of_files_saturate_at_the_largest_u64() {
     let image = TreeImage::checked(Bytes::from(bytes)).unwrap();
     assert_eq!(image.files(), 3);
     assert_eq!(image.file_bytes(), u64::MAX);
-}
-
-/// Asserts that the children of a directory are the range of its record, and that a file, a link
-/// and the empty directory have none.
-#[test]
-fn children_of_a_directory_are_a_range_and_of_anything_else_empty() {
-    let image = image();
-    assert_eq!(image.children(0), 1..7);
-    assert_eq!(image.children(1), 7..10);
-    for index in [2, 3, 6, 7, 9] {
-        assert_eq!(image.children(index), 0..0, "entry {index}");
-    }
-    let names: Vec<_> = image.children(1).map(|i| image.name_of(i)).collect();
-    assert_eq!(names, ["x", "y", "z"]);
-}
-
-/// Asserts that a child is found by its name, and that a name before the first, between two,
-/// after the last, a prefix of one, and the name of a grandchild are not found, and a file and
-/// an entry past the end have no children to find.
-#[test]
-fn a_child_is_found_by_binary_search_and_an_absent_name_is_none() {
-    let image = image();
-    for (name, index) in [("d", 1), ("f", 2), ("g", 3), ("h", 4), ("i", 5), ("l", 6)] {
-        assert_eq!(image.child(0, name), Some(index), "{name}");
-    }
-    for name in ["a", "e", "dd", "", "k", "m", "z", "x", "d/x"] {
-        assert_eq!(image.child(0, name), None, "{name:?}");
-    }
-    assert_eq!(image.child(1, "x"), Some(7));
-    assert_eq!(image.child(1, "z"), Some(9));
-    assert_eq!(image.child(1, "w"), None);
-    assert_eq!(image.child(1, "zz"), None);
-    assert_eq!(image.child(2, "x"), None);
-    assert_eq!(image.child(6, "x"), None);
-    assert_eq!(image.child(10, "x"), None);
-}
-
-/// Asserts that a listing that goes on after a name begins at the first child that sorts after
-/// it: after each child's own name, at the one after it; after a name before the first, at the
-/// first; after a name between two, at the next; after the last or past it, at the end; and a
-/// file or an entry past the end lists nothing.
-#[test]
-fn children_after_a_name_begin_at_the_next_name() {
-    let image = image();
-    assert_eq!(image.children_after(0, ""), 1..7);
-    assert_eq!(image.children_after(0, "a"), 1..7);
-    for (at, name) in ["d", "f", "g", "h", "i", "l"].into_iter().enumerate() {
-        let next = at as u32 + 2;
-        assert_eq!(image.children_after(0, name), next..7, "after {name}");
-    }
-    assert_eq!(image.children_after(0, "e"), 2..7);
-    assert_eq!(image.children_after(0, "dd"), 2..7);
-    assert_eq!(image.children_after(0, "z"), 7..7);
-    assert_eq!(image.children_after(1, "x"), 8..10);
-    assert_eq!(image.children_after(1, "z"), 10..10);
-    assert_eq!(image.children_after(2, "a"), 0..0);
-    assert_eq!(image.children_after(10, "a"), 0..0);
-}
-
-/// Asserts that a path leads to its entry: the empty path to the root, a name and a nested path
-/// to theirs.
-#[test]
-fn a_path_leads_to_its_entry() {
-    let image = image();
-    assert_eq!(image.find(""), Ok(0));
-    assert_eq!(image.find("d"), Ok(1));
-    assert_eq!(image.find("l"), Ok(6));
-    assert_eq!(image.find("d/x"), Ok(7));
-    assert_eq!(image.find("d/z"), Ok(9));
-}
-
-/// Asserts that a name a directory lacks is `NotFound`, and a name below a file or a link, even
-/// one that does not exist, is `NotADirectory`: nothing below it is followed.
-#[test]
-fn a_path_that_leads_nowhere_says_why() {
-    let image = image();
-    assert_eq!(image.find("e"), Err(ImagePathError::NotFound));
-    assert_eq!(image.find("d/q"), Err(ImagePathError::NotFound));
-    assert_eq!(image.find("d/"), Err(ImagePathError::NotFound));
-    assert_eq!(image.find("e/x"), Err(ImagePathError::NotFound));
-    assert_eq!(image.find("f/x"), Err(ImagePathError::NotADirectory));
-    assert_eq!(image.find("l/x"), Err(ImagePathError::NotADirectory));
-    assert_eq!(image.find("d/x/y"), Err(ImagePathError::NotADirectory));
-    assert_eq!(image.find("g/q/r"), Err(ImagePathError::NotADirectory));
-}
-
-/// Asserts that `is_dir` and `name_of` answer for every entry: the directories are the root and
-/// `d`, and each name is the entry's own.
-#[test]
-fn is_dir_and_name_of_answer_for_each_entry() {
-    let image = image();
-    let dirs: Vec<_> = (0..10).filter(|&i| image.is_dir(i)).collect();
-    assert_eq!(dirs, [0, 1]);
-    let names: Vec<_> = (0..10).map(|i| image.name_of(i)).collect();
-    assert_eq!(names, ["", "d", "f", "g", "h", "i", "l", "x", "y", "z"]);
-}
-
-/// Asserts that a name two directories share is stored once and read for both, and found in each.
-#[test]
-fn a_name_shared_by_two_directories_is_read_in_both() {
-    let bytes = encode(vec![
-        file("d/x", 0o644, 1, "k", 0, 1),
-        file("e/x", 0o644, 1, "k", 1, 2),
-        link("e/y", "x"),
-    ]);
-    let image = TreeImage::checked(Bytes::from(bytes)).unwrap();
-    assert_eq!(image.find("d/x"), Ok(3));
-    assert_eq!(image.find("e/x"), Ok(4));
-    assert_eq!(image.name_of(3), "x");
-    assert_eq!(image.name_of(4), "x");
-    assert_eq!(image.find("e/y"), Ok(5));
-}
-
-/// Asserts that a name already checked at one length is checked again at another: two siblings
-/// whose names begin at one place, `a` and `ab`, are both accepted and found.
-#[test]
-fn a_name_met_again_with_another_length_is_checked_again() {
-    let mut bytes = encode(vec![
-        file("ab", 0o644, 1, "k", 0, 1),
-        file("zz", 0o644, 1, "k", 1, 2),
-    ]);
-    let at = le32(&bytes, rec(&bytes, 1) + 4) as u32;
-    set_name(&mut bytes, 1, at, 1);
-    set_name(&mut bytes, 2, at, 2);
-    let image = TreeImage::checked(Bytes::from(bytes)).unwrap();
-    assert_eq!(image.name_of(1), "a");
-    assert_eq!(image.name_of(2), "ab");
-    assert_eq!(image.find("a"), Ok(1));
-    assert_eq!(image.find("ab"), Ok(2));
 }
 
 /// Asserts that a name checked at one length does not vouch for the same start at another: a
@@ -568,7 +337,7 @@ fn open_holds_the_limits_and_checked_does_not() {
     let image = TreeImage::checked(bytes).unwrap();
     assert_eq!(image.len(), 10);
     assert_eq!(image.files(), 6);
-    assert_eq!(image.find("d/x"), Ok(7));
+    assert_eq!(ListImage::heap(&image).find("d/x"), Ok(7));
 }
 
 /// Asserts that a tree at exactly each limit is accepted by `open`.
@@ -592,6 +361,7 @@ fn checked_reads_the_same_tree_as_open() {
     assert_eq!(checked.len(), opened.len());
     assert_eq!(checked.files(), opened.files());
     assert_eq!(checked.file_bytes(), opened.file_bytes());
+    let (checked, opened) = (ListImage::heap(&checked), ListImage::heap(&opened));
     for index in 0..10 {
         assert_eq!(checked.entry(index), opened.entry(index));
     }

@@ -7,6 +7,7 @@ use crate::TreeDigest;
 use crate::server::local_cache::attaches::{Attach, Fetches, Levels, Outcome};
 use crate::server::local_cache::descriptors::Descriptors;
 use crate::server::local_cache::opens::{Opens, Spans};
+use crate::server::local_cache::tree_lists::{Totals, TreeLists};
 use crate::server::local_cache::trees::{PlacementId, placement_id};
 
 const SHA: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -516,6 +517,32 @@ fn a_descriptors_is_the_report_it_writes() {
         "descriptors boot-1 7 -1 2",
         "descriptors boot-1 7 1 x",
         "descriptors  7 1 2",
+    ] {
+        assert_eq!(line(text), Err(Refusal::Malformed), "{text:?}");
+    }
+}
+
+/// Asserts that a `treelists` is the report it writes, and that one that is not, one word short or
+/// with a bad number included, is refused as malformed.
+#[test]
+fn a_treelists_is_the_report_it_writes() {
+    let report = TreeLists {
+        mount: "boot-1".to_owned(),
+        process: 77,
+        mapped: 2,
+        bytes: 8192,
+        cap: 536_870_912,
+        totals: Totals {
+            cap: 1,
+            idle: 3,
+            over_cap: 0,
+        },
+    };
+    assert_eq!(line(&report.line()), Ok(Request::TreeLists(report)));
+    for text in [
+        "treelists",
+        "treelists boot-1 7 1 2 3 4 5",
+        "treelists boot-1 7 1 2 3 4 5 x",
     ] {
         assert_eq!(line(text), Err(Refusal::Malformed), "{text:?}");
     }

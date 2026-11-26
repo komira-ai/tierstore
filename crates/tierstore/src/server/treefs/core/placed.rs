@@ -38,7 +38,6 @@ use crate::server::local_cache::trees::{FlatKind, FlatTree, Location, image_path
 use crate::tree_manifest::{
     BlobSource, EntryKind, MAX_MANIFEST_BYTES, TreeDigest, TreeEntry, TreeError, flatten_in_waves,
 };
-use crate::{MAX_TREE_LIST_BYTES, TreeImage};
 
 use super::super::fill_client::{AskError, Place, PlacedTree, Until};
 use super::super::fills::Report;
@@ -83,17 +82,6 @@ pub(super) fn read_manifest(path: &std::path::Path) -> std::io::Result<Vec<u8>> 
     let mut bytes = Vec::new();
     let _ = File::open(path)?
         .take(MAX_MANIFEST_BYTES as u64 + 1)
-        .read_to_end(&mut bytes)?;
-    Ok(bytes)
-}
-
-/// The bytes of the image file at `path`, at most [`MAX_TREE_LIST_BYTES`] and one more byte, so
-/// that a larger file is refused by its size and not read whole.
-fn read_image(path: &std::path::Path) -> std::io::Result<Vec<u8>> {
-    use std::io::Read as _;
-    let mut bytes = Vec::new();
-    let _ = File::open(path)?
-        .take(MAX_TREE_LIST_BYTES as u64 + 1)
         .read_to_end(&mut bytes)?;
     Ok(bytes)
 }
@@ -305,14 +293,28 @@ impl Core {
         })
     }
 
-    /// The tree at the fs location `path` that is the image of the tree `tree`, read from the
-    /// tree's directory and checked: its shape, not its digest, which the tree store checked when
-    /// it took the image and checks at each start.
+    /// The tree at the fs location `path` that is the image of the tree `tree`: the list in
+    /// memory already (the tree store's, or another location's), else mapped from the tree's
+    /// directory and checked, its shape, not its digest, which the tree store checked when it
+    /// took the image and checks at each start. Room is made under `fs.tree_list_ram_bytes` first,
+    /// unless another tree of the mount shows the list already, and a list that does not fit is
+    /// mapped all the same, and counted (`core/lists.rs`).
     fn image_of(&self, tree: &TreeDigest, path: String) -> Result<Tree, Unread> {
         let file = image_path(&self.settings.cache_path, tree);
         let failed = |why: String| Unread::Failed(format!("the image of {tree} at {path}: {why}"));
-        let bytes = read_image(&file).map_err(|why| failed(why.to_string()))?;
-        let image = TreeImage::checked(bytes.into()).map_err(|why| failed(why.to_string()))?;
+        // A list another tree of the mount shows already adds nothing: no room is made for it,
+        // and it is never mapped past the cap. One the tree store mapped, which no tree of the
+        // mount shows yet, is made room for: the mount holds it from now on.
+        let need = self.lists.mapped.need(tree, &file);
+        let fits = (need == 0 && self.shown(tree)) || self.make_room(need);
+        let image = self
+            .lists
+            .mapped
+            .open(tree, &file)
+            .map_err(|why| failed(why.to_string()))?;
+        if !fits {
+            self.over_cap(tree);
+        }
         Ok(Tree::image(image, path))
     }
 

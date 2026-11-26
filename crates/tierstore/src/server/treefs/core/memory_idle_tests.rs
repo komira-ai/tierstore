@@ -7,7 +7,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use super::super::{Core, Entry, Errno, Looked};
-use super::{Footprint, memory_line};
+use super::{Footprint, lists, memory_line};
+use crate::server::local_cache::trees::Mapped;
 use crate::server::treefs::ino;
 use crate::server::treefs::locked;
 use crate::server::treefs::testing::{Logged, Rig, TREE_IDLE, logged, sample};
@@ -223,48 +224,69 @@ fn a_look_says_the_trees_in_memory_when_they_change() {
         core.look_around();
         core.look_around();
     });
+    let lists = "; tree lists: 0 mapped, 0 MiB of 512 MiB; 0 released for the cap and 0 idle \
+                 since the last sweep";
     assert_eq!(
         lines,
         [
             format!(
                 "tierstore fs: 1 tree in memory, 1 of them attached: {entries} entries, \
-                 about {mib} MiB"
+                 about {mib} MiB{lists}"
             ),
             format!(
                 "tierstore fs: 1 tree in memory, 0 of them attached: {entries} entries, \
-                 about {mib} MiB"
+                 about {mib} MiB{lists}"
             ),
-            "tierstore fs: 0 trees in memory, 0 of them attached: 0 entries, about 0 MiB"
-                .to_owned(),
+            format!(
+                "tierstore fs: 0 trees in memory, 0 of them attached: 0 entries, about 0 MiB{lists}"
+            ),
         ]
     );
 }
 
 /// Asserts that the bytes of the line are MiB rounded up: none for none, one for a byte, one for a
-/// MiB, two for a byte more; and that one tree is said in the singular.
+/// MiB, two for a byte more; that one tree is said in the singular; and that the clause of the
+/// tree lists says the lists mapped, their bytes and the cap in MiB rounded up the same way, and
+/// the lists released for the cap and idle since the look before.
 #[test]
 fn the_memory_line_rounds_the_bytes_up_to_mib() {
+    let none = lists::Said {
+        cap: 4096,
+        ..lists::Said::default()
+    };
     let line = |bytes: u64| {
         memory_line(Footprint {
             trees: 2,
             attached: 1,
             entries: 7,
             bytes,
+            lists: none,
         })
     };
     let words = "tierstore fs: 2 trees in memory, 1 of them attached: 7 entries, about";
-    assert_eq!(line(0), format!("{words} 0 MiB"));
-    assert_eq!(line(1), format!("{words} 1 MiB"));
-    assert_eq!(line(1 << 20), format!("{words} 1 MiB"));
-    assert_eq!(line((1 << 20) + 1), format!("{words} 2 MiB"));
+    let empty = "; tree lists: 0 mapped, 0 MiB of 1 MiB; 0 released for the cap and 0 idle since \
+                 the last sweep";
+    assert_eq!(line(0), format!("{words} 0 MiB{empty}"));
+    assert_eq!(line(1), format!("{words} 1 MiB{empty}"));
+    assert_eq!(line(1 << 20), format!("{words} 1 MiB{empty}"));
+    assert_eq!(line((1 << 20) + 1), format!("{words} 2 MiB{empty}"));
     let one = memory_line(Footprint {
         trees: 1,
         attached: 0,
         entries: 3,
         bytes: 0,
+        lists: lists::Said {
+            mapped: Mapped {
+                lists: 3,
+                bytes: (2 << 20) + 1,
+            },
+            cap: 2 << 30,
+            released: (4, 5),
+        },
     });
     assert_eq!(
         one,
-        "tierstore fs: 1 tree in memory, 0 of them attached: 3 entries, about 0 MiB"
+        "tierstore fs: 1 tree in memory, 0 of them attached: 3 entries, about 0 MiB; tree lists: \
+         3 mapped, 3 MiB of 2048 MiB; 4 released for the cap and 5 idle since the last sweep"
     );
 }

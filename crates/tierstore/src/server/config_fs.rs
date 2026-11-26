@@ -204,6 +204,7 @@ pub(in crate::server) fn fs_of(at: &str, params: &Params) -> Result<FsInterface,
         recover_wait: params.recover_wait,
         reattach_concurrency: params.reattach_concurrency,
         tree_idle_secs: params.tree_idle_secs,
+        tree_list_ram_bytes: params.tree_list_ram_bytes,
         put: params.put.clone().map(|strict| strict.0),
         ..FsTable::default()
     };
@@ -236,6 +237,7 @@ pub(in crate::server) fn refuse_fs_params(
             params.reattach_concurrency.is_some(),
         ),
         ("tree_idle_secs", params.tree_idle_secs.is_some()),
+        ("tree_list_ram_bytes", params.tree_list_ram_bytes.is_some()),
         ("nfs", params.nfs.is_some()),
         ("put", params.put.is_some()),
         ("fill_socket", params.fill_socket.is_some()),

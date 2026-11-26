@@ -12,10 +12,11 @@ use super::super::PinAnswer;
 use super::TreeStore;
 use super::files::{
     At, IMAGE, PlacementFile, READY, RECORDS, SOURCES, STAGING, Source, Sources, encode_records,
-    placement_file, tree_dir, trees_dir, write_new,
+    image_path, placement_file, tree_dir, trees_dir, write_new,
 };
 use super::location::{Location, Meets, PlacementId, Table, meets};
 use super::state::{Content, Placement, Shared, TreeInfo, closure};
+use crate::tree_image_list::ListImage;
 use crate::{BuiltFile, BuiltTree, RecordChild, TreeDigest, TreeImage};
 
 /// What [`TreeStore::create`] makes a tree and a placement of.
@@ -344,7 +345,10 @@ impl Shared {
                 if !settled {
                     self.write_tree(&root, &[(IMAGE, &image.bytes()[..])], ready)?;
                 }
-                Ok(Content::Image(image))
+                // The file is in place and never changes: the list is read from its mapping from
+                // now on, and the heap bytes go with the request.
+                let stored = ListImage::stored(&image, &image_path(&self.root, &root));
+                Ok(Content::Image(self.lists.keep(root, stored)))
             }
         }
     }
@@ -384,7 +388,8 @@ impl TreeStore {
 
     /// Makes the tree of the version 2 tree list of `request` and places it at its locations, as
     /// [`TreeStore::create`] does: the tree is named by the digest of the request and is the list
-    /// itself, written to the tree's directory as it is (`image`) and read in place; it has no
+    /// itself, written to the tree's directory as it is (`image`) and read in place from a mapping of
+    /// that file (`mapped.rs`), never written again; it has no
     /// directory records and holds no tree by digest.
     ///
     /// # Errors

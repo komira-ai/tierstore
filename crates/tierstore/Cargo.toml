@@ -56,6 +56,8 @@ server = [
     "dep:tierstore-trees-api",
     "dep:tonic",
     "dep:tracing",
+    "dep:libc",
+    "dep:vm-memory",
     "s3",
     "tokio/macros",
     "tokio/net",
@@ -107,8 +109,8 @@ percent-encoding = { workspace = true, optional = true }
 ring = { workspace = true, optional = true }
 # The user id the server runs as, which a key file must belong to, and the free space, the link count and
 # the times of the files of the local cache, and the listening sockets, which `std` cannot bind
-# with `IPV6_V6ONLY` set (`server`).
-rustix = { workspace = true, features = ["event", "fs", "mount", "net", "pipe", "process"], optional = true }
+# with `IPV6_V6ONLY` set, and the size of a page, which a mapped tree list takes whole (`server`).
+rustix = { workspace = true, features = ["event", "fs", "mount", "net", "param", "pipe", "process"], optional = true }
 # The body of a CompleteMultipartUpload request (`server`).
 roxmltree = { workspace = true, optional = true }
 # The TLS of the OCI read front (`server`): the certificate and key are read at start, and the
@@ -128,6 +130,12 @@ tierstore-trees-api = { workspace = true, features = ["server"], optional = true
 # `Status` and the body of a gRPC call, which the trees front answers with; tonic's own transport
 # and TLS are not used (`server`).
 tonic = { workspace = true, features = ["codegen"], optional = true }
+# The read-only, private mapping of a version 2 tree list's image (`server`, `tree_image_list.rs`):
+# `MmapRegion::build` maps the file and every read copies its bytes out, with no `unsafe` in the
+# crate. `libc` gives the constants of the mapping alone (`PROT_READ`, `MAP_PRIVATE`); no libc
+# call is made.
+libc = { workspace = true, optional = true }
+vm-memory = { workspace = true, features = ["backend-mmap"], optional = true }
 # The journal objects, the checkpoints and the usage object are JSON.
 serde.workspace = true
 serde_json.workspace = true

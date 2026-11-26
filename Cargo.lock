@@ -3320,6 +3320,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "libc",
  "md-5 0.11.0",
  "nfsserve",
  "nix",
@@ -3353,6 +3354,7 @@ dependencies = [
  "tonic",
  "tracing",
  "tsfuse",
+ "vm-memory",
  "x509-parser",
 ]
 

@@ -17,7 +17,9 @@ use crate::server::local_cache::manifest_path;
 use crate::server::treefs::fill_client::FillClient;
 use crate::server::treefs::ino;
 use crate::server::treefs::table::TreeTable;
-use crate::server::treefs::testing::{Built, FakeFill, OWNER, Rig, TREE_IDLE, dir, file, sample};
+use crate::server::treefs::testing::{
+    Built, FakeFill, OWNER, Rig, TREE_IDLE, TREE_LIST_RAM, dir, file, sample,
+};
 
 /// What the production client of an `fs.fetch_timeout` of 60 s (the default) retries a closed
 /// socket for: 60 pauses of a second.
@@ -64,6 +66,7 @@ pub(super) fn core_over(
             generation: 1,
             count_lookups: true,
             tree_idle: TREE_IDLE,
+            tree_list_ram_bytes: TREE_LIST_RAM,
             clock: Arc::clone(&rig.clock) as Arc<dyn Clock>,
         },
         Arc::new(fills),

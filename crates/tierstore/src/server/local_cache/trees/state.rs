@@ -11,7 +11,9 @@ use super::super::{LocalCache, PinAnswer, locked};
 use super::config::TreesConfig;
 use super::files::{Place, Sources};
 use super::location::{Location, PlacementId, Table};
-use crate::{TreeDigest, TreeImage};
+use super::mapped::MappedLists;
+use crate::TreeDigest;
+use crate::tree_image_list::ListImage;
 
 /// A tree the node holds: what is in its directory, read once.
 #[derive(Debug)]
@@ -38,8 +40,9 @@ pub(super) enum Content {
         /// Where the bytes of the tree's own files are fetched from.
         sources: Sources,
     },
-    /// A version 2 tree list, read in place: entries by index, each file at its own span.
-    Image(Arc<TreeImage>),
+    /// A version 2 tree list, read in place from its mapped image file (shared with the mount of
+    /// this process, `mapped.rs`): entries by index, each file at its own span.
+    Image(Arc<ListImage>),
 }
 
 impl TreeInfo {
@@ -60,7 +63,7 @@ impl TreeInfo {
     }
 
     /// The image the tree is, if it is one.
-    pub(super) fn image(&self) -> Option<&Arc<TreeImage>> {
+    pub(super) fn image(&self) -> Option<&Arc<ListImage>> {
         match &self.content {
             Content::Image(image) => Some(image),
             Content::Records { .. } => None,
@@ -126,6 +129,8 @@ pub(super) struct Shared {
     /// The number of the next staging directory.
     pub staged: AtomicU64,
     pub state: Mutex<State>,
+    /// The tree lists in memory, which the mount of this process shares (`mapped.rs`).
+    pub lists: Arc<MappedLists>,
 }
 
 impl Shared {

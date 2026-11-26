@@ -46,7 +46,9 @@ use crate::TreeDigest;
 use crate::server::fill_socket;
 use crate::server::fill_socket::request::{Refusal, check_blob};
 use crate::server::local_cache::layout::is_digest;
-use crate::server::local_cache::trees::{FileSpan, MountPlace, MountTree, TreeStore, placement_id};
+use crate::server::local_cache::trees::{
+    FileSpan, MappedLists, MountPlace, MountTree, TreeStore, placement_id,
+};
 use crate::server::local_cache::{Blob, FillError, LocalCache, Mode};
 
 use super::fill_client::{AskError, FillFailure, Place, PlacedTree, Until};
@@ -378,7 +380,12 @@ impl Fills for InProcess {
             Report::Levels(levels) => self.cache.tree_levels(levels),
             Report::Descriptors(descriptors) => self.cache.descriptors_reported(descriptors),
             Report::Opens(opens) => self.cache.opens_reported(*opens),
+            Report::TreeLists(lists) => self.cache.tree_lists_reported(lists),
         }
+    }
+
+    fn lists(&self) -> Option<Arc<MappedLists>> {
+        self.trees.as_ref().map(|trees| Arc::clone(trees.lists()))
     }
 
     fn pause(&self, pause: Duration) {

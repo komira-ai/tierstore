@@ -15,9 +15,8 @@
 //! A put under a `cache = true` policy, create-only or plain, is also kept on the node (module `keep`):
 //! the body is copied to `.stage/` as it streams to the upstream, and once the upstream has
 //! acknowledged it and said what tag it gave the object, the copy is put in the cache before the
-//! answer. That copy is best effort and never fails the put.
-//! Without the setting every write call of the [`Backend`] is `Unsupported`, as the front
-//! refuses it before.
+//! answer. That copy is best effort and never fails the put. Without the setting every write
+//! call of the [`Backend`] is `Unsupported`, as the front refuses it before.
 //!
 //! # What is kept
 //!
@@ -158,6 +157,7 @@ mod source;
 mod stall;
 mod starts;
 mod stream;
+pub(super) mod tree_lists;
 pub mod trees;
 mod write;
 

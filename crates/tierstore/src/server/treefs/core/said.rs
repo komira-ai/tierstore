@@ -32,6 +32,8 @@ pub(in crate::server::treefs) enum Failing {
     Tree,
     /// Any other request: a listing, a lookup, a fault the code does not expect.
     Other,
+    /// A tree list mapped past `fs.tree_list_ram_bytes` (`core/lists.rs`).
+    Lists,
 }
 
 impl Failing {
@@ -42,6 +44,10 @@ impl Failing {
             Self::Read => ("failed read of an open file", "failed reads of open files"),
             Self::Tree => ("failed read", "failed reads"),
             Self::Other => ("other failed request", "other failed requests"),
+            Self::Lists => (
+                "tree list mapped past the cap",
+                "tree lists mapped past the cap",
+            ),
         };
         format!("{count} more {}", if count == 1 { one } else { many })
     }
@@ -144,7 +150,8 @@ impl Core {
     /// tells the node how many files of the cache this process holds open and how many opens
     /// failed for lack of descriptors since it started (`descriptors`, for the node's metrics: a
     /// total, so a report lost loses nothing the next one carries), and how long its opens took and
-    /// how many wait now (`opens`, `core/opens.rs`, totals too), says the counts of failures
+    /// how many wait now (`opens`, `core/opens.rs`, totals too), and the tree lists it holds mapped
+    /// (`treelists`, `core/lists.rs`, the releases totals too), says the counts of failures
     /// not said whose last line is [`SAY_EVERY_MS`] old, and says the trees in memory if they
     /// changed (`Core::say_memory`, `core/memory.rs`).
     pub(in crate::server::treefs) fn look_around(&self) {
@@ -156,6 +163,7 @@ impl Core {
         };
         self.fills.report(Report::Descriptors(report));
         self.report_opens();
+        self.report_tree_lists();
         for line in self.lines.unsaid(self.now(), None) {
             tracing::warn!("{line}");
         }

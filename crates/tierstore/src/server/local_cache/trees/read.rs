@@ -13,8 +13,8 @@ use super::TreeStore;
 use super::files::{RECORDS, Source};
 use super::location::{Located, PlacementId, under};
 use super::state::TreeInfo;
-use crate::tree_image::{ImageEntry, ImageKind, ImagePathError};
-use crate::{Mode, RecordChild, TreeDigest, TreeImage, TreeRecord};
+use crate::tree_image_list::{ImageEntry, ImageKind, ImagePathError, ListImage};
+use crate::{Mode, RecordChild, TreeDigest, TreeRecord};
 
 /// Why a question about a path was not answered.
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
@@ -123,13 +123,13 @@ pub(super) struct Snapshot {
 
 impl Snapshot {
     /// The image the placement's tree is, if it is one.
-    pub(super) fn image(&self) -> Option<&Arc<TreeImage>> {
+    pub(super) fn image(&self) -> Option<&Arc<ListImage>> {
         self.closure.first().and_then(|tree| tree.image())
     }
 }
 
 /// The entry of `image` that `path` leads to.
-fn image_entry<'a>(image: &'a TreeImage, path: &str) -> Result<ImageEntry<'a>, ReadError> {
+fn image_entry(image: &ListImage, path: &str) -> Result<ImageEntry, ReadError> {
     image.find_entry(path).map_err(|why| match why {
         ImagePathError::NotADirectory => ReadError::NotADirectory,
         ImagePathError::NotFound => ReadError::NotFound,
@@ -137,7 +137,7 @@ fn image_entry<'a>(image: &'a TreeImage, path: &str) -> Result<ImageEntry<'a>, R
 }
 
 /// The span of a file of an image: its own.
-pub(super) fn image_span(span: Option<(&Arc<str>, u64)>) -> Option<FileSpan> {
+pub(super) fn image_span(span: Option<(Arc<str>, u64)>) -> Option<FileSpan> {
     span.map(|(key, offset)| FileSpan {
         pack: key.to_string(),
         offset,
@@ -145,8 +145,8 @@ pub(super) fn image_span(span: Option<(&Arc<str>, u64)>) -> Option<FileSpan> {
 }
 
 /// The child entry of a listing that the entry `entry` of an image is.
-fn image_child(entry: ImageEntry<'_>) -> RecordChild {
-    let name = entry.name.to_owned();
+fn image_child(entry: ImageEntry) -> RecordChild {
+    let name = entry.name;
     match entry.kind {
         ImageKind::Dir { .. } => RecordChild::Dir {
             name,
@@ -160,10 +160,7 @@ fn image_child(entry: ImageEntry<'_>) -> RecordChild {
             size,
             sha256,
         },
-        ImageKind::Symlink { target } => RecordChild::Symlink {
-            name,
-            target: target.to_owned(),
-        },
+        ImageKind::Symlink { target } => RecordChild::Symlink { name, target },
     }
 }
 
@@ -291,9 +288,7 @@ impl TreeStore {
                     sha256,
                     span: image_span(span),
                 },
-                ImageKind::Symlink { target } => Resolved::Symlink {
-                    target: target.to_owned(),
-                },
+                ImageKind::Symlink { target } => Resolved::Symlink { target },
             });
         }
         Ok(match self.walk(&snapshot, path)? {
@@ -413,7 +408,7 @@ impl TreeStore {
 
 /// [`TreeStore::list`] of the directory `path` of `image`.
 fn image_list(
-    image: &TreeImage,
+    image: &ListImage,
     path: &str,
     after: Option<&str>,
     limit: usize,

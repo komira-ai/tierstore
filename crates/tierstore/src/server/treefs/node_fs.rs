@@ -267,11 +267,12 @@ impl NodeFs {
     }
 
     /// Waits until every request parked on the fetches is answered (`Fetches::drain`), then tells
-    /// the node of the opens (`core/opens.rs`): the stop of the readers for a hand-over or a
-    /// restart, after which this process answers no more opens.
+    /// the node of the opens (`core/opens.rs`) and of the tree lists (`core/lists.rs`): the stop of
+    /// the readers for a hand-over or a restart, after which this process answers no more opens.
     pub(super) fn drain(&self) {
         self.fetches.drain();
         self.core.report_opens();
+        self.core.report_tree_lists();
     }
 
     /// The requests parked on the fetches and not answered yet.

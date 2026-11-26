@@ -107,8 +107,9 @@
 //!   sections and copying only the keys;
 //!   [`TreeListV2::build`] walks the entries once, handing out each span to read as it meets it,
 //!   and gives the [`BuiltTree`]. [`TreeImage::open`] makes the same walk and keeps the list as
-//!   the tree, read in place: an entry's number is its index, and nothing is made per entry or
-//!   per directory. The same page is the reference.
+//!   the tree, which the server reads in place, on the heap or mapped from the list's file: an
+//!   entry's number is its index, and nothing is made per entry or per directory. The same page is
+//!   the reference.
 //!
 //! The keys under `_journal/` (the per-node journals of the releases before the entries, which
 //! this release does not apply; their formats stay readable as bytes, see [`decode_journal`]), `_entries/` and `_tiering/` belong to the proxy and the
@@ -216,6 +217,8 @@ mod sleeper;
 mod sleeper_tests;
 mod tiered;
 mod tree_image;
+#[cfg(feature = "server")]
+mod tree_image_list;
 mod tree_list;
 #[cfg(test)]
 mod tree_list_tests;
