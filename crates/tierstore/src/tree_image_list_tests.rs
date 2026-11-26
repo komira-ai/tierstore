@@ -1,10 +1,12 @@
 //! Tests of a list read in place: the entries, the lookups and the listings of a version 2 tree
 //! list on the heap and mapped from its file, each case on both backings; that the mapping is of
 //! the file and takes whole pages; what an image file that cannot be read gives; and that bytes
-//! changed after the map read as absent, never as a panic.
+//! changed after the walk, before the map and (on Linux) after it, read as absent, never as a
+//! panic.
 
 use std::fs::{File, OpenOptions};
 use std::os::unix::fs::FileExt as _;
+use std::path::Path;
 
 use bytes::Bytes;
 use tierstore_testkit::dir::TestDir;
@@ -480,34 +482,29 @@ fn an_image_file_that_cannot_be_read_says_why() {
     assert_eq!(junk.to_string(), TreeListV2Error::BadMagic.to_string());
 }
 
-/// Asserts that bytes changed in place under a mapping after the walk (a record's name moved past
-/// the names, a name no longer text, a directory's child count raised to the largest, a link's
-/// target moved to the largest offset with no length and to a length past the names) read as
-/// absent names, empty targets and children cut to the entries: nothing panics, and every entry
-/// and listing is still answered. The file keeps its length: nothing cuts an image short.
-#[test]
-fn bytes_damaged_after_the_map_read_as_absent_not_a_panic() {
-    let dir = scratch();
-    let bytes = sample();
-    let [_, mapped] = both(&dir, &bytes);
-    assert_eq!(mapped.name_of(1), "d");
-    let path = dir.join("image");
-    let file = OpenOptions::new().write(true).open(&path).unwrap();
-    let names = le32(&bytes, 48);
+/// Changes the bytes of the image file at `path`, which holds the list `bytes`, in place: a
+/// record's name moved past the names (`d`), a name no longer text (`f`), the root's child count
+/// raised to the largest, a link's target moved to the largest offset with no length (`l`) and to
+/// a length past the names (`d/z`). The file keeps its length: nothing cuts an image short.
+fn damage(path: &Path, bytes: &[u8]) {
+    let file = OpenOptions::new().write(true).open(path).unwrap();
+    let names = le32(bytes, 48);
     let write = |at: usize, what: &[u8]| file.write_all_at(what, at as u64).unwrap();
-    // `d`: its name far past the names.
-    write(rec(&bytes, 1) + 4, &u32::MAX.to_le_bytes());
-    // `f`: its name no longer text.
-    let f = le32(&bytes, rec(&bytes, 2) + 4);
+    write(rec(bytes, 1) + 4, &u32::MAX.to_le_bytes());
+    let f = le32(bytes, rec(bytes, 2) + 4);
     write(names + f, &[0xff]);
-    // The root: as many children as a record can say.
-    write(rec(&bytes, 0) + 16, &u64::MAX.to_le_bytes());
-    // `l`: its target at the largest offset, of no length; `d/z`: of a length past the names.
-    write(rec(&bytes, 6) + 16, &u64::MAX.to_le_bytes());
-    write(rec(&bytes, 6) + 24, &0u64.to_le_bytes());
-    write(rec(&bytes, 9) + 24, &u64::MAX.to_le_bytes());
-    assert_eq!(std::fs::metadata(&path).unwrap().len(), bytes.len() as u64);
+    write(rec(bytes, 0) + 16, &u64::MAX.to_le_bytes());
+    write(rec(bytes, 6) + 16, &u64::MAX.to_le_bytes());
+    write(rec(bytes, 6) + 24, &0u64.to_le_bytes());
+    write(rec(bytes, 9) + 24, &u64::MAX.to_le_bytes());
+    assert_eq!(std::fs::metadata(path).unwrap().len(), bytes.len() as u64);
+}
 
+/// Asserts that `mapped`, a mapping of a file [`damage`] changed, reads the damage as absent
+/// names, empty targets and children cut to the entries; nothing panics, every entry and listing
+/// is still answered, and the names the damage left alone are read as before.
+fn assert_damage_read_as_absent(mapped: &ListImage) {
+    assert!(mapped.is_mapped());
     assert_eq!(mapped.name_of(1), "");
     assert_eq!(mapped.name_of(2), "");
     assert_eq!(mapped.children(0), 1..10);
@@ -524,8 +521,38 @@ fn bytes_damaged_after_the_map_read_as_absent_not_a_panic() {
         let _ = (mapped.child(0, name), mapped.children_after(0, name));
         let _ = (mapped.find(name), mapped.find_entry(name));
     }
-    // The other names are read as before.
     assert_eq!(mapped.child(0, "g"), Some(3));
+}
+
+/// Asserts that bytes changed in place after the walk and before the map (the list walked from
+/// the bytes as written, the file then damaged, then mapped with no new walk) read as absent, not
+/// as a panic. The mapping is made after the change, so it reads the changed bytes on every
+/// system.
+#[test]
+fn bytes_damaged_after_the_walk_read_as_absent_not_a_panic() {
+    let dir = scratch();
+    let bytes = sample();
+    let path = dir.join("image");
+    std::fs::write(&path, &bytes).unwrap();
+    let image = TreeImage::checked(Bytes::copy_from_slice(&bytes)).unwrap();
+    damage(&path, &bytes);
+    let mapped = ListImage::mapped(&image, File::open(&path).unwrap()).unwrap();
+    assert_damage_read_as_absent(&mapped);
+}
+
+/// Asserts that bytes changed in place under a mapping, after a read through it, read as absent,
+/// not as a panic. Linux alone: whether a private mapping shows a change made to its file after it
+/// was mapped is left to the system by POSIX; Linux shows it in every page the mapping has not
+/// written (it writes none), while macOS kept the bytes of a page it had already read.
+#[cfg(target_os = "linux")]
+#[test]
+fn bytes_damaged_after_the_map_read_as_absent_not_a_panic() {
+    let dir = scratch();
+    let bytes = sample();
+    let [_, mapped] = both(&dir, &bytes);
+    assert_eq!(mapped.name_of(1), "d");
+    damage(&dir.join("image"), &bytes);
+    assert_damage_read_as_absent(&mapped);
 }
 
 /// Asserts that a list removed while it is mapped is still read through its mapping: removing a
