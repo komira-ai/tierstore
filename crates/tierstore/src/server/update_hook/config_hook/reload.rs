@@ -11,9 +11,10 @@
 //!   steps are the arm's, as for any config update.
 //! - `cutover` reloads the guard when the package changes its file, has the control socket set the
 //!   staged value, and records `swapped` with the mount the socket named.
-//! - `verify` observes the build of the instance that serves, as the arm does, and reads the value
-//!   back from that mount's gauge `tierstore_fs_tree_list_ram_bytes` on the public port (deferred,
-//!   `not_ready`, while it shows another), then records `verified`.
+//! - `verify` observes the build of the instance that serves, as the arm does (and, before the
+//!   commit, defers while its cache is read-only), and reads the value back from that mount's
+//!   gauge `tierstore_fs_tree_list_ram_bytes` on the public port (deferred, `not_ready`, while it
+//!   shows another), then records `verified`.
 //! - `rollback`, before the commit, reloads the guard again (when the package changed it and is
 //!   not the node's first) and sets the value of the file that served, unless the instance no
 //!   longer runs (a start reads the file hostkeeper put back).
@@ -24,7 +25,7 @@ use std::convert::identity;
 
 use super::super::PUBLIC_PORT;
 use super::super::args::Step;
-use super::super::look::{Look, verified};
+use super::super::look::{Look, verified, writable};
 use super::super::params::Params;
 use super::super::ports::{Control, Guard, Instance, Lock, StateDir, SystemdPorts, UnitState};
 use super::super::probe::tree_list_ram_bytes_of;
@@ -376,6 +377,13 @@ fn verify(opened: &Opened, act: &Act<'_>) -> Result<Done, Done> {
             done
         }
     })?;
+    // Before the commit the instance must be the cache's writer, as the arm's `verify` requires:
+    // until it is, the node's jobs cannot fill their trees.
+    let mode = if committed {
+        mode
+    } else {
+        writable(mode, &unit_name(live), retry)?
+    };
     let mut first = String::new();
     if let Some(cap) = &opened.reload.tree_list_ram_bytes {
         let mount = cap.mount.as_deref().ok_or_else(|| {

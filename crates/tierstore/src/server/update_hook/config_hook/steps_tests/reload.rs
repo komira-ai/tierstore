@@ -793,7 +793,7 @@ fn a_prepare_over_another_reload_in_flight_records_its_own() {
     }
 }
 
-/// Runs `tierstore config-hook <step> --params <file>` as hostkeeper does, through the verb's
+/// Runs `tierstore config-hook <step> [<staged release>] --params <file>` as hostkeeper does, through the verb's
 /// command line and a params file that names only the staged and previous packages and the
 /// configuration file (the service manager is this system's default), with the steps of the
 /// config hook over the fakes of `node`: the exit status and the report line.
@@ -810,8 +810,12 @@ fn on_the_command_line(
         &format!("config_file = \"{}\"\n", lin::CONFIG),
     );
     std::fs::write(&file, text).unwrap();
-    let mut args: Vec<std::ffi::OsString> = ["tierstore", "config-hook", step, "--params"]
-        .into_iter()
+    // `prepare` alone is given the staged release directory.
+    let staged: &[&str] = if step == "prepare" { &[PKG_NEW] } else { &[] };
+    let mut args: Vec<std::ffi::OsString> = ["tierstore", "config-hook", step]
+        .iter()
+        .chain(staged)
+        .chain(&["--params"])
         .map(std::ffi::OsString::from)
         .collect();
     args.push(file.into_os_string());
@@ -852,4 +856,29 @@ fn a_cap_change_on_the_command_line_is_applied_in_place() {
     assert_eq!(node.control.gauge.get(), Some(2 * GIB));
     assert_eq!(node.fake.record(), at_rest(set_on_mount(GIB, 2 * GIB)));
     assert_eq!(node.service.get(), Some(release_record(Instance::A)));
+}
+
+/// Asserts that a `verify` of a reload, before the commit, is deferred (`not_ready`) while the
+/// serving instance's cache is read-only, as the arm's `verify` is, and records nothing; once it
+/// serves read-write the step succeeds. After the commit a read-only cache is the promotion
+/// pending, not a deferral.
+#[test]
+fn a_verify_of_a_reload_waits_for_a_writable_cache() {
+    let node = changing(Some(GIB), Some(2 * GIB));
+    let p = update();
+    node.go(&p, &[Prepare, Cutover]);
+    node.fake.set_read_only(true);
+    let done = node.step(Verify, &p);
+    lin::assert_deferred(&done, Reason::NotReady, 5);
+    assert_eq!(
+        lin::detail(&done),
+        "tierstore@a serves read-only: its cache has not taken the write role yet"
+    );
+    assert!(!node.fake.record().has(Marker::Verified));
+    node.fake.set_read_only(false);
+    node.go(&p, &[Verify, Cleanup]);
+    node.fake.set_read_only(true);
+    let watched = node.step(Verify, &p);
+    lin::assert_ok(&watched);
+    assert!(watched.report.promotion_pending);
 }
