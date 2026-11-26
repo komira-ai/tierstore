@@ -43,7 +43,7 @@ pub(super) fn settings() -> Settings {
 }
 
 /// The source `index` of the run `run` of [`AGENT`].
-pub(super) fn source(run: &str, index: u32) -> Option<Source> {
+pub(in crate::server) fn source(run: &str, index: u32) -> Option<Source> {
     Some(Source {
         agent: AGENT.to_owned(),
         run: run.to_owned(),
@@ -52,7 +52,7 @@ pub(super) fn source(run: &str, index: u32) -> Option<Source> {
 }
 
 /// The mode a job's layer asks for.
-pub(super) const READ_ONLY: i32 = MountMode::ReadOnly as i32;
+pub(in crate::server) const READ_ONLY: i32 = MountMode::ReadOnly as i32;
 
 /// The file `path` of the list, whose bytes are the blob `blob` of `pack`.
 pub(super) fn member(pack: &Pack, path: &str, blob: usize, mode: u16) -> ListEntry {
@@ -72,7 +72,7 @@ pub(super) fn member(pack: &Pack, path: &str, blob: usize, mode: u16) -> ListEnt
 }
 
 /// The tree of the pack's three blobs, an empty directory, a link and an empty file.
-pub(super) fn list_of(pack: &Pack) -> TreeList {
+pub(in crate::server) fn list_of(pack: &Pack) -> TreeList {
     TreeList {
         entries: vec![
             member(pack, "bin/other", 1, 0o644),
@@ -104,7 +104,7 @@ pub(super) fn list_of(pack: &Pack) -> TreeList {
 }
 
 /// A provider over the tree store's bench, with the list of the pack's tree in the upstream.
-pub(super) struct Rig {
+pub(in crate::server) struct Rig {
     pub bench: Bench,
     /// The key of the list of [`list_of`].
     pub key: String,
@@ -155,7 +155,7 @@ impl Rig {
     }
 
     /// The path of that source under the mount, as the tree store places it.
-    pub(super) fn place_of(run: &str, index: u32) -> String {
+    pub(in crate::server) fn place_of(run: &str, index: u32) -> String {
         format!(
             "mount-provider/{}/{}/{index}",
             hex::encode(AGENT),
@@ -222,7 +222,7 @@ pub(super) fn unavailable(error: ProviderError) -> String {
 }
 
 /// A gRPC client of the provider's socket.
-pub(super) struct Client {
+pub(in crate::server) struct Client {
     sender: SendRequest<Full<Bytes>>,
 }
 
@@ -240,12 +240,35 @@ impl Client {
         Self { sender }
     }
 
+    /// Connects to the socket at `path` once: none when no socket is there or none listens on it
+    /// (between two instances of a hand-over, the file of the one that went is still there).
+    pub(in crate::server) async fn try_connect(path: &Path) -> Option<Self> {
+        let stream = UnixStream::connect(path).await.ok()?;
+        let (sender, connection) = http2::handshake(TokioExecutor::new(), TokioIo::new(stream))
+            .await
+            .ok()?;
+        tokio::spawn(async move {
+            let _ = connection.await;
+        });
+        Some(Self { sender })
+    }
+
     /// Calls `method` with `message`: the answer, or the status of a refusal.
     pub(super) async fn call<A: Message + Default>(
         &mut self,
         method: &str,
         message: &impl Message,
     ) -> Result<A, Status> {
+        self.try_call(method, message).await.expect("an answer")
+    }
+
+    /// [`call`](Self::call), or none when the connection ends before the answer: the instance
+    /// that served it closed its socket.
+    pub(in crate::server) async fn try_call<A: Message + Default>(
+        &mut self,
+        method: &str,
+        message: &impl Message,
+    ) -> Option<Result<A, Status>> {
         let bytes = message.encode_to_vec();
         let mut frame = vec![0];
         frame.extend_from_slice(&u32::try_from(bytes.len()).expect("small").to_be_bytes());
@@ -256,17 +279,17 @@ impl Client {
             .header("te", "trailers")
             .body(Full::new(Bytes::from(frame)))
             .expect("a request");
-        let response = self.sender.send_request(request).await.expect("an answer");
+        let response = self.sender.send_request(request).await.ok()?;
         let (parts, body) = response.into_parts();
-        let collected = body.collect().await.expect("the body");
+        let collected = body.collect().await.ok()?;
         let trailers = collected.trailers().cloned();
         let status = Status::from_header_map(&parts.headers)
             .or_else(|| trailers.as_ref().and_then(Status::from_header_map))
             .expect("a grpc-status");
         if status.code() != tonic::Code::Ok {
-            return Err(status);
+            return Some(Err(status));
         }
         let data = collected.to_bytes();
-        Ok(A::decode(&data[5..]).expect("an answer message"))
+        Some(Ok(A::decode(&data[5..]).expect("an answer message")))
     }
 }

@@ -96,8 +96,8 @@ async fn connect_to_slot(shared: SocketAddr, slot: u16) -> Option<TcpStream> {
 
 /// A relay to one instance: every connection to `at` is passed on to a connection of the
 /// instance with the slot it was made for. Dropping it closes every connection it passes on.
-struct Pin {
-    at: SocketAddr,
+pub(super) struct Pin {
+    pub(super) at: SocketAddr,
     task: JoinHandle<()>,
 }
 
@@ -125,7 +125,7 @@ impl Hold {
 }
 
 /// A relay to the instance with `slot` behind the sockets `shared`.
-async fn pin(shared: SocketAddr, slot: u16) -> Pin {
+pub(super) async fn pin(shared: SocketAddr, slot: u16) -> Pin {
     pin_holding(shared, slot, None).await
 }
 

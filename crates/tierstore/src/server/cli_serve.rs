@@ -3,7 +3,7 @@
 
 use std::future::Future;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tokio::net::TcpListener;
@@ -18,8 +18,8 @@ use super::drain::late_of;
 use super::first_beat::wait_first_beat;
 use super::first_format::first_format;
 use super::handoff::{
-    Front, Handoff, HandoffError, Inherited, MAX_SOCKETS, Offer, Offered, Socket, Want,
-    check_control_path, offered, take,
+    Front, Handoff, HandoffError, Inherited, MAX_SOCKETS, Offer, Offered, Predecessor, Socket,
+    Want, check_control_path, offered_with_lock, take,
 };
 use super::listen::{bind_all_with, duplicates, local_addrs};
 use super::lock::Received;
@@ -181,6 +181,7 @@ pub async fn run_handing(
         addresses,
         offer,
         lock: _,
+        follow: _,
     } = bind_fronts(
         handoff,
         None,
@@ -331,8 +332,14 @@ pub(super) struct Bound {
     /// hand-off, or when it could not be made after the running instance's `done`.
     pub(super) offer: Option<Offer>,
     /// The cache lock the image this one was executed from handed over, when it did: the lock
-    /// file the caller named.
+    /// file the caller named. The cache takes the write role with it at once: no process is left
+    /// that writes.
     pub(super) lock: Option<Received>,
+    /// The cache lock a running instance handed over in the `ready` step, and the connection to
+    /// it after its `bye`: the cache takes the write role with the lock at that instance's
+    /// `written`, or when the connection ends (`handoff::follow`), and holds the connection until
+    /// this process ends.
+    pub(super) follow: Option<(Predecessor, Received)>,
 }
 
 /// Sockets a start has already got before [`bind_fronts`].
@@ -343,11 +350,14 @@ pub(super) enum Got {
     Taken(Box<Inherited>),
 }
 
-/// The running instance's offer of its sockets, asked for on `handoff` and checked against `s3`
-/// and `oci`, and not yet answered (`None` where no instance answers): the start of a node whose
-/// file has an `fs` interface holds it while it takes the mount from the other process, so that it
-/// has checked both offers before it accepts either (`docs/design/one-service.md` section 4.2).
-/// The checks [`bind_fronts`] makes before it asks are made first.
+/// The running instance's offer of its sockets, asked for on `handoff` with the `ready` step and
+/// the cache lock at `lock`, checked against `s3` and `oci`, and not yet answered (`None` where no
+/// instance answers): the start of a node whose file has an `fs` interface holds it while it takes
+/// the mount from the other process, so that it has checked both offers before it accepts either
+/// (`docs/design/one-service.md` section 4.2). The checks [`bind_fronts`] makes before it asks are
+/// made first. Once accepted, [`bind_fronts`] says `ready` on it before this start serves, and the
+/// lock it handed over makes the cache the writer at that instance's `written`, not after its
+/// drain; a running instance that takes no `ready` step is asked as before, with `take 1` alone.
 ///
 /// # Errors
 /// As [`bind_fronts`], for what is found before the `ack`.
@@ -355,10 +365,11 @@ pub(super) async fn ask_sockets(
     handoff: &Handoff,
     s3: &[SocketAddr],
     oci: &[SocketAddr],
+    lock: &Path,
 ) -> Result<Option<Offered>, HandingError> {
     before_asking(handoff, s3.len() + oci.len())?;
     let want = Want { s3, oci, nfs: &[] };
-    Ok(offered(handoff, &want).await?)
+    Ok(offered_with_lock(handoff, &want, lock).await?)
 }
 
 /// What is checked before a running instance is asked for its sockets: that `sockets` fit in one
@@ -392,9 +403,19 @@ fn before_asking(handoff: &Handoff, sockets: usize) -> Result<(), HandingError> 
 /// control socket that cannot be made then is said on stderr and the start serves without one,
 /// so that it is not handed over before it restarts.
 ///
+/// Sockets taken with the `ready` step ([`ask_sockets`]) are told `ready` here, before the control
+/// socket is made and before anything is served: the running instance serves on until then. When
+/// it answers `bye`, the lock it handed over goes to [`Bound::follow`] with the connection. When it
+/// does not (it gave up first, and serves on as it was, on its own control socket, with its lock),
+/// the start fails with nothing served: the one point after `done` that does, as two instances
+/// must not serve the sockets together. A start of a node with an `fs` interface then leaves the
+/// mount it took to its descriptor store, and the service manager's restart adopts it and takes
+/// the sockets from that instance again.
+///
 /// # Errors
-/// A hand-off that is refused, mismatched, not ended in time, or whose control socket cannot be
-/// made ([`HandingError::Handoff`]); an address that `bind_own` cannot bind
+/// A hand-off that is refused, mismatched, not ended in time, whose control socket cannot be
+/// made, or whose running instance does not answer `ready` ([`HandingError::Handoff`]); an address
+/// that `bind_own` cannot bind
 /// ([`HandingError::Start`]) or the OCI front cannot ([`HandingError::Oci`]); a socket whose
 /// address cannot be read or that cannot be copied ([`HandingError::Sockets`]).
 pub(super) async fn bind_fronts(
@@ -442,6 +463,7 @@ pub(super) async fn bind_fronts(
             addresses,
             offer,
             lock: None,
+            follow: None,
         });
     };
     // Past the running instance's `done`: nothing below may fail the start.
@@ -453,10 +475,20 @@ pub(super) async fn bind_fronts(
         oci_addrs,
         nfs_addrs: _,
         copies,
-        ready: _,
+        ready,
         mount: _,
         lock,
     } = inherited;
+    // A running instance that took part in the `ready` step serves on until it is told `ready`,
+    // and one that does not answer it gave up first and serves on: this start must not serve
+    // beside it, and fails before anything is served.
+    let (lock, follow) = match ready {
+        None => (lock, None),
+        Some(ready) => {
+            let predecessor = ready.send_keeping().await?;
+            (None, lock.map(|lock| (predecessor, lock)))
+        }
+    };
     let oci = match (oci, front) {
         (Some(setup), Some(front)) => Some(OciListener::over(
             oci_sockets,
@@ -483,6 +515,7 @@ pub(super) async fn bind_fronts(
         addresses,
         offer,
         lock,
+        follow,
     })
 }
 
@@ -542,6 +575,9 @@ pub(super) async fn stopped_by(
 #[path = "cold_cli.rs"]
 pub(super) mod cold;
 
+#[cfg(test)]
+#[path = "cli_serve_ready_tests.rs"]
+mod ready_tests;
 #[cfg(test)]
 #[path = "cli_serve_tests.rs"]
 mod tests;

@@ -155,9 +155,30 @@ impl Look<'_> {
     }
 }
 
+/// `mode` when the new release may be verified in it before the commit; a build node whose cache
+/// is still read-only (it has not taken the write role from the instance it took over from) defers
+/// `verify` with `not_ready` and `retry_secs` instead: `what` serves, but its node's jobs cannot
+/// fill their trees or reach the mount provider yet, so hostkeeper keeps the node in its update
+/// and asks again, and ends the deferrals itself at `verify_deadline_secs`. Nothing is recorded
+/// while it defers.
+///
+/// # Errors
+/// The deferral.
+pub(super) fn writable(mode: CacheMode, what: &str, retry_secs: u64) -> Result<CacheMode, Done> {
+    if mode == CacheMode::ReadOnly {
+        return Err(Done::deferred(
+            Reason::NotReady,
+            format!("{what} serves read-only: its cache has not taken the write role yet"),
+            retry_secs,
+        ));
+    }
+    Ok(mode)
+}
+
 /// The success of a `verify` that observed the new release in `mode`: a build node that still
-/// serves read-only (it has not taken the cache lock yet) says `promotion_pending`, and
-/// hostkeeper runs `verify` again until it does not, within its promotion ceiling.
+/// serves read-only (it has not taken the cache lock yet; only after the commit, as [`writable`]
+/// defers it before) says `promotion_pending`, and hostkeeper runs `verify` again until it does
+/// not, within its promotion ceiling.
 pub(super) fn verified(mode: CacheMode, version: &str) -> Done {
     let pending = mode == CacheMode::ReadOnly;
     let mut done = Done::ok(if pending {

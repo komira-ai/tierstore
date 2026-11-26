@@ -89,13 +89,6 @@ impl Predecessor {
 /// The successor's side of the lock after `bye`: it takes the write role with `received` on
 /// `written` or the end of the connection, and once the predecessor is gone it may offer the lock
 /// in its turn. It runs until the predecessor has ended, and holds the connection until then.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the start of the one process follows the lock it took (one-service.md section 6, P3)"
-    )
-)]
 pub(crate) async fn follow(predecessor: Predecessor, received: Received, cache: LocalCache) {
     let wrote = predecessor.written().await;
     let taking = cache.clone();

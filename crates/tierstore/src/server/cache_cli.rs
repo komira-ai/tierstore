@@ -50,7 +50,13 @@
 //! file system too (see [`Service`]): after the cache and the tree store are open it takes the
 //! mount from a running instance, or serves the descriptor the service manager kept, or mounts
 //! afresh, and only then binds the trees front and takes or binds the S3 and OCI sockets; a start
-//! that fails after that leaves the mount as a stop does. Every build node's start then tells the
+//! that fails after that leaves the mount as a stop does. The S3 and OCI sockets of a running
+//! instance are asked for with the `ready` step and the cache lock (`take 1`, `ready`): the running
+//! instance serves them until this start says `ready`, then starts no cache write and says
+//! `written` once its writes in flight have ended, and this start's cache takes the write role with
+//! the lock it handed over then, rather than after that instance's drain, so that the mount's fills
+//! and the mount provider (bound while the cache is the writer) wait for that instance's last
+//! writes and one scan of the cache only. Every build node's start then tells the
 //! service manager `READY=1` where one listens. The mount is served while the fronts drain and is
 //! left once they have; a mount that cannot be served on stops the fronts as a signal does, and the
 //! start ends in failure.
@@ -94,7 +100,7 @@ use super::front::{InvalidFlags, server_config};
 use super::handoff::Inherited;
 #[cfg(target_os = "linux")]
 use super::handoff::Offered;
-use super::handoff::{Handed, Handing, Handoff, Image, Own, Want, read_handed};
+use super::handoff::{self, Handed, Handing, Handoff, Image, Own, Want, read_handed};
 use super::listen::{LoopbackBind, bind_set, bind_with, joined};
 use super::local_cache::trees::{TreeStore, TreesConfig};
 use super::local_cache::{CacheConfig, Disk, Every, LocalCache, Mode, SystemDisk, check_local};
@@ -594,7 +600,8 @@ pub(super) async fn serve_front(
                     let oci_listen = oci
                         .as_ref()
                         .map_or_else(Vec::new, |setup| setup.listen.clone());
-                    ask_sockets(handoff, &bind_set(fronts.listen, true), &oci_listen)
+                    let s3 = bind_set(fronts.listen, true);
+                    ask_sockets(handoff, &s3, &oci_listen, &lock_path)
                         .await
                         .map_err(super::cli::HandingError::into_boxed)?
                 }
@@ -645,6 +652,7 @@ pub(super) async fn serve_front(
             addresses,
             offer,
             lock,
+            follow,
         },
     ) = match fronts_bound.await {
         Ok(bound) => bound,
@@ -663,6 +671,15 @@ pub(super) async fn serve_front(
     };
     if let Some(received) = lock {
         drop(tokio::spawn(take_write_role(cache.clone(), received)));
+    }
+    // A lock handed over in the `ready` step is the cache's at the running instance's `written`;
+    // the connection is held, in this task, until this process ends.
+    if let Some((predecessor, received)) = follow {
+        drop(tokio::spawn(handoff::follow(
+            predecessor,
+            received,
+            cache.clone(),
+        )));
     }
     // The copies the drain does not close: the next image gets them.
     let kept = next

@@ -116,6 +116,7 @@ async fn take_lock(path: &Path, addr: SocketAddr, lock: &Path) -> super::super::
     let ask = Ask {
         mount: None,
         lock: Some(lock),
+        leaves_another_lock: false,
     };
     let taken = take_service(&handoff(path.to_owned()), &want, ask).await;
     taken.unwrap().expect("an instance answers")
@@ -527,6 +528,7 @@ async fn a_taker_against_a_previous_release_offer_is_refused_the_mount_and_asks_
             prepare: Box::new(|_| panic!("no mount is offered")),
         }),
         lock: Some(&lock),
+        leaves_another_lock: false,
     };
     let handoff = handoff(path.clone());
     let (taken, requests) = tokio::join!(take_service(&handoff, &want, ask), previous);

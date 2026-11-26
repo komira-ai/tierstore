@@ -58,6 +58,7 @@ pub(in crate::server) async fn serve_cold(
         addresses,
         offer,
         lock: _,
+        follow: _,
     } = bind_fronts(
         settings.handoff.as_ref(),
         None,

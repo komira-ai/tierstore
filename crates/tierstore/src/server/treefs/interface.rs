@@ -10,7 +10,8 @@
 //! 1. **Take** it from a running instance that answers `take-fs 1` on `handoff.sock` in the
 //!    runtime directory (`handover.rs`): a `tierstore fs` process of the two-process layout, or a
 //!    process of this layout, which answers there too. The mount comes from the process that holds
-//!    it, and the S3 and OCI sockets from the instance on `server.handoff_socket` (`take 1`): in
+//!    it, and the S3 and OCI sockets, with the cache lock, from the instance on
+//!    `server.handoff_socket` (`take 1`, `ready`; the cache takes the write role at its `written`): in
 //!    the switch from two processes to one these are two processes, and with one process they are
 //!    the same one. The start asks for the sockets first and checks their offer, holds it
 //!    unanswered while it takes the mount, and accepts it once the mount's instance has said `done`
