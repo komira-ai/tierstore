@@ -40,7 +40,7 @@ acts on a finished run of a push to `main` alone, and a queue's branch is never 
 run of `ci.yml` has a concurrency group of its own and is never cancelled. The workflow lint holds
 this (`crates/xtask/tests/workflows/merge_queue.rs`): the required workflows and jobs are listed
 there, each has the trigger and an unfiltered `pull_request`, no other workflow has the trigger, and
-each required job reports under its own name (no `name:`, matrix or `if:`, since a skipped required
+each required job reports under its own name (no `name:` other than its id, no matrix, no `if:`, since a skipped required
 check counts as passed) on a hosted Linux x86_64 runner with no write scope. A job added to
 `ci.yml` is refused until it is listed there and in the ruleset, and the ruleset names exactly the
 jobs listed there. Without the ruleset, GitHub requires no check by name and a pull request is
