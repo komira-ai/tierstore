@@ -19,11 +19,15 @@ use std::time::Duration;
 
 use super::super::{Errno, Looked};
 use super::tree_read_tests::core_over;
-use crate::Clock;
 use crate::server::local_cache::{TreeFilled, manifest_path};
 use crate::server::treefs::ino;
-use crate::server::treefs::testing::{Built, Logged, Rig, Upstream, dir, file, logged, sha, until};
+use crate::server::treefs::testing::{
+    Built, Logged, Rig, Upstream, dir, file, image_bytes, logged, sha, until,
+};
+use crate::server::treefs::tree::Tree;
+use crate::tree_image_list::ListImage;
 use crate::tree_manifest::{EntryKind, TreeDigest, TreeEntry, flatten_in_waves, parse_manifest};
+use crate::{Clock, TreeImage, is_tree_list_v2};
 
 /// What answers a `fill-tree`: the rig's fake, the digest of the root, and the line asked.
 type Answer = Arc<dyn Fn(&Upstream, &str, &str) -> String + Send + Sync>;
@@ -89,9 +93,20 @@ impl Node {
 /// upstream the cache directory `cache` does not hold, put there a level at a time from the root,
 /// a directory the cache holds not gone into, as `local_cache/tree_fill.rs` does; `ok 3`
 /// and the manifests filled at each level, or the words of the first that the upstream does not
-/// have.
+/// have. A root that is a version 2 tree list is put there and gone no further into, `ok 3 1`.
 fn descend(upstream: &Upstream, cache: &Path, root: &str) -> String {
     let built = upstream.built.lock().unwrap();
+    if let Some(list) = built.manifests.get(root).filter(|b| is_tree_list_v2(b)) {
+        let path = manifest_path(cache, root);
+        let filled = u64::from(!path.exists());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, list).unwrap();
+        return TreeFilled {
+            ms: 3,
+            levels: vec![filled],
+        }
+        .answer();
+    }
     let mut levels = Vec::new();
     let mut level = vec![root.to_owned()];
     while !level.is_empty() {
@@ -353,4 +368,118 @@ fn a_fill_tree_that_takes_the_bound_leaves_the_read_none() {
         line.ends_with("; fill-tree ok in 30000 ms, 30000 ms at the node, fills by level:"),
         "{line}"
     );
+}
+
+/// The entries, by index, of the image of the version 2 tree list `bytes`, as a tree of `trees/`.
+fn of_the_image(bytes: &[u8]) -> Vec<TreeEntry> {
+    let image = TreeImage::checked(bytes.to_vec().into()).unwrap();
+    let tree = Tree::image(Arc::new(ListImage::heap(&image)), None);
+    let count = u32::try_from(tree.len()).unwrap();
+    (0..count).map(|at| tree.entry(at).unwrap()).collect()
+}
+
+/// Puts the version 2 tree list of [`image_bytes`] in the rig's upstream as the object
+/// `cas/l/<its digest>`, where a root manifest would be; its bytes and its digest.
+fn list_in(rig: &Rig) -> (Vec<u8>, String) {
+    let bytes = image_bytes();
+    let digest = sha(&bytes);
+    let mut built = rig.upstream.built.lock().unwrap();
+    let _ = built.manifests.insert(digest.clone(), bytes.clone());
+    (bytes, digest)
+}
+
+/// Asserts that a lookup of `trees/<digest>` whose object is a version 2 tree list is attached from
+/// the one fill of that object: the node is asked one `fill-tree`, which stops at the list it
+/// fills, and the read fills nothing itself and reads no manifest (the attach says 0 manifests and
+/// the one level of the fill-tree); the tree attached is the list, mapped once, with no location,
+/// its entries by index those of the list's image (the root, then `bin`, `d`, `empty`, `link`,
+/// `bin/other` and `bin/tool`); and its entries are looked up with the modes the list stores (`d`
+/// 0700, where a tree of manifests shows every directory 0755) and the sizes it says.
+#[test]
+fn a_tree_list_at_trees_digest_is_attached_from_one_fill() {
+    let rig = Rig::new("tfs-tree-list", Built::of(Vec::new()));
+    let (bytes, list) = list_in(&rig);
+    let node = Node::start(&rig, "node.sock", this_release(&rig));
+    let core = core_over(&rig, &node.socket, |_| {});
+    let log = Logged::default();
+    let found = {
+        let _logging = logged(&log, tracing::Level::INFO);
+        core.lookup(ino::TREES, &list)
+    };
+    let Ok(Looked::Found(root)) = &found else {
+        panic!("{found:?}");
+    };
+    assert_eq!(node.asked("fill-tree"), [format!("fill-tree {list} 30000")]);
+    assert_eq!(node.asked("fill"), Vec::<String>::new());
+    let entries = read(&core, 1);
+    assert_eq!(entries, of_the_image(&bytes));
+    let names: Vec<&str> = entries.iter().map(|entry| &*entry.name).collect();
+    assert_eq!(names, ["", "bin", "d", "empty", "link", "other", "tool"]);
+    let loaded = core.tree(1).unwrap();
+    assert!(loaded.tree.list().is_some());
+    assert_eq!(loaded.tree.location(), None);
+    assert_eq!(core.lists.mapped.mapped().lists, 1);
+    let Ok(Looked::Found(d)) = core.lookup(root.attr.ino, "d") else {
+        panic!("d");
+    };
+    assert_eq!(d.attr.perm, 0o700);
+    let Ok(Looked::Found(bin)) = core.lookup(root.attr.ino, "bin") else {
+        panic!("bin");
+    };
+    let Ok(Looked::Found(tool)) = core.lookup(bin.attr.ino, "tool") else {
+        panic!("bin/tool");
+    };
+    assert_eq!((tool.attr.perm, tool.attr.size), (0o755, 5));
+    assert_eq!(reports(&rig, "levels", 1), ["levels 1 1"]);
+    let line = format!(
+        "tierstore fs: lookup of {list}: ok in 0 ms; 0 manifests: 0 from the cache, 0 filled, 0 \
+         not had; 1 levels; fills by level: 0, slowest ms by level: 0; fill-tree ok in 0 ms, 3 ms \
+         at the node, fills by level: 1; a tree list of {} bytes",
+        bytes.len()
+    );
+    assert_eq!(said(&log), [line]);
+}
+
+/// Asserts that a tree list a node of the release before fills is read from the cache all the
+/// same: that node fills the root of a `fill-tree` and then answers that it cannot read it as a
+/// manifest; the read finds the list in the cache, fills nothing itself, and attaches the list.
+#[test]
+fn a_tree_list_a_node_of_the_release_before_fills_is_read_from_the_cache() {
+    let rig = Rig::new("tfs-tree-list-old", Built::of(Vec::new()));
+    let (bytes, list) = list_in(&rig);
+    let cache = rig.cache.clone();
+    let before: Answer = Arc::new(move |upstream, root, _| {
+        let path = manifest_path(&cache, root);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, &upstream.built.lock().unwrap().manifests[root]).unwrap();
+        format!("cannot read {root}: malformed manifest: expected value at line 1 column 1")
+    });
+    let node = Node::start(&rig, "node.sock", before);
+    let core = core_over(&rig, &node.socket, |_| {});
+    assert!(matches!(
+        core.lookup(ino::TREES, &list),
+        Ok(Looked::Found(_))
+    ));
+    assert_eq!(node.asked("fill-tree").len(), 1);
+    assert_eq!(node.asked("fill"), Vec::<String>::new());
+    assert_eq!(read(&core, 1), of_the_image(&bytes));
+}
+
+/// Asserts that the new reader takes a manifest root at `trees/<digest>` on the manifest path, as
+/// before (B8, the reader of this release on the data of the release before): a tree of manifests
+/// is flattened from its manifests, is no list, maps nothing, and its root's manifest is counted.
+#[test]
+fn a_manifest_root_at_trees_digest_takes_the_manifest_path() {
+    let rig = Rig::new("tfs-tree-manifest-root", chain(2));
+    let root = rig.upstream.built.lock().unwrap().root.clone();
+    let node = Node::start(&rig, "node.sock", this_release(&rig));
+    let core = core_over(&rig, &node.socket, |_| {});
+    assert!(matches!(
+        core.lookup(ino::TREES, &root),
+        Ok(Looked::Found(_))
+    ));
+    assert_eq!(read(&core, 1), flattened(&rig, &root));
+    assert!(core.tree(1).unwrap().tree.list().is_none());
+    assert_eq!(core.lists.mapped.mapped().lists, 0);
+    assert_eq!(reports(&rig, "fetched", 1)[0].split(' ').nth(1), Some("3"));
 }

@@ -29,7 +29,7 @@
 
 use std::fs::File;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use sha2::{Digest as _, Sha256};
@@ -47,7 +47,7 @@ use super::fetched::{Fetched, TreeAsked};
 use super::loaded::Loaded;
 use super::said::Failing;
 use super::{Core, Errno, Looked, locked};
-use crate::server::local_cache::{FILL_SOCKET_CONCURRENCY, manifest_path};
+use crate::server::local_cache::{FILL_SOCKET_CONCURRENCY, is_list, manifest_path};
 
 /// The bytes 16 to 24 of the key a placement's tree at a location is numbered under; the first
 /// sixteen are the placement's id, the last eight the start of the SHA-256 of the location's path.
@@ -55,6 +55,10 @@ const PLACED: &[u8; 8] = b"tsplaced";
 
 /// The answer of the fill socket for an object the upstream does not have.
 const ABSENT: &str = "upstream 404";
+
+/// Why the read of a tree's manifests stopped at its root: the root is a tree list, which is read
+/// as one ([`Core::read_tree`]).
+const LIST: &str = "the root is a tree list";
 
 /// The longest one read of a tree's manifests may take, every manifest it fills through the fill
 /// socket together. A job agent gives up on a lookup of `trees/<digest>` 60 s after it asked, and
@@ -226,6 +230,14 @@ impl Core {
     /// down the tree in the cache and answering once. Whatever it answers, the tree is then read as
     /// above, so a manifest the node did not fill (it failed, or it is of a release before the
     /// request) is filled by the read itself, and fails the read in the words it did before.
+    ///
+    /// A root whose file begins as a version 2 tree list is that list, the whole tree: the read
+    /// stops at it, with no manifest read, and the tree is the list, mapped from the cache's file
+    /// of the object and walked for its shape, not hashed again (the fill checked it against the
+    /// digest), under `fs.tree_list_ram_bytes` as a placement's list is ([`Core::image_of`]). A
+    /// node of this release stops its `fill-tree` at such a root, so the list costs the one fill
+    /// of it; a node of the release before fills it and then fails to read it, and the read finds
+    /// it in the cache all the same. A list below the root is read as a manifest, and refused.
     pub(in crate::server::treefs) fn read_tree(
         &self,
         digest: &TreeDigest,
@@ -256,30 +268,48 @@ impl Core {
                 .saturating_add(u64::try_from(TREE_READ.as_millis()).unwrap_or(u64::MAX)),
         };
         let root = manifest_path(&self.settings.cache_path, &digest.to_string());
-        if std::fs::metadata(root).is_err() {
+        if std::fs::metadata(&root).is_err() {
             let start = self.now();
             let answer = self.fills.fill_tree(digest, until);
             let ms = self.now().saturating_sub(start);
             fetched.asked_tree(TreeAsked { answer, ms });
         }
+        // Whether the root is a tree list, which the read of the root finds and then stops at.
+        let list = AtomicBool::new(false);
+        // The root's bytes, or none for a root that is a tree list.
+        let read = |path: &std::path::Path, level: usize| -> std::io::Result<Option<Vec<u8>>> {
+            if level == 0 && is_list(path)? {
+                list.store(true, Ordering::Release);
+                return Ok(None);
+            }
+            read_manifest(path).map(Some)
+        };
         let fetch = |wanted: &TreeDigest, level: usize| -> Result<Vec<u8>, String> {
             let hex = wanted.to_string();
             let path = manifest_path(&self.settings.cache_path, &hex);
-            if let Ok(bytes) = read_manifest(&path) {
+            if let Ok(bytes) = read(&path, level) {
+                let Some(bytes) = bytes else {
+                    fetched.listed();
+                    return Err(LIST.to_owned());
+                };
                 fetched.cached(level);
                 return Ok(bytes);
             }
-            let read = |()| read_manifest(&path).map_err(|error| error.to_string());
+            let again = |()| read(&path, level).map_err(|error| error.to_string());
             let start = self.now();
             let filled = self.fills.fill_manifest(&hex, until);
             let ms = self.now().saturating_sub(start);
-            let had = filled.and_then(read);
+            let had = filled.and_then(again);
             fetched.filled(level, ms, had.is_ok());
-            had
+            had?.ok_or_else(|| LIST.to_owned())
         };
         let flattened = flatten_in_waves(digest, MANIFESTS_AT_ONCE, fetch);
         self.fills.report(Report::Fetched(fetched.counts()));
         self.fills.report(Report::Levels(fetched.levels()));
+        if list.load(Ordering::Acquire) {
+            let failed = |why: String| Unread::Failed(format!("the tree list {digest}: {why}"));
+            return self.list_of(digest, &root, None, failed);
+        }
         flattened.map(Tree::new).map_err(|why| {
             let gone = matches!(
                 &why,
@@ -302,20 +332,34 @@ impl Core {
     fn image_of(&self, tree: &TreeDigest, path: String) -> Result<Tree, Unread> {
         let file = image_path(&self.settings.cache_path, tree);
         let failed = |why: String| Unread::Failed(format!("the image of {tree} at {path}: {why}"));
+        self.list_of(tree, &file, Some(path), failed)
+    }
+
+    /// The tree that is the version 2 tree list `tree` in the file `file`, at the fs `location`
+    /// of a placement, or none for a tree of `trees/`: the list in memory already, else mapped
+    /// from the file and walked for its shape. Room is made under `fs.tree_list_ram_bytes` first,
+    /// as [`Core::image_of`] says; a list that cannot be opened is `failed`, in its words.
+    fn list_of(
+        &self,
+        tree: &TreeDigest,
+        file: &std::path::Path,
+        location: Option<String>,
+        failed: impl Fn(String) -> Unread,
+    ) -> Result<Tree, Unread> {
         // A list another tree of the mount shows already adds nothing: no room is made for it,
         // and it is never mapped past the cap. One the tree store mapped, which no tree of the
         // mount shows yet, is made room for: the mount holds it from now on.
-        let need = self.lists.mapped.need(tree, &file);
+        let need = self.lists.mapped.need(tree, file);
         let fits = (need == 0 && self.shown(tree)) || self.make_room(need);
         let image = self
             .lists
             .mapped
-            .open(tree, &file)
+            .open(tree, file)
             .map_err(|why| failed(why.to_string()))?;
         if !fits {
             self.over_cap(tree);
         }
-        Ok(Tree::image(image, path))
+        Ok(Tree::image(image, location))
     }
 
     /// Looks up `name` in `parent`, the mount's root or a directory above the fs locations: the
