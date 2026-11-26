@@ -49,7 +49,8 @@ async fn binding(path: &Path, addr: SocketAddr, got: Got) -> Result<Bound, Handi
     let own = || -> Result<Vec<TcpListener>, Error> { panic!("a start that took binds none") };
     let backend: std::sync::Arc<dyn Backend> = std::sync::Arc::new(MemoryBackend::new());
     let handoff = handoff(path.to_owned());
-    let binding = bind_fronts(Some(&handoff), Some(got), &[addr], own, None, backend);
+    let addrs = [addr];
+    let binding = bind_fronts(Some(&handoff), Some(got), &addrs, own, None, backend);
     within("the fronts are bound", binding).await
 }
 
