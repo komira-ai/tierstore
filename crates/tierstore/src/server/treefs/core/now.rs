@@ -105,10 +105,10 @@ impl Core {
         (digest, size, source): (&TreeDigest, u64, Option<&BlobSource>),
     ) -> Option<FileBytes> {
         let source = source?;
-        let blob = (digest.to_string(), size);
+        let sha = digest.to_string();
         let (base, path) = self
             .fills
-            .span_held((&blob.0, size), (&source.key, source.offset))?;
+            .span_held((&sha, size), (&source.key, source.offset))?;
         let file = self.open_files.get(&path).ok()?;
         let bytes = FileBytes { file, base, size };
         loaded.keep_span(digest, &bytes);

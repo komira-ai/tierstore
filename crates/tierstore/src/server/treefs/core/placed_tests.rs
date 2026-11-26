@@ -476,6 +476,31 @@ async fn an_open_of_a_span_the_node_holds_is_answered_at_once_in_process(over: O
     assert!(parked.is_none(), "{parked:?}");
 }
 
+/// Asserts that an open of a file whose span the node holds is parked, not failed, when the pack's
+/// file the node names cannot be opened now (gone from the cache's directory): the open asks the
+/// span on a thread of the fetches, which fills it again.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_held_span_whose_file_does_not_open_is_parked() {
+    let live = Live::over("tfs-placed-now-gone", Over::InProcess).await;
+    let _ = live.place(vec![fs_at("jobs/1f3a/root")]);
+    let tool = live
+        .on_core(|core| {
+            walk(core, &["jobs", "1f3a", "root", "bin", "tool"])
+                .attr
+                .ino
+        })
+        .await;
+    live.bench.fill(0).await;
+    let (_, offset, size) = &live.bench.pack.blobs[0];
+    let held = live
+        .bench
+        .store
+        .held_span(&live.bench.pack.key, *offset, *size);
+    std::fs::remove_file(held.expect("the span is held").path).unwrap();
+    let parked = live.on_core(move |core| core.open_now(tool, false)).await;
+    assert!(parked.is_none(), "{parked:?}");
+}
+
 /// Asserts that a core in process answers no open at once from a cache that does not hold the
 /// write role, though the span is in the index: the index of a read-only cache is the holder's as
 /// of its last read, so the open is parked and asks the span, which waits for the write role. Once

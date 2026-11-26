@@ -61,6 +61,16 @@ fn in_process(cache: &LocalCache, trees: Option<&TreeStore>, fetch_timeout: Dura
     )
 }
 
+/// Asserts that a node with no tree store holds no span: asked without waiting, the answer is
+/// none, and nothing is waited for.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_node_without_a_tree_store_holds_no_span() {
+    let rig = Rig::new("tfs-in-no-trees-span");
+    let over = in_process(&rig.cache, None, Duration::from_secs(30));
+    let sha256 = "1".repeat(64);
+    assert_eq!(over.span_held((&sha256, 10), ("cas/pack/one", 0)), None);
+}
+
 /// Runs `work` on a thread that is not the runtime's, as the core is called, and gives its answer.
 async fn off_runtime<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
     let (sent, got) = tokio::sync::oneshot::channel();
