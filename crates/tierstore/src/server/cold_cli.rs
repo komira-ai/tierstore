@@ -151,3 +151,7 @@ pub(in crate::server) async fn serve_cold_until_signalled(
 #[cfg(test)]
 #[path = "cold_cli_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "cold_cli_front_tests.rs"]
+mod front_tests;
