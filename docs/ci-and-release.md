@@ -4,7 +4,7 @@
 
 | file | when | what |
 |---|---|---|
-| `ci.yml` | pull request, push to `main` | `lint`: format, cargo-deny (licences, bans, sources), clippy, the workflow lint. `test`: every test under cargo-llvm-cov with branch coverage, and the 99% gate on lines and branches of every crate (`crates/coverage-gate`). |
+| `ci.yml` | pull request, merge queue (`merge_group`), push to `main` | `lint`: format, cargo-deny (licences, bans, sources), clippy, the workflow lint. `test`: every test under cargo-llvm-cov with branch coverage, and the 99% gate on lines and branches of every crate (`crates/coverage-gate`). |
 | `farm.yml` | pull request from a branch of this repository (not Dependabot's), push to `main` | the farm lane, advisory: `buck2 build //:ci` of the workspace through buildrules, every action on the build farm or from its cache, refused unless the summary line says `local: 0` (`cargo xtask farm-build`). `//:ci` is every member's rustfmt check, clippy and, but for the members and tests that stay here, its tests. It is not a gate: `ci.yml` is. See [docs/farm.md](farm.md). |
 | `advisories.yml` | daily, push to `main` | `cargo deny check advisories`; the result is kept in one issue, and the run is green whatever it finds. |
 | `artifacts.yml` | pull request (linux-x86_64 only), push to `main`; by hand | builds `tierstore` (`--features server`) for linux-x86_64, linux-arm64 and macos-arm64, each on a GitHub-hosted runner of its platform, packages it with its SBOM and as a hostkeeper package (and, for the Homebrew tap and apt, as a tap-named tarball and, on Linux, a Debian package and an RPM package), writes the release index of the hostkeeper packages, makes `SHA256SUMS`. A pull request runs on Linux x86_64 alone: for it only the linux-x86_64 job runs, and the sums cover its files. The other platforms are built on a push to `main` and by hand: the linux-arm64 and macos-arm64 jobs build, package, run the binary, unpack the hostkeeper package and, on macOS, check the code signature; they run no test of the workspace (`beta.yml` does, below). `sums` waits for them, so their files are summed, signed and released only when they pass. A push to `main` builds every platform, and a run by hand (`gh workflow run artifacts.yml --ref <branch>`) builds and sums every platform of a branch and signs nothing. On a push to `main` it also builds the macOS installer unsigned and signs it with the Developer ID Installer identity (`sign-pkg`, then `check-pkg`; see "The macOS installer"), and signs (build provenance and SBOM attestations); the checks of what it signed are made by `release.yml`'s `verify`, before anything is tagged. The Linux binaries are linked against glibc 2.28 by `cargo zigbuild`, not against the runner's glibc, and each Linux job fails when the binary asks for a newer `GLIBC_` symbol version (see "The glibc floor of the Linux binaries"). On a push to `main` once the variable `MACOS_PACKAGE_ON_FARM` is `true`, the macOS files are made on a Mac of the build farm instead (`macos-arm64-farm`, which calls `macos-farm.yml`), and the hosted macOS job is skipped. |
@@ -25,9 +25,28 @@ the one write scope a pull request's job holds, for the farm's network join alon
 push to `main`, for the same join, in a workflow of its own so that its tokens cannot sign as
 `artifacts.yml`).
 
-`main` has no branch protection rule, so GitHub requires no check by name. A pull request is
-merged only when every check of its head commit has passed, but `farm.yml`'s `build`, which is
-advisory (a farm outage turns it red and holds nothing). Pull requests run on Linux x86_64
+### Merging into main
+
+A pull request is merged only when every check of its head commit has passed, but `farm.yml`'s
+`build`, which is advisory (a farm outage turns it red and holds nothing). `main` can take pull
+requests through GitHub's merge queue: a ruleset on `main` with a merge queue rule (merge commits,
+up to five pull requests built and merged at once, each group landing only when all of its checks
+are green) and a required status checks rule naming `ci.yml`'s `lint` and `test`, the checks of the
+GitHub Actions app. The queue builds each queued pull request merged with the ones ahead of it on a
+branch of its own (`gh-readonly-queue/main/...`) and lands it once `lint` and `test` pass on that
+commit. `ci.yml` is the one workflow with the `merge_group` trigger; no other workflow runs for the
+queue, so the queue builds no release file, publishes nothing and starts no release (`release.yml`
+acts on a finished run of a push to `main` alone, and a queue's branch is never `main`). A queue
+run of `ci.yml` has a concurrency group of its own and is never cancelled. The workflow lint holds
+this (`crates/xtask/tests/workflows/merge_queue.rs`): the required workflows and jobs are listed
+there, each has the trigger and an unfiltered `pull_request`, no other workflow has the trigger, and
+each required job reports under its own name (no `name:` other than its id, no matrix, no `if:`, since a skipped required
+check counts as passed) on a hosted Linux x86_64 runner with no write scope. A job added to
+`ci.yml` is refused until it is listed there and in the ruleset, and the ruleset names exactly the
+jobs listed there. Without the ruleset, GitHub requires no check by name and a pull request is
+merged by hand.
+
+Pull requests run on Linux x86_64
 alone (`ci.yml`, `farm.yml`, and `artifacts.yml`'s `linux-x86_64`, `version` and `sums` jobs), because those
 hosted runners are plentiful; macOS and linux-arm64 are built in
 `artifacts.yml` on a push to `main`, and their tests run in `beta.yml` on a push to `main`. The workflow lint fails when a workflow a pull request starts

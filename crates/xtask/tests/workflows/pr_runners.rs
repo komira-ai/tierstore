@@ -8,7 +8,7 @@ use super::yaml::{self, Node};
 
 /// Whether `label` is a GitHub-hosted Linux x86_64 runner: `ubuntu-<version>` or `ubuntu-latest`,
 /// not an `-arm` image, not a larger-runner or self-hosted label.
-fn linux_x86_64(label: &str) -> bool {
+pub fn linux_x86_64(label: &str) -> bool {
     let label = label.to_ascii_lowercase();
     label.strip_prefix("ubuntu-").is_some_and(|v| {
         v == "latest" || (!v.is_empty() && v.chars().all(|c| c.is_ascii_digit() || c == '.'))
