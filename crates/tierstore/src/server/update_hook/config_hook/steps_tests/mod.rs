@@ -7,7 +7,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use super::super::ports::Guard;
+use super::super::ports::{Control, Guard, Instances, Reply};
 use super::super::systemd_tests::fake as lin;
 use super::super::{
     CACHE_HANDOFF_CAPABILITY, Done, HANDOFF_CAPABILITY, HANDOFF_STATE_DIR_CAPABILITY, Host,
@@ -221,12 +221,95 @@ fn with_socket(socket: &str) -> String {
     format!("[server]\nhandoff_socket = \"{socket}\"\n")
 }
 
+/// The mount the fake control socket names, and the one of a process before it, whose gauge the
+/// node still shows.
+const MOUNT: &str = "mount-7";
+const OLD_MOUNT: &str = "mount-6";
+
+/// The control socket of the instance that serves: it records each request, takes a `set` of the
+/// cap of the tree lists, which the node's gauge then shows (unless the gauge `lags`), and answers
+/// `answer` when one is given, or fails when `broken`.
+struct FakeControl {
+    asked: RefCell<Vec<(PathBuf, String)>>,
+    gauge: Cell<Option<u64>>,
+    lags: Cell<bool>,
+    answer: RefCell<Option<String>>,
+    broken: Cell<bool>,
+}
+
+impl FakeControl {
+    fn new() -> FakeControl {
+        FakeControl {
+            asked: RefCell::new(Vec::new()),
+            gauge: Cell::new(None),
+            lags: Cell::new(false),
+            answer: RefCell::new(None),
+            broken: Cell::new(false),
+        }
+    }
+
+    /// The requests, in order, each with the socket it went to.
+    fn asked(&self) -> Vec<(PathBuf, String)> {
+        self.asked.borrow().clone()
+    }
+}
+
+impl Control for FakeControl {
+    fn ask(&self, socket: &Path, line: &str) -> Result<String, PortError> {
+        self.asked
+            .borrow_mut()
+            .push((socket.to_path_buf(), line.to_owned()));
+        if self.broken.get() {
+            return Err(PortError::failed(PortKind::Instances, "connection refused"));
+        }
+        if let Some(answer) = self.answer.borrow().clone() {
+            return Ok(answer);
+        }
+        let bytes: u64 = line
+            .strip_prefix("set tree_list_ram_bytes ")
+            .and_then(|bytes| bytes.parse().ok())
+            .unwrap_or_else(|| panic!("not a set: {line}"));
+        if !self.lags.get() {
+            self.gauge.set(Some(bytes));
+        }
+        Ok(format!(
+            "{{\"ok\":true,\"tree_list_ram_bytes\":{bytes},\"mount\":\"{MOUNT}\"}}"
+        ))
+    }
+}
+
+/// The instances' answers of the fake, with the gauges of the cap of the tree lists on
+/// `/metricz`: the mount of the process before at 1 MiB, and [`MOUNT`] at what the control
+/// socket set.
+struct Gauged<'a> {
+    fake: &'a lin::SystemdFake,
+    control: &'a FakeControl,
+}
+
+impl Instances for Gauged<'_> {
+    fn get(&self, port: u16, path: &str) -> Result<Reply, PortError> {
+        let mut reply = self.fake.get(port, path)?;
+        if path == "/metricz" {
+            reply.body.push_str(&format!(
+                "tierstore_fs_tree_list_ram_bytes{{mount=\"{OLD_MOUNT}\"}} 1048576\n"
+            ));
+            if let Some(bytes) = self.control.gauge.get() {
+                reply.body.push_str(&format!(
+                    "tierstore_fs_tree_list_ram_bytes{{mount=\"{MOUNT}\"}} {bytes}\n"
+                ));
+            }
+        }
+        Ok(reply)
+    }
+}
+
 /// A node of two systemd instances: `A` serves the binary of `lin::OLD`, the config hook's record
 /// is the fake's, the release's record is `service`.
 struct Linux {
     fake: lin::SystemdFake,
     files: Files,
     guard: CountingGuard,
+    control: FakeControl,
     service: Mem,
 }
 
@@ -272,6 +355,7 @@ impl Linux {
             fake,
             files,
             guard: CountingGuard::new(),
+            control: FakeControl::new(),
             service: Mem::holding(Some(&release_record(Instance::A))),
         }
     }
@@ -307,7 +391,10 @@ impl Linux {
             fs_units: self.fake.fs_ports(),
             fs_markers: self.fake.fs_ports(),
             fs_processes: self.fake.fs_ports(),
-            instances: &self.fake,
+            instances: &Gauged {
+                fake: &self.fake,
+                control: &self.control,
+            },
             host: &running,
             clock: &self.fake,
             state: &self.fake,
@@ -317,7 +404,7 @@ impl Linux {
             release: Path::new(lin::OLD),
             build: &build,
         };
-        systemd_step(step, params, &ports, &self.guard, &common)
+        systemd_step(step, params, &ports, &self.guard, &self.control, &common)
     }
 
     /// Runs `steps`, each of which must succeed.
@@ -373,6 +460,7 @@ fn assert_restarts(serving: Option<&str>, staged_text: &str, params: &Params) {
 }
 
 mod macos;
+mod reload;
 mod switch_macos;
 mod switch_systemd;
 mod systemd_rollback;

@@ -1,16 +1,20 @@
 //! The update hook's `state.json`: one record for both service managers. The launchd arm writes
 //! the keys of the single-instance record of the release before; the systemd arm adds `live`,
-//! `next` and `mode`, and, on a node with an fs process, `fs_live` and `fs_next`.
+//! `next` and `mode`, and, on a node with an fs process, `fs_live` and `fs_next`; the config hook's
+//! record of a change applied in place adds `reload`.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-use tierstore::server::update_hook::{Instance, Kind, Marker, Mode, Record, RecordError};
+use tierstore::server::update_hook::{
+    Instance, Kind, ListCap, Marker, Mode, Record, RecordError, Reload,
+};
 
 const SINGLE: &[u8] = include_bytes!("fixtures/hook_record_single.json");
 const SYSTEMD: &[u8] = include_bytes!("fixtures/hook_record_systemd.json");
 const SYSTEMD_FS: &[u8] = include_bytes!("fixtures/hook_record_systemd_fs.json");
 const SYSTEMD_SWITCH: &[u8] = include_bytes!("fixtures/hook_record_systemd_switch.json");
+const SYSTEMD_RELOAD: &[u8] = include_bytes!("fixtures/hook_record_systemd_reload.json");
 const REST: &[u8] = include_bytes!("fixtures/hook_record_systemd_rest.json");
 const NEWER: &[u8] = include_bytes!("fixtures/hook_record_systemd_newer.json");
 
@@ -30,6 +34,7 @@ fn single() -> Record {
         fs_live: None,
         fs_next: None,
         fs_switch: false,
+        reload: None,
     }
 }
 
@@ -53,6 +58,7 @@ fn systemd() -> Record {
         fs_live: None,
         fs_next: None,
         fs_switch: false,
+        reload: None,
     }
 }
 
@@ -127,6 +133,53 @@ fn the_switch_record_fixture_reads_and_is_written_as_the_fixture() {
     let without = text.replace("  \"fs_switch\": true,\n", "");
     assert_ne!(without, text);
     assert!(!Record::decode(without.as_bytes()).unwrap().fs_switch);
+}
+
+/// The config hook's record of a change applied in place, in flight after its `cutover`: `a` serves
+/// and starts no other instance, and the cap of the tree lists was set on the mount `4b5a6978`.
+fn systemd_reload() -> Record {
+    Record {
+        updating: true,
+        markers: BTreeSet::from([Marker::Swapped]),
+        to: Some(PathBuf::from(
+            "/var/lib/hostkeeper/packages/tierstore-config/1.1.0",
+        )),
+        version: Some("0.5.0+0123456789ab".to_owned()),
+        reload: Some(Reload {
+            guard: false,
+            tree_list_ram_bytes: Some(ListCap {
+                from: 536_870_912,
+                to: 1 << 30,
+                control_socket: PathBuf::from("/run/tierstore-fs/control.sock"),
+                mount: Some("4b5a6978".to_owned()),
+            }),
+        }),
+        ..Record::idle(Some(Instance::A))
+    }
+}
+
+/// Asserts that the record of a change applied in place reads as its value and is written as the
+/// fixture, with `reload` among the keys in order and the schema still 1; that the fixtures of
+/// records without it read as none; and that the fixture with the key taken out, which is what a
+/// hook that does not know the key reads of it, is the same record with no reload. Catches a
+/// renamed or removed key, a key written when it is not set, and a raised schema.
+#[test]
+fn the_reload_record_fixture_reads_and_is_written_as_the_fixture() {
+    assert_eq!(Record::decode(SYSTEMD_RELOAD).unwrap(), systemd_reload());
+    assert_eq!(systemd_reload().encode(), SYSTEMD_RELOAD);
+    assert_eq!(systemd_reload().check(), Ok(()));
+    for fixture in [SINGLE, SYSTEMD, SYSTEMD_FS, SYSTEMD_SWITCH, REST] {
+        assert_eq!(Record::decode(fixture).unwrap().reload, None);
+    }
+    let mut value: serde_json::Value = serde_json::from_slice(SYSTEMD_RELOAD).unwrap();
+    assert!(value.as_object_mut().unwrap().remove("reload").is_some());
+    assert_eq!(
+        Record::decode(value.to_string().as_bytes()).unwrap(),
+        Record {
+            reload: None,
+            ..systemd_reload()
+        }
+    );
 }
 
 /// Asserts that the record of a systemd host at rest reads as `Record::idle` of the live instance

@@ -211,7 +211,7 @@ pub(super) struct Settings {
     /// How long a tree a lookup attached stays attached with no request naming it
     /// (`fs.tree_idle_secs`).
     pub tree_idle: Duration,
-    /// The most bytes of tree lists kept mapped (`fs.tree_list_ram_bytes`, `core/lists.rs`).
+    /// The most bytes of tree lists kept mapped, at start (`fs.tree_list_ram_bytes`, `lists.rs`).
     pub tree_list_ram_bytes: u64,
     /// The clock the use of a tree is told by, in milliseconds: only its differences count.
     pub clock: Arc<dyn Clock>,
@@ -318,9 +318,10 @@ impl Core {
         table: TreeTable,
         runtime_dir: &Path,
     ) -> Self {
+        let ram = settings.tree_list_ram_bytes;
         Self {
             settings,
-            lists: lists::Lists::new(fills.lists().unwrap_or_default()),
+            lists: lists::Lists::new(fills.lists().unwrap_or_default(), ram),
             fills,
             table,
             state: Mutex::new(State {

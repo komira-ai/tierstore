@@ -29,6 +29,13 @@
 //! - `cleanup` retires the old instance, as for an update.
 //! - `uninstall` changes nothing: the service keeps what it read.
 //!
+//! On systemd a staged file that differs from the one that serves in nothing but
+//! `tree_list_ram_bytes` of the `fs` interface, or in nothing at all, moves no instance: `prepare`
+//! records it as a change applied in place, `cutover` has the control socket of the instance that
+//! serves set the new value (and reloads the guard only when its file changed), `verify` reads it
+//! back from the gauge of the mount, `rollback` sets the value of the file that served again, and
+//! `cleanup` commits with the same instance serving (`reload.rs`).
+//!
 //! A node's fs process of the old layout is left alone by every config update but one: the
 //! **switch** of a node to one process, a package whose staged file has an `fs` interface where
 //! the file that serves has none and the old fs process runs (on a Mac: the `tierstore-fs` job is
@@ -44,6 +51,7 @@
 //! The build an instance must show is this binary's own version: the config hook is run from
 //! the service's installed binary, which is the one that serves.
 
+mod reload;
 mod steps;
 mod switch;
 

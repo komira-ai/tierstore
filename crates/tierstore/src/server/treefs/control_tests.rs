@@ -148,6 +148,31 @@ fn a_request_that_is_refused_is_answered_in_words_and_the_connection_goes_on() {
         refused("unknown request")
     );
     assert_eq!(client.ask(""), refused("unknown request"));
+    assert_eq!(
+        client.ask("set tree_list_ram_bytes 4095"),
+        refused("tree_list_ram_bytes 4095 is less than 4096")
+    );
+    for (bytes, said) in [
+        ("lots", "\"lots\""),
+        ("-1", "\"-1\""),
+        ("", "\"\""),
+        ("18446744073709551616", "\"18446744073709551616\""),
+    ] {
+        assert_eq!(
+            client.ask(&format!("set tree_list_ram_bytes {bytes}")),
+            refused(&format!(
+                "tree_list_ram_bytes {said} is not a whole number of bytes"
+            ))
+        );
+    }
+    for request in [
+        "set",
+        "set tree_list_ram_bytes",
+        "set tree_list_ram_bytes 4096 now",
+        "set tree_idle_secs 60",
+    ] {
+        assert_eq!(client.ask(request), refused("unknown request"), "{request}");
+    }
     let missing = format!("attach {} for run-1", "ab".repeat(32));
     assert!(
         client.ask(&missing)["error"]
@@ -279,6 +304,29 @@ fn a_group_the_process_is_not_in_is_an_error_unless_it_is_root() {
     let own = std::fs::metadata(&rig.runtime).unwrap().gid();
     let served = Control::serve(rig.core.clone(), &path, own.wrapping_add(7));
     assert_eq!(served.is_ok(), rustix::process::geteuid().is_root());
+}
+
+/// Asserts that `set tree_list_ram_bytes` makes the cap of the lists mapped what it names, from
+/// the least the file allows (4096) to the most a number of bytes holds, answers it with the id
+/// of the mount, and has the node told each cap at once (`treelists`), with no look for idle
+/// trees. Catches a set that the node's gauge `tierstore_fs_tree_list_ram_bytes` never shows.
+#[test]
+fn a_set_of_the_tree_list_cap_is_answered_with_the_mount_and_told_to_the_node() {
+    let (rig, _control) = served("tfs-control-set");
+    let mut client = Client::connect(&rig.dir.path().join("control.sock"));
+    let process = std::process::id();
+    let mut told = Vec::new();
+    for bytes in [4096, 1 << 30, u64::MAX] {
+        assert_eq!(
+            client.ask(&format!("set tree_list_ram_bytes {bytes}")),
+            json!({"ok": true, "tree_list_ram_bytes": bytes, "mount": "mount-1"})
+        );
+        told.push(format!("treelists mount-1 {process} 0 0 {bytes} 0 0 0"));
+        crate::server::treefs::testing::until(|| {
+            rig.upstream.asked("treelists").len() == told.len()
+        });
+        assert_eq!(rig.upstream.asked("treelists"), told);
+    }
 }
 
 /// Asserts the pure handler, which the socket calls: an unknown request is refused.
