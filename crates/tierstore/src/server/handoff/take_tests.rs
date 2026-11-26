@@ -279,6 +279,7 @@ async fn a_taker_that_cannot_copy_the_sockets_refuses_before_the_running_instanc
     let mut ask = super::Ask {
         mount: None,
         lock: None,
+        leaves_another_lock: false,
     };
     let knobs = super::Knobs {
         copy: no_copy,

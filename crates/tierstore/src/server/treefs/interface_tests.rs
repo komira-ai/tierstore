@@ -823,5 +823,7 @@ async fn a_start_whose_s3_address_is_taken_leaves_the_mount_it_served() {
     drop(taken);
 }
 
+#[path = "interface_handover_tests.rs"]
+mod handover;
 #[path = "switch_tests.rs"]
 mod switch;

@@ -157,7 +157,9 @@ async fn a_switch_whose_offers_do_not_both_match_naks_both_and_changes_nothing()
 }
 
 /// An old `tierstore` that offers one S3 socket at `control` and goes away at the `ack`, as one that
-/// dies there would: the new process's `done` never comes. Returns the address it offers.
+/// dies there would: the new process's `done` never comes. It is asked for the `ready` step, which
+/// the start of a node with an `fs` interface asks for with the cache lock. Returns the address it
+/// offers.
 async fn dies_at_ack(control: PathBuf) -> std::net::SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -165,7 +167,7 @@ async fn dies_at_ack(control: PathBuf) -> std::net::SocketAddr {
     drop(tokio::spawn(async move {
         let (stream, _) = socket.accept().await.unwrap();
         let request = wire::recv(&stream).await.unwrap();
-        assert_eq!(request.lines, ["take 1"]);
+        assert_eq!(request.lines, ["take 1", "ready"]);
         let lines = ["offer".to_owned(), format!("s3 {addr}")];
         wire::send(&stream, &lines, &[listener.as_fd()])
             .await

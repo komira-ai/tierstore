@@ -94,8 +94,11 @@ pub(crate) use mount::{Mount, check_control};
 #[cfg(test)]
 pub(crate) use mount::{MountWant, Prepare};
 #[cfg(test)]
+pub(crate) use take::offered;
+#[cfg(test)]
 pub(crate) use take::{Ask, take_service};
-pub(crate) use take::{Inherited, Offered, Want, offered, take, take_with_ready};
+pub(crate) use take::{Inherited, Offered, Want, offered_with_lock, take, take_with_ready};
+pub(crate) use written::{Predecessor, follow};
 
 /// What an instance is told to do about a hand-off: where the control socket is, and how long a
 /// taker waits for the running instance.

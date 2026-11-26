@@ -1,10 +1,11 @@
-//! `verify`: observes that the staged release serves, and records it. On a node whose fs process
+//! `verify`: observes that the staged release serves, and records it; before the commit, a new
+//! instance whose cache is still read-only defers it ([`writable`]). On a node whose fs process
 //! the update handed over, it also checks that the new fs instance runs the binary the update
 //! installed ([`fs_exe`]); on one whose fs process it left alone, the detail says first which
 //! release that process still runs.
 
 use super::super::PUBLIC_PORT;
-use super::super::look::verified;
+use super::super::look::{verified, writable};
 use super::super::params::Params;
 use super::super::ports::UnitState;
 use super::super::record::{Marker, Record};
@@ -51,10 +52,13 @@ pub(super) fn verify(c: &Ctx<'_, '_>, params: &Params, record: &Record) -> Resul
     }
     fs::check_active(c, record, params.verify_retry_secs)?;
     let fs_said = fs_exe::check(c, record, target)?;
-    let mode = c
+    let observed = c
         .look()
         .observed(target)
         .map_err(|done| not_ready_yet(done, &unit_name(next), params))?;
+    // Before the commit the new instance must be the cache's writer: until it is, the node's jobs
+    // cannot fill their trees or reach the mount provider, and the node stays in its update.
+    let mode = writable(observed, &unit_name(next), params.verify_retry_secs)?;
     // `verified` follows its act: everything above was observed.
     if !record.has(Marker::Verified) {
         c.save(&record.with(Marker::Verified))?;
