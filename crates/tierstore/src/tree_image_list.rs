@@ -15,7 +15,9 @@
 //! cuts one. A file removed while it is mapped stays readable through the mapping until the
 //! mapping is released. Bytes changed in place after the walk (a damaged disk, or a hand) read as
 //! absent entries, empty names and empty listings, never as a panic: every read is bounded by the
-//! section it reads, and a directory's children by the entries.
+//! section it reads, and a directory's children by the entries. Whether a change made after the
+//! file was mapped is seen through the mapping at all is the system's choice (POSIX leaves it open
+//! for a private mapping): Linux shows it, macOS may keep the bytes it had read.
 
 use std::cmp::Ordering;
 use std::fs::File;
