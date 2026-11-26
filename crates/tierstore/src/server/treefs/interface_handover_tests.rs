@@ -77,11 +77,6 @@ fn settings(
     settings
 }
 
-/// Says on standard output which step a test begins: a test that hangs shows where.
-fn step(what: &str) {
-    println!("step: {what}");
-}
-
 /// The `/readyz` answer of the process behind `pin`, once it is `want`: the pin's connections go
 /// to that process alone, and each probe is a connection of its own.
 async fn readyz_of(pin: &Pin, want: &str) {
@@ -97,6 +92,8 @@ async fn readyz_of(pin: &Pin, want: &str) {
 /// The first process of an update, serving the mount and its S3 front, with a HEAD on it held at
 /// its upstream: its drain goes on until [`Draining::let_go`].
 struct Draining {
+    /// Dropped before the node's directory, where its socket is.
+    _manager: FakeManager,
     node: FsNode,
     control: PathBuf,
     first: Started,
@@ -106,7 +103,6 @@ struct Draining {
     held: Arc<Held>,
     to_first: Pin,
     heading: JoinHandle<Result<Option<u64>, objstore_s3::ObjectStoreError>>,
-    _manager: FakeManager,
 }
 
 impl Draining {
@@ -133,19 +129,16 @@ impl Draining {
         let on = platform(&manager, Some(stored.as_raw_fd()), node.kernel(false));
         let upstream: Arc<dyn Backend> = held.clone();
         let mut first = start_on(first_settings, upstream, on);
-        step("the first serves");
         let first_bound = within("the first serves", &mut first.bound).await.unwrap();
-        step("the first answers the kernel");
         assert_answers(&kernel, 1);
-        step("the pin to the first");
         let to_first = pin(first_bound.s3, FIRST).await;
         held.armed.store(true, Ordering::SeqCst);
         let at = to_first.at;
         let heading =
             tokio::spawn(async move { client(at).len(&ObjectKey::new("cas/held").unwrap()).await });
-        step("the head reaches the upstream");
         within("the head reaches the upstream", held.reached.notified()).await;
         Self {
+            _manager: manager,
             node,
             control,
             first,
@@ -155,7 +148,6 @@ impl Draining {
             held,
             to_first,
             heading,
-            _manager: manager,
         }
     }
 
@@ -177,12 +169,10 @@ impl Draining {
         let manager = FakeManager::start(&self.node.dir.path().join("second.sock"));
         let on = platform(&manager, None, self.node.kernel(false));
         let mut second = start_on(second_settings, upstream, on);
-        step("the second serves");
         let bound = within("the second serves", &mut second.bound)
             .await
             .unwrap();
         assert_eq!(bound.s3, self.first_bound.s3);
-        step("the pin to the second");
         let to_second = pin(self.first_bound.s3, SECOND).await;
         (second, to_second, manager)
     }
@@ -198,11 +188,9 @@ impl Draining {
     /// uses.
     async fn let_go(self) -> (FsNode, std::os::fd::OwnedFd) {
         self.held.let_go.notify_one();
-        step("the head ends");
         let answered = within("the head ends", self.heading).await.unwrap();
         assert_eq!(answered.unwrap(), Some(4));
         drop(self.to_first);
-        step("the first ends");
         let drained = within("the first ends", self.first.ended)
             .await
             .unwrap()
@@ -220,25 +208,25 @@ impl Draining {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_second_process_is_the_writer_while_the_first_still_drains() {
     let draining = Draining::start("tsfs-one-writer", None).await;
-    let (second, to_second, _manager) = draining.take_over(memory(), None).await;
-    step("the second takes the write role");
+    let (second, to_second, manager) = draining.take_over(memory(), None).await;
     within(
         "the second takes the write role",
         readyz_of(&to_second, "ready read-write"),
     )
     .await;
     draining.still_draining();
-    step("the second answers the kernel");
     assert_answers(&draining.kernel, 2);
-    let _kept = draining.let_go().await;
+    let kept = draining.let_go().await;
     within(
         "the second is still the writer",
         readyz_of(&to_second, "ready read-write"),
     )
     .await;
     drop(to_second);
-    step("the second stops");
     stop(second).await.unwrap();
+    // The second's manager before the node's directory, where its socket is.
+    drop(manager);
+    drop(kept);
 }
 
 /// Asserts that a job agent's Prepare and Mount, made on the mount provider's socket while the first
@@ -253,7 +241,6 @@ async fn the_second_process_is_the_writer_while_the_first_still_drains() {
 async fn a_provider_mount_during_the_hand_over_is_answered_by_the_second_process() {
     let draining = Draining::start("tsfs-one-provider", Some("provider.sock".as_ref())).await;
     let socket = draining.node.dir.path().join("provider.sock");
-    step("the first binds the provider");
     crate::server::local_cache::testing::until("the first binds the provider", || socket.exists())
         .await;
     let upstream = MemoryBackend::new();
@@ -265,10 +252,9 @@ async fn a_provider_mount_during_the_hand_over_is_answered_by_the_second_process
     let list = list_of(&pack).encode();
     let key = tree_list_key(&list);
     upstream.put(&key, Bytes::from(list)).await.unwrap();
-    let (second, to_second, _manager) = draining
+    let (second, to_second, manager) = draining
         .take_over(Arc::new(upstream), Some("provider.sock".as_ref()))
         .await;
-    step("the provider mounts the source");
     let mounted = within("the provider mounts the source", mount(&socket, &key)).await;
     let place = Rig::place_of("js.1", 0);
     assert_eq!(
@@ -276,11 +262,13 @@ async fn a_provider_mount_during_the_hand_over_is_answered_by_the_second_process
         draining.node.mountpoint().join(place).to_string_lossy()
     );
     draining.still_draining();
-    let _kept = draining.let_go().await;
+    let kept = draining.let_go().await;
     drop(to_second);
-    step("the second stops");
     stop(second).await.unwrap();
     assert!(!socket.exists());
+    // The second's manager before the node's directory, where its socket is.
+    drop(manager);
+    drop(kept);
 }
 
 /// Prepares and mounts the source `js.1` of the list `key` on the provider's socket at `socket`
