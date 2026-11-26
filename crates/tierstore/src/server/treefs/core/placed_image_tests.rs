@@ -11,7 +11,7 @@ use crate::server::local_cache::trees::image_path;
 use crate::server::treefs::core::blob::descriptor_tests::descriptors_on;
 use crate::server::treefs::core::{Entry, Kind, Looked};
 use crate::server::treefs::ino;
-use crate::server::treefs::testing::{Built, Rig, image_bytes, open_cached, sha};
+use crate::server::treefs::testing::{Built, Logged, Rig, image_bytes, logged, open_cached, sha};
 use crate::tree_manifest::{TreeError, flatten_in_waves};
 
 const ID: &str = "0123456789abcdef0123456789abcdef";
@@ -438,8 +438,9 @@ fn a_tree_list_from_a_node_before_fill_tree_is_attached_from_the_reads_one_fill(
 
 /// Asserts that a tree list that fails its shape walk is `EIO` and takes no tree number: an object
 /// that begins with the list's magic and hashes to its digest but is cut short, asked twice, is
-/// `EIO` both times, with no number in the table and nothing mapped; and that an object of the
-/// same digest form that is not a list at all is refused as a manifest, `EIO` too, as before.
+/// `EIO` both times, refused as a tree list (not as a manifest) in the words said, with no number
+/// in the table and nothing mapped; and that an object of the same digest form that is not a list
+/// at all is refused as a malformed manifest, `EIO` too, as before.
 #[test]
 fn a_tree_list_that_fails_its_shape_walk_is_eio_and_takes_no_number() {
     let rig = Rig::new("tfs-list-bad-shape", Built::of(Vec::new()));
@@ -447,14 +448,27 @@ fn a_tree_list_that_fails_its_shape_walk_is_eio_and_takes_no_number() {
     let short = &bytes[..bytes.len() / 2];
     assert!(crate::is_tree_list_v2(short));
     let cut = object(&rig, short);
-    for _ in 0..2 {
+    let log = Logged::default();
+    {
+        let _logging = logged(&log, tracing::Level::WARN);
         assert_eq!(rig.core.lookup(ino::TREES, &cut).err(), Some(Errno::Io));
     }
+    let said = log.text();
+    let walked = format!("tierstore fs: cannot attach {cut} on a lookup: the tree list {cut}: ");
+    assert!(said.contains(&walked), "{said}");
+    assert_eq!(rig.core.lookup(ino::TREES, &cut).err(), Some(Errno::Io));
     let digest = TreeDigest::from_hex(&cut).unwrap();
     assert_eq!(rig.core.table.find(&digest), None);
     assert_eq!(rig.core.lists.mapped.mapped().lists, 0);
     let neither = object(&rig, b"neither a manifest nor a tree list");
-    assert_eq!(rig.core.lookup(ino::TREES, &neither).err(), Some(Errno::Io));
+    let log = Logged::default();
+    {
+        let _logging = logged(&log, tracing::Level::WARN);
+        assert_eq!(rig.core.lookup(ino::TREES, &neither).err(), Some(Errno::Io));
+    }
+    let said = log.text();
+    assert!(said.contains("malformed manifest"), "{said}");
+    assert!(!said.contains("the tree list"), "{said}");
     let digest = TreeDigest::from_hex(&neither).unwrap();
     assert_eq!(rig.core.table.find(&digest), None);
 }

@@ -332,7 +332,7 @@ impl Core {
     fn image_of(&self, tree: &TreeDigest, path: String) -> Result<Tree, Unread> {
         let file = image_path(&self.settings.cache_path, tree);
         let failed = |why: String| Unread::Failed(format!("the image of {tree} at {path}: {why}"));
-        self.list_of(tree, &file, Some(path), failed)
+        self.list_of(tree, &file, Some(path.clone()), failed)
     }
 
     /// The tree that is the version 2 tree list `tree` in the file `file`, at the fs `location`
