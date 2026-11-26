@@ -235,18 +235,34 @@ fn mount_refused(why: String) -> Done {
 /// `fs` interface or moves its mount; a change that must be a restart; and on a Mac any config
 /// update of a node whose file has an `fs` interface (the hand-over to the next image is the
 /// update hook's; a config update cannot tell the new image from the one it replaces, as both
-/// report the same build). Returns the arm's params.
+/// report the same build). Returns the arm's params. With `in_place` (given on systemd alone, and
+/// taken when the params declare no restart), a change the instance that serves applies itself is returned as that, before any
+/// of the refusals, which are of a new process: nothing moves.
 fn prepare_params(
     params: &Params,
     ports_host: &dyn Host,
     common: &Common<'_>,
     holds_fs: &dyn Fn() -> Result<bool, Done>,
-    mac: bool,
+    (mac, in_place): (bool, bool),
 ) -> Result<Prepared, Done> {
     release_at_rest(common.service)?;
     let (staged, text) = staged_checked(ports_host, common.release, params)?;
     let serving = ports_host.config(config_file(params)?)?;
     let restart = must_restart(serving.as_deref(), &text);
+    let reload = serving
+        .as_deref()
+        .filter(|_| in_place && !params.declared_restart)
+        .and_then(|serving| reload::of(serving, &text));
+    if let Some(reload) = reload {
+        return Ok(Prepared {
+            params: arm_params(params, common.build, &staged, restart),
+            switch: false,
+            reload: Some(Reload {
+                guard: guard_changed(ports_host, params)?,
+                ..reload
+            }),
+        });
+    }
     let old_fs = serving.as_deref().and_then(fs_interface);
     let new_fs = fs_interface(&text);
     let switch = new_fs.is_some() && old_fs.is_none() && holds_fs()?;
@@ -288,18 +304,6 @@ fn prepare_params(
             ));
         }
     }
-    // A Mac restarts its one job for every config update.
-    let reload = match serving
-        .as_deref()
-        .filter(|_| !mac)
-        .and_then(|s| reload::of(s, &text))
-    {
-        Some(reload) => Some(Reload {
-            guard: guard_changed(ports_host, params)?,
-            ..reload
-        }),
-        None => None,
-    };
     Ok(Prepared {
         params: arm_params(
             params,
@@ -308,7 +312,7 @@ fn prepare_params(
             restart || (switch && switch_restarts),
         ),
         switch,
-        reload,
+        reload: None,
     })
 }
 
@@ -384,11 +388,15 @@ fn systemd_attempt(
         Step::Restore => Err(not_a_step()),
         Step::Uninstall => Ok(uninstalled()),
         Step::Prepare => {
-            let prepared = prepare_params(params, ports.host, common, &|| fs_runs(ports), false)?;
-            if let Some(reload) = prepared.reload
-                && let Some(done) = reload::prepare(params, ports, common.build, reload)?
-            {
-                return Ok(done);
+            let holds_fs = || fs_runs(ports);
+            let mut prepared =
+                prepare_params(params, ports.host, common, &holds_fs, (false, true))?;
+            if let Some(reload) = prepared.reload.take() {
+                if let Some(done) = reload::prepare(params, ports, common.build, reload)? {
+                    return Ok(done);
+                }
+                // The node is not one instance serving: the change is the arm's, refusals and all.
+                prepared = prepare_params(params, ports.host, common, &holds_fs, (false, false))?;
             }
             let policy = if prepared.switch {
                 FsPolicy::Switch
@@ -547,7 +555,7 @@ fn launchd_attempt(
         Step::Uninstall => Ok(uninstalled()),
         Step::Prepare => {
             let loaded = || Ok(ports.launchd.loaded(FS_LAUNCHD_LABEL)?);
-            let prepared = prepare_params(params, ports.host, common, &loaded, true)?;
+            let prepared = prepare_params(params, ports.host, common, &loaded, (true, false))?;
             let done = arm(step, &prepared.params);
             if prepared.switch && done.outcome == super::super::report::Outcome::Success {
                 switch::note(ports.state)?;

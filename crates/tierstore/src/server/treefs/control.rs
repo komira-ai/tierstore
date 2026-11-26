@@ -16,10 +16,13 @@
 //!
 //! A request that is refused is answered `{"ok":false,"error":"<why>"}`. `attach` is answered when
 //! the tree's manifests are read and flattened. `detach` of a run that attached nothing is
-//! answered `not attached`. `set tree_list_ram_bytes` makes `<bytes>`, a whole number of at least
-//! 4096 as in the file, the cap `fs.tree_list_ram_bytes` from now on (`core/lists.rs`), and names
-//! the mount whose `tierstore_fs_tree_list_ram_bytes` gauge shows it; the file is not read. These are the attachments of runs: a tree a lookup attached with no run
+//! answered `not attached`. These are the attachments of runs: a tree a lookup attached with no run
 //! (`core/implicit.rs`) is not listed, and no request here ends it.
+//!
+//! `set tree_list_ram_bytes` makes `<bytes>`, a whole number of at least 4096 as in the file, the
+//! cap `fs.tree_list_ram_bytes` from now on (`core/lists.rs`), once the lists over it that nothing
+//! holds are released, and names the mount whose `tierstore_fs_tree_list_ram_bytes` gauge shows
+//! it; the file is not read.
 
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
 use std::os::fd::{AsFd as _, OwnedFd};

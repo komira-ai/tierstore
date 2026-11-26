@@ -453,7 +453,11 @@ fn the_steps_of_a_reload_keep_their_order() {
     lin::assert_failed(&node.step(Verify, &p), Reason::OutOfOrder);
     node.go(&p, &[Cutover]);
     lin::assert_failed(&node.step(Cleanup, &p), Reason::NotVerified);
-    node.go(&p, &[Verify, Cleanup]);
+    node.go(&p, &[Verify]);
+    let verified = node.fake.snapshot();
+    node.go(&p, &[Verify]);
+    assert_eq!(node.fake.snapshot(), verified);
+    node.go(&p, &[Cleanup]);
     lin::assert_failed(&node.step(Cutover, &p), Reason::OutOfOrder);
     lin::assert_failed(&node.step(Rollback, &p), Reason::Committed);
     let before = node.fake.snapshot();
@@ -577,4 +581,214 @@ fn a_hand_over_after_a_reload_at_rest_is_the_arms() {
     node.go(&next, &[Prepare, Cutover]);
     assert_eq!(node.fake.actions(), ["markers.set b", "units.start b"]);
     assert_eq!(node.fake.record().reload, None);
+}
+
+/// Asserts that a reload records the fs instance of the old layout that runs, not the one an
+/// older config record names (a release update hands that process over without touching the
+/// config record), and writes it into the release's record; and that with both fs instances
+/// running (one of them still drains) the change is left to the arm. Catches a stale `fs_live`
+/// that the boot step would start.
+#[test]
+fn a_reload_names_the_fs_instance_that_runs() {
+    let node = Linux::on(
+        lin::SystemdFake::fs_installed(),
+        &[],
+        Some(lin::WITH_SOCKET),
+        lin::WITH_SOCKET,
+    );
+    node.fake
+        .set_fs_unit(Instance::A, UnitState::Inactive, Some(lin::OLD));
+    node.fake
+        .set_fs_unit(Instance::B, UnitState::Active, Some(lin::OLD));
+    node.fake.set_record(&Record {
+        fs_live: Some(Instance::A),
+        ..Record::idle(Some(Instance::A))
+    });
+    let p = update();
+    node.go(&p, &[Prepare]);
+    assert_eq!(node.fake.record().fs_live, Some(Instance::B));
+    node.go(&p, &[Cutover, Verify, Cleanup]);
+    assert_eq!(
+        node.service.get().and_then(|record| record.fs_live),
+        Some(Instance::B)
+    );
+
+    let node = Linux::on(
+        lin::SystemdFake::fs_installed(),
+        &[],
+        Some(lin::WITH_SOCKET),
+        lin::WITH_SOCKET,
+    );
+    node.fake
+        .set_fs_unit(Instance::B, UnitState::Active, Some(lin::OLD));
+    let _ = node.step(Prepare, &p);
+    assert_eq!(node.fake.record().reload, None);
+}
+
+/// Asserts that a change applied in place is not refused for what would need a new process: a
+/// node with an `fs` interface and a hot tier of kind `dir`, which the arm can only restart (and
+/// so refuses, the mount held), takes a change of the cap alone in place. Catches the refusals of
+/// a restart applied to a change that moves nothing.
+#[test]
+fn a_node_that_could_only_restart_takes_a_cap_change_in_place() {
+    let file = |bytes: u64| {
+        format!(
+            "{}\n[[interface]]\ntype = \"fs\"\n\n[interface.params]\n{}",
+            lin::DIR_HOT,
+            cap(bytes)
+        )
+    };
+    let node = Linux::new(Some(&file(GIB)), &file(2 * GIB));
+    node.go(&update(), &[Prepare, Cutover]);
+    assert_eq!(node.control.asked(), [set(2 * GIB)]);
+    assert_eq!(node.fake.actions(), Vec::<String>::new());
+
+    let node = Linux::new(
+        Some(&file(GIB)),
+        &format!("{}proxy_id = \"p2\"\n", file(GIB)),
+    );
+    lin::assert_failed(&node.step(Prepare, &update()), Reason::ModeUnsupported);
+}
+
+/// Asserts that params that declare a restart (`mode = "restart"`) restart the node even for a
+/// byte-identical file: an operator who asks for a restart gets one.
+#[test]
+fn a_declared_restart_is_a_restart_even_of_an_identical_file() {
+    let node = Linux::new(Some(lin::WITH_SOCKET), lin::WITH_SOCKET);
+    let p = lin::params_with(
+        PKG_NEW,
+        Some(super::PKG_OLD),
+        &format!("config_file = \"{}\"\nmode = \"restart\"\n", lin::CONFIG),
+    );
+    node.go(&p, &[Prepare]);
+    assert_eq!(node.fake.record().mode, Some(Mode::Restart));
+    assert_eq!(node.fake.record().reload, None);
+}
+
+/// Asserts that a `prepare` run again after hostkeeper installed the staged file (the file that
+/// serves now reads as the staged one) keeps the reload it recorded, the change of the cap with
+/// it, so that `cutover` still sets it. Catches a change lost to a `prepare` run again.
+#[test]
+fn a_prepare_again_after_the_file_was_installed_keeps_the_change() {
+    let node = changing(Some(GIB), Some(2 * GIB));
+    let p = update();
+    node.go(&p, &[Prepare]);
+    node.files
+        .put(Path::new(lin::CONFIG), &fs_file(&cap(2 * GIB)));
+    let again = node.step(Prepare, &p);
+    lin::assert_ok(&again);
+    assert_eq!(
+        lin::detail(&again),
+        "prepared in place already: tierstore@a applies fs.tree_list_ram_bytes 1073741824 to \
+         2147483648; no other instance starts"
+    );
+    assert_eq!(node.fake.record().reload, Some(changed(GIB, 2 * GIB)));
+    node.go(&p, &[Cutover]);
+    assert_eq!(node.control.asked(), [set(2 * GIB)]);
+}
+
+/// Asserts that `cleanup` confirms afresh before the commit: an instance that is no longer
+/// active, or that does not answer with the build, fails `not_confirmed` and commits nothing.
+#[test]
+fn a_cleanup_confirms_the_instance_still_serves() {
+    let node = changing(Some(GIB), Some(2 * GIB));
+    let p = update();
+    node.go(&p, &[Prepare, Cutover, Verify]);
+    node.fake
+        .set_unit(Instance::A, UnitState::Inactive, Some(lin::OLD), false);
+    let done = node.step(Cleanup, &p);
+    lin::assert_failed(&done, Reason::NotConfirmed);
+    assert_eq!(lin::detail(&done), "tierstore@a is Inactive, not active");
+    node.fake
+        .set_unit(Instance::A, UnitState::Active, Some(lin::OLD), false);
+    let done = node.step(Cleanup, &p);
+    lin::assert_failed(&done, Reason::NotConfirmed);
+    assert!(
+        lin::detail(&done).contains("was not seen serving"),
+        "{}",
+        lin::detail(&done)
+    );
+    assert!(!node.fake.record().committed());
+    assert!(done.report.reversible);
+}
+
+/// Asserts that only the first `fs` interface's cap is applied in place, the one whose control
+/// socket the hook asks: a change of the cap of a second `fs` entry is a change like any other,
+/// and hands over.
+#[test]
+fn a_cap_of_a_second_fs_entry_is_not_applied_in_place() {
+    let two = |bytes: u64| {
+        format!(
+            "{}\n[[interface]]\ntype = \"fs\"\n\n[[interface]]\ntype = \"fs\"\n\n[interface.params]\n{}",
+            lin::WITH_SOCKET,
+            cap(bytes)
+        )
+    };
+    let node = Linux::new(Some(&two(GIB)), &two(2 * GIB));
+    node.go(&update(), &[Prepare]);
+    assert_eq!(node.fake.record().reload, None);
+}
+
+/// Asserts that a package that changes only the guard's file reloads the guard at `cutover` and
+/// again at the `rollback` of a package that has a previous one, and asks the control socket
+/// nothing.
+#[test]
+fn a_change_of_the_guard_alone_reloads_it_both_ways() {
+    let node = Linux::new(Some(lin::WITH_SOCKET), lin::WITH_SOCKET);
+    node.files.put(Path::new(GUARD_FILE), "old rules");
+    node.files.put(
+        &staged_copy(Path::new(PKG_NEW), Path::new(GUARD_FILE)),
+        "new rules",
+    );
+    let p = update();
+    node.go(&p, &[Prepare, Cutover]);
+    assert_eq!(node.reloads(), 1);
+    node.go(&p, &[Rollback]);
+    assert_eq!(node.reloads(), 2);
+    assert_eq!(node.control.asked(), []);
+}
+
+/// Asserts that a `verify` whose instance answers with another build fails `wrong_build`, as the
+/// arm's does, and is not deferred.
+#[test]
+fn a_verify_of_another_build_fails() {
+    let node = changing(Some(GIB), Some(2 * GIB));
+    let p = update();
+    node.go(&p, &[Prepare, Cutover]);
+    node.fake.lie(lin::OLD, "9.9.9+0123456789ab");
+    lin::assert_failed(&node.step(Verify, &p), Reason::WrongBuild);
+    assert!(!node.fake.record().has(Marker::Verified));
+}
+
+/// Asserts that a `prepare` over a reload in flight that is not this package's (another staged
+/// release, another build, or one that names no serving instance) records this one afresh.
+#[test]
+fn a_prepare_over_another_reload_in_flight_records_its_own() {
+    for record in [
+        Record {
+            to: Some(PathBuf::from(
+                "/var/lib/hostkeeper/packages/tierstore-config/1.2.0",
+            )),
+            ..in_flight(Some(Instance::A))
+        },
+        Record {
+            version: Some("9.9.9".to_owned()),
+            ..in_flight(Some(Instance::A))
+        },
+        in_flight(None),
+    ] {
+        let node = changing(Some(GIB), Some(2 * GIB));
+        node.fake.set_record(&Record {
+            reload: Some(Reload::default()),
+            ..record
+        });
+        let done = node.step(Prepare, &update());
+        lin::assert_ok(&done);
+        assert!(lin::detail(&done).starts_with("prepared in place: "));
+        let record = node.fake.record();
+        assert_eq!(record.to, Some(PathBuf::from(PKG_NEW)));
+        assert_eq!(record.version, Some(build()));
+        assert_eq!(record.live, Some(Instance::A));
+        assert_eq!(record.reload, Some(changed(GIB, 2 * GIB)));
+    }
 }

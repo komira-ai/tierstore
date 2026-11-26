@@ -56,7 +56,9 @@
 //!   gauge shows it:
 //!   `{"guard":false,"tree_list_ram_bytes":{"from":536870912,"to":1073741824,"control_socket":"/run/tierstore-fs/control.sock","mount":"..."}}`.
 //!   The key is set only with an update in flight or committed, and never with `next`, `mode`,
-//!   `fs_next` or `fs_switch`. A hook that does not know it ignores it.
+//!   `fs_next` or `fs_switch`. A hook that does not know it ignores it: it reads a record at rest
+//!   as it is, and one with a reload in flight as an update that names no instance to start,
+//!   which its steps refuse (`state_invalid`) rather than act on.
 //!
 //! An absent `live` with no update in flight means no instance is known to serve: launchd's one
 //! job has no letter, and a systemd host that was never installed has none.

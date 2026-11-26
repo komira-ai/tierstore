@@ -48,9 +48,12 @@ pub(super) const GONE_ATTEMPTS: u32 = 60;
 pub(super) const CAPABILITIES_TIMEOUT: Duration = Duration::from_secs(10);
 /// The longest a connect to the service may take.
 pub(super) const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
-/// The longest a whole request to the service may take: its write and every read of the answer;
-/// on the control socket of the instance that serves, its write, and its read.
+/// The longest a whole request to the service may take: its write and every read of the answer.
 pub(super) const READ_TIMEOUT: Duration = Duration::from_secs(5);
+/// The longest the write of a request to the control socket of the instance that serves, and the
+/// read of its answer, may each take: a lowered cap of the tree lists is answered once the lists
+/// over it are released, each with a round trip to the node's cache, a few milliseconds.
+pub(super) const CONTROL_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Where the machine is and what runs its programs.
 pub(super) struct SystemConfig<'a> {
@@ -187,7 +190,7 @@ pub(super) fn config_run_on(
                 .with_program(config.systemctl);
             let markers = MarkerFiles::new(under(&config.root, MARKER_DIR));
             let guard = GuardUnit::new(&units, GUARD_UNIT, under(&config.root, GUARD_FILE));
-            let control = ControlSocket::new(config.root.clone(), READ_TIMEOUT);
+            let control = ControlSocket::new(config.root.clone(), CONTROL_TIMEOUT);
             let fs_units = SystemdUnits::new(runner, FS_START_TIMEOUT, STOP_TIMEOUT, SHOW_TIMEOUT)
                 .with_program(config.systemctl)
                 .of(Family::Fs);

@@ -5,9 +5,10 @@
 //! which the control socket of that interface sets (`set tree_list_ram_bytes <bytes>`,
 //! `treefs/control.rs`); a byte-identical file is the case with nothing to set.
 //!
-//! - `prepare` records the update with `reload` and no `next` or `mode`, when exactly one instance
-//!   runs and the config hook's record has no other update in flight; otherwise the steps are the
-//!   arm's, as for any config update.
+//! - `prepare` records the update with `reload` and no `next` or `mode`, when the params declare no
+//!   restart, exactly one instance runs (and at most one of the fs process of the old layout,
+//!   which it names), and the config hook's record has no other update in flight; otherwise the
+//!   steps are the arm's, as for any config update.
 //! - `cutover` reloads the guard when the package changes its file, has the control socket set the
 //!   staged value, and records `swapped` with the mount the socket named.
 //! - `verify` observes the build of the instance that serves, as the arm does, and reads the value
@@ -16,7 +17,8 @@
 //! - `rollback`, before the commit, reloads the guard again (when the package changed it and is
 //!   not the node's first) and sets the value of the file that served, unless the instance no
 //!   longer runs (a start reads the file hostkeeper put back).
-//! - `cleanup` records the commit and the update at rest, `live` unchanged.
+//! - `cleanup` confirms afresh that the instance runs and serves, then records the commit and the
+//!   update at rest, `live` unchanged.
 
 use std::convert::identity;
 
@@ -35,34 +37,38 @@ use crate::server::treefs::DEFAULT_TREE_LIST_RAM_BYTES;
 /// The param of the `fs` interface that the instance that serves applies in place.
 const TREE_LIST_RAM_BYTES: &str = "tree_list_ram_bytes";
 
-/// The table of a file with the keys applied in place taken out (a params table left empty goes
-/// too), and `tree_list_ram_bytes` of its first `fs` interface (the default when it names none;
-/// `None` when it has no such interface). `None` when the text is not TOML or the key is not a
-/// whole number of bytes, which a file the release accepts never has.
+/// The table of a file with the key applied in place taken out of its first `fs` interface, the
+/// one the hook reads the control socket of (a params table left empty goes too), and that key's
+/// value (the default when it names none; `None` when the file has no such interface). `None` when
+/// the text is not TOML or the key is not a whole number of bytes, which a file the release accepts
+/// never has.
 fn split(text: &str) -> Option<(toml::Table, Option<u64>)> {
     let mut table: toml::Table = text.parse().ok()?;
-    let mut cap = None;
-    if let Some(toml::Value::Array(entries)) = table.get_mut("interface") {
-        for entry in entries.iter_mut().filter_map(toml::Value::as_table_mut) {
-            if entry.get("type").and_then(toml::Value::as_str) != Some(FS_INTERFACE) {
-                continue;
-            }
-            let params = entry.get_mut("params").and_then(toml::Value::as_table_mut);
-            let bytes = match params.and_then(|params| params.remove(TREE_LIST_RAM_BYTES)) {
-                None => DEFAULT_TREE_LIST_RAM_BYTES,
-                Some(value) => u64::try_from(value.as_integer()?).ok()?,
-            };
-            let _ = cap.get_or_insert(bytes);
-            if entry
-                .get("params")
-                .and_then(toml::Value::as_table)
-                .is_some_and(toml::Table::is_empty)
-            {
-                let _ = entry.remove("params");
-            }
-        }
+    let entry = table
+        .get_mut("interface")
+        .and_then(toml::Value::as_array_mut)
+        .and_then(|entries| {
+            entries
+                .iter_mut()
+                .filter_map(toml::Value::as_table_mut)
+                .find(|entry| entry.get("type").and_then(toml::Value::as_str) == Some(FS_INTERFACE))
+        });
+    let Some(entry) = entry else {
+        return Some((table, None));
+    };
+    let params = entry.get_mut("params").and_then(toml::Value::as_table_mut);
+    let bytes = match params.and_then(|params| params.remove(TREE_LIST_RAM_BYTES)) {
+        None => DEFAULT_TREE_LIST_RAM_BYTES,
+        Some(value) => u64::try_from(value.as_integer()?).ok()?,
+    };
+    if entry
+        .get("params")
+        .and_then(toml::Value::as_table)
+        .is_some_and(toml::Table::is_empty)
+    {
+        let _ = entry.remove("params");
     }
-    Some((table, cap))
+    Some((table, Some(bytes)))
 }
 
 /// What the change from the file `serving` to `staged` applies in place, the guard aside; `None`
@@ -122,8 +128,11 @@ fn read(state: &dyn StateDir) -> Result<Option<Record>, Done> {
 
 /// `prepare` of a reload over the params `params` of the config package, whose staged file the
 /// instance that serves `build` applies as `reload` says. `Ok(None)` leaves the step to the arm:
-/// no instance runs, or both do (one of them drains), or the config hook's record has an update
-/// of the arm in flight (the arm finishes a committed one, and refuses one past its cutover).
+/// no instance runs, or both do (one of them drains), both instances of the fs process of the old
+/// layout run, or the config hook's record has an update of the arm in flight (the arm finishes a
+/// committed one, and refuses one past its cutover). A `prepare` run again over the reload it
+/// recorded keeps it: hostkeeper may have installed the staged file since, which the change would
+/// then be read from as none.
 pub(super) fn prepare(
     params: &Params,
     ports: &SystemdPorts<'_>,
@@ -144,6 +153,16 @@ pub(super) fn prepare(
                 "an update is past its cutover: finish or roll it back first",
             ));
         }
+        if let (Some(reload), Some(live)) = (&record.reload, record.live)
+            && record.to.as_ref() == Some(&params.staged_release)
+            && record.version.as_deref() == Some(build)
+        {
+            return Ok(Some(Done::ok(format!(
+                "prepared in place already: {} applies {}; no other instance starts",
+                unit_name(live),
+                said(reload)
+            ))));
+        }
     }
     let mut running = Vec::new();
     for instance in Instance::ALL {
@@ -154,6 +173,19 @@ pub(super) fn prepare(
     let [live] = running.as_slice() else {
         return Ok(None);
     };
+    // The fs process of the old layout is left alone; the record names the instance that runs,
+    // as the arm's does (a release update may have handed it over since the record was written).
+    let mut fs_running = Vec::new();
+    for instance in Instance::ALL {
+        if ports.fs_units.state(instance)?.running() {
+            fs_running.push(instance);
+        }
+    }
+    let fs_live = match fs_running.as_slice() {
+        [one] => Some(*one),
+        [] => record.as_ref().and_then(|record| record.fs_live),
+        _ => return Ok(None),
+    };
     let detail = format!(
         "prepared in place: {} applies {}; no other instance starts",
         unit_name(*live),
@@ -163,7 +195,7 @@ pub(super) fn prepare(
         updating: true,
         to: Some(params.staged_release.clone()),
         version: Some(build.to_owned()),
-        fs_live: record.and_then(|record| record.fs_live),
+        fs_live,
         reload: Some(reload),
         ..Record::idle(Some(*live))
     };
@@ -217,9 +249,8 @@ pub(super) fn run(step: Step, opened: &Opened, act: &Act<'_>) -> Done {
         .flatten()
     {
         Ok(Done::ok(detail))
-    } else if (opened.record.updating || opened.record.committed())
-        && !opened.record.is_of(act.params)
-    {
+    } else if !opened.record.is_of(act.params) {
+        // A record of a reload is in flight or committed (`Record::check`): of one update.
         Err(Done::fail(
             Reason::BadParams,
             format!(
@@ -275,7 +306,8 @@ fn set(control: &dyn Control, cap: &ListCap, bytes: u64) -> Result<String, Done>
 
 fn cutover(opened: &Opened, act: &Act<'_>) -> Result<Done, Done> {
     let record = &opened.record;
-    if !record.updating || record.committed() {
+    // A record of a reload that is not committed has one in flight (`Record::check`).
+    if record.committed() {
         return Err(Done::fail(
             Reason::OutOfOrder,
             "cutover follows a prepare, before cleanup",
@@ -352,10 +384,13 @@ fn verify(opened: &Opened, act: &Act<'_>) -> Result<Done, Done> {
                 "the record of the update in place names no mount whose cap was set",
             )
         })?;
-        let shown = match act.ports.instances.get(PUBLIC_PORT, "/metricz") {
-            Ok(reply) if reply.status == 200 => tree_list_ram_bytes_of(&reply.body, mount),
-            _ => None,
-        };
+        let shown = act
+            .ports
+            .instances
+            .get(PUBLIC_PORT, "/metricz")
+            .ok()
+            .filter(|reply| reply.status == 200)
+            .and_then(|reply| tree_list_ram_bytes_of(&reply.body, mount));
         if shown != Some(cap.to) {
             let shown = shown.map_or_else(|| "nothing".to_owned(), |bytes| bytes.to_string());
             return Err(Done::deferred(
@@ -432,6 +467,26 @@ fn cleanup(opened: &Opened, act: &Act<'_>) -> Result<Done, Done> {
         ));
     }
     let live = live_of(record)?;
+    // Afresh, before the commit, as the arm's `cleanup` confirms: the instance runs and serves.
+    let not_confirmed = |why: String| Done::fail(Reason::NotConfirmed, why);
+    let state = act.ports.units.state(live)?;
+    if state != UnitState::Active {
+        return Err(not_confirmed(format!(
+            "{} is {state:?}, not active",
+            unit_name(live)
+        )));
+    }
+    let look = Look {
+        instances: act.ports.instances,
+        clock: act.ports.clock,
+    };
+    let target = &act.params.target_version;
+    look.observed(target).map_err(|failed| {
+        not_confirmed(format!(
+            "{target} was not seen serving: {}",
+            failed.report.detail.unwrap_or_default()
+        ))
+    })?;
     // The commit and the end in one write: there is no old instance to retire.
     let mut finished = record.with(Marker::Stopping);
     finished.updating = false;
