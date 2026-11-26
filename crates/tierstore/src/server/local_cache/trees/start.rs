@@ -24,8 +24,9 @@ use super::files::{
     placement_file, placements_dir, tree_dir, trees_dir,
 };
 use super::location::{Location, PlacementId, meets};
+use super::mapped::MappedLists;
 use super::state::{Content, Placement, Shared, State, TreeInfo};
-use crate::tree_image::ImageKind;
+use crate::tree_image_list::{ImageKind, ListImage};
 use crate::{RecordChild, TreeDigest, TreeImage, TreeRecord};
 
 /// The entries of the directory `dir`, by name: none if it is not there.
@@ -75,11 +76,13 @@ struct Read {
     ready: bool,
 }
 
-/// Reads the directory of the tree `root`, or says why it is not a tree.
-fn read_tree(dir: &Path, root: TreeDigest) -> Result<Read, String> {
+/// Reads the directory of the tree `root`, or says why it is not a tree. An image is kept in
+/// `lists`, mapped from its file.
+fn read_tree(dir: &Path, root: TreeDigest, lists: &MappedLists) -> Result<Read, String> {
     let ready = dir.join(READY).exists();
-    match std::fs::read(dir.join(IMAGE)) {
-        Ok(bytes) => return read_image(bytes, root, ready),
+    let image = dir.join(IMAGE);
+    match std::fs::read(&image) {
+        Ok(bytes) => return read_image(bytes, (root, &image), ready, lists),
         Err(why) if why.kind() != io::ErrorKind::NotFound => return Err(format!("image: {why}")),
         Err(_) => {}
     }
@@ -121,8 +124,14 @@ fn read_tree(dir: &Path, root: TreeDigest) -> Result<Read, String> {
     })
 }
 
-/// The tree `root` whose directory holds the image `bytes`.
-fn read_image(bytes: Vec<u8>, root: TreeDigest, ready: bool) -> Result<Read, String> {
+/// The tree `root` whose directory holds the image `bytes`, read from the file `path`: hashed and
+/// walked from `bytes`, then kept in `lists` mapped from the file, and the bytes dropped.
+fn read_image(
+    bytes: Vec<u8>,
+    (root, path): (TreeDigest, &Path),
+    ready: bool,
+    lists: &MappedLists,
+) -> Result<Read, String> {
     if TreeDigest::of(&bytes) != root {
         return Err("the image does not hash to its name".to_owned());
     }
@@ -130,7 +139,7 @@ fn read_image(bytes: Vec<u8>, root: TreeDigest, ready: bool) -> Result<Read, Str
     Ok(Read {
         root,
         children: Vec::new(),
-        content: Content::Image(Arc::new(image)),
+        content: Content::Image(lists.keep(root, ListImage::stored(&image, path))),
         ready,
     })
 }
@@ -176,7 +185,7 @@ impl Shared {
                         size,
                         span: Some((key, offset)),
                         ..
-                    } => self.cache.span_of(key, offset, size).is_some(),
+                    } => self.cache.span_of(&key, offset, size).is_some(),
                     _ => true,
                 }),
         }
@@ -192,7 +201,7 @@ impl Shared {
                 continue;
             }
             let outcome = match TreeDigest::from_hex(&name) {
-                Some(root) => read_tree(&path, root).map(|tree| (root, tree)),
+                Some(root) => read_tree(&path, root, &self.lists).map(|tree| (root, tree)),
                 None => Err("not a digest".to_owned()),
             };
             match outcome {

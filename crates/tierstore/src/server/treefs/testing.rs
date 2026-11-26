@@ -34,6 +34,8 @@ use super::put::fake::FakePuts;
 use super::table::TreeTable;
 use crate::server::local_cache::{blob_path, manifest_path};
 
+pub(in crate::server::treefs) use super::testing_image::{image_bytes, image_named};
+
 /// The digest of `bytes` as hex.
 pub(in crate::server) fn sha(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
@@ -227,9 +229,12 @@ impl Upstream {
     /// The answer to a line, as the fake gives it.
     fn respond(&self, line: &str) -> Option<String> {
         let words: Vec<&str> = line.split(' ').collect();
-        if let Some(answer) = locked(&self.answers).get(words[0]) {
+        // An answer to the whole line comes before an answer to its verb.
+        let answers = locked(&self.answers);
+        if let Some(answer) = answers.get(line).or_else(|| answers.get(words[0])) {
             return Some(answer.clone());
         }
+        drop(answers);
         if let (Some(pack), "span") = (&*locked(&self.pack), words[0]) {
             let offset = words.last().copied().unwrap_or_default();
             return Some(format!("ok {offset} {}", pack.display()));
@@ -536,6 +541,7 @@ impl Rig {
             recover_wait: Duration::from_secs(30),
             reattach_concurrency: 4,
             tree_idle: TREE_IDLE,
+            tree_list_ram_bytes: TREE_LIST_RAM,
             allow_other: false,
             nfs: crate::server::treefs::nfs::config::NfsSettings::default(),
             put: None,
@@ -568,6 +574,9 @@ pub(in crate::server::treefs) static SIGNALS: Mutex<()> = Mutex::new(());
 /// How long a tree a lookup attached stays attached with no use, in the rigs.
 pub(in crate::server) const TREE_IDLE: Duration = Duration::from_secs(60);
 
+/// The bytes of tree lists a rig keeps mapped, but where a test sets its own (`Rig::capped`).
+pub(in crate::server) const TREE_LIST_RAM: u64 = 512 << 20;
+
 /// The owner every entry of the rigs reports.
 pub(in crate::server) const OWNER: (u32, u32) = (1234, 5678);
 
@@ -579,12 +588,17 @@ impl Rig {
 
     /// A rig whose entries report `owner`.
     pub(in crate::server) fn owned(name: &str, built: Built, owner: (u32, u32)) -> Self {
-        Self::made(name, built, owner, true)
+        Self::made(name, built, (owner, TREE_LIST_RAM), true)
+    }
+
+    /// A rig whose core keeps at most `cap` bytes of tree lists mapped (`fs.tree_list_ram_bytes`).
+    pub(in crate::server) fn capped(name: &str, built: Built, cap: u64) -> Self {
+        Self::made(name, built, (OWNER, cap), true)
     }
 
     /// A rig whose core does not count lookups: a frontend with no forget.
     pub(in crate::server) fn uncounted(name: &str, built: Built) -> Self {
-        Self::made(name, built, OWNER, false)
+        Self::made(name, built, (OWNER, TREE_LIST_RAM), false)
     }
 
     /// A second core over the same cache and fill socket, with a table of tree numbers and a
@@ -608,6 +622,7 @@ impl Rig {
                 generation: 1,
                 count_lookups: false,
                 tree_idle: TREE_IDLE,
+                tree_list_ram_bytes: TREE_LIST_RAM,
                 clock: Arc::clone(&self.clock) as Arc<dyn Clock>,
             },
             fills,
@@ -616,7 +631,12 @@ impl Rig {
         ))
     }
 
-    fn made(name: &str, built: Built, owner: (u32, u32), count_lookups: bool) -> Self {
+    fn made(
+        name: &str,
+        built: Built,
+        (owner, cap): ((u32, u32), u64),
+        count_lookups: bool,
+    ) -> Self {
         let dir = TestDir::under(std::env::temp_dir(), name);
         let cache = dir.path().join("cache");
         let runtime = dir.path().join("run");
@@ -659,6 +679,7 @@ impl Rig {
                 generation: 1,
                 count_lookups,
                 tree_idle: TREE_IDLE,
+                tree_list_ram_bytes: cap,
                 clock: Arc::clone(&clock) as Arc<dyn Clock>,
             },
             fills,
@@ -950,46 +971,6 @@ pub(in crate::server) fn until(mut condition: impl FnMut() -> bool) {
         condition()
     });
     let _ = looks.expect("the event never came");
-}
-
-/// The bytes of a version 2 tree list of the entries 0 root, 1 `bin`, 2 `d` (empty, mode 0700),
-/// 3 `empty` (size 0), 4 `link` (to `bin/tool`), 5 `bin/other` (3 bytes of `p0` at 5, mode 0644)
-/// and 6 `bin/tool` (the 5 bytes `hello` of `p0` at 0, mode 0755).
-pub(in crate::server::treefs) fn image_bytes() -> Vec<u8> {
-    use crate::{BlobSource, ListEntry, ListKind, Mode, TreeDigest, TreeList};
-    let file = |path: &str, (mode, size, offset): (u16, u64, u64), content: &[u8]| ListEntry {
-        path: path.to_owned(),
-        kind: ListKind::File {
-            mode: Mode::new(mode).unwrap(),
-            size,
-            source: (size > 0).then(|| BlobSource {
-                key: Arc::from("p0"),
-                offset,
-            }),
-            sha256: Some(TreeDigest::of(content)),
-        },
-    };
-    TreeList {
-        entries: vec![
-            file("bin/tool", (0o755, 5, 0), b"hello"),
-            file("bin/other", (0o644, 3, 5), b"abc"),
-            file("empty", (0o644, 0, 0), b""),
-            ListEntry {
-                path: "link".to_owned(),
-                kind: ListKind::Symlink {
-                    target: "bin/tool".to_owned(),
-                },
-            },
-            ListEntry {
-                path: "d".to_owned(),
-                kind: ListKind::Dir {
-                    mode: Mode::new(0o700).unwrap(),
-                },
-            },
-        ],
-    }
-    .encode_v2()
-    .unwrap()
 }
 
 #[cfg(test)]

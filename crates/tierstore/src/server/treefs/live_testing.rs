@@ -29,7 +29,7 @@ use super::fills::Fills;
 use super::in_process::InProcess;
 use super::ino;
 use super::table::TreeTable;
-use super::testing::{OWNER, TREE_IDLE};
+use super::testing::{OWNER, TREE_IDLE, TREE_LIST_RAM};
 
 /// The mount id of the core of a [`Live`]: the run its holds of placements are made under.
 pub(in crate::server) const MOUNT: &str = "mount-1";
@@ -152,6 +152,7 @@ impl Live {
                 generation: 1,
                 count_lookups: true,
                 tree_idle: TREE_IDLE,
+                tree_list_ram_bytes: TREE_LIST_RAM,
                 clock: Arc::clone(&clock) as Arc<dyn Clock>,
             },
             fills,

@@ -184,6 +184,8 @@ pub(in crate::server) mod live_testing;
 mod recovery_tests;
 #[cfg(test)]
 pub(in crate::server) mod testing;
+#[cfg(test)]
+pub(in crate::server) mod testing_image;
 
 #[cfg(test)]
 mod tests {

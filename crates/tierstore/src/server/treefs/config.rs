@@ -18,6 +18,7 @@
 //! | `fs.reattach_concurrency` | how many trees a start reads the manifests of at once when it makes the attachments again, before it serves (1 reads them one after the other) | `16` |
 //! | `fs.recover_wait` | after a restart on a kernel without resend: how long the connection may show requests no one answers before it is aborted | `30s` |
 //! | `fs.tree_idle_secs` | how long, in seconds, a tree a lookup attached stays attached with no request naming it | `900` |
+//! | `fs.tree_list_ram_bytes` | the most bytes of version 2 tree lists the mount keeps mapped before it releases those no run attaches and no request reads (`core/lists.rs`); at least a page, 4096 | `536870912` (512 MiB) |
 //! | `[fs.put]` | the put directory, `<mountpoint>/put/`, see `put/config.rs` | not served |
 //!
 //! `fs.passthrough` and `fs.max_backing_ids` were removed with passthrough, after tierstore 0.3.121:
@@ -95,6 +96,13 @@ const DEFAULT_TREE_IDLE_SECS: u64 = 900;
 /// The most `fs.tree_idle_secs` may be: a week.
 const MOST_TREE_IDLE_SECS: u64 = 7 * 24 * 3600;
 
+/// The bytes of tree lists the mount keeps mapped when the file leaves out
+/// `fs.tree_list_ram_bytes`: 512 MiB, about 1,700 lists of 0.3 MiB or 73 of 7 MiB.
+const DEFAULT_TREE_LIST_RAM_BYTES: u64 = 512 << 20;
+
+/// The least `fs.tree_list_ram_bytes` may be: one page, which a mapping takes at least.
+const LEAST_TREE_LIST_RAM_BYTES: u64 = 4096;
+
 /// The keys of `[fs]` that an earlier release read and this one does not, each with why: a file
 /// written for that release starts with them, and each is said.
 const REMOVED: [(&str, &str); 2] = [
@@ -141,6 +149,7 @@ pub(in crate::server) struct FsTable {
     pub(in crate::server) recover_wait: Option<Dur>,
     pub(in crate::server) reattach_concurrency: Option<u32>,
     pub(in crate::server) tree_idle_secs: Option<u64>,
+    pub(in crate::server) tree_list_ram_bytes: Option<u64>,
     pub(in crate::server) put: Option<PutTable>,
 }
 
@@ -175,6 +184,8 @@ pub(in crate::server) struct FsSettings {
     pub reattach_concurrency: usize,
     /// How long a tree a lookup attached stays attached with no request naming it.
     pub tree_idle: Duration,
+    /// The most bytes of tree lists the mount keeps mapped (`fs.tree_list_ram_bytes`).
+    pub tree_list_ram_bytes: u64,
     /// Whether users other than the one who mounts may use the mount: always, but in the tests,
     /// where the mounting user is not root and `fusermount3` allows it only by `/etc/fuse.conf`.
     pub allow_other: bool,
@@ -381,6 +392,15 @@ impl FsSettings {
             1,
             MOST_TREE_IDLE_SECS,
         )?;
+        let tree_list_ram_bytes = within(
+            place,
+            "tree_list_ram_bytes",
+            table
+                .tree_list_ram_bytes
+                .unwrap_or(DEFAULT_TREE_LIST_RAM_BYTES),
+            LEAST_TREE_LIST_RAM_BYTES,
+            u64::MAX,
+        )?;
         let group = require(place, "client_group", table.client_group)?;
         let owner = require(place, "owner", table.owner)?;
         let mountpoint = absolute(&key("mountpoint"), mountpoint)?;
@@ -404,6 +424,7 @@ impl FsSettings {
             recover_wait,
             reattach_concurrency: reattach_concurrency as usize,
             tree_idle: Duration::from_secs(tree_idle_secs),
+            tree_list_ram_bytes,
             allow_other: true,
             nfs: NfsSettings::of(place, table.nfs, timeout)?,
             put: put_config::of(&key("put"), table.put)?,

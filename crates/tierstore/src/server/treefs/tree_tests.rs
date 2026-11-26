@@ -6,6 +6,7 @@ use std::sync::Arc;
 use super::{ARC_HEADER, Kids, Tree};
 use crate::TreeImage;
 use crate::server::treefs::testing::{Built, Node, dir, file, image_bytes};
+use crate::tree_image_list::ListImage;
 use crate::tree_manifest::{EntryKind, TreeDigest, flatten};
 
 /// The tree whose root holds `children`, flattened.
@@ -91,7 +92,7 @@ fn a_placed_tree_has_modes_and_a_location_and_a_tree_of_manifests_has_neither() 
 /// The image tree of [`image_bytes`] placed at `jobs/1`.
 fn image_tree() -> Tree {
     let image = TreeImage::checked(image_bytes().into()).unwrap();
-    Tree::image(image, "jobs/1".to_owned())
+    Tree::image(Arc::new(ListImage::heap(&image)), "jobs/1".to_owned())
 }
 
 /// Asserts that a tree over an image counts its entries, reports its location, and makes each
@@ -256,18 +257,22 @@ fn a_flattened_tree_estimates_its_entries_names_and_tables() {
     );
 }
 
-/// Asserts the heap estimate of a tree over an image: the bytes of the list, each key of its
-/// packs, and its location.
+/// Asserts the heap estimate of a tree over an image: each key of its packs and its location, and
+/// not the bytes of the list, which are budgeted apart (`core/lists.rs`); and that the tree gives
+/// the list it is read from, which a flattened tree has none of.
 #[test]
-fn an_image_tree_estimates_its_bytes_keys_and_location() {
-    let image = TreeImage::checked(image_bytes().into()).unwrap();
-    let list = image.bytes().len();
+fn an_image_tree_estimates_its_keys_and_location_and_not_its_list() {
+    let image = Arc::new(ListImage::heap(
+        &TreeImage::checked(image_bytes().into()).unwrap(),
+    ));
     let keys: usize = image
         .keys()
         .iter()
         .map(|key| size_of::<Arc<str>>() + key.len() + ARC_HEADER)
         .sum();
     assert_eq!(image.keys().len(), 1);
-    let tree = Tree::image(image, "jobs/1".to_owned());
-    assert_eq!(tree.heap_bytes(), (list + keys + "jobs/1".len()) as u64);
+    let tree = Tree::image(Arc::clone(&image), "jobs/1".to_owned());
+    assert_eq!(tree.heap_bytes(), (keys + "jobs/1".len()) as u64);
+    assert!(Arc::ptr_eq(tree.list().unwrap(), &image));
+    assert!(Tree::new(Vec::new()).list().is_none());
 }

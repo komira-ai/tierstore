@@ -602,6 +602,41 @@ async fn a_descriptors_is_answered_ok_and_counted() {
     served.stop().await;
 }
 
+/// Asserts that a `treelists` is answered `ok`, by a node with no tree store, and shows in the
+/// cache's families: the gauges at the last report and each counter at what the process's totals
+/// grew by; a malformed one is refused and changes nothing.
+#[tokio::test]
+async fn a_treelists_is_answered_ok_and_counted() {
+    let rig = Rig::new("tfs-treelists");
+    let place = Place::new("tfs-treelists");
+    let served = Served::start(&rig.cache, &place.path);
+    let mut client = Client::connect(&place.path).await;
+    assert_eq!(
+        client.ask("treelists boot-1 7 3 12288 4096 1 2 1").await,
+        "ok"
+    );
+    assert_eq!(
+        client.ask("treelists boot-1 7 2 8192 4096 4 2 1").await,
+        "ok"
+    );
+    assert_eq!(
+        client.ask("treelists boot-1 7 2 8192 4096 9 9").await,
+        "refused malformed request"
+    );
+    let metrics = rig.cache.metrics();
+    for line in [
+        "tierstore_fs_tree_lists_mapped{mount=\"boot-1\"} 2\n",
+        "tierstore_fs_tree_list_mapped_bytes{mount=\"boot-1\"} 8192\n",
+        "tierstore_fs_tree_list_ram_bytes{mount=\"boot-1\"} 4096\n",
+        "tierstore_fs_tree_list_releases_total{mount=\"boot-1\",why=\"cap\"} 4\n",
+        "tierstore_fs_tree_list_releases_total{mount=\"boot-1\",why=\"idle\"} 2\n",
+        "tierstore_fs_tree_list_over_cap_total{mount=\"boot-1\"} 1\n",
+    ] {
+        assert!(metrics.contains(line), "{line}{metrics}");
+    }
+    served.stop().await;
+}
+
 /// Asserts that an `opens` is answered `ok`, by a node with no tree store, and shows in the cache's
 /// families: the histogram at what the process's totals grew by and the gauge at the last report;
 /// one of another number of buckets is refused and changes neither family.

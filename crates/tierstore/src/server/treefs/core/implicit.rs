@@ -111,13 +111,14 @@ impl Core {
         let counts = fetched.counts();
         tracing::info!(
             "tierstore fs: lookup of {digest}: {} in {ms} ms; {} manifests: {} from the cache, \
-             {} filled, {} not had{}",
+             {} filled, {} not had{}{}",
             outcome.word(),
             counts.manifests(),
             counts.cache,
             counts.filled,
             counts.failed,
             fetched.by_level(),
+            self.list_said(&attached),
         );
         attached
     }
@@ -288,7 +289,7 @@ const NAMED: usize = 8;
 
 /// The line said when the implicit attachment of the tree `digest`, numbered `number`, ends with
 /// `failures`: their count, and the first [`NAMED`] of them by path, each with its reason.
-fn ended_with((digest, number): (&TreeDigest, u64), failures: &[Failure]) -> String {
+pub(super) fn ended_with((digest, number): (&TreeDigest, u64), failures: &[Failure]) -> String {
     let named: Vec<String> = failures
         .iter()
         .take(NAMED)

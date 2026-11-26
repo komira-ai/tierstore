@@ -22,8 +22,8 @@ use serde::{Deserialize, Serialize};
 use super::TreeStore;
 use super::location::{Location, PlacementId};
 use super::read::{ReadError, image_span};
-use crate::tree_image::ImageKind;
-use crate::{RecordChild, TreeDigest, TreeImage, TreeRecord};
+use crate::tree_image_list::{ImageKind, ListImage};
+use crate::{RecordChild, TreeDigest, TreeRecord};
 
 /// The most entries a flattened tree may have, its root included: what the 24 bits of the index
 /// of an inode number count.
@@ -343,7 +343,7 @@ impl TreeStore {
 }
 
 /// The image `image`, flattened in the order of its indices, at the fs locations `paths`.
-fn flat_image(image: &TreeImage, paths: Vec<String>) -> FlatTree {
+fn flat_image(image: &ListImage, paths: Vec<String>) -> FlatTree {
     let mut packs = Packs::default();
     let entries = (0..image.len() as u32)
         .filter_map(|index| image.entry(index))
@@ -368,16 +368,13 @@ fn flat_image(image: &TreeImage, paths: Vec<String>) -> FlatTree {
                     };
                     (mode.bits(), kind)
                 }
-                ImageKind::Symlink { target } => (
-                    crate::Mode::SYMLINK.bits(),
-                    FlatKind::Symlink {
-                        target: target.to_owned(),
-                    },
-                ),
+                ImageKind::Symlink { target } => {
+                    (crate::Mode::SYMLINK.bits(), FlatKind::Symlink { target })
+                }
             };
             FlatEntry {
                 parent: entry.parent,
-                name: entry.name.to_owned(),
+                name: entry.name,
                 mode,
                 kind,
             }

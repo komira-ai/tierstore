@@ -175,6 +175,7 @@ pub(super) fn core_of(
             generation,
             count_lookups,
             tree_idle: settings.tree_idle,
+            tree_list_ram_bytes: settings.tree_list_ram_bytes,
             clock,
         },
         fills,

@@ -211,6 +211,8 @@ pub(super) struct Settings {
     /// How long a tree a lookup attached stays attached with no request naming it
     /// (`fs.tree_idle_secs`).
     pub tree_idle: Duration,
+    /// The most bytes of tree lists kept mapped (`fs.tree_list_ram_bytes`, `core/lists.rs`).
+    pub tree_list_ram_bytes: u64,
     /// The clock the use of a tree is told by, in milliseconds: only its differences count.
     pub clock: Arc<dyn Clock>,
 }
@@ -280,6 +282,8 @@ pub(in crate::server) struct Core {
     lines: said::Lines,
     /// What the trees in memory held at the last line that said it (`Core::say_memory`).
     memory_said: Mutex<Option<memory::Footprint>>,
+    /// The tree lists mapped, under `fs.tree_list_ram_bytes` (`core/lists.rs`).
+    lists: lists::Lists,
     /// The requests served, by name, for the tests that count what reaches the core.
     #[cfg(test)]
     pub(super) served: Mutex<Vec<&'static str>>,
@@ -316,6 +320,7 @@ impl Core {
     ) -> Self {
         Self {
             settings,
+            lists: lists::Lists::new(fills.lists().unwrap_or_default()),
             fills,
             table,
             state: Mutex::new(State {
@@ -952,12 +957,6 @@ impl Core {
     pub(super) fn open_files(&self) -> usize {
         self.handles.len()
     }
-
-    /// The trees in memory.
-    #[cfg(test)]
-    pub(super) fn trees_in_memory(&self) -> usize {
-        self.trees.len()
-    }
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -967,6 +966,7 @@ mod fetched;
 #[cfg(any(target_os = "linux", test))]
 mod handles;
 mod implicit;
+mod lists;
 mod live;
 mod loaded;
 mod memory;

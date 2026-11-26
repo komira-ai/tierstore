@@ -2,17 +2,20 @@
 //! each directory the indices of its children), or an image read in place (below). A tree a placement shows at an fs location also has the
 //! mode of each entry, as stored, and the path of the location.
 //!
-//! A placed tree that is a version 2 tree list is held as its image ([`TreeImage`]) and read in
-//! place: an entry's index is its place in the image, a directory's children are a range of
-//! indices sorted by name, and an entry is made from its record when it is asked for. Nothing is
-//! held per entry.
+//! A placed tree that is a version 2 tree list is held as its image ([`ListImage`]), mapped from
+//! the list's file and shared with every other holder of the list in the process (the tree store
+//! among them, `server/local_cache/trees/mapped.rs`), and read in place: an entry's index is its
+//! place in the image, a directory's children are a range of indices sorted by name, and an entry
+//! is made from its record when it is asked for. Nothing is held per entry, and the list's bytes
+//! are not on the heap: they are budgeted apart, under `fs.tree_list_ram_bytes`
+//! (`core/lists.rs`).
 
 use std::ops::Range;
 use std::sync::Arc;
 
-use crate::tree_image::ImageKind;
+use crate::TreeDigest;
+use crate::tree_image_list::{ImageKind, ListImage};
 use crate::tree_manifest::{BlobSource, EntryKind, TreeEntry};
-use crate::{Mode, TreeDigest, TreeImage};
 
 /// What the allocation of an `Arc<str>` holds besides the text: its two counts.
 const ARC_HEADER: usize = 2 * size_of::<usize>();
@@ -42,8 +45,8 @@ enum Body {
         /// whose modes follow from the kinds.
         modes: Vec<u16>,
     },
-    /// A version 2 tree list, read in place.
-    Image(TreeImage),
+    /// A version 2 tree list, read in place, shared with the other holders of the list.
+    Image(Arc<ListImage>),
 }
 
 /// The indices of the children of a directory, in name order.
@@ -140,13 +143,13 @@ impl Tree {
     }
 
     /// The tree a placement shows at the fs location `location` that is the image `image`.
-    pub(super) fn image(image: TreeImage, location: String) -> Self {
+    pub(super) fn image(image: Arc<ListImage>, location: String) -> Self {
         let keys: usize = image
             .keys()
             .iter()
             .map(|key| size_of::<Arc<str>>() + key.len() + ARC_HEADER)
             .sum();
-        let heap = image.bytes().len() + keys + location.capacity();
+        let heap = keys + location.capacity();
         Self {
             body: Body::Image(image),
             location: Some(location),
@@ -156,21 +159,27 @@ impl Tree {
 
     /// The bytes the tree holds on the heap, an estimate made when it was made: for a flattened
     /// tree its entries, their names, the tables of children and modes, and its location; for an
-    /// image the list's bytes, the keys of its packs and its location. The targets of links and
+    /// image the keys of its packs and its location (the list itself is mapped, and budgeted
+    /// apart: [`Tree::list`]). The targets of links and
     /// the keys of the packs a flattened tree's files are read from are shared by the entries
     /// that name them and are not counted, nor is what the allocator adds to each block.
     pub(super) fn heap_bytes(&self) -> u64 {
         self.heap
     }
 
+    /// The list the tree is read from, if it is an image.
+    pub(super) fn list(&self) -> Option<&Arc<ListImage>> {
+        match &self.body {
+            Body::Image(image) => Some(image),
+            Body::Listed { .. } => None,
+        }
+    }
+
     /// The stored mode of the entry `index` of a placed tree; none for a tree of manifests.
     pub(super) fn mode(&self, index: u32) -> Option<u16> {
         match &self.body {
             Body::Listed { modes, .. } => modes.get(index as usize).copied(),
-            Body::Image(image) => image.entry(index).map(|entry| match entry.kind {
-                ImageKind::Dir { mode, .. } | ImageKind::File { mode, .. } => mode.bits(),
-                ImageKind::Symlink { .. } => Mode::SYMLINK.bits(),
-            }),
+            Body::Image(image) => image.mode(index).map(|mode| mode.bits()),
         }
     }
 
@@ -208,10 +217,7 @@ impl Tree {
                 digest: sha256,
                 size,
                 exec: mode.bits() & 0o111 != 0,
-                source: span.map(|(key, offset)| BlobSource {
-                    key: Arc::clone(key),
-                    offset,
-                }),
+                source: span.map(|(key, offset)| BlobSource { key, offset }),
             },
             ImageKind::Symlink { target } => EntryKind::Symlink {
                 target: Arc::from(target),

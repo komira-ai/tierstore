@@ -123,6 +123,7 @@ pub(super) struct Params {
     pub recover_wait: Option<Dur>,
     pub reattach_concurrency: Option<u32>,
     pub tree_idle_secs: Option<u64>,
+    pub tree_list_ram_bytes: Option<u64>,
     pub nfs: Option<Strict<NfsTable>>,
     pub put: Option<Strict<PutTable>>,
     // Keys of `[fs]` that are not params, each refused by name with why, whatever its value.

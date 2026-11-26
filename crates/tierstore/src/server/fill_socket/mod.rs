@@ -50,8 +50,9 @@
 //! `local_cache/starts.rs`) is answered `ok`, by a node with no tree store too, and so are an
 //! `attached`, a `fetched` and a `levels` (what the mount reports of its attaches, see
 //! `local_cache/attaches.rs`), a `descriptors` (what it reports of its open cache files, see
-//! `local_cache/descriptors.rs`), and an `opens` (how long its opens of files took, see
-//! `local_cache/opens.rs`).
+//! `local_cache/descriptors.rs`), an `opens` (how long its opens of files took, see
+//! `local_cache/opens.rs`), and a `treelists` (the tree lists it holds mapped, see
+//! `local_cache/tree_lists.rs`).
 
 pub(in crate::server) mod mount;
 pub(in crate::server) mod put;
@@ -312,6 +313,10 @@ async fn session((cache, trees): (LocalCache, Option<TreeStore>), stream: UnixSt
             }
             Ok(Request::Opens(report)) => {
                 cache.opens_reported(*report);
+                "ok".to_owned()
+            }
+            Ok(Request::TreeLists(report)) => {
+                cache.tree_lists_reported(report);
                 "ok".to_owned()
             }
             Err(refusal) => format!("refused {refusal}"),

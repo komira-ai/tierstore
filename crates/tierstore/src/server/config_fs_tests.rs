@@ -189,7 +189,8 @@ threads = 8
 handoff_wait = "40s"
 recover_wait = "50s"
 reattach_concurrency = 4
-tree_idle_secs = 60"#;
+tree_idle_secs = 60
+tree_list_ram_bytes = 8192"#;
 
 /// The `nfs` sub-table both say, every key but the hand-off ones, none at its default.
 const SAME_NFS: &str = r#"listen = "127.0.0.1:12050"
@@ -648,6 +649,7 @@ fn the_fs_params_and_the_other_types_params_are_apart() {
         "recover_wait = \"5s\"",
         "reattach_concurrency = 1",
         "tree_idle_secs = 1",
+        "tree_list_ram_bytes = 4096",
         "nfs = {}",
         "put = {}",
         "fill_socket = \"/f.sock\"",
