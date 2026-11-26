@@ -792,3 +792,64 @@ fn a_prepare_over_another_reload_in_flight_records_its_own() {
         assert_eq!(record.reload, Some(changed(GIB, 2 * GIB)));
     }
 }
+
+/// Runs `tierstore config-hook <step> --params <file>` as hostkeeper does, through the verb's
+/// command line and a params file that names only the staged and previous packages and the
+/// configuration file (the service manager is this system's default), with the steps of the
+/// config hook over the fakes of `node`: the exit status and the report line.
+fn on_the_command_line(
+    node: &Linux,
+    step: &str,
+    dir: &std::path::Path,
+) -> (std::process::ExitCode, serde_json::Value) {
+    use super::super::super::{Invocation, Machine, Params};
+    let file = dir.join(format!("{step}.params.toml"));
+    let text = lin::params_text(
+        PKG_NEW,
+        Some(super::PKG_OLD),
+        &format!("config_file = \"{}\"\n", lin::CONFIG),
+    );
+    std::fs::write(&file, text).unwrap();
+    let mut args: Vec<std::ffi::OsString> = ["tierstore", "config-hook", step, "--params"]
+        .into_iter()
+        .map(std::ffi::OsString::from)
+        .collect();
+    args.push(file.into_os_string());
+    let run_step = |invocation: &Invocation, params: &Params| node.step(invocation.step, params);
+    let machine = Machine { step: &run_step };
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let code = super::super::run(&args, &mut out, &mut err, &machine);
+    assert!(err.is_empty(), "{}", String::from_utf8_lossy(&err));
+    let out = String::from_utf8(out).unwrap();
+    (code, serde_json::from_str(out.trim_end()).unwrap())
+}
+
+/// Asserts a change of the cap applied in place end to end through the verb hostkeeper runs,
+/// `config-hook <step> --params <file>`, from the params file to the report line: `prepare`,
+/// `cutover`, `verify` and `cleanup` each exit 0 with a report that names no reason, the last one
+/// not reversible; the instance that served still serves, alone, with no unit started or stopped
+/// and no marker changed; the control socket was asked once for the staged cap, which the gauge
+/// then shows; and the release's record names the same instance. Catches a reload class that the
+/// command line does not reach (the params' defaults, the steps the verb runs).
+#[test]
+fn a_cap_change_on_the_command_line_is_applied_in_place() {
+    let node = changing(Some(GIB), Some(2 * GIB));
+    let dir = tierstore_testkit::dir::TestDir::under(std::env::temp_dir(), "config-hook-in-place");
+    for step in ["prepare", "cutover", "verify", "cleanup"] {
+        let (code, line) = on_the_command_line(&node, step, dir.path());
+        assert_eq!(
+            format!("{code:?}"),
+            format!("{:?}", std::process::ExitCode::from(0)),
+            "{step}: {line}"
+        );
+        assert!(line.get("reason").is_none(), "{step}: {line}");
+        assert_eq!(line["reversible"], step != "cleanup", "{step}: {line}");
+    }
+    assert_eq!(node.fake.actions(), Vec::<String>::new());
+    assert_eq!(node.fake.running(), [Instance::A]);
+    assert_eq!(node.fake.markers(), [Instance::A]);
+    assert_eq!(node.control.asked(), [set(2 * GIB)]);
+    assert_eq!(node.control.gauge.get(), Some(2 * GIB));
+    assert_eq!(node.fake.record(), at_rest(set_on_mount(GIB, 2 * GIB)));
+    assert_eq!(node.service.get(), Some(release_record(Instance::A)));
+}
