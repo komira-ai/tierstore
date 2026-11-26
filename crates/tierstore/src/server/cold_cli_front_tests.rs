@@ -213,7 +213,7 @@ async fn create_only_holds(store: &S3Store, name: &str, first: &'static [u8]) {
     );
     let all = ByteRange::new(0, u64::try_from(first.len()).unwrap()).unwrap();
     assert_eq!(store.get_range(&x, all).await.unwrap(), first);
-    assert_eq!(open_uploads(store, "cas/").await, [id.clone()]);
+    assert_eq!(open_uploads(store, "cas/").await, std::slice::from_ref(&id));
     store.abort_multipart(&x, &id).await.unwrap();
     assert!(open_uploads(store, "cas/").await.is_empty());
 }
@@ -301,7 +301,10 @@ async fn a_node_over_the_cold_tier_serves_ranges_listings_and_uploads_from_the_c
 
         let m = key("cas/m");
         let (id, parts) = open_upload(&store, &m, &[b"abc", b"def"]).await;
-        assert_eq!(open_uploads(&store, "cas/").await, [id.clone()]);
+        assert_eq!(
+            open_uploads(&store, "cas/").await,
+            std::slice::from_ref(&id)
+        );
         store.complete_multipart(&m, &id, &parts).await.unwrap();
         assert!(open_uploads(&store, "cas/").await.is_empty());
         let whole = ByteRange::new(0, 6).unwrap();
