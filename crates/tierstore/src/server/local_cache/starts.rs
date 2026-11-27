@@ -30,8 +30,10 @@ use std::sync::Mutex;
 
 use self::list_refusals::ListRefusals;
 use super::attaches::Attaches;
+use super::attaches::runs::Runs;
 use super::descriptors::Held;
 use super::opens::Opened;
+use super::opens::requests::Answered;
 use super::tree_lists::Lists;
 use super::{LocalCache, locked};
 
@@ -84,6 +86,10 @@ pub(super) struct Starts {
     pub(super) opens: Opened,
     /// The tree lists the mounts hold mapped (`tree_lists`).
     pub(super) tree_lists: Lists,
+    /// The requests of the mounts' frontends (`requests`).
+    pub(super) requests: Answered,
+    /// The attaches and detaches of runs the mounts report (`runs`).
+    pub(super) runs: Runs,
     /// The tree lists the mount provider refused (`list_refusals`).
     list_refusals: ListRefusals,
 }
@@ -143,8 +149,8 @@ impl Starts {
 
     /// The family in the Prometheus text format: cumulative buckets, the sum in seconds and the
     /// count, all of one moment; then the families of the mounts' reports (`attaches`,
-    /// `descriptors`, `opens`, `tree_lists`) and of the provider's refused lists
-    /// (`list_refusals`).
+    /// `descriptors`, `opens`, `tree_lists`, `requests`, `runs`) and of the provider's refused
+    /// lists (`list_refusals`).
     pub(super) fn render(&self) -> String {
         let state = locked(&self.state);
         let mut text = format!("# TYPE {REQUEST_TO_START} histogram\n");
@@ -161,6 +167,8 @@ impl Starts {
         text.push_str(&self.descriptors.render());
         text.push_str(&self.opens.render());
         text.push_str(&self.tree_lists.render());
+        text.push_str(&self.requests.render());
+        text.push_str(&self.runs.render());
         text.push_str(&self.list_refusals.render());
         text
     }
