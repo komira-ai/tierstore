@@ -20,7 +20,9 @@
 //! - `not_released`: a `Release` or a `Sweep` whose placement the store could not remove now.
 //!
 //! Each answer counts once. A start the agent fails outside the provider (its own look at the
-//! directory the provider answered) is not seen here.
+//! directory the provider answered) is not seen here, and neither is a `Prepare` of a new source
+//! refused because the provider holds `trees.max_sources` sources, which is counted in
+//! `tierstore_provider_prepare_refused_total` (`preparations.rs`).
 
 use std::fmt::Write as _;
 use std::sync::atomic::AtomicU64;

@@ -111,13 +111,24 @@ pub(super) fn deletes_many(method: &Method, target: &Target, query: &Query) -> b
     *method == Method::POST && *target == Target::Bucket && query.has("delete")
 }
 
-/// The most bytes the body of a call may have: the limit of the server, and for DeleteObjects
-/// what 1000 keys fill ([`DELETE_BODY_LIMIT`]), since that body is held whole.
-pub(super) fn body_limit(limit: usize, deleting: bool) -> usize {
-    if deleting {
-        limit.min(DELETE_BODY_LIMIT)
-    } else {
-        limit
+/// The most bytes of a body that is read whole and is not a DeleteObjects document: a
+/// `CompleteMultipartUpload` of the 10,000 parts S3 takes, each with its ETag and every checksum,
+/// is under 5 MiB, and every other such body (a `CreateBucketConfiguration`, the empty body of a
+/// copy, a read or a delete) is a few hundred bytes.
+pub(super) const WHOLE_BODY_LIMIT: usize = 8 << 20;
+
+/// The most bytes the body of a call may have. The limit of the server for a body that is
+/// streamed to the backend (a put of an object that is not a copy, a part of an upload); what
+/// 1000 keys fill for DeleteObjects ([`DELETE_BODY_LIMIT`]); and [`WHOLE_BODY_LIMIT`] for every
+/// other body, which is held whole.
+pub(super) fn body_limit(limit: usize, deleting: bool, parts: &Parts, target: &Target) -> usize {
+    let streamed = parts.method == Method::PUT
+        && matches!(target, Target::Object(_))
+        && header(&parts.headers, "x-amz-copy-source").is_none();
+    match (deleting, streamed) {
+        (true, _) => limit.min(DELETE_BODY_LIMIT),
+        (false, true) => limit,
+        (false, false) => limit.min(WHOLE_BODY_LIMIT),
     }
 }
 
@@ -453,7 +464,8 @@ impl<'a> Writes<'a> {
 impl Server {
     /// Does what a request asks for, once it is signed. The body of a multipart part and that
     /// of a put whose conditions are served (see [`conditional::streamed`]) are streamed to the
-    /// backend as they arrive; every other call reads its body first.
+    /// backend as they arrive; a put whose conditions are not served is refused unread; every
+    /// other call reads its body first, whole ([`whole_body`](Self::whole_body)).
     pub(super) async fn dispatch<B>(
         &self,
         parts: &Parts,
@@ -490,7 +502,7 @@ impl Server {
             && let Some(source) = header(&parts.headers, "x-amz-copy-source")
         {
             // A copy has no body; it is read, so that its signed hash is checked.
-            reader.read_all(check).await?;
+            self.whole_body(reader, check).await?;
             return self
                 .copy(parts, query, key, source, multipart, writes)
                 .await;
@@ -506,7 +518,13 @@ impl Server {
             let put = self.put_streamed(key, len, reader, check, writes).await;
             return self.counted_put(put);
         }
-        let body = reader.read_all(check).await?;
+        if let ("PUT", Target::Object(key), false) = (method, &target, multipart) {
+            // A put whose conditions are not served is refused before its body is read.
+            refuse_reserved(key)?;
+            return Err(conditional::refused(&parts.headers));
+        }
+        // The body, and the permit that bounds the bodies held whole, until the answer is made.
+        let (body, _held) = self.whole_body(reader, check).await?;
         if let Some(setting) = &setting {
             return self.setting(setting);
         }
@@ -527,10 +545,6 @@ impl Server {
             }
             ("GET", Target::Object(key), false) => self.get_object(parts, query, &key).await,
             ("HEAD", Target::Object(key), false) => self.head_object(parts, query, &key).await,
-            ("PUT", Target::Object(key), false) => {
-                refuse_reserved(&key)?;
-                Err(conditional::refused(&parts.headers))
-            }
             ("DELETE", Target::Object(key), false) => self.delete_object(&key).await,
             ("DELETE", Target::Object(key), true) => self.abort_upload(query, &key).await,
             ("POST", Target::Object(key), true) if query.has("uploads") => {
@@ -547,8 +561,23 @@ impl Server {
     /// One call to the backend, which gives the object's meta and the body as it arrives: the
     /// headers are made from the meta and the status from the window the body holds. A
     /// condition that is not met, or a range that is not satisfiable, drops the body unread.
+    /// The read holds a permit of the server's reads until the body of its answer is over or
+    /// dropped (`bounds`): a GET that finds none free is answered 503 `SlowDown` unopened.
     async fn get_object(&self, parts: &Parts, query: &Query, key: &str) -> Result<Answer, S3Error> {
         refuse_reserved(key)?;
+        let permit = self.read_permit()?;
+        let mut read = self.read_object(parts, query, key).await?;
+        read.body_mut().hold_permit(permit);
+        Ok(read)
+    }
+
+    /// [`get_object`](Self::get_object), once it holds its permit.
+    async fn read_object(
+        &self,
+        parts: &Parts,
+        query: &Query,
+        key: &str,
+    ) -> Result<Answer, S3Error> {
         if let Some(placed) = self.read_placed(parts, query, key, true).await? {
             return Ok(placed);
         }

@@ -24,6 +24,7 @@ fn id_of(run: &str) -> SourceId {
         agent: AGENT.to_owned(),
         run: run.to_owned(),
         index: 0,
+        attempt: 0,
     }
 }
 

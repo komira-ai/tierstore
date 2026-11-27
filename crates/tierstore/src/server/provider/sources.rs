@@ -1,9 +1,13 @@
 //! The sources this process prepared, and the four calls of the contract over them.
 //!
 //! A source this process prepared is held in a table, with the stage of its preparation, which a
-//! `Mount` waits on. What a release, a sweep or a mount needs beyond the table it finds in the tree
-//! store by the source's path (module `names`), so that after a restart of this process, which
-//! empties the table, a source the agent prepared before is still mounted and released.
+//! `Mount` waits on. The table holds at most `trees.max_sources` sources: a `Prepare` of a new
+//! source past that is refused `UNAVAILABLE`, and a `Release` or a `Sweep` makes room. At most
+//! `trees.prepare_concurrency` preparations read and make their tree at once; the others wait for a
+//! turn (`local_cache/preparations.rs`). What a release, a sweep or a mount needs beyond the table
+//! it finds in the tree store by the source's path (module `names`), so that after a restart of
+//! this process, which empties the table, a source the agent prepared before is still mounted and
+//! released.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -11,14 +15,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use tierstore_trees_api::provider::v1::{MountMode, Source};
+use tierstore_trees_api::provider::v1::{KeptAttempt, MountMode, Source};
 use tokio::sync::{Semaphore, watch};
 
 use super::names::{SourceId, check_name, source_of};
 use super::prepare::{Job, run};
 use super::{MOUNT_WAIT, ProviderError, ProviderFlags};
 use crate::server::local_cache::trees::{LifeError, PlacementId, PreparePrefetch, TreeStore};
-use crate::server::local_cache::{LocalCache, QueuedReads, Unavailable};
+use crate::server::local_cache::{LocalCache, Preparations, QueuedReads, Unavailable};
 use crate::{MAX_TREE_LIST_BYTES, TreeDigest, tree_list_digest};
 
 /// Where the preparation of a source is.
@@ -112,6 +116,11 @@ pub(super) struct Shared {
     pub fills: Semaphore,
     /// The room of the reads queued, the node's (`local_cache/queued_reads.rs`).
     pub queued: Arc<QueuedReads>,
+    /// The turns of the preparations that read and make their tree: `trees.prepare_concurrency`
+    /// at once. Closed when the process stops, and a preparation waiting for one then fails.
+    pub turns: Semaphore,
+    /// The counts of the sources and the preparations (`local_cache/preparations.rs`).
+    pub counts: Arc<Preparations>,
     sources: Mutex<BTreeMap<SourceId, Held>>,
 }
 
@@ -171,7 +180,9 @@ impl Provider {
     /// The same, with `settings`.
     pub(super) fn with(store: TreeStore, cache: LocalCache, settings: Settings) -> Self {
         let fills = Semaphore::new(store.config().fill_concurrency);
-        let queued = cache.queued_reads();
+        let turns = Semaphore::new(store.config().prepare_concurrency);
+        let (queued, counts) = (cache.queued_reads(), cache.preparations());
+        counts.set_sources(0);
         Self {
             shared: Arc::new(Shared {
                 store,
@@ -179,6 +190,8 @@ impl Provider {
                 settings,
                 fills,
                 queued,
+                turns,
+                counts,
                 sources: Mutex::new(BTreeMap::new()),
             }),
         }
@@ -206,9 +219,11 @@ impl Provider {
             .unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Stops the reads of files that have not begun: the process is stopping.
+    /// Stops the reads of files and the preparations that have not begun: the process is
+    /// stopping.
     pub(in crate::server) fn halt(&self) {
         self.shared.fills.close();
+        self.shared.turns.close();
     }
 
     /// `Prepare`: checks the source, the ref and the mode, and begins the preparation in the
@@ -219,7 +234,8 @@ impl Provider {
     /// # Errors
     /// [`ProviderError::Invalid`] for a source or a ref that is not well formed;
     /// [`ProviderError::Refused`] for a mode other than read-only, or a source prepared with
-    /// another ref; [`ProviderError::Unavailable`] ([`no_fs`]) if no process serves the mount.
+    /// another ref; [`ProviderError::Unavailable`] ([`no_fs`]) if no process serves the mount,
+    /// and for a new source while the table holds `trees.max_sources` sources, counted.
     pub(super) fn prepare(
         &self,
         source: Option<Source>,
@@ -255,6 +271,13 @@ impl Provider {
             self.again_if_failed(&id, held);
             return Ok(());
         }
+        let most = self.shared.store.config().max_sources;
+        if sources.len() >= most {
+            self.shared.counts.refuse();
+            return Err(ProviderError::Unavailable(format!(
+                "the node holds {most} sources (trees.max_sources): release one, or retry"
+            )));
+        }
         let held = Held {
             key: reference.to_owned(),
             digest,
@@ -263,6 +286,7 @@ impl Provider {
         };
         self.start(&id, &held);
         sources.insert(id, held);
+        self.shared.counts.set_sources(sources.len());
         Ok(())
     }
 
@@ -283,7 +307,9 @@ impl Provider {
             stage: Arc::clone(&held.stage),
             released: Arc::clone(&held.released),
         };
-        self.lock().insert(id, held);
+        let mut sources = self.lock();
+        sources.insert(id, held);
+        self.shared.counts.set_sources(sources.len());
         (job, seen)
     }
 
@@ -321,13 +347,12 @@ impl Provider {
         let mut stage = {
             let sources = self.lock();
             let Some(held) = sources.get(&id) else {
-                return match self.placement_at(&id) {
-                    Some(_) => Ok(path),
-                    None => Err(self.unavailable(
+                return self.placed_path(&id).ok_or_else(|| {
+                    self.unavailable(
                         Unavailable::NotPreparedHere,
                         "the source is not prepared here".to_owned(),
-                    )),
-                };
+                    )
+                });
             };
             self.again_if_failed(&id, held);
             held.stage.subscribe()
@@ -360,24 +385,48 @@ impl Provider {
         }
     }
 
+    /// The directory of the placement of `id` that this process did not prepare: the placement at
+    /// the path of `id`, or, for a source that names its attempt, the one at the path of the same
+    /// source without an attempt, which a provider before attempts placed for it.
+    fn placed_path(&self, id: &SourceId) -> Option<PathBuf> {
+        let unnumbered = id.unnumbered();
+        std::iter::once(id)
+            .chain((id.attempt != 0).then_some(&unnumbered))
+            .find(|id| self.placement_at(id).is_some())
+            .map(|id| self.shared.settings.mountpoint.join(id.path()))
+    }
+
     /// `Release`: stops the source's preparation and removes its placement at once, ending the
     /// hold the file system's mount took at a lookup of the source's path
     /// (`TreeStore::release_now`), and forgets the request of its run. A tree in the mount's
     /// memory keeps serving; one it has to read again is gone. The tree goes with the placement
     /// unless another source's placement has the tree. A source that is not known is a success.
+    /// A source that names its attempt is that attempt's alone: a later attempt of the run is
+    /// another source, which this leaves as it is. Its release also releases the same source
+    /// without an attempt, which only a provider before attempts, or the agent before it counted
+    /// them, made: an attempt that is over.
     ///
     /// # Errors
     /// [`ProviderError::Invalid`] for a source that is not well formed;
     /// [`ProviderError::Unavailable`] if the store cannot change its directory now.
     pub(super) fn release(&self, source: Option<Source>) -> Result<(), ProviderError> {
         let id = SourceId::of(source)?;
-        self.release_id(&id).map(drop)
+        self.release_id(&id)?;
+        if id.attempt != 0 {
+            self.release_id(&id.unnumbered())?;
+        }
+        Ok(())
     }
 
     /// Releases `id`: whether there was anything to release.
     fn release_id(&self, id: &SourceId) -> Result<bool, ProviderError> {
         self.shared.cache.run_forgotten(&id.run_dir());
-        let held = self.lock().remove(id);
+        let held = {
+            let mut sources = self.lock();
+            let held = sources.remove(id);
+            self.shared.counts.set_sources(sources.len());
+            held
+        };
         let mut released = false;
         if let Some(held) = held {
             held.released.store(true, Ordering::SeqCst);
@@ -411,15 +460,36 @@ impl Provider {
             .map(|located| located.placement)
     }
 
-    /// `Sweep`: releases every source of `agent` whose run is not in `keep`, those this process
-    /// prepared and the placements under the agent's path; how many.
+    /// `Sweep`: releases every source of `agent` that `keep` and `from` do not keep, those this
+    /// process prepared and the placements under the agent's path; how many. A source is kept if
+    /// its run is in `keep` or in `from`, unless it names its attempt and that is earlier than
+    /// every attempt `from` names for its run (an attempt of 0 there keeps every attempt): a later
+    /// attempt than the agent named is kept, and so is a source that names no attempt.
     ///
     /// # Errors
     /// [`ProviderError::Invalid`] for an agent that is not well formed; what a release gives.
-    pub(super) fn sweep(&self, agent: &str, keep: &[String]) -> Result<u32, ProviderError> {
+    pub(super) fn sweep(
+        &self,
+        agent: &str,
+        keep: &[String],
+        from: &[KeptAttempt],
+    ) -> Result<u32, ProviderError> {
         check_name("agent", agent)?;
-        let keep: BTreeSet<&str> = keep.iter().map(String::as_str).collect();
-        let swept = |id: &SourceId| id.agent == agent && !keep.contains(id.run.as_str());
+        // The earliest attempt kept of each run kept: the least `from` names for it, else 0.
+        let mut kept: BTreeMap<&str, u64> = BTreeMap::new();
+        for entry in from {
+            let floor = kept.entry(entry.run.as_str()).or_insert(entry.attempt);
+            *floor = (*floor).min(entry.attempt);
+        }
+        for run in keep {
+            kept.entry(run.as_str()).or_insert(0);
+        }
+        let swept = |id: &SourceId| {
+            id.agent == agent
+                && kept
+                    .get(id.run.as_str())
+                    .is_none_or(|&floor| id.attempt != 0 && id.attempt < floor)
+        };
         let mut gone: BTreeSet<SourceId> = self
             .lock()
             .keys()

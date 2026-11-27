@@ -250,6 +250,17 @@ pub(super) fn run(step: Step, opened: &Opened, act: &Act<'_>) -> Done {
         .flatten()
     {
         Ok(Done::ok(detail))
+    } else if step == Step::Rollback
+        && let Some(judged) = another_in_flight(&opened.record, act)
+    {
+        // The record is then at rest: nothing of the package the params name is in flight.
+        judged
+            .and_then(|()| roll_back_stale(opened, act))
+            .map(|note| {
+                Done::ok(format!(
+                    "{note}; nothing to roll back: no update is in flight"
+                ))
+            })
     } else if !opened.record.is_of(act.params) {
         // A record of a reload is in flight or committed (`Record::check`): of one update.
         Err(Done::fail(
@@ -276,6 +287,89 @@ pub(super) fn run(step: Step, opened: &Opened, act: &Act<'_>) -> Done {
         || (step == Step::Cleanup && done.outcome == Outcome::Success);
     done.report.reversible &= !committed;
     done
+}
+
+/// Whether the reload on record is of another package, in flight and not committed, that `act`
+/// rolls back: hostkeeper gave that package up and moved `current` back, and the updater that
+/// started it is gone, so its rollback never ran. `None` when the record is at rest, committed or
+/// of the package `act` names; `Some(Err)`, with why, for one it keeps, which the step refuses as
+/// before: `act` is a node's first config package (whether the package on record was one too, and
+/// so whether the guard is reloaded, is not on record), or `act` names that package's own staged
+/// release as the one `current` names, as an update still in its cutover does (hostkeeper moved
+/// `current` to it). The record of a reload names no `from`, so the release it returns to is the
+/// one `current` names, which is what its own rollback would find.
+fn another_in_flight(record: &Record, act: &Act<'_>) -> Option<Result<(), Done>> {
+    if !record.updating || record.committed() || record.is_of(act.params) {
+        return None;
+    }
+    let kept = |why: String| {
+        Some(Err(Done::fail(
+            Reason::BadParams,
+            format!(
+                "the params name {} {}, and the update on record is {:?} {:?}: {why}",
+                act.params.staged_release.display(),
+                act.params.target_version,
+                record.to.as_deref(),
+                record.version.as_deref(),
+            ),
+        )))
+    };
+    if act.first {
+        return kept(
+            "the params are of a node's first config package, and the package on record is \
+             rolled back only with the params it was written under"
+                .to_owned(),
+        );
+    }
+    let current = act.params.previous.as_ref().map(|p| p.release.as_path());
+    if current == record.to.as_deref() {
+        return kept(
+            "the params name its staged release as the one the host runs: that update is still \
+             in its cutover"
+                .to_owned(),
+        );
+    }
+    Some(Ok(()))
+}
+
+/// Rolls the reload on record back, as its own `rollback` does: it needs nothing of the params
+/// but whether the package is a node's first. The note that leads the step's detail.
+fn roll_back_stale(opened: &Opened, act: &Act<'_>) -> Result<String, Done> {
+    let whose = format!(
+        "the record is of the update to {} {}, not {} {}",
+        opened.record.to.clone().unwrap_or_default().display(),
+        opened.record.version.as_deref().unwrap_or_default(),
+        act.params.staged_release.display(),
+        act.params.target_version
+    );
+    let back = rollback(opened, act).map_err(|mut done| {
+        let rest = done.report.detail.take().unwrap_or_default();
+        done.report.detail = Some(format!(
+            "{whose}, and its rollback with its own target and releases is not done; {rest}"
+        ));
+        done
+    })?;
+    Ok(format!(
+        "{whose}: rolled back with its own target and releases ({})",
+        back.report.detail.as_deref().unwrap_or_default()
+    ))
+}
+
+/// `prepare` over the record of a reload of another package that is past its cutover and that
+/// `act` rolls back ([`another_in_flight`]): it is rolled back first, and the note that leads the
+/// step's detail is returned. `None` for any other record: one before its cutover is recorded
+/// over, as before, and one past it that is kept is refused by the step.
+pub(super) fn roll_back_before_prepare(act: &Act<'_>) -> Result<Option<String>, Done> {
+    let Some(opened) = open(act.ports.state)? else {
+        return Ok(None);
+    };
+    if opened.record.markers.is_empty() {
+        return Ok(None);
+    }
+    match another_in_flight(&opened.record, act) {
+        Some(Ok(())) => roll_back_stale(&opened, act).map(Some),
+        _ => Ok(None),
+    }
 }
 
 /// The instance that serves, which the record of a reload names.

@@ -2,8 +2,9 @@
 //! chunks of the tiers, and that no other module of the loader owns: how long a client has to send
 //! the head of a request (`header_timeout`) or to finish the TLS handshake of the OCI front
 //! (`oci_handshake_timeout`), the listen backlog and the pauses of the accept loops and of the
-//! closing door, the pieces a streamed put holds, the S3 multipart sizes and queue depth, and the
-//! sizes in which a `dir` tier copies and reads.
+//! closing door, the pieces a streamed put holds, the most connections and reads of objects the
+//! front holds at once, the S3 multipart sizes and queue depth, and the sizes in which a `dir`
+//! tier copies and reads.
 //!
 //! Each has the value that was a constant of the code before it was a key as its default, a range
 //! that a value outside is refused with (naming the key), and, where two keys depend on each
@@ -16,6 +17,7 @@ use std::time::Duration;
 use crate::dir::{COPY_CHUNK, READ_CHUNK};
 use crate::s3::CHUNKS_WAITING;
 
+use super::bounds::{MAX_CONCURRENT_READS, MAX_CONNECTIONS};
 use super::config::{ConfigError, ServerTable, invalid, within};
 use super::config_tuning::{S3Client, span};
 use super::config_units::Size;
@@ -37,6 +39,10 @@ pub struct IoTuning {
     /// `server.oci_handshake_timeout`: how long a client has to finish the TLS handshake with
     /// the OCI front.
     pub oci_handshake_timeout: Duration,
+    /// `server.max_connections`: the most connections of the S3 front open at once.
+    pub max_connections: usize,
+    /// `server.max_concurrent_reads`: the most GETs of objects the S3 front streams at once.
+    pub max_concurrent_reads: usize,
 }
 
 impl Default for IoTuning {
@@ -46,6 +52,8 @@ impl Default for IoTuning {
             listen: ListenTuning::default(),
             put_pieces_queued: PIECES_QUEUED,
             oci_handshake_timeout: OCI_HANDSHAKE,
+            max_connections: MAX_CONNECTIONS,
+            max_concurrent_reads: MAX_CONCURRENT_READS,
         }
     }
 }
@@ -57,6 +65,8 @@ impl IoTuning {
         server.listen = self.listen;
         server.put_pieces_queued = self.put_pieces_queued;
         server.oci_handshake_timeout = self.oci_handshake_timeout;
+        server.max_connections = self.max_connections;
+        server.max_concurrent_reads = self.max_concurrent_reads;
     }
 }
 
@@ -173,6 +183,18 @@ pub(super) fn io_tuning(
             4096,
         )?,
         oci_handshake_timeout,
+        max_connections: count(
+            "max_connections",
+            server.max_connections,
+            old.max_connections,
+            1_000_000,
+        )?,
+        max_concurrent_reads: count(
+            "max_concurrent_reads",
+            server.max_concurrent_reads,
+            old.max_concurrent_reads,
+            1_000_000,
+        )?,
     })
 }
 
