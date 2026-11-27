@@ -175,9 +175,29 @@ fn the_mark_and_the_bound_hold_at_their_size_and_not_a_byte_below() {
         ]
     );
     let watch = MemoryWatch::new(1024, 0);
-    assert_eq!(steps(&watch, &[1023, 1024]), [Step::Steady, Step::Reached]);
-    // Straight to the bound: degraded with it, though the mark was never seen alone.
+    let got = steps(&watch, &[512, 1023, 1024]);
+    assert_eq!(got, [Step::Degraded, Step::Steady, Step::Reached]);
+    // Straight to the bound from under the mark: degraded with it.
+    let watch = MemoryWatch::new(1024, 0);
+    assert_eq!(steps(&watch, &[100, 4096]), [Step::Steady, Step::Reached]);
     assert!(watch.degraded());
+}
+
+/// Asserts that the thread's loop pauses before each look and ends at the cut, 30 looks after
+/// the bound, and not before: 2 looks under it, the look at it, 30 more.
+#[test]
+fn the_loop_pauses_before_each_look_and_ends_at_the_cut() {
+    let watch = Arc::new(MemoryWatch::new(1024, 0));
+    let dog = Dog::new(Arc::clone(&watch), None);
+    let mut sizes = vec![100, 200, 2048].into_iter();
+    let (mut looks, mut pauses) = (0u32, 0u32);
+    let look = || {
+        looks += 1;
+        sizes.next().map_or_else(|| anon(2048), anon)
+    };
+    watch_until_cut(dog, look, || pauses += 1);
+    assert_eq!((looks, pauses), (3 + CUT_AFTER, 3 + CUT_AFTER));
+    assert!(watch.has_reached());
 }
 
 /// Asserts that a look that cannot be read changes nothing and is said once, and that once the
@@ -214,8 +234,9 @@ fn the_dog_goes_on_through_the_mark_and_its_recovery() {
 }
 
 /// Asserts that each exit at the bound raises the count in the state directory, which the next
-/// start reads, so that the second exit of the same node writes 2; and that a count that does not
-/// read, or no count, is 0.
+/// start reads, so that the second exit of the same node writes 2, and leaves no other file; that
+/// an exit adds to the count the file has when it exits (one the other instance raised); and that
+/// a count that does not read, or no count, is 0.
 #[test]
 fn the_exits_at_the_bound_are_counted_across_starts_in_the_state_directory() {
     let dir = TestDir::under(std::env::temp_dir(), "memory-count");
@@ -228,7 +249,15 @@ fn the_exits_at_the_bound_are_counted_across_starts_in_the_state_directory() {
         let text = std::fs::read_to_string(dir.path().join(COUNT_FILE)).unwrap();
         assert_eq!(text, format!("{start}\n"));
     }
-    assert!(!dir.path().join(format!("{COUNT_FILE}.new")).exists());
+    let left: Vec<_> = std::fs::read_dir(dir.path()).unwrap().collect();
+    assert_eq!(left.len(), 1, "only the count file: {left:?}");
+    // The other instance raised the count since this one started: the exit adds to the file.
+    let watch = Arc::new(MemoryWatch::new(1024, 0));
+    std::fs::write(dir.path().join(COUNT_FILE), "7\n").unwrap();
+    let mut dog = Dog::new(Arc::clone(&watch), Some(dir.path().to_owned()));
+    assert_eq!(dog.tick(anon(4096)), Tick::Again);
+    let text = std::fs::read_to_string(dir.path().join(COUNT_FILE)).unwrap();
+    assert_eq!(text, "8\n");
     std::fs::write(dir.path().join(COUNT_FILE), "two\n").unwrap();
     assert_eq!(read_count(dir.path()), 0);
 }

@@ -11,7 +11,7 @@
 //! ```
 //!
 //! An interface is a front over the same proxy. The types are `s3` (the S3 API, `/healthz`,
-//! `/readyz`, `/usagez` and `/metricz`), `oci` (the read-only registry front), `trees` (the
+//! `/readyz`, `/usagez`, `/memoryz`, `/metricz`), `oci` (the read-only registry front), `trees` (the
 //! gRPC API of node-local trees, see [`trees`](super::trees)), `mount-provider` (jobscheduler's
 //! mount provider on a Unix socket, see [`provider::config`](super::provider::config), which listens
 //! on no address and takes params of its own) and `fs` (the trees as a file system, see

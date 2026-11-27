@@ -435,7 +435,7 @@ each with a `# TYPE` line, whatever sources the node has:
 | `tierstore_memory_anon_bytes` | gauge | none | the anonymous resident memory of the process at the last look (a look a second; on Linux `RssAnon` of `/proc/self/status`, which leaves out the page cache and mapped files; on macOS the peak resident size); 0 when the memory is not watched |
 | `tierstore_memory_bound_bytes` | gauge | none | the bound, `server.memory_bound`; 0 when there is none. The mark is half of it |
 | `tierstore_memory_degraded` | gauge | none | 1 from a look at or over the mark until one under seven eighths of it, and from the bound on; else 0 |
-| `tierstore_memory_bound_exits_total` | counter | none | exits at the bound, counted in the file `memory-bound-exits` of the service's state directory, so across restarts of the node (both instances of the template share it); this process's own exit is in it from the look that reached the bound. Without a state directory it counts this process alone |
+| `tierstore_memory_bound_exits_total` | counter | none | exits at the bound, counted in the file `memory-bound-exits` of the service's state directory, so across restarts of the node (both instances of the template share it, and each exit adds one to what the file says then); this process's own exit is in it from the look that reached the bound. Without a state directory it counts this process alone |
 
 Alert on `tierstore_memory_degraded` (or on `/memoryz`, which is 503 at the same time) before the
 bound, and on an increase of `tierstore_memory_bound_exits_total` after it:

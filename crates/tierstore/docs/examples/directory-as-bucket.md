@@ -65,7 +65,7 @@ aws --endpoint-url http://127.0.0.1:9000 s3api get-object --bucket tierstore --k
 - A put is acknowledged when the hot directory has the object. The copy to the cold directory follows in the background.
 - A get is served from the hot directory; if only the cold directory has the object, it is read from there and a copy is put back in the hot directory.
 - The hot tier evicts the objects that were written (or copied back) longest ago, and only those that the cold tier already holds. It is not an LRU: reading an object does not keep it.
-- `/healthz`, `/readyz`, `/usagez` and `/metricz` answer on the same address.
+- `/healthz`, `/readyz`, `/usagez`, `/memoryz` and `/metricz` answer on the same address.
 
 ## Limits
 

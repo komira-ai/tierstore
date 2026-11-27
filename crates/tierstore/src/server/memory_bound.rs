@@ -318,13 +318,14 @@ impl Dog {
         Tick::Again
     }
 
-    /// Writes the count of exits at the bound, this one included, to the state directory, if
-    /// there is one; a failure is said and the exit goes on.
+    /// Raises the count of exits at the bound in the state directory, if there is one, from what
+    /// the file says now (the other instance of the template may have raised it since this start);
+    /// a failure is said and the exit goes on.
     fn count(&self) {
         let Some(dir) = &self.state_dir else {
             return;
         };
-        if let Err(why) = write_count(dir, self.watch.exits()) {
+        if let Err(why) = write_count(dir, read_count(dir).saturating_add(1)) {
             let file = dir.join(COUNT_FILE);
             tracing::warn!(
                 "tierstore: the exit at the memory bound is not counted in {}: {why}",
@@ -341,23 +342,35 @@ pub(super) fn read_count(dir: &Path) -> u64 {
     text.trim().parse().unwrap_or(0)
 }
 
-/// Writes `count` to the count file of `dir`, through a file beside it and a rename, so that a
-/// reader finds the old count or the new one.
+/// Writes `count` to the count file of `dir`, through a file beside it named by the process and a
+/// rename, so that a reader finds the old count or the new one, and two processes do not share
+/// the file they write.
 pub(super) fn write_count(dir: &Path, count: u64) -> std::io::Result<()> {
-    let new = dir.join(format!("{COUNT_FILE}.new"));
+    let new = dir.join(format!("{COUNT_FILE}.new.{}", std::process::id()));
     std::fs::write(&new, format!("{count}\n"))?;
     std::fs::rename(&new, dir.join(COUNT_FILE))
 }
 
-/// The looks of the thread, one every [`INTERVAL`], the first after one; at the cut the process
-/// exits without the end of its drain.
-fn watching(mut dog: Dog) {
+/// The looks of the thread: `pause`, then a look from `look`, until the cut; it returns at the
+/// cut. The binary pauses [`INTERVAL`] and then exits without the end of its drain.
+pub(super) fn watch_until_cut(
+    mut dog: Dog,
+    mut look: impl FnMut() -> Option<Sample>,
+    mut pause: impl FnMut(),
+) {
     loop {
-        std::thread::sleep(INTERVAL);
+        pause();
         if dog.tick(look()) == Tick::Exit {
-            std::process::exit(i32::from(EXIT_STATUS));
+            return;
         }
     }
+}
+
+/// The thread of the binary: a look every [`INTERVAL`], the first after one, and at the cut the
+/// exit with [`EXIT_STATUS`].
+fn watching(dog: Dog) {
+    watch_until_cut(dog, look, || std::thread::sleep(INTERVAL));
+    std::process::exit(i32::from(EXIT_STATUS));
 }
 
 /// The watch of the binary, once [`install`] made it.
@@ -383,13 +396,17 @@ pub(super) fn install(bound: u64, state_dir: Option<PathBuf>) {
     let exits = state_dir.as_deref().map_or(0, read_count);
     let watch = Arc::new(MemoryWatch::new(bound, exits));
     let dog = Dog::new(Arc::clone(&watch), state_dir);
-    // The binary installs once; a second watch would not be the one the server shows.
-    let _ = INSTALLED.set(watch);
     let started = std::thread::Builder::new()
         .name("memory-bound".to_owned())
         .spawn(move || watching(dog));
-    if let Err(why) = started {
-        tracing::error!("tierstore: the memory bound is not held: its thread did not start: {why}");
+    match started {
+        // The binary installs once, before it serves; the thread's first look is a second later.
+        Ok(_) => {
+            let _ = INSTALLED.set(watch);
+        }
+        Err(why) => tracing::error!(
+            "tierstore: the memory bound is not held: its thread did not start: {why}"
+        ),
     }
 }
 

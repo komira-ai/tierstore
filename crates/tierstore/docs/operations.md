@@ -125,7 +125,7 @@ memory not watched
 
 The first and the last are 200, the other two 503. The last is a process with no bound.
 
-A build node in normal work holds 1.2 to 2.0 GiB of anonymous memory, and the most its configured budgets allow at once is about 10 GiB ([limits](limits.md)), so the default mark (16 GiB) is above both, and the default bound is an eighth of a 252 GiB build host. A process that reaches its bound again within a minute of each start meets the unit's start limit (5 starts in 60 seconds) and is left failed, as for any other failure.
+A build node in normal work holds 1.2 to 2.0 GiB of anonymous memory, and the most its configured budgets allow at once is about 10 GiB ([limits](limits.md)), so the default mark (16 GiB) is above both, and the default bound is an eighth of a 252 GiB build host. A process that reaches its bound again soon after each start meets the unit's start limit (5 starts in 60 seconds under the template `tierstore@.service`, 5 in an hour under `tierstore.service`) and is left failed, as for any other failure. A process stopped by SIGTERM whose drain meets the bound exits 75 too, and is started again.
 
 ## Live update by hand-off of the sockets
 

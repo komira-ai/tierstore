@@ -32,8 +32,8 @@ use super::{Drained, Server};
 /// The addresses [`run_serving`] is bound to.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Addresses {
-    /// The S3 front, `/healthz`, `/readyz`, `/usagez` and `/metricz`: the first address of
-    /// [`s3_all`](Self::s3_all).
+    /// The S3 front and its probes (`/healthz`, `/readyz`, `/usagez`, `/memoryz`, `/metricz`):
+    /// the first address of [`s3_all`](Self::s3_all).
     pub s3: SocketAddr,
     /// Every address the S3 front is bound to, in the order of the addresses of the `s3` interfaces.
     pub s3_all: Vec<SocketAddr>,

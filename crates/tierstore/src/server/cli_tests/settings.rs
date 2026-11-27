@@ -74,7 +74,7 @@ fn the_settings_are_made_from_the_flags() {
 fn a_file_with_a_probe_path_as_the_bucket_is_refused() {
     use crate::server::config::from_text;
     use crate::server::config_testing::{DEFAULTS, MINIMAL};
-    for name in ["healthz", "readyz", "usagez", "metricz"] {
+    for name in ["healthz", "readyz", "usagez", "memoryz", "metricz"] {
         let text = MINIMAL.replacen("tier-bucket", name, 1);
         let cli = from_text(&text, DEFAULTS).unwrap();
         assert_eq!(cli.bucket, name);
