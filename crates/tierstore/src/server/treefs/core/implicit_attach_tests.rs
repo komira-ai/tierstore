@@ -155,11 +155,17 @@ fn a_lookup_fetches_a_level_of_manifests_at_once_and_reports_the_attach() {
         "0.065"
     );
     assert_eq!(
-        counted(&rig, "tierstore_cache_manifest_fill_seconds_count{via=\"tree\"}"),
+        counted(
+            &rig,
+            "tierstore_cache_manifest_fill_seconds_count{via=\"tree\"}"
+        ),
         13
     );
     assert_eq!(
-        counted(&rig, "tierstore_cache_manifest_fill_seconds_count{via=\"fill\"}"),
+        counted(
+            &rig,
+            "tierstore_cache_manifest_fill_seconds_count{via=\"fill\"}"
+        ),
         0
     );
     let line = format!(

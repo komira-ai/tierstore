@@ -2,8 +2,8 @@
 //! Linux, NFS on loopback on macOS) in the node's own file, as `docs/design/one-service.md` lays
 //! out. They are read and checked here; the start of the build node serves the mount from them (on
 //! Linux by FUSE, `treefs/interface.rs`; on macOS by NFS, `treefs/nfs/interface.rs`), and on a
-//! system that is neither this release serves nothing from them and says so (`not_served`). `tierstore fs`, with its own `[fs]` table, still serves the trees of a node
-//! whose file has no `fs` interface.
+//! system that is neither this release serves nothing from them and says so (`not_served`). `tierstore fs`
+//! no longer serves: it only checks an `[fs]` table (`--check-config`) and lists attachments.
 //!
 //! ```toml
 //! [[interface]]
@@ -353,7 +353,7 @@ pub(in crate::server) fn fs_settings(
 pub(in crate::server) fn not_served(fs: Option<&FsSettings>) -> Option<String> {
     fs.map(|fs| {
         format!(
-            "tierstore: the fs interface (mountpoint {}) is checked and not served by this release on this system; `tierstore fs`, with its own [fs] table, serves the trees",
+            "tierstore: the fs interface (mountpoint {}) is checked and not served by this release on this system, where no process serves the trees",
             fs.mountpoint.display()
         )
     })

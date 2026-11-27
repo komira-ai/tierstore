@@ -32,7 +32,9 @@ pub(super) const NOT_A_PROCESS: &str = "tierstore fs is no longer a process of i
 
 /// The arguments of the verb.
 #[derive(Debug, Parser)]
-#[command(about = "The virtual build file system: one FUSE mount of the trees clients attach")]
+#[command(
+    about = "The attachments of the virtual build file system, and the check of an [fs] file; it serves nothing"
+)]
 struct Args {
     /// The configuration file, which has an `[fs]` table (needed).
     #[arg(long, global = true)]
@@ -45,7 +47,7 @@ struct Args {
     command: Option<Command>,
 }
 
-/// What the verb does besides serving.
+/// What the verb does when it is given a subcommand.
 #[derive(Debug, Subcommand)]
 enum Command {
     /// List what is attached, one line each: the digest of the tree and the run.

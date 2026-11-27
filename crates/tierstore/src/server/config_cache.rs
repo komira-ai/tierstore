@@ -20,7 +20,7 @@
 //! keep_wait            = "5s"
 //! keep_deadline        = "60s"
 //! write_through        = false  # true: take writes and send them to the upstream
-//! # fill_socket        = "/var/lib/tierstore/fill.sock"   # default: fill.sock in the state dir
+//! # fill_socket        = "/var/lib/tierstore/fill.sock"   # read and ignored: no fill socket is served
 //! # fill_socket_concurrency = 16
 //! # fill_socket_wait        = "60s"
 //! # put_ingest              = "/usr/local/tierstore/put"   # a Mac's: needs write_through = true
@@ -293,8 +293,8 @@ pub(super) struct CacheSettings {
     pub trees: TreesConfig,
     /// The mount provider, as the `mount-provider` interface makes it; none without one.
     pub provider: Option<ProviderFlags>,
-    /// The file system, as the `fs` interface makes it; none without one. This release reads and
-    /// checks it and serves none: `tierstore fs` still serves the trees.
+    /// The file system, as the `fs` interface makes it; none without one. This process serves it
+    /// (on Linux and macOS), its core calling the cache in the process.
     pub fs: Option<FsSettings>,
     /// The root of the put ingest (`local_cache.put_ingest`), or none.
     pub put_ingest: Option<std::path::PathBuf>,

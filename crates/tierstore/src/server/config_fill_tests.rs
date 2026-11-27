@@ -16,6 +16,7 @@ use super::super::config_cache::CacheSettings;
 use super::super::config_testing::DEFAULTS;
 use super::super::local_cache::{FILL_SOCKET_CONCURRENCY, FILL_SOCKET_WAIT};
 use super::IGNORED_FILL_SOCKET;
+
 /// A build node's file with `more` lines in `[local_cache]` and `server` in `[server]`.
 fn file(server: &str, more: &str) -> String {
     format!(

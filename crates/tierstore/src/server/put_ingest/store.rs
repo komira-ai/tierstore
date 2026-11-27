@@ -1,9 +1,9 @@
 //! The put of one committed file: opened without following a link, checked to be a regular file
 //! with one link, read once in chunks and hashed as it passes to the cache's create-only put that
 //! names its SHA-256 ([`put_stream_sha256`](crate::Backend::put_stream_sha256)), the put the
-//! file system's put directory makes for a commit (`treefs/in_process/put.rs`). A body that is not the declared digest
-//! (a truncated or a changed file) ends with an error before its last byte, and the upstream
-//! stores nothing of it.
+//! file system's put directory makes for a commit (`treefs/in_process/put.rs`). A body that is not
+//! the declared digest (a truncated or a changed file) ends with an error before its last byte, and
+//! the upstream stores nothing of it.
 
 use std::fmt;
 use std::fs::File;

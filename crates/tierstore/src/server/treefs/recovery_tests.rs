@@ -179,7 +179,8 @@ fn locked_cache(rig: &Rig) -> LocalCache {
     let mut config = CacheConfig::new(&rig.cache, 1 << 30, vec![("cas/".to_owned(), true)]);
     never_expires(&mut config);
     let backend: Arc<dyn Backend> = rig.upstream.clone();
-    let _entered = rig.work.handle().enter();
+    let handle = rig.work.handle();
+    let _entered = handle.enter();
     let (disk, clock) = (Arc::new(FakeDisk::new()), Arc::new(TestClock::new()));
     LocalCache::open_locked(config, backend, disk, clock).unwrap()
 }

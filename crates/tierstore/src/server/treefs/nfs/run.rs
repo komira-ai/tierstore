@@ -1,7 +1,7 @@
-//! The process of `tierstore fs` on macOS: the neutral start (`start.rs`), the NFS and MOUNT
-//! protocols on a loopback socket, the mount, and the wait for the signal that ends it. The `fs`
-//! interface of the one process starts and leaves the same front (`interface.rs`), with a core that
-//! calls the node's cache, and no hand-off socket of its own.
+//! The run of the NFS front on macOS: the neutral start (`start.rs`), the NFS and MOUNT protocols
+//! on a loopback socket, the mount, and the wait for what ends it. The `fs` interface of the one
+//! process starts and leaves this front (`interface.rs`), with a core that calls the node's cache;
+//! the tests also run it alone, through `serve_with`, with the wait for SIGTERM or SIGINT.
 //!
 //! A start, in order: the mount user's number is found; if `fs.nfs.handoff_socket` is given, a
 //! running instance is asked for its listening socket (`handoff`); the neutral start is done (the

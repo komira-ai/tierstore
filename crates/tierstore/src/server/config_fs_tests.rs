@@ -218,9 +218,10 @@ stage_ttl_secs = 1000
 committed_ttl_secs = 70"#;
 
 /// Asserts that an `fs` interface makes the very settings the `[fs]` table of `tierstore fs` makes
-/// of the same keys, with the node's own `local_cache.path` as the cache directory and `handoff.sock`
-/// in the runtime directory as the hand-over socket of the mount; and that a file with only the needed params gets the `[fs]`
-/// defaults. The put directory is in it on Linux, where it is served.
+/// of the same keys, with the node's own `local_cache.path` as the cache directory and
+/// `handoff.sock` in the runtime directory as the hand-over socket of the mount; and that a file
+/// with only the needed params gets the `[fs]` defaults. The put directory is in it on Linux,
+/// where it is served.
 #[test]
 fn an_fs_interface_makes_the_settings_the_fs_table_made() {
     let put = if cfg!(target_os = "linux") {
@@ -657,7 +658,7 @@ fn a_start_says_it_does_not_serve_the_fs_interface() {
     assert_eq!(
         not_served(Some(&fs)).as_deref(),
         Some(
-            "tierstore: the fs interface (mountpoint /run/tierstore/fs) is checked and not served by this release on this system; `tierstore fs`, with its own [fs] table, serves the trees"
+            "tierstore: the fs interface (mountpoint /run/tierstore/fs) is checked and not served by this release on this system, where no process serves the trees"
         )
     );
 }

@@ -15,9 +15,7 @@ use super::super::placed::key_of;
 use super::super::{Core, Entry, Errno, Looked};
 use crate::TreeDigest;
 use crate::server::local_cache::trees::testing::{fs_at, open_image};
-use crate::server::local_cache::trees::{
-    ImageRequest, Mapped, PlacementId, TreeStore, TreesConfig,
-};
+use crate::server::local_cache::trees::{ImageRequest, Mapped, PlacementId, TreeStore, TreesConfig};
 use crate::server::treefs::in_process::InProcess;
 use crate::server::treefs::ino;
 use crate::server::treefs::locked;

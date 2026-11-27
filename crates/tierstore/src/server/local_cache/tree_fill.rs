@@ -62,19 +62,6 @@ pub(in crate::server) struct TreeFilled {
     pub levels: Vec<u64>,
 }
 
-impl TreeFilled {
-    /// The text `ok <ms> <filled> [<filled> ...]`: the milliseconds and the manifests of each
-    /// level. Only the tests of the core still build a fill's answer from it.
-    #[cfg(test)]
-    pub(in crate::server) fn answer(&self) -> String {
-        let mut answer = format!("ok {}", self.ms);
-        for filled in &self.levels {
-            answer.push_str(&format!(" {filled}"));
-        }
-        answer
-    }
-}
-
 /// Why a fill of a tree's new manifests did not fill them all. The text is the words of the
 /// failure.
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]

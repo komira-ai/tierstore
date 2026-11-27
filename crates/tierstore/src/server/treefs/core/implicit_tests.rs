@@ -37,7 +37,8 @@ fn blob_of_len(rig: &Rig, len: usize) -> String {
 
 /// Opens and lets go the file `ino`, which pins its blob for its tree when the tree is attached.
 fn opened(rig: &Rig, ino: u64) {
-    rig.core.release(open_cached(&rig.core, ino, false).unwrap());
+    rig.core
+        .release(open_cached(&rig.core, ino, false).unwrap());
 }
 
 /// The root digest of the rig's tree.

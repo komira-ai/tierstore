@@ -294,7 +294,22 @@ fn a_read_of_an_earlier_processs_handle_whose_tree_is_gone_is_an_io_error_said()
     for entry in std::fs::read_dir(&rig.cache).unwrap() {
         let _ = std::fs::remove_dir_all(entry.unwrap().path());
     }
-    rig.upstream.built.lock().unwrap().manifests.clear();
+    // The upstream's store keeps what it published, so the tree is made gone by the answer the
+    // upstream gives for each of its manifests.
+    let gone: Vec<String> = {
+        let mut built = rig.upstream.built.lock().unwrap();
+        let gone = built.manifests.keys().cloned().collect();
+        built.manifests.clear();
+        gone
+    };
+    for digest in gone {
+        let _ = rig
+            .upstream
+            .failing
+            .lock()
+            .unwrap()
+            .insert(digest, "upstream 404".to_owned());
+    }
     let next = rig.successor();
     let log = Logged::default();
     let guard = logged(&log, tracing::Level::WARN);

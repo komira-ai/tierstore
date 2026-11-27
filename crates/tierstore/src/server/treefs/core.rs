@@ -39,9 +39,9 @@ use crate::tree_manifest::{EntryKind, TreeDigest, TreeEntry};
 use super::attach::{Attachments, Failure, Snapshot, is_run};
 #[cfg(any(target_os = "linux", test))]
 use super::backing::{Adopted, Guard};
-use super::in_process::InProcess;
 #[cfg(any(target_os = "linux", test))]
 use super::handle;
+use super::in_process::InProcess;
 use super::ino;
 use super::locked;
 #[cfg(target_os = "linux")]

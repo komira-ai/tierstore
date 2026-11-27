@@ -45,10 +45,10 @@ use super::table::TreeTable;
 use crate::server::local_cache::SystemDisk;
 use crate::{MonotonicClock, SystemClock};
 
-/// Serves the put directory of `settings` from `core`, where `fs.put` is enabled, its puts asked by
-/// `reach`: the stage opened
-/// and its journal replayed, the hand-over of the process before taken over (`handed`, none for a
-/// fresh mount or a start after a crash), and the sweep started. `generation` numbers the handles.
+/// Serves the put directory of `settings` from `core`, where `fs.put` is enabled, its puts made
+/// by the cache of `reach`: the stage opened and its journal replayed, the hand-over of the
+/// process before taken over (`handed`, none for a fresh mount or a start after a crash), and the
+/// sweep started. `generation` numbers the handles.
 ///
 /// # Errors
 /// [`StartError::Put`] for a stage that cannot be used, [`StartError::Io`] for the sweep's thread.
@@ -424,11 +424,11 @@ impl Running {
     /// commit waiting for a release ends at once; one that uploads, by its deadline). Blocks until
     /// then.
     ///
-    /// What asks the node's cache is waited for first, while the readers
-    /// still serve: the uploads of the commits that run now, the unpins of the detaches decided
-    /// now, and the announcement being sent. Each lasts until its deadline while the cache does
-    /// not answer (the tierstore restarting), and with the readers stopped the mount would answer
-    /// nothing for that long. A request that takes the lifecycle lock (a lookup that attaches a
+    /// What asks the node's cache is waited for first, while the readers still serve: the uploads
+    /// of the commits that run now, the unpins of the detaches decided now, and the announcement
+    /// being sent. Each lasts until its deadline while the cache does not answer (it is read-only
+    /// while another process holds the lock of its directory, as at the node's restart), and with
+    /// the readers stopped the mount would answer nothing for that long. A request that takes the lifecycle lock (a lookup that attaches a
     /// tree) can still wait for the unpins, as a detach decided in the meantime waits for them under
     /// that lock. What begins after this first wait is waited for after the stop, as before.
     pub(super) fn quiesce(&self) {

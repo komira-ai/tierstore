@@ -138,12 +138,18 @@ fn every_refusal_names_its_key() {
     let cases: Vec<(String, &str)> = vec![
         (fs("mountpoint = \"relative\"\n"), "fs.mountpoint"),
         (fs("runtime_dir = \"relative\"\n"), "fs.runtime_dir"),
-        (fs("control_socket = \"relative.sock\"\n"), "fs.control_socket"),
+        (
+            fs("control_socket = \"relative.sock\"\n"),
+            "fs.control_socket",
+        ),
         (
             fs(&format!("control_socket = \"/{}\"\n", "s".repeat(120))),
             "fs.control_socket",
         ),
-        (fs("handoff_socket = \"relative.sock\"\n"), "fs.handoff_socket"),
+        (
+            fs("handoff_socket = \"relative.sock\"\n"),
+            "fs.handoff_socket",
+        ),
         (
             fs(&format!("handoff_socket = \"/{}\"\n", "s".repeat(120))),
             "fs.handoff_socket",
@@ -151,7 +157,10 @@ fn every_refusal_names_its_key() {
         (fs("handoff_wait = \"999ms\"\n"), "fs.handoff_wait"),
         (fs("handoff_wait = \"2h\"\n"), "fs.handoff_wait"),
         (fs("reattach_concurrency = 0\n"), "fs.reattach_concurrency"),
-        (fs("reattach_concurrency = 1025\n"), "fs.reattach_concurrency"),
+        (
+            fs("reattach_concurrency = 1025\n"),
+            "fs.reattach_concurrency",
+        ),
         (fs("tree_idle_secs = 0\n"), "fs.tree_idle_secs"),
         (fs("tree_idle_secs = 604801\n"), "fs.tree_idle_secs"),
         (fs("recover_wait = \"0s\"\n"), "fs.recover_wait"),

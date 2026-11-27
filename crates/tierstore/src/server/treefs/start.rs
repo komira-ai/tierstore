@@ -5,9 +5,9 @@
 //! A start, in order: the runtime directory and the mount point are made; the runtime directory
 //! gets a table of tree numbers (afresh, or, for an NFS mount that outlives the server, the one the
 //! mount of this boot left, see [`Identity`]); the backing table an earlier release kept for a mount that is gone is removed; the
-//! core is made, asking the node's cache and tree store by the reach it is given (`fills.rs`: the
-//! calls of the one process); the attachments the file holds are
-//! made again (the manifests the cache does not hold are asked of it); the thread is started that
+//! core is made, calling the node's cache and tree store it is given (`fills.rs`: `Calls`); the
+//! attachments the file holds are made again (the manifests the cache does not hold are asked of
+//! it); the thread is started that
 //! tells the cache which trees are attached, so that it drops the pins of any other, once the cache
 //! answers (`core/live.rs`: the start does not wait for it); and the control socket is bound.
 //!

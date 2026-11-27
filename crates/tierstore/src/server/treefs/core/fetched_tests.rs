@@ -71,7 +71,7 @@ fn each_answer_of_a_fill_tree_is_said_and_adds_a_round() {
         format!("{levels}; fill-tree ok in 7 ms, 5 ms at the node, fills by level: 1 2")
     );
     assert_eq!(
-        said(TreeAnswer::Failed("read-only".to_owned())),
-        format!("{levels}; fill-tree failed in 7 ms: read-only")
+        said(TreeAnswer::Failed("busy".to_owned())),
+        format!("{levels}; fill-tree failed in 7 ms: busy")
     );
 }

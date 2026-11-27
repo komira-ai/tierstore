@@ -355,7 +355,10 @@ fn a_tree_that_is_not_in_memory_is_forgotten_dropped_and_unpinned_with_no_change
         .handle()
         .block_on(rig.node.fill_blob(&blob))
         .unwrap();
-    let pins = rig.node.pin("mount-1", &digest(1).to_string(), &[tool]).unwrap();
+    let pins = rig
+        .node
+        .pin("mount-1", &digest(1).to_string(), &[tool])
+        .unwrap();
     assert_eq!(pins.pinned, 1);
     assert_eq!(rig.node.pinned_bytes(), 10);
     core.forget(ino::of(9, 3), 1);

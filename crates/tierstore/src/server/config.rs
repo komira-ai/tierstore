@@ -63,8 +63,8 @@ pub(super) mod cold;
 #[path = "config_fs.rs"]
 pub(super) mod fs;
 use super::config_entry::entry_tuning;
-use super::config_handoff::handoff_of;
 use super::config_fill::warn_ignored_fill_socket;
+use super::config_handoff::handoff_of;
 use super::config_hot_only::{refuse_hot_keys, warn_retired_keys};
 pub(super) use super::config_interface::OciFlags;
 use super::config_interface::{

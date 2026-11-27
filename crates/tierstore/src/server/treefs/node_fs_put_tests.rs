@@ -96,7 +96,8 @@ impl Served {
     fn start(name: &str) -> Self {
         let rig = Rig::new(name, sample());
         let store = {
-            let _entered = rig.work.handle().enter();
+            let handle = rig.work.handle();
+            let _entered = handle.enter();
             NodeRig::writing(&format!("{name}-store"))
         };
         let calls = Calls {

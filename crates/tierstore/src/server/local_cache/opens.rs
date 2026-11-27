@@ -21,7 +21,7 @@
 //! down: a new process given the same id). The totals of the
 //! [`PROCESSES`](super::descriptors::PROCESSES) latest processes of a mount are kept, so the two
 //! processes of a hand-over, reporting in turns, are counted apart and neither twice. The gauge
-//! `tierstore_fs_opens_waiting` is the sum over the mounts of each one's last `<waiting>`. At most
+//! `tierstore_fs_opens_waiting` is the sum over the mounts of each one's last `waiting`. At most
 //! [`MOST_MOUNTS`](super::descriptors::MOST_MOUNTS) mounts are kept: a report of another, when
 //! that many are, is counted nowhere.
 //!

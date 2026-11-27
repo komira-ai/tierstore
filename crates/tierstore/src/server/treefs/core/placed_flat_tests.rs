@@ -269,10 +269,7 @@ async fn an_unknown_directory_above_the_locations_is_found_through_the_node_or_n
     let blocked = Live::in_process_with("tfs-placed-mounted-ro", read_only, SHORT).await;
     blocked
         .on_core(|core| {
-            assert_eq!(
-                core.lookup(dir_ino("jobs"), "1f3a").err(),
-                Some(Errno::Io)
-            );
+            assert_eq!(core.lookup(dir_ino("jobs"), "1f3a").err(), Some(Errno::Io));
             assert_eq!(core.parent(dir_ino("jobs")).err(), Some(Errno::Io));
         })
         .await;

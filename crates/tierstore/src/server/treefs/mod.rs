@@ -172,6 +172,8 @@ mod recovery_tests;
 pub(in crate::server) mod testing;
 #[cfg(test)]
 pub(in crate::server) mod testing_image;
+#[cfg(test)]
+pub(in crate::server) mod testing_upstream;
 
 #[cfg(test)]
 mod tests {

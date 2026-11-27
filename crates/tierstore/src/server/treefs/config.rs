@@ -1,5 +1,6 @@
-//! The settings of `tierstore fs`: the `[fs]` table of the file `--config` names, the file of this
-//! process alone (the S3 instance reads a file of its own, which has no `[fs]` table).
+//! The settings of the file system: the params of the `fs` interface of a build node's file, and
+//! the `[fs]` table of a file `tierstore fs --check-config` checks (a file of the two-process
+//! layout, which this release reads and serves nothing of).
 //!
 //! | key | meaning | default |
 //! |---|---|---|
@@ -273,7 +274,8 @@ impl FsSettings {
     /// A [`ConfigError`] that names the key: one needed and left out, a path that is not
     /// absolute, an owner or a group that is not one, a value out of its range.
     pub(super) fn of(mut table: FsTable, lookup: Lookup<'_>) -> Result<Self, ConfigError> {
-        let cache_path = table.cache_path.take();
+        // `fs.fill_socket` is read and ignored: no process serves a fill socket any more.
+        let (cache_path, _fill_socket) = (table.cache_path.take(), table.fill_socket.take());
         let node = move || {
             let cache_path = require("fs", "cache_path", cache_path)?;
             absolute("fs.cache_path", cache_path)

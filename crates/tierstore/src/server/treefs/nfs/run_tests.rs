@@ -590,8 +590,8 @@ async fn a_start_as_the_wrong_user_makes_nothing() {
     assert!(!settings.runtime_dir.exists());
 }
 
-/// Asserts that a start refused by what the neutral start does has that error's status: the control
-/// socket's path cannot be bound.
+/// Asserts that a start refused by what the neutral start does is the neutral start's error
+/// (`NfsError::Start`), which names the key: the control socket's path cannot be bound.
 #[tokio::test]
 async fn a_start_the_neutral_start_refuses_ends_with_its_status() {
     let (rig, _) = attached("nfs-run-neutral");

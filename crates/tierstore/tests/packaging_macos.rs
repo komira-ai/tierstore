@@ -557,8 +557,8 @@ fn the_plist_waits_210_seconds_on_exit() {
 }
 
 /// Asserts that the shipped `fs.toml` is the file the job's command line names and that it agrees
-/// with `tierstore.toml`: its `fs.fill_socket` is `local_cache.fill_socket` (both read and ignored),
-/// its `fs.mountpoint` is the mount provider's `mountpoint`, its `fs.cache_path` is
+/// with `tierstore.toml`: its `fs.fill_socket` is `local_cache.fill_socket` (both read and
+/// ignored), its `fs.mountpoint` is the mount provider's `mountpoint`, its `fs.cache_path` is
 /// `local_cache.path`, its runtime directory is under `run` beside the sockets, the account it
 /// names is `_tierstore`, the job's, and its NFS socket is on loopback. It would catch a file
 /// service that reads the cache or mount point of another place than the node's, so that the
