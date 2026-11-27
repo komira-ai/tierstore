@@ -192,3 +192,72 @@ async fn the_loop_takes_the_lock_at_a_tick_after_it_is_free_and_ends_when_halted
     halt.notify_one();
     looping.await.unwrap();
 }
+
+/// Asserts that a call the cache was given with `before_read_write` is made at each take of the
+/// lock, after the cache can write to its directory and before its mode says read-write to whoever
+/// watches it, and that a call that answers false is not made again: it would catch a take that
+/// says read-write before what reads the directory beside the cache (the tree store) has read it.
+#[tokio::test]
+async fn a_call_before_read_write_is_made_at_each_take_before_the_mode_says_so() {
+    let rig = Rig::new("tscache-hold-readying");
+    let holder = rig.locked();
+    let waiting = rig.locked();
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    for (name, again) in [("kept", true), ("once", false)] {
+        let seen = Arc::clone(&seen);
+        let modes = waiting.watch_mode();
+        // Not the cache itself, which would then hold itself.
+        let inner = Arc::downgrade(&waiting.inner);
+        waiting.before_read_write(Box::new(move || {
+            let writes = inner.upgrade().is_some_and(|inner| inner.read_write());
+            let mode = (writes, *modes.borrow());
+            seen.lock().unwrap().push((name, mode));
+            again
+        }));
+    }
+    let made = || std::mem::take(&mut *seen.lock().unwrap());
+    assert_eq!(waiting.tick().unwrap(), Tick::Waiting);
+    assert!(
+        made().is_empty(),
+        "no call while the lock is held elsewhere"
+    );
+    drop(holder);
+    assert_eq!(waiting.tick().unwrap(), Tick::Took);
+    let before = (true, Mode::ReadOnly);
+    assert_eq!(made(), vec![("kept", before), ("once", before)]);
+    assert_eq!(*waiting.watch_mode().borrow(), Mode::ReadWrite);
+    assert_eq!(waiting.tick().unwrap(), Tick::Held);
+    assert!(made().is_empty(), "no call while the cache holds the lock");
+    // Lost, and taken again: the call that asked to be kept is made again, alone.
+    std::fs::remove_file(rig.config.path.join(".lock")).unwrap();
+    assert_eq!(waiting.tick().unwrap(), Tick::Lost);
+    assert_eq!(waiting.tick().unwrap(), Tick::Took);
+    assert_eq!(made(), vec![("kept", before)]);
+}
+
+/// Asserts that a call given with `before_read_write` that panics does not stop the take: the
+/// cache holds the lock, is read-write and says so on its mode, and the call is made again at the
+/// next take. It would catch a take that a panicking call leaves with the flag of the write role
+/// set and the lock dropped, writing beside the next holder.
+#[tokio::test]
+async fn a_call_before_read_write_that_panics_leaves_the_take_done() {
+    let rig = Rig::new("tscache-hold-readying-panics");
+    let holder = rig.locked();
+    let waiting = rig.locked();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&calls);
+    waiting.before_read_write(Box::new(move || {
+        let _ = counted.fetch_add(1, Ordering::SeqCst);
+        panic!("a call that panics");
+    }));
+    drop(holder);
+    assert_eq!(waiting.tick().unwrap(), Tick::Took);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(waiting.mode(), Mode::ReadWrite);
+    assert_eq!(*waiting.watch_mode().borrow(), Mode::ReadWrite);
+    assert_eq!(waiting.tick().unwrap(), Tick::Held);
+    std::fs::remove_file(rig.config.path.join(".lock")).unwrap();
+    assert_eq!(waiting.tick().unwrap(), Tick::Lost);
+    assert_eq!(waiting.tick().unwrap(), Tick::Took);
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+}

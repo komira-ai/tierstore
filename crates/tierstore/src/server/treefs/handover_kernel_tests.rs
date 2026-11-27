@@ -5,6 +5,9 @@
 //! rig's settings; the reader is a thread that reads every file of the sample tree through the
 //! mount again and again and compares the bytes to what `sample` wrote.
 //!
+//! A file can also be mapped (`vm-memory`'s `MmapRegion`, a private read-only mapping) before the
+//! hand-over and read through the mapping after it.
+//!
 //! Every wait is on an event: the manager's `READY=1`, the end of a serve thread, the hand-over
 //! socket's file, and the number of rounds the reader has finished. A mount needs `/dev/fuse` and
 //! `fusermount3` (the mounting user is not root); where either is missing a test says so on
@@ -15,6 +18,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread::JoinHandle;
+
+use vm_memory::{FileOffset, MmapRegion, VolatileMemory as _};
 
 use super::config::FsSettings;
 use super::handover::{self, HandoverError, Paths};
@@ -245,6 +250,63 @@ fn hand_over_under_read() {
     );
     reader.after(1);
     assert_eq!(reader.finish(), Ok(()));
+    sigterm();
+    new.join().unwrap().unwrap();
+    assert!(mount.present(), "the store keeps the mount");
+}
+
+/// Asserts that a file mapped through the mount before the hand-over, as a compiler maps its
+/// inputs, is read whole through its mapping after it: every page, none of which the kernel held
+/// at the hand-over, is answered by the new instance with the file's bytes, and the process that
+/// holds the mapping takes no fault (a page the new instance answered with an error would end it
+/// with SIGBUS). Catches a hand-over that leaves the pages of a mapped file unreadable.
+#[test]
+fn a_file_mapped_before_the_hand_over_is_read_through_its_mapping_after_it() {
+    with_fuse(mapped_across_the_hand_over);
+}
+
+fn mapped_across_the_hand_over() {
+    let _one_at_a_time = SIGNALS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let rig = rig("tfs-handover-mapped");
+    let mount = Mount(rig.mountpoint.clone());
+    let settings = rig.settings();
+    let old_manager = FakeManager::start(&rig.dir.path().join("old.sock"));
+    let old = serving(&settings, &old_manager);
+    until_ready(&old_manager, &old);
+    let at = tree_at(&rig);
+
+    // Each file that has bytes, mapped by way of the process the mount is taken from, and no page
+    // of it read.
+    let mapped: Vec<_> = expected()
+        .into_iter()
+        .filter(|(_, bytes)| !bytes.is_empty())
+        .map(|(name, bytes)| {
+            let file = std::fs::File::open(at.join(name)).unwrap();
+            forget_pages(&file);
+            let map = MmapRegion::<()>::build(
+                Some(FileOffset::new(file, 0)),
+                bytes.len(),
+                libc::PROT_READ,
+                libc::MAP_PRIVATE,
+            )
+            .unwrap();
+            (name, map, bytes)
+        })
+        .collect();
+
+    let new_manager = FakeManager::start(&rig.dir.path().join("new.sock"));
+    let new = serving(&settings, &new_manager);
+    until_ready(&new_manager, &new);
+    old.join().unwrap().unwrap();
+    for (name, map, bytes) in &mapped {
+        let mut read = vec![0u8; bytes.len()];
+        let copied = map.get_slice(0, read.len()).unwrap().copy_to(&mut read[..]);
+        assert_eq!(copied, bytes.len(), "{name}: every page");
+        assert_eq!(&read, bytes, "{name} through its mapping");
+    }
+    drop(mapped);
     sigterm();
     new.join().unwrap().unwrap();
     assert!(mount.present(), "the store keeps the mount");

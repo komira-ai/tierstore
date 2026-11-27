@@ -1,5 +1,5 @@
 //! What the planner refuses: needed ranges the list cannot hold (`PlanError`), each with its exact
-//! message. A profile never makes a plan fail (`ranks.rs`).
+//! message. A shared pack fails the same way (`shared.rs`).
 //!
 //! Catches:
 //! - a needed range of a missing pack, or past its pack, planned as some other cells;

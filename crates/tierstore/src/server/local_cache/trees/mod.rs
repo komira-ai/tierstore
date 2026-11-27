@@ -57,9 +57,12 @@
 //!
 //! [`TreeStore::open`] reads the directory (module `start` has what it keeps). A tree that was
 //! marked ready is dropped if the cache no longer holds a range of it. A store over a cache that
-//! holds no lock reads and removes nothing, refuses to create, and serves what it read; the loop
-//! reads the directory again once the cache has taken the lock, keeping the attachments and reads
-//! the store had.
+//! holds no lock reads and removes nothing, refuses to create, and serves what it read. When the
+//! cache takes the lock (at a tick, or handed over by the process before it), the take reads the
+//! directory again before the cache says read-write (`LocalCache::before_read_write`), keeping
+//! the attachments and reads the store had: a request that waits for the write role (the mount's
+//! opens and reads, the provider, the fill socket) finds every placement the holder made, also
+//! those it made after this store was opened. The loop reads it again if that read failed.
 
 mod config;
 mod create;
@@ -145,10 +148,21 @@ impl TreeStore {
             root,
             staged: AtomicU64::new(0),
             state: Mutex::new(State::default()),
+            reading: Mutex::new(()),
             lists: Arc::default(),
         });
         let store = Self { shared };
         if enabled {
+            // A take of the write role reads the directory again before the cache says
+            // read-write, for as long as the store is open; given before the first read, so a
+            // take while that read runs is not missed.
+            let open = Arc::downgrade(&store.shared);
+            store.shared.cache.before_read_write(Box::new(move || {
+                open.upgrade().is_some_and(|shared| {
+                    let _ = Self { shared }.refresh();
+                    true
+                })
+            }));
             store.load()?;
         }
         Ok(store)
