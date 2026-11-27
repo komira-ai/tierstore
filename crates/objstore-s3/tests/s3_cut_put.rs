@@ -8,6 +8,7 @@
     reason = "an integration test: a failed unwrap or expect is the failure it reports"
 )]
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -27,14 +28,14 @@ fn key(name: &str) -> ObjectKey {
     ObjectKey::new(name).unwrap()
 }
 
-/// A store that looks at the key at once after a PUT that got no answer: the service's
+/// A store, shared by the test and the put it spawns, that looks at the key at once after a PUT that got no answer: the service's
 /// [`FakeS3::hold_heads`] orders the look after the cut PUT, as the wait does on a real store.
-fn store(s3: &FakeS3) -> S3Store {
+fn store(s3: &FakeS3) -> Arc<S3Store> {
     let tuning = S3Tuning {
         cut_put_look_after: Duration::ZERO,
         ..S3Tuning::default()
     };
-    s3.store_tuned(CONDITIONAL, tuning)
+    Arc::new(s3.store_tuned(CONDITIONAL, tuning))
 }
 
 /// `bytes` as a body of one chunk.
