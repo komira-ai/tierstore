@@ -6,8 +6,8 @@
 use std::collections::BTreeSet;
 
 use super::fake::{
-    FS_LABEL, FS_MOUNT, Fake, LABEL, NEW, NEW_VERSION, OLD, assert_failed, assert_ok, in_flight,
-    path,
+    CONFIG, FS_LABEL, FS_MOUNT, Fake, LABEL, NEW, NEW_VERSION, OLD, assert_failed, assert_ok,
+    in_flight, path,
 };
 use crate::server::update_hook::{
     FS_CONFIG_FILE, FS_LAUNCHD_PLIST, LAUNCHD_PLIST, Marker, Reason, Record, Step,
@@ -15,11 +15,14 @@ use crate::server::update_hook::{
 
 use Step::{Cleanup, Cutover, Prepare, Rollback, Verify};
 
-/// The calls to the launchd domain and the host so far, in order.
+/// The calls to the launchd domain and the host so far, in order, but the reads of the node's file
+/// (every step reads it once to tell whether the node serves its own mount).
 fn acts(fake: &Fake) -> Vec<String> {
+    let node_file = format!("host.config {CONFIG}");
     fake.log()
         .into_iter()
         .filter(|call| call.starts_with("launchd.") || call.starts_with("host."))
+        .filter(|call| *call != node_file)
         .collect()
 }
 
