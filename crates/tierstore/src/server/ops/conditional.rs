@@ -33,7 +33,7 @@ use super::{Writes, detached, refuse_reserved, upload_error};
 
 /// How a put of an object is stored as its body streams, for the key `writes` says and the
 /// conditions of `headers`: `None` for a put whose conditions this front does not serve (which
-/// is refused, see `put_conditional`). `If-None-Match: *` makes the full key's put create-only,
+/// is refused, see [`refused`]). `If-None-Match: *` makes the full key's put create-only,
 /// and `If-Match` alone makes it replace on that ETag ([`Writes::Swaps`], without its quotes).
 /// Any other key keeps its own way: the checks of its role refused `If-Match` before this.
 pub(super) fn streamed<'a>(headers: &'a HeaderMap, writes: Writes<'a>) -> Option<Writes<'a>> {

@@ -368,8 +368,9 @@ fn joined<T>(done: Result<Result<T, Error>, JoinError>) -> Result<T, Error> {
     })
 }
 
-/// Whether a put only creates, which is what it does when it has no `If-Match` and its
-/// `If-None-Match` is absent or `*`: the body of such a put is streamed to the backend.
+/// Whether a put only creates: it has no `If-Match`, and its `If-None-Match` is absent or `*`
+/// (the rule of a scoped key). Which puts stream their body, and how, is decided by
+/// [`conditional::streamed`].
 pub(super) fn creates_only(headers: &HeaderMap) -> bool {
     let conditions = (
         header(headers, "if-match"),
