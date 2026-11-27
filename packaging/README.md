@@ -711,8 +711,8 @@ params = { socket = "/var/lib/tierstore/provider.sock", mountpoint = "/run/tiers
 `mountpoint` is the node's file system mount, under which the provider places each job's tree:
 the `fs` interface's `params.mountpoint` in the same file. Since 0.3.196 `tierstore fs` is no longer
 a process of its own (it exits 2 and names the interface; the unit that ran it is gone), so a file
-with no `fs` interface has no process serving the mount, and the
-provider answers every `Prepare` and `Mount` `UNAVAILABLE` there. jobscheduler's agent on the node takes the socket and the provider's directory as a
+with a `mount-provider` entry and no `fs` interface has no process serving the mount, and the load
+refuses it. jobscheduler's agent on the node takes the socket and the provider's directory as a
 read-only mount root, in flags of its own:
 
 ```text

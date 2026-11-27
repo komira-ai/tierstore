@@ -491,18 +491,27 @@ pub(super) fn with_legacy(
     Ok(tables)
 }
 
+/// Why a `mount-provider` entry is refused in a file with no `fs` entry: the provider answers each
+/// source with a directory under the `fs` interface's mount, and since 0.3.196 no other process
+/// serves one (`tierstore fs` exits 2), so such a node would start and answer no job its tree. The
+/// file of a Mac of the two-process layout is such a file.
+pub(super) const NO_FS: &str = "a mount-provider needs an [[interface]] with type = \"fs\" in the same file: the provider answers directories under that interface's mount, and no other process serves one (tierstore fs is no longer a process of its own)";
+
 /// The interfaces the entries of a file stand for.
 ///
 /// # Errors
 /// A [`ConfigError`] that names the entry by its place in the list (`interface[1]`): a type that
 /// is not one, a missing or doubled place to listen, an address in use by another entry, a param
 /// the type does not take, `oci` or `trees` entries that disagree, a second `mount-provider` or
-/// `fs` entry, and a provider's `mountpoint` that is not the `fs` interface's.
+/// `fs` entry, a `mount-provider` entry in a file with no `fs` entry ([`NO_FS`]), and a
+/// provider's `mountpoint` that is not the `fs` interface's.
 pub(super) fn interfaces(tables: &[InterfaceTable]) -> Result<Interfaces, ConfigError> {
     let mut s3 = Vec::new();
     let mut oci: Option<(usize, OciFlags)> = None;
     let mut trees: Option<(usize, TreesFlags)> = None;
     let mut provider: Option<ProviderFlags> = None;
+    // The provider's place.
+    let mut provider_at: Option<String> = None;
     // The provider's place, when it gives its own `mountpoint`.
     let mut provider_given: Option<String> = None;
     let mut fs: Option<FsInterface> = None;
@@ -518,8 +527,9 @@ pub(super) fn interfaces(tables: &[InterfaceTable]) -> Result<Interfaces, Config
             "mount-provider" => {
                 provider = Some(provider_of(&at, &table.params)?);
                 if table.params.mountpoint.is_some() {
-                    provider_given = Some(at);
+                    provider_given = Some(at.clone());
                 }
+                provider_at = Some(at);
                 continue;
             }
             "fs" if fs.is_some() => {
@@ -592,6 +602,9 @@ pub(super) fn interfaces(tables: &[InterfaceTable]) -> Result<Interfaces, Config
     if s3.is_empty() {
         let why = "it needs at least one interface with type = \"s3\"";
         return Err(invalid("interface", why));
+    }
+    if let (Some(at), None) = (&provider_at, &fs) {
+        return Err(invalid(&format!("{at}.type"), NO_FS));
     }
     provider_mountpoint(provider.as_mut(), provider_given.as_deref(), fs.as_ref())?;
     let oci = oci.map_or_else(OciFlags::none, |(_, flags)| flags);

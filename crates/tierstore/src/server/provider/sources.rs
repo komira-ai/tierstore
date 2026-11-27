@@ -71,7 +71,8 @@ pub(super) struct Settings {
     /// The mount of the node's file system.
     pub mountpoint: PathBuf,
     /// Whether this process serves the file system at `mountpoint` (the file has an `fs`
-    /// interface); every `Prepare` and `Mount` is [`no_fs`] if not.
+    /// interface, which a file with a provider must have); every `Prepare` and `Mount` is
+    /// [`no_fs`] if not.
     pub served: bool,
     /// The longest read of a tree's sidecar.
     pub list_timeout: Duration,
@@ -95,7 +96,8 @@ pub(super) struct Settings {
 pub(super) const PREFETCH_QUEUE_BYTES: u64 = 256 << 20;
 
 /// The reason of every `Prepare` and `Mount` of a provider whose mount `mountpoint` no process of
-/// this release serves: the node's file has no `fs` interface.
+/// this release serves: no `fs` interface serves it (a file that loads has one, so this is the
+/// answer of a provider whose `served` flag is clear).
 pub(super) fn no_fs(mountpoint: &std::path::Path) -> String {
     format!(
         "no file system serves {}: the node's file has no [[interface]] with type = \"fs\", and \

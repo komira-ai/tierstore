@@ -69,7 +69,7 @@
 //! (`Record::stale`).
 
 mod exec;
-pub(super) mod fs;
+pub(in crate::server) mod fs;
 mod volume;
 
 use std::cell::Cell;

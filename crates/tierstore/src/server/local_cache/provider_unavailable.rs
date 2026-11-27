@@ -6,8 +6,9 @@
 //! counts say, without a look at the jobs, why a node's starts wait and fail on the provider's
 //! side:
 //!
-//! - `no_fs`: a `Prepare` or a `Mount` on a node whose file has no `fs` interface, where no process
-//!   of this release serves the mount the provider answers directories under.
+//! - `no_fs`: a `Prepare` or a `Mount` of a provider whose mount no process of this release serves
+//!   (its `served` flag is clear). A file with a `mount-provider` entry and no `fs` entry is
+//!   refused at load, so a node that loaded its file does not count it.
 //! - `not_ready`: a `Mount` that waited its time and found the tree not yet placed.
 //! - `not_prepared_here`: a `Mount` of a source this process has no preparation of and finds no
 //!   placement of (the process started after the source's `Prepare`).

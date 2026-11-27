@@ -49,7 +49,7 @@
 
 mod args;
 pub mod config_hook;
-mod launchd;
+pub(super) mod launchd;
 mod look;
 pub mod machine;
 mod old_layout;
