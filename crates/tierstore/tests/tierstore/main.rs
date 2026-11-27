@@ -30,6 +30,7 @@ mod list_uploads_reserved;
 mod multipart;
 mod open_read;
 mod recheck;
+mod reserved_keys;
 #[cfg(feature = "s3")]
 mod s3;
 #[cfg(feature = "s3")]
