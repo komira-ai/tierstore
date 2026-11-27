@@ -186,9 +186,6 @@ jobs:
       # Fails when a crate is under 99.00% of its lines or of its branches.
       - name: Per-crate table and 99% gate
         run: cargo "+$COVERAGE_TOOLCHAIN" run -p coverage-gate --locked -- --lcov target/coverage/lcov.info --root "$GITHUB_WORKSPACE" --summary-file "$GITHUB_STEP_SUMMARY"
-      # TEMPORARY (removed before merge): the preparation tests, 500 times each.
-      - name: Stress the preparation tests 500 times
-        run: cargo "+$COVERAGE_TOOLCHAIN" nextest run -p tierstore --features tierstore/s3 --locked --stress-count 500 -E 'test(~server::provider::prepare_tests::) | test(~server::provider::prepare_bound_tests::)'
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: ${{ !cancelled() }}
         with:
