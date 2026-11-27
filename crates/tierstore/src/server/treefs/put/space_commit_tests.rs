@@ -10,9 +10,9 @@ use rustix::io::Errno;
 
 use super::super::carry::{Handed, HeldDir};
 use super::super::changes::Topic;
-use super::super::fake::failed;
-use super::super::testing::{DEADLINE, Rig, SpaceRig, sha};
+use super::super::testing::{DEADLINE, SpaceRig, sha};
 use super::{PutSpace, dir_ino};
+use crate::Error;
 use crate::server::treefs::ino;
 use crate::server::treefs::testing::until;
 
@@ -36,9 +36,9 @@ fn staged(space: &PutSpace, dir: u64, name: &str, bytes: &[u8]) -> u64 {
     attr.ino
 }
 
-/// Asserts that the commit uploads the bytes as the object `<dir>/<name>`, with their size and
-/// SHA-256 in the request, and that the committed name then has the number of the `.part` name,
-/// mode 0400 and the size, while the `.part` name is gone.
+/// Asserts that the commit puts the bytes upstream once, as the object `<dir>/<name>`, and that the
+/// committed name then has the number of the `.part` name, mode 0400 and the size, while the
+/// `.part` name is gone.
 #[test]
 fn a_commit_uploads_the_bytes_and_shows_the_committed_name() {
     let rig = SpaceRig::new("put-commit");
@@ -52,10 +52,7 @@ fn a_commit_uploads_the_bytes_and_shows_the_committed_name() {
         rig.puts.object(&format!("{DIR}/pack")).unwrap(),
         b"the pack"
     );
-    let asked = rig.puts.asked.lock().unwrap().clone();
-    assert_eq!(asked.len(), 1);
-    let line = format!("put {DIR}/pack {} 8 from ", sha(b"the pack"));
-    assert!(asked[0].starts_with(&line), "{}", asked[0]);
+    assert_eq!(rig.puts.keys(), [format!("{DIR}/pack")]);
     let committed = space.lookup(dir, "pack").unwrap().unwrap();
     assert_eq!(
         (committed.ino, committed.perm, committed.size),
@@ -65,32 +62,35 @@ fn a_commit_uploads_the_bytes_and_shows_the_committed_name() {
 }
 
 /// Asserts the errno of each answer of the upload that is not a success (`exists_different`
-/// `EEXIST`, `checksum` `EBADMSG`, `toolarge` `EFBIG`, `stage` `EIO`, a word not known `EIO`, the
-/// socket's refusal `EIO`, a line that is not JSON `EIO`), each asked once; that the file stays
-/// staged after each; and that the same rename then commits it.
+/// `EEXIST`, `checksum` `EBADMSG`, `toolarge` `EFBIG`, each from the upstream's refusal, and
+/// `stage` `EIO`, for a staged file the cache cannot open, which no upstream is asked for), each
+/// asked once; that the file stays staged after each; and that the same rename then commits it.
 #[test]
 fn each_answer_of_the_upload_has_its_errno_and_leaves_the_file_staged() {
     let rig = SpaceRig::new("put-commit-errno");
     let space = &rig.space;
     let dir = nonce(space);
     let _ = staged(space, dir, "pack.part", b"bytes");
-    let answers = [
-        (failed("exists_different"), Errno::EXIST),
-        (failed("checksum"), Errno::BADMSG),
-        (failed("toolarge"), Errno::FBIG),
-        (failed("stage"), Errno::IO),
-        (failed("later_word"), Errno::IO),
-        ("refused malformed".to_owned(), Errno::IO),
-        ("not json".to_owned(), Errno::IO),
+    let key = format!("{DIR}/pack");
+    let refusals = [
+        (Error::AlreadyExists(key.clone()), Errno::EXIST),
+        (Error::BadDigest(key.clone()), Errno::BADMSG),
+        (Error::TooLarge(key), Errno::FBIG),
     ];
-    for (count, (answer, errno)) in answers.into_iter().enumerate() {
-        rig.puts.script.lock().unwrap().push_back(answer.clone());
+    for (count, (refusal, errno)) in refusals.into_iter().enumerate() {
+        rig.puts.fail_next(refusal);
         let renamed = space.rename((dir, "pack.part"), (dir, "pack"), false);
-        assert_eq!(renamed, Err(errno), "{answer}");
+        assert_eq!(renamed, Err(errno), "{errno:?}");
         assert_eq!(rig.puts.count(), count + 1);
         assert_eq!(space.lookup(dir, "pack.part").unwrap().unwrap().size, 5);
         assert_eq!(space.lookup(dir, "pack").unwrap(), None);
     }
+    let link = rig.rig.link_staged(b"bytes");
+    let renamed = space.rename((dir, "pack.part"), (dir, "pack"), false);
+    assert_eq!(renamed, Err(Errno::IO));
+    assert_eq!(rig.puts.count(), 3);
+    assert_eq!(space.lookup(dir, "pack.part").unwrap().unwrap().size, 5);
+    link.restore();
     assert!(rig.pauses.lock().unwrap().is_empty());
     space
         .rename((dir, "pack.part"), (dir, "pack"), false)
@@ -106,13 +106,7 @@ fn an_upstream_that_does_not_take_the_put_is_asked_again() {
     let space = &rig.space;
     let dir = nonce(space);
     let _ = staged(space, dir, "pack.part", b"again");
-    for _ in 0..3 {
-        rig.puts
-            .script
-            .lock()
-            .unwrap()
-            .push_back(failed("upstream"));
-    }
+    rig.puts.fail_next_times(3);
     space
         .rename((dir, "pack.part"), (dir, "pack"), false)
         .unwrap();
@@ -133,13 +127,7 @@ fn an_upstream_that_never_takes_the_put_is_eio_at_the_deadline() {
     let space = &rig.space;
     let dir = nonce(space);
     let _ = staged(space, dir, "pack.part", b"never");
-    for _ in 0..100 {
-        rig.puts
-            .script
-            .lock()
-            .unwrap()
-            .push_back(failed("upstream"));
-    }
+    rig.puts.fail_next_times(100);
     assert_eq!(
         space.rename((dir, "pack.part"), (dir, "pack"), false),
         Err(Errno::IO)
@@ -154,11 +142,12 @@ fn an_upstream_that_never_takes_the_put_is_eio_at_the_deadline() {
     assert_eq!(space.lookup(dir, "pack.part").unwrap().unwrap().size, 5);
 }
 
-/// Asserts that a fill socket that is not there is asked again until the deadline, then `EIO`,
-/// and the file stays staged.
+/// Asserts that a cache that stays read-only (another process holds the lock of its directory, so
+/// the put waits for the write role) is asked again until the deadline, then `EIO`, that nothing
+/// reaches the upstream, and the file stays staged.
 #[test]
-fn a_fill_socket_that_is_not_there_is_eio_at_the_deadline() {
-    let rig = SpaceRig::of(Rig::new("put-commit-nosocket"), 1, false);
+fn a_cache_that_stays_read_only_is_eio_at_the_deadline() {
+    let rig = SpaceRig::read_only("put-commit-read-only");
     let space = &rig.space;
     let dir = nonce(space);
     let _ = staged(space, dir, "pack.part", b"nowhere");
@@ -167,6 +156,7 @@ fn a_fill_socket_that_is_not_there_is_eio_at_the_deadline() {
         Err(Errno::IO)
     );
     assert!(!rig.pauses.lock().unwrap().is_empty());
+    assert_eq!(rig.puts.count(), 0);
     assert!(space.lookup(dir, "pack.part").unwrap().is_some());
 }
 

@@ -1,4 +1,4 @@
-//! Fixtures of the tests of the fill socket: an upstream object made of blobs, and the questions a
+//! Fixtures of the tests of the core's fills: an upstream object made of blobs, and the questions a
 //! test asks of a cache after the fills.
 
 use super::LocalCache;
@@ -12,7 +12,7 @@ pub(in crate::server) fn distinct(seed: usize, len: usize) -> Vec<u8> {
         .collect()
 }
 
-/// An upstream object made of blobs, one after the other: what the fills of the fill socket read
+/// An upstream object made of blobs, one after the other: what the core's fills read
 /// from.
 pub(in crate::server) struct Pack {
     pub(in crate::server) key: String,
@@ -83,7 +83,7 @@ pub(in crate::server) fn recency(cache: &LocalCache) -> Vec<String> {
         .collect()
 }
 
-/// The name on disk of the blob `sha256` of the fill socket: its digest, as for any object
+/// The name on disk of the blob `sha256` of the core: its digest, as for any object
 /// `cas/l/<sha256>`.
 pub(in crate::server) fn blob_hex(sha256: &str) -> String {
     name_of(&format!("cas/l/{sha256}")).hex

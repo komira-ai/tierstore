@@ -19,15 +19,18 @@ use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 use rustix::fs::{CWD, FileType, Mode, OFlags, XattrFlags};
+use tokio::sync::Semaphore;
 
+use crate::server::local_cache::testing::{Rig as NodeRig, Tamper};
 use crate::server::treefs::config::FsSettings;
-use crate::server::treefs::fills::Reach;
+use crate::server::treefs::fills::Calls;
 use crate::server::treefs::put::PutSettings;
 use crate::server::treefs::put::config::PutConfig;
 use crate::server::treefs::put::space::{PutAttr, PutSpace};
 use crate::server::treefs::put_fs::{absent, attr, entry};
 use crate::server::treefs::run::{Kernel, Prepared, Running};
 use crate::server::treefs::testing::{Rig, sample, until, with_fuse};
+use crate::{Backend as _, Op};
 
 /// The job's directory, below `put/`.
 const JOB: &str = "cas/b/build/nonce";
@@ -57,10 +60,34 @@ fn settings(rig: &Rig) -> FsSettings {
     settings
 }
 
-/// A process serving the mount of a rig, with the put directory.
+/// The puts the cache of a [`Served`] makes to its upstream, held there from the moment they
+/// reach it until they are let go.
+struct Held {
+    gate: Arc<Semaphore>,
+    tamper: Arc<Tamper>,
+}
+
+impl Held {
+    /// Lets the waiting puts, and the next ones, go on.
+    fn let_go(&self) {
+        self.gate.add_permits(1 << 16);
+    }
+
+    /// Waits until `count` puts are waiting at the upstream.
+    fn wait_for(&self, count: u64) {
+        until(|| self.tamper.at_puts() >= count);
+    }
+}
+
+/// A process serving the mount of a rig, with the put directory: its core calls a cache of its own
+/// that writes through to an upstream the test reads, which a restart keeps.
 struct Served {
     running: Option<Running>,
     settings: FsSettings,
+    /// What the core calls.
+    calls: Calls,
+    /// The cache the core calls, and the upstream it puts to.
+    store: NodeRig,
     rig: Rig,
 }
 
@@ -68,13 +95,37 @@ impl Served {
     /// A start of the process over a new rig named after `name`.
     fn start(name: &str) -> Self {
         let rig = Rig::new(name, sample());
+        let store = {
+            let _entered = rig.work.handle().enter();
+            NodeRig::writing(&format!("{name}-store"))
+        };
+        let calls = Calls {
+            cache: store.cache.clone(),
+            trees: None,
+            runtime: rig.work.handle(),
+        };
         let settings = settings(&rig);
-        let running = Running::start((&settings, &Reach::Socket), &Kernel::real()).unwrap();
+        let running = Running::start((&settings, &calls), &Kernel::real()).unwrap();
         Self {
             running: Some(running),
             settings,
+            calls,
+            store,
             rig,
         }
+    }
+
+    /// Holds the puts of the cache at the upstream from now on.
+    fn hold(&self) -> Arc<Held> {
+        Arc::new(Held {
+            gate: self.store.tamper.hold_puts(),
+            tamper: Arc::clone(&self.store.tamper),
+        })
+    }
+
+    /// The puts that reached the upstream.
+    fn puts(&self) -> u64 {
+        self.store.calls(Op::Put)
     }
 
     /// The path of `name` below `put/`.
@@ -89,7 +140,12 @@ impl Served {
 
     /// The bytes uploaded as the object `key`.
     fn object(&self, key: &str) -> Option<Vec<u8>> {
-        self.rig.upstream.puts.object(key)
+        let got = self
+            .rig
+            .work
+            .handle()
+            .block_on(self.store.tamper.get(key, None));
+        got.ok().map(|bytes| bytes.to_vec())
     }
 
     /// The hand-over of a running instance to a successor, as `handoff-fs-v1` does it: the copies
@@ -117,7 +173,7 @@ impl Served {
     fn adopt(&mut self, device: OwnedFd, control: Option<UnixListener>) {
         let prepared = Prepared::load(&self.settings).unwrap();
         let next = Running::adopt(
-            (&self.settings, &Reach::Socket),
+            (&self.settings, &self.calls),
             prepared,
             device,
             (control, false),
@@ -395,7 +451,7 @@ fn a_killed_writer_leaves_its_file_staged_and_uploads_nothing() {
         writer.kill().unwrap();
         assert!(!writer.wait().unwrap().success());
         until(|| store.open_handles().is_empty());
-        assert_eq!(served.rig.upstream.puts.count(), 0);
+        assert_eq!(served.puts(), 0);
         assert_eq!(std::fs::metadata(&part).unwrap().len(), 4);
         std::fs::rename(&part, served.at(JOB).join("pack")).unwrap();
         assert_eq!(served.object(&format!("{JOB}/pack")).unwrap(), b"half");
@@ -548,16 +604,15 @@ fn a_commit_uploading_at_a_hand_over_is_answered_before_the_quiesce_returns() {
         let mut served = Served::start("put-mount-commit-at-handover");
         let job = served.at(JOB);
         write_file(&job.join("pack.part"), b"uploading");
-        let puts = std::sync::Arc::clone(&served.rig.upstream.puts);
-        puts.hold();
+        let puts = served.hold();
         let first = served.running.take().unwrap();
-        let gate = std::sync::Arc::clone(&puts);
+        let gate = Arc::clone(&puts);
         *first.core().put().unwrap().before_drain.lock().unwrap() =
-            Some(std::sync::Arc::new(move || gate.let_go()));
+            Some(Arc::new(move || gate.let_go()));
         let (device, control) = first.share().unwrap();
         std::thread::scope(|scope| {
             let rename = scope.spawn(|| std::fs::rename(job.join("pack.part"), job.join("pack")));
-            puts.wait_for_held(1);
+            puts.wait_for(1);
             first.quiesce();
             assert_eq!(
                 served.object(&format!("{JOB}/pack")).as_deref(),
@@ -573,8 +628,8 @@ fn a_commit_uploading_at_a_hand_over_is_answered_before_the_quiesce_returns() {
     });
 }
 
-/// Asserts that while a hand-over waits for a commit whose upload the node's tierstore does not
-/// answer (as while it restarts and its fill socket is away), the mount still answers: a `statfs`
+/// Asserts that while a hand-over waits for a commit whose upload the node's cache has not
+/// finished (the upstream holds it), the mount still answers: a `statfs`
 /// of the mount made in that wait is answered, and only then is the upload let go, so the quiesce
 /// returns with the commit uploaded. Catches a quiesce that stops the readers before it waits for
 /// the upload, which leaves the mount answering nothing until the upload's deadline: a `statfs`
@@ -585,8 +640,7 @@ fn the_mount_answers_while_a_hand_over_waits_for_an_upload() {
         let mut served = Served::start("put-mount-answers-in-quiesce");
         let job = served.at(JOB);
         write_file(&job.join("pack.part"), b"uploading");
-        let puts = Arc::clone(&served.rig.upstream.puts);
-        puts.hold();
+        let puts = served.hold();
         let first = served.running.take().unwrap();
         let (said, answered) = mpsc::channel();
         let (gate, mountpoint) = (Arc::clone(&puts), served.rig.mountpoint.clone());
@@ -604,7 +658,7 @@ fn the_mount_answers_while_a_hand_over_waits_for_an_upload() {
         let (device, control) = first.share().unwrap();
         std::thread::scope(|scope| {
             let rename = scope.spawn(|| std::fs::rename(job.join("pack.part"), job.join("pack")));
-            puts.wait_for_held(1);
+            puts.wait_for(1);
             first.quiesce();
             // An answer that did not come leaves the upload held: it is let go for the rename.
             let heard = answered.try_recv();

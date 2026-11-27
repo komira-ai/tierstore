@@ -10,7 +10,7 @@ use super::super::fixtures::{EPOCH, attached, loopback, settings};
 use super::super::wire_client::{Client, Cred, Dec, Enc, GETATTR, LOOKUP, NFS, READ};
 use super::tests::{Recorder, closed, euid};
 use super::{Leaving, Running};
-use crate::server::treefs::testing::Rig;
+use crate::server::treefs::testing::{PACK, Rig, sha};
 
 fn me() -> Cred {
     Cred::Sys(euid(), 0)
@@ -45,7 +45,7 @@ async fn started(
 ) {
     let runner = Recorder::new(true);
     let running = Running::start(
-        &settings(rig, loopback()),
+        (&settings(rig, loopback()), &rig.calls()),
         runner.clone(),
         euid(),
         None,
@@ -185,9 +185,29 @@ async fn a_resent_lookup_or_read_after_restart_is_answered_identically() {
     second.leave(Leaving::Signal).await.unwrap();
 }
 
-/// Asserts that the attachments are restored by a restart from the file, the pins are asserted
-/// again to the cache under the mount's id (the same for both starts of one boot, another for the
-/// next boot), and the control socket takes the attachments of the next start.
+/// Fills the blob `content` of the sample tree into the rig's cache, and pins it for `tree` of
+/// `mount`.
+fn pin_for(rig: &Rig, (mount, tree): (&str, &str), content: &[u8]) {
+    let digest = sha(content);
+    let offset = rig.upstream.built.lock().unwrap().offsets[&digest];
+    let asks = rig.asks();
+    asks.fill_blob(
+        (digest.as_str(), content.len() as u64),
+        (PACK, offset),
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        asks.pin(mount, tree, &[digest.as_str()]).unwrap(),
+        "ok 1 0 0"
+    );
+}
+
+/// Asserts that the attachments are restored by a restart from the file, the cache is told the
+/// trees attached under the mount's id (the same for both starts of one boot, another for the
+/// next boot): what the mount pinned for an attached tree stays pinned, and the pins of a tree that
+/// is not attached and of another boot's mount are taken away; and the control socket takes the
+/// attachments of the next start.
 #[tokio::test]
 async fn attachments_and_pins_are_restored_on_restart() {
     let (rig, digest) = attached("nfs-restart-pins");
@@ -196,7 +216,13 @@ async fn attachments_and_pins_are_restored_on_restart() {
     first._setup.core.settled().unwrap();
     first.leave(Leaving::Signal).await.unwrap();
     closed(address).await;
-    let asked = rig.upstream.asked("pins-live").len();
+    let mount = format!("nfs-{EPOCH:08x}");
+    let next_boot = format!("nfs-{:08x}", EPOCH + 1);
+    let cc: Vec<u8> = (0..3000u32).map(|i| (i % 241) as u8).collect();
+    let big: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
+    pin_for(&rig, (&mount, &digest), b"int a;");
+    pin_for(&rig, (&mount, "not-attached"), &cc);
+    pin_for(&rig, (&next_boot, &digest), &big);
 
     let (second, _, client, _, _) = started(&rig, EPOCH).await;
     drop(client);
@@ -209,11 +235,11 @@ async fn attachments_and_pins_are_restored_on_restart() {
         .collect();
     assert_eq!(attached, [format!("{digest} run-1")]);
     second._setup.core.settled().unwrap();
-    let pins = rig.upstream.asked("pins-live");
-    assert_eq!(pins.len(), asked + 1);
-    let live = pins.last().unwrap();
-    assert!(live.contains(&format!("nfs-{EPOCH:08x}")), "{live}");
-    assert!(live.ends_with(&digest), "{live}");
+    // The start told the cache the attached trees: no other pin of the mount, and none of another
+    // mount, was left for the cache to take away.
+    assert_eq!(rig.node.pins_live(&mount, &[digest.clone()]).unwrap(), 0);
+    // The pin of the attached tree is the one that stayed.
+    assert!(rig.node.unpin(&mount, &digest).unwrap() >= 1);
     second.leave(Leaving::Signal).await.unwrap();
 }
 
@@ -224,7 +250,7 @@ async fn a_mount_that_is_there_is_not_made_again() {
     let (rig, _) = attached("nfs-restart-mounted");
     let runner = Recorder::mounted_at(&rig.mountpoint);
     let running = Running::start(
-        &settings(&rig, loopback()),
+        (&settings(&rig, loopback()), &rig.calls()),
         runner.clone(),
         euid(),
         None,
@@ -244,7 +270,7 @@ async fn a_mount_that_is_there_is_not_made_again() {
 
     let runner = Recorder::new(true);
     let running = Running::start(
-        &settings(&rig, loopback()),
+        (&settings(&rig, loopback()), &rig.calls()),
         runner.clone(),
         euid(),
         None,
@@ -272,7 +298,7 @@ async fn a_mount_that_is_there_is_not_made_again() {
 async fn a_mount_made_from_another_address_is_cleared_and_made_again() {
     let (rig, _) = attached("nfs-restart-mounted-from");
     let first = Running::start(
-        &settings(&rig, loopback()),
+        (&settings(&rig, loopback()), &rig.calls()),
         Recorder::new(true),
         euid(),
         None,
@@ -303,7 +329,7 @@ async fn a_mount_made_from_another_address_is_cleared_and_made_again() {
     // Port 0 binds another port than `was`, which the stopped server has released.
     let stale = Recorder::mounted_at(&rig.mountpoint);
     let other = Running::start(
-        &settings(&rig, loopback()),
+        (&settings(&rig, loopback()), &rig.calls()),
         stale.clone(),
         euid(),
         None,
@@ -328,7 +354,7 @@ async fn a_mount_made_from_another_address_is_cleared_and_made_again() {
 
     let busy = Recorder::busy_at(&rig.mountpoint, true);
     let forced = Running::start(
-        &settings(&rig, loopback()),
+        (&settings(&rig, loopback()), &rig.calls()),
         busy.clone(),
         euid(),
         None,
@@ -352,7 +378,7 @@ async fn a_mount_made_from_another_address_is_cleared_and_made_again() {
 
     let stuck = Recorder::busy_at(&rig.mountpoint, false);
     let refused = Running::start(
-        &settings(&rig, loopback()),
+        (&settings(&rig, loopback()), &rig.calls()),
         stuck.clone(),
         euid(),
         None,

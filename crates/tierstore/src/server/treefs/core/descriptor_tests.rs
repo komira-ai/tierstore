@@ -7,8 +7,6 @@ use std::process::Command;
 
 use super::*;
 use crate::server::treefs::attach::Failure;
-use crate::server::treefs::fill_client::FillClient;
-use crate::server::treefs::fills::Fills as _;
 use crate::server::treefs::ino;
 use crate::server::treefs::testing::{Logged, Rig, logged, open_cached, sample};
 
@@ -96,7 +94,7 @@ fn three_thousand_handles_of_one_cache_file_hold_one_real_descriptor() {
 }
 
 // What a failed open for want of descriptors is: the reason recorded for it and said, the fills it
-// asks the fill socket for (none: the cache holds the blob), and the tries it makes (one).
+// asks the cache to fill (none: the cache holds the blob), and the tries it makes (one).
 const NO_DESCRIPTOR_REASON: &str = "no descriptor: Too many open files (os error 24)";
 const NO_DESCRIPTOR_FILLS: usize = 0;
 const NO_DESCRIPTOR_TRIES: u32 = 1;
@@ -158,9 +156,9 @@ fn running_out_of_descriptors_fails_the_open() {
     let (rig, path) = rig_with_blob("tfs-fds-emfile", 3000);
     let core = &rig.core;
     // A handle opened before; and the tool, not open yet, is what fails. Its first open and release
-    // are before the limit: the fake node writes the file of the cache for the fill it asks (it is
-    // in this process, and would run out of descriptors too), and the core keeps the connection
-    // of the fill socket, which a new one would not be had for.
+    // are before the limit: the node's cache writes the file for the fill it is asked (it is in
+    // this process, and would run out of descriptors too), so the open that fails is one of a blob
+    // the cache holds, which no fill is asked for.
     let before = open_cached(core, ino::of(1, 3), false).unwrap();
     let expected = std::fs::read(&path).unwrap();
     let target = ino::of(1, 4);
@@ -189,19 +187,6 @@ fn running_out_of_descriptors_fails_the_open() {
     };
     assert_eq!(refused.raw_os_error(), Some(24), "{refused}");
     let failed = open_cached(core, target, false);
-    // A client of the fill socket with no connection kept cannot make one either: it says why at
-    // once, and pauses for nothing.
-    let paused = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let pauses = std::sync::Arc::clone(&paused);
-    let client = FillClient::pausing(
-        rig.dir.path().join("fill.sock"),
-        3,
-        std::time::Duration::from_secs(30),
-        std::sync::Arc::new(move |_| {
-            let _ = pauses.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        }),
-    );
-    let unconnected = client.fill_blob(("ab", 1), ("k", 0), None);
     // Descriptors free again: the same open succeeds.
     drop(held);
     setrlimit(Resource::Nofile, was).unwrap();
@@ -209,14 +194,6 @@ fn running_out_of_descriptors_fails_the_open() {
     drop(guard);
     assert_eq!(failed, Err(Errno::Io), "{}", log.text());
     assert_eq!(core.descriptor_failures(), 1);
-    assert_eq!(
-        unconnected,
-        Err(
-            "no descriptor: cannot connect to the fill socket: Too many open files (os error 24)"
-                .to_owned()
-        )
-    );
-    assert_eq!(paused.load(std::sync::atomic::Ordering::SeqCst), 0);
     assert_eq!(core.read(before, 0, 3000).unwrap(), expected);
     assert!(after.is_ok(), "{after:?}");
     let failures = core.detach(RUN).unwrap();

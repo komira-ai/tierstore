@@ -3,18 +3,22 @@
 //! which left its state in the runtime directory.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use tsfuse::abi::InitFlags;
 
 use super::backing;
 use super::config::FsSettings;
 use super::fakedev::{self, Message};
-use super::fills::Reach;
+use super::fills::Calls;
 use super::init_record::{self, Record, RecordError};
 use super::ino;
 use super::run::{Prepared, Running};
 use super::start::StartError;
 use super::testing::{Rig, sample, sha, until};
+use crate::server::local_cache::testing::{FakeDisk, never_expires};
+use crate::server::local_cache::{CacheConfig, LocalCache, Tick};
+use crate::{Backend, TestClock};
 
 /// The rig and its settings, with the record the process that mounted left.
 fn left_behind(name: &str, resend: bool) -> (Rig, FsSettings) {
@@ -26,9 +30,19 @@ fn left_behind(name: &str, resend: bool) -> (Rig, FsSettings) {
 }
 
 /// A process over the connection of `device`.
-fn adopt(settings: &FsSettings, device: std::os::fd::OwnedFd, resend: bool) -> Running {
+fn adopt(rig: &Rig, settings: &FsSettings, device: std::os::fd::OwnedFd, resend: bool) -> Running {
+    adopt_over(&rig.calls(), settings, device, resend)
+}
+
+/// A process over the connection of `device` that calls `calls`.
+fn adopt_over(
+    calls: &Calls,
+    settings: &FsSettings,
+    device: std::os::fd::OwnedFd,
+    resend: bool,
+) -> Running {
     let prepared = Prepared::load(settings).unwrap();
-    Running::adopt((settings, &Reach::Socket), prepared, device, (None, resend)).unwrap()
+    Running::adopt((settings, calls), prepared, device, (None, resend)).unwrap()
 }
 
 /// Asserts that a reply answers the request `unique` with success.
@@ -40,10 +54,10 @@ fn answered(message: &Message, unique: u64) {
 /// no one read, with no handshake: the kernel sent `INIT` once and it was not sent again.
 #[test]
 fn a_takeover_serves_what_was_queued_with_no_handshake() {
-    let (_rig, settings) = left_behind("tfs-rec-queued", false);
+    let (rig, settings) = left_behind("tfs-rec-queued", false);
     let (device, kernel) = fakedev::pair();
     kernel.getattr(5, ino::ROOT);
-    let running = adopt(&settings, device, false);
+    let running = adopt(&rig, &settings, device, false);
     answered(&kernel.reply(), 5);
     kernel.lookup(6, ino::ROOT, "trees");
     answered(&kernel.reply(), 6);
@@ -56,14 +70,14 @@ fn a_takeover_serves_what_was_queued_with_no_handshake() {
 fn a_takeover_records_the_next_generation_and_keeps_the_mount_id() {
     let (rig, settings) = left_behind("tfs-rec-generation", false);
     let (device, _kernel) = fakedev::pair();
-    let running = adopt(&settings, device, false);
+    let running = adopt(&rig, &settings, device, false);
     let record = init_record::read(&rig.runtime).unwrap();
     assert_eq!(record.generation, 2);
     assert_eq!(record.mount_id, "mount-1");
     assert_eq!(record.outcome, fakedev::outcome(false));
     assert_eq!(running.outcome(), fakedev::outcome(false));
     let (device, _kernel) = fakedev::pair();
-    let again = adopt(&settings, device, false);
+    let again = adopt(&rig, &settings, device, false);
     assert_eq!(init_record::read(&rig.runtime).unwrap().generation, 3);
     drop(again);
 }
@@ -73,9 +87,9 @@ fn a_takeover_records_the_next_generation_and_keeps_the_mount_id() {
 /// connection was not, or the takeover follows a hand-over, nothing is sent.
 #[test]
 fn a_takeover_asks_for_the_requests_again_only_where_the_kernel_can_send_them() {
-    let (_rig, settings) = left_behind("tfs-rec-resend", true);
+    let (rig, settings) = left_behind("tfs-rec-resend", true);
     let (device, kernel) = fakedev::pair();
-    let running = adopt(&settings, device, true);
+    let running = adopt(&rig, &settings, device, true);
     let note = kernel.reply();
     assert_eq!((note.unique, note.error, note.body.len()), (0, 7, 0));
     assert!(running.outcome().flags.contains(InitFlags::HAS_RESEND));
@@ -86,13 +100,13 @@ fn a_takeover_asks_for_the_requests_again_only_where_the_kernel_can_send_them() 
     drop(running);
 
     let (device, kernel) = fakedev::pair();
-    let after_handover = adopt(&settings, device, false);
+    let after_handover = adopt(&rig, &settings, device, false);
     kernel.assert_silent();
     drop(after_handover);
 
-    let (_rig, settings) = left_behind("tfs-rec-no-resend", false);
+    let (rig, settings) = left_behind("tfs-rec-no-resend", false);
     let (device, kernel) = fakedev::pair();
-    let no_resend = adopt(&settings, device, true);
+    let no_resend = adopt(&rig, &settings, device, true);
     kernel.assert_silent();
     drop(no_resend);
 }
@@ -100,11 +114,11 @@ fn a_takeover_asks_for_the_requests_again_only_where_the_kernel_can_send_them() 
 /// Asserts that a notification the kernel refuses is only said: the takeover goes on.
 #[test]
 fn a_refused_resend_is_said_and_the_takeover_goes_on() {
-    let (_rig, settings) = left_behind("tfs-rec-refused", true);
+    let (rig, settings) = left_behind("tfs-rec-refused", true);
     let (device, kernel) = fakedev::pair();
     // The kernel's end is gone, so the notification cannot be written.
     drop(kernel);
-    let running = adopt(&settings, device, true);
+    let running = adopt(&rig, &settings, device, true);
     assert!(running.resend_failed());
     drop(running);
 }
@@ -115,10 +129,10 @@ fn a_refused_resend_is_said_and_the_takeover_goes_on() {
 /// answered once, after it.
 #[test]
 fn the_kernel_is_asked_to_send_requests_again_before_the_readers_start() {
-    let (_rig, settings) = left_behind("tfs-rec-resend-first", true);
+    let (rig, settings) = left_behind("tfs-rec-resend-first", true);
     let (device, kernel) = fakedev::pair();
     kernel.getattr(5, ino::ROOT);
-    let running = adopt(&settings, device, true);
+    let running = adopt(&rig, &settings, device, true);
     let note = kernel.reply();
     assert_eq!((note.unique, note.error), (0, 7));
     answered(&kernel.reply(), 5);
@@ -132,9 +146,9 @@ fn the_kernel_is_asked_to_send_requests_again_before_the_readers_start() {
 /// and `resume` lets the hold go, reads again and answers what waited.
 #[test]
 fn a_quiesced_process_reads_nothing_and_a_resumed_one_answers_what_waited() {
-    let (_rig, settings) = left_behind("tfs-rec-quiesce", false);
+    let (rig, settings) = left_behind("tfs-rec-quiesce", false);
     let (device, kernel) = fakedev::pair();
-    let running = adopt(&settings, device, false);
+    let running = adopt(&rig, &settings, device, false);
     kernel.getattr(1, ino::ROOT);
     answered(&kernel.reply(), 1);
     assert!(!running.core().is_held());
@@ -149,7 +163,8 @@ fn a_quiesced_process_reads_nothing_and_a_resumed_one_answers_what_waited() {
     answered(&kernel.reply(), 3);
 }
 
-/// Calls its function when dropped: lets a gate through when a test fails, so that it ends.
+/// Calls its function when dropped: gives the cache its write role back when a test fails, so
+/// that the request that waits for it ends.
 struct OnDrop<F: FnMut()>(F);
 
 impl<F: FnMut()> Drop for OnDrop<F> {
@@ -158,24 +173,49 @@ impl<F: FnMut()> Drop for OnDrop<F> {
     }
 }
 
+/// The cache of `rig`'s directory and upstream, opened as the binary's is: it takes the lock of its
+/// directory, and is read-write while it holds it.
+fn locked_cache(rig: &Rig) -> LocalCache {
+    let mut config = CacheConfig::new(&rig.cache, 1 << 30, vec![("cas/".to_owned(), true)]);
+    never_expires(&mut config);
+    let backend: Arc<dyn Backend> = rig.upstream.clone();
+    let _entered = rig.work.handle().enter();
+    let (disk, clock) = (Arc::new(FakeDisk::new()), Arc::new(TestClock::new()));
+    LocalCache::open_locked(config, backend, disk, clock).unwrap()
+}
+
 /// Asserts that while a hand-over waits for the unpin of a detach decided before it, which the
-/// node's tierstore does not answer (as while it restarts and its fill socket is away), the readers
-/// still answer: a request the kernel sends once the quiesce waits is answered. Once the unpin is
-/// let through the quiesce returns with the core held, reads nothing more, and a resume answers
-/// what waited. Catches a quiesce that stops the readers before it waits for the unpins, which
-/// leaves the mount answering nothing for as long as the fill socket does not answer.
+/// node's cache does not take while it has no write role (it lost the lock of its directory), the
+/// readers still answer: a request the kernel sends once the quiesce waits is answered. Once the
+/// cache takes the lock again the unpin is made, the quiesce returns with the core held, reads
+/// nothing more, and a resume answers what waited. Catches a quiesce that stops the readers before
+/// it waits for the unpins, which leaves the mount answering nothing for as long as the cache has
+/// no write role.
 #[test]
 fn the_readers_answer_while_a_hand_over_waits_for_an_unpin() {
-    let (rig, settings) = left_behind("tfs-rec-quiesce-unpin", false);
+    let (rig, mut settings) = left_behind("tfs-rec-quiesce-unpin", false);
+    // Longer than the test: the unpin ends by the write role coming back, not by its wait.
+    settings.fetch_timeout = Duration::from_secs(600);
     let root = rig.upstream.built.lock().unwrap().root.clone();
+    let cache = locked_cache(&rig);
+    let calls = Calls {
+        cache: cache.clone(),
+        trees: None,
+        runtime: rig.work.handle(),
+    };
     let (device, kernel) = fakedev::pair();
-    let running = Arc::new(adopt(&settings, device, false));
+    let running = Arc::new(adopt_over(&calls, &settings, device, false));
     let _ = running.core().attach(&root, "run-1").unwrap();
-    rig.upstream.gate_verb("unpin");
-    let _go = OnDrop(|| rig.upstream.permit_verb("unpin", 1_000));
+    // The cache loses its lock file: read-only until its next tick takes the lock again.
+    std::fs::remove_file(rig.cache.join(".lock")).unwrap();
+    assert_eq!(cache.tick().unwrap(), Tick::Lost);
+    let _back = OnDrop(|| {
+        let _ = cache.tick();
+    });
+    let watchers = cache.mode_watchers();
     let detaching = Arc::clone(&running);
     let detach = std::thread::spawn(move || detaching.core().detach("run-1"));
-    rig.upstream.wait_for_verb("unpin", 1);
+    until(|| cache.mode_watchers() > watchers);
     let quiescing = Arc::clone(&running);
     let quiesce = std::thread::spawn(move || quiescing.quiesce());
     // The quiesce waits for the unpin.
@@ -188,7 +228,7 @@ fn the_readers_answer_while_a_hand_over_waits_for_an_unpin() {
     kernel.getattr(7, ino::ROOT);
     answered(&kernel.reply(), 7);
     assert!(!quiesce.is_finished());
-    rig.upstream.permit_verb("unpin", 1);
+    assert_eq!(cache.tick().unwrap(), Tick::Took);
     quiesce.join().unwrap();
     assert!(detach.join().unwrap().is_some());
     assert!(running.core().is_held());
@@ -202,16 +242,16 @@ fn the_readers_answer_while_a_hand_over_waits_for_an_unpin() {
 /// own: the descriptor is the same connection.
 #[test]
 fn the_offer_of_a_hand_over_is_copies_of_the_connection_and_the_control_socket() {
-    let (_rig, settings) = left_behind("tfs-rec-share", false);
+    let (rig, settings) = left_behind("tfs-rec-share", false);
     let (device, kernel) = fakedev::pair();
-    let running = adopt(&settings, device, false);
+    let running = adopt(&rig, &settings, device, false);
     let (copy, listener) = running.share().unwrap();
     assert!(std::os::unix::net::UnixStream::connect(&settings.control_socket).is_ok());
     drop(listener);
     // The process quiesces; a successor serving the copy answers what waits.
     running.quiesce();
     kernel.getattr(4, ino::ROOT);
-    let next = adopt(&settings, copy, false);
+    let next = adopt(&rig, &settings, copy, false);
     answered(&kernel.reply(), 4);
     drop(next);
     running.give_up();
@@ -224,7 +264,7 @@ fn a_file_open_across_a_takeover_is_read_and_released_by_the_next_process() {
     let (rig, settings) = left_behind("tfs-rec-handles", false);
     let root = rig.upstream.built.lock().unwrap().root.clone();
     let (device, kernel) = fakedev::pair();
-    let first = adopt(&settings, device, false);
+    let first = adopt(&rig, &settings, device, false);
     let _ = first.core().attach(&root, "run-1").unwrap();
     let header = ino::of(1, 7);
     kernel.open(1, header);
@@ -239,7 +279,7 @@ fn a_file_open_across_a_takeover_is_read_and_released_by_the_next_process() {
     drop(first);
 
     // The next process knows no such handle; the first read makes the open again.
-    let next = adopt(&settings, copy, false);
+    let next = adopt(&rig, &settings, copy, false);
     assert_eq!(next.core().open_files(), 0);
     kernel.read(3, header, (fh, 2, 100));
     let second_read = kernel.reply();
@@ -279,7 +319,7 @@ fn a_takeover_that_cannot_read_the_state_says_what_and_serves_nothing() {
         cache_path: rig.dir.path().join("none"),
         ..settings
     };
-    let error = Running::adopt((&lost, &Reach::Socket), prepared, device, (None, false))
+    let error = Running::adopt((&lost, &rig.calls()), prepared, device, (None, false))
         .err()
         .unwrap();
     assert!(error.to_string().contains("fs.cache_path"), "{error}");
@@ -305,7 +345,7 @@ fn the_backing_ids_of_an_earlier_release_are_adopted_where_the_connection_has_pa
     let table = format!("{} 7 2 exact\n{} 8 1\n", sha(b"tool bytes"), sha(b"int a;"));
     std::fs::write(rig.runtime.join(backing::FILE), &table).unwrap();
     let (device, _kernel) = fakedev::pair();
-    let plain = adopt(&settings, device, false);
+    let plain = adopt(&rig, &settings, device, false);
     assert_eq!(plain.core().adopted_ids(), 0);
     assert_eq!(
         std::fs::read_to_string(rig.runtime.join(backing::FILE)).unwrap(),
@@ -315,7 +355,7 @@ fn the_backing_ids_of_an_earlier_release_are_adopted_where_the_connection_has_pa
 
     with_passthrough(&rig, &table);
     let (device, _kernel) = fakedev::pair();
-    let backed = adopt(&settings, device, false);
+    let backed = adopt(&rig, &settings, device, false);
     assert_eq!(backed.core().adopted_ids(), 2);
     let kept = std::fs::read_to_string(rig.runtime.join(backing::FILE)).unwrap();
     let mut want = [
@@ -335,7 +375,7 @@ fn a_pause_a_resume_and_a_leave_write_no_backing_table_and_keep_the_ids() {
     let table = format!("{} 7 2\n", sha(b"tool bytes"));
     with_passthrough(&rig, &table);
     let (device, _kernel) = fakedev::pair();
-    let running = adopt(&settings, device, false);
+    let running = adopt(&rig, &settings, device, false);
     let file = || std::fs::read_to_string(rig.runtime.join(backing::FILE)).unwrap();
     running.quiesce();
     assert_eq!(file(), table);
@@ -361,7 +401,7 @@ fn a_takeover_never_looks_at_the_mount_point() {
     };
     let (device, kernel) = fakedev::pair();
     kernel.getattr(5, ino::ROOT);
-    let running = adopt(&settings, device, false);
+    let running = adopt(&rig, &settings, device, false);
     answered(&kernel.reply(), 5);
     assert!(!settings.mountpoint.exists());
     assert!(!file.join("mnt").is_dir());

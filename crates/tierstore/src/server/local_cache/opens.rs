@@ -1,16 +1,16 @@
-//! What `tierstore fs` tells the node of the opens of files of its trees, for the cache's
-//! `/metricz`: how long each open took, by how it ended and where its bytes came from, and how
-//! many opens wait now.
+//! What the file system's core tells the cache of the opens of files of its trees, for the
+//! cache's `/metricz`: how long each open took, by how it ended and where its bytes came from, and
+//! how many opens wait now.
 //!
-//! The mount times every open of a file from the request's arrival to its answer, on its own clock
+//! The core times every open of a file from the request's arrival to its answer, on its own clock
 //! (`treefs/core/opens.rs`), and counts the opens in flight. At each look for idle trees (every
 //! quarter of `fs.tree_idle_secs`, at most a minute apart) and when its readers stop for a
-//! hand-over, it sends, as `descriptors` is sent (`descriptors.rs`),
-//! `opens <mount> <process> <waiting> <spans>...`:
+//! hand-over, it reports them, as `descriptors` are reported (`descriptors.rs`), by calling the
+//! cache in this process (`treefs/in_process.rs`): an [`Opens`] of
 //!
-//! - `<mount>`: the id of the mount;
-//! - `<process>`: the id of the mount process (its pid);
-//! - `<waiting>`: the opens in flight now;
+//! - `mount`: the id of the mount;
+//! - `process`: the id of the mount process (its pid);
+//! - `waiting`: the opens in flight now;
 //! - then, for each pair of an [`Outcome`] and a [`Source`] in the order of [`KINDS`], the
 //!   milliseconds of all those opens and how many fell in each bucket of
 //!   [`BOUNDS_MS`](super::attaches::BOUNDS_MS) and above the last: running totals since that
@@ -23,22 +23,20 @@
 //! processes of a hand-over, reporting in turns, are counted apart and neither twice. The gauge
 //! `tierstore_fs_opens_waiting` is the sum over the mounts of each one's last `<waiting>`. At most
 //! [`MOST_MOUNTS`](super::descriptors::MOST_MOUNTS) mounts are kept: a report of another, when
-//! that many are, is answered `ok` and counted nowhere.
+//! that many are, is counted nowhere.
 //!
-//! The report is advice, like the others of the mount: one is lost when the thread that sends it
-//! has a queue of 1024, when the fill socket is away, or when the node is of a release before
-//! this one (it answers `refused unknown request`, which the mount ignores). A report this node
-//! cannot read (another number of buckets, from a mount of another release) is refused and adds
-//! nothing.
+//! The report is advice, like the others of the core: it reaches the cache's counts at once, on
+//! the caller's thread, and a lost one loses nothing the next carries.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::sync::Mutex;
 
 use super::attaches::{BUCKETS, Histogram};
-use super::descriptors::{MOST_MOUNTS, PROCESSES, number};
+#[cfg(test)]
+use super::descriptors::number;
+use super::descriptors::{MOST_MOUNTS, PROCESSES};
 use super::{LocalCache, locked};
-use crate::server::fill_socket::request::is_name;
 
 /// The families, each with a `# TYPE` line, and the series of the histogram, each written out for
 /// `docs/metrics.md`.
@@ -127,7 +125,7 @@ impl Spans {
     }
 }
 
-/// The opens of a mount process: the report `opens`.
+/// The opens of a mount process.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::server) struct Opens {
     /// The id of the mount.
@@ -141,7 +139,8 @@ pub(in crate::server) struct Opens {
 }
 
 impl Opens {
-    /// The line of the report.
+    /// The line of the report. Only the tests of the core still read the words of a report.
+    #[cfg(test)]
     pub(in crate::server) fn line(&self) -> String {
         let mut line = format!("opens {} {} {}", self.mount, self.process, self.waiting);
         for spans in &self.spans {
@@ -155,12 +154,11 @@ impl Opens {
 
     /// The report whose words after `opens` are `rest`: a mount name, two numbers, and for each
     /// kind the milliseconds and one number for each bucket. None for anything else, among it a
-    /// report of another number of buckets.
+    /// report of another number of buckets. Only the tests of the core still read the words of a
+    /// report.
+    #[cfg(test)]
     pub(in crate::server) fn parse(rest: &str) -> Option<Self> {
         let (mount, numbers) = rest.split_once(' ')?;
-        if !is_name(mount) {
-            return None;
-        }
         let numbers: Vec<u64> = numbers.split(' ').map(number).collect::<Option<_>>()?;
         let [process, waiting, cells @ ..] = numbers.as_slice() else {
             return None;

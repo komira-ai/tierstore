@@ -9,7 +9,7 @@
 //! - **Start.** The job's command is the first to look inside the run's trees: the agent opens
 //!   each tree's root and the kernel looks the roots up when it mounts the job's overlay, and
 //!   neither reads below a root (jobscheduler's `docs/design/job-rootfs.md`, section 7.2). So
-//!   `tierstore fs` tells the node, on the fill socket's `started <path>`, the first time a lookup
+//!   the file system's core tells the cache, on its report `started <path>`, the first time a lookup
 //!   in a directory of a tree placed at `path`, or a listing of one, reaches it, and the first
 //!   such report of any source of the run ends the span ([`LocalCache::run_started`]).
 //!

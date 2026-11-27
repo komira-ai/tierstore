@@ -279,7 +279,11 @@ impl Wire {
 
     /// A frontend over `built`, with the put directory served or not.
     fn over(name: &str, built: Built, put: bool) -> Self {
-        let rig = Rig::new(name, built);
+        Self::on(Rig::new(name, built), name, put)
+    }
+
+    /// A frontend over the core of `rig`, with the put directory served or not.
+    fn on(rig: Rig, name: &str, put: bool) -> Self {
         let root = rig.upstream.built.lock().unwrap().root.clone();
         let _ = rig.core.attach(&root, RUN).unwrap();
         let scratch = put.then(|| {
@@ -342,6 +346,21 @@ impl Wire {
             .iter()
             .filter(|got| **got == what)
             .count()
+    }
+
+    /// The value of the sample of the node's cache's `/metricz` text that begins with `series`.
+    fn metric(&self, series: &str) -> u64 {
+        let prefix = format!("{series} ");
+        let text = self.rig.node.metrics();
+        let found = text
+            .lines()
+            .find_map(|line| line.strip_prefix(&prefix).map(|n| n.parse().unwrap()));
+        found.unwrap_or_else(|| panic!("no sample {series} in the cache's metrics"))
+    }
+
+    /// The reads of the mount that joined a fill the cache already had running.
+    fn joins(&self) -> u64 {
+        self.metric("tierstore_cache_fill_joins_total{path=\"mount\"}")
     }
 
     /// The trees the core keeps in memory once the run is detached: those of which the kernel

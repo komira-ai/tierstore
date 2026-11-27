@@ -1,15 +1,23 @@
 //! The flattened tree of a placement as the core takes it, and the keys and numbers of placements.
 
+use std::time::Duration;
+
 use super::{Errno, dir_ino, key_of, path_hash, placement_of, tree_of};
 use crate::server::local_cache::trees::FlatTree;
+use crate::server::local_cache::trees::testing::{Bench, fs_at, tree_path};
 use crate::server::treefs::ino;
-use crate::server::treefs::testing::{Built, Rig};
+use crate::server::treefs::live_testing::Live;
+use crate::server::treefs::testing::{Built, PACK, PACK_START, Rig, sha};
 use crate::tree_manifest::{EntryKind, TreeDigest};
+
+/// The wait for the write role of a core that calls a read-only cache: what a test that waits it
+/// out takes.
+const SHORT: Duration = Duration::from_millis(100);
 
 const ID: &str = "0123456789abcdef0123456789abcdef";
 const HEX: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
-/// A flattened tree read from its JSON, as the socket sends it.
+/// A flattened tree read from its JSON, as the tree store gives it.
 fn flat(json: &str) -> FlatTree {
     serde_json::from_str(json).unwrap()
 }
@@ -214,67 +222,75 @@ fn a_file_with_an_unknown_pack_or_a_bad_digest_is_refused() {
     }
 }
 
-/// Asserts that over a fake socket whose node has no placements, a lookup in the root of a name
-/// that is no location, and one in a directory number nobody knows, are not found.
-#[test]
-fn a_name_that_is_no_location_is_not_found_in_the_root() {
-    let rig = Rig::new("tfs-placed-none", Built::of(Vec::new()));
-    assert_eq!(rig.core.lookup(ino::ROOT, "jobs").err(), Some(Errno::NoEnt));
-    assert_eq!(
-        rig.core.lookup(dir_ino("jobs"), "1f3a").err(),
-        Some(Errno::NoEnt)
-    );
+/// Asserts that over a tree store with no placements, a lookup in the root of a name that is no
+/// location, and one in a directory number nobody knows, are not found.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_name_that_is_no_location_is_not_found_in_the_root() {
+    let live = Live::new("tfs-placed-none").await;
+    live.on_core(|core| {
+        assert_eq!(core.lookup(ino::ROOT, "jobs").err(), Some(Errno::NoEnt));
+        assert_eq!(
+            core.lookup(dir_ino("jobs"), "1f3a").err(),
+            Some(Errno::NoEnt)
+        );
+    })
+    .await;
 }
 
-/// Answers the requests of `verb` of the fake fill socket of `rig` with `answer`.
-fn answer(rig: &Rig, verb: &str, answer: &str) {
-    let _ = crate::server::treefs::locked(&rig.upstream.answers)
-        .insert(verb.to_owned(), answer.to_owned());
+/// Asserts that a placement whose records the tree store cannot read (the records file of its tree
+/// is gone) makes the lookup an I/O error and gives the hold of the placement back, and that a
+/// placement the tree store no longer has is not there.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_placement_with_damaged_records_makes_the_lookup_an_io_error() {
+    let live = Live::new("tfs-placed-damaged").await;
+    let created = live.place(vec![fs_at("jobs")]);
+    let gone = live.place(vec![fs_at("gone")]);
+    live.bench.store.release(&gone.placement).unwrap();
+    std::fs::remove_file(tree_path(&live.bench.rig, &created.tree).join("records")).unwrap();
+    live.on_core(|core| {
+        assert_eq!(core.lookup(ino::ROOT, "jobs").err(), Some(Errno::Io));
+        assert_eq!(core.lookup(ino::ROOT, "gone").err(), Some(Errno::NoEnt));
+    })
+    .await;
+    let held = live.bench.store.placement(&created.placement).unwrap();
+    assert_eq!(held.attachments, 0);
 }
 
-/// Asserts that a node that answers a `place` with a placement id that is not one, or with words
-/// that are no answer of `place`, makes the lookup an I/O error, and that a placement whose tree
-/// the node says is damaged is an I/O error too and gives the hold of the placement back.
-#[test]
-fn a_node_that_answers_place_or_flat_wrongly_makes_the_lookup_an_io_error() {
-    let rig = Rig::new("tfs-placed-wrong", Built::of(Vec::new()));
-    answer(&rig, "place", "tree not-a-placement-id");
-    assert_eq!(rig.core.lookup(ino::ROOT, "jobs").err(), Some(Errno::Io));
-    answer(&rig, "place", "read-only");
-    assert_eq!(rig.core.lookup(ino::ROOT, "jobs").err(), Some(Errno::Io));
-    answer(&rig, "place", &format!("tree {ID}"));
-    answer(&rig, "flat", "damaged");
-    assert_eq!(rig.core.lookup(ino::ROOT, "jobs").err(), Some(Errno::Io));
-    assert_eq!(
-        rig.upstream.asked("unplace"),
-        vec![format!("unplace mount-1 {ID}")]
-    );
-    // A placement the node no longer has is not there.
-    answer(&rig, "flat", "none");
-    assert_eq!(rig.core.lookup(ino::ROOT, "jobs").err(), Some(Errno::NoEnt));
-}
-
-/// Asserts that a directory above the locations whose path the core does not know is an I/O
-/// error when the node's list of locations cannot be read, and not there when the list does not
-/// have it.
-#[test]
-fn an_unknown_directory_above_the_locations_is_found_through_the_node_or_not_at_all() {
-    let rig = Rig::new("tfs-placed-mounted", Built::of(Vec::new()));
-    answer(&rig, "mounted", "junk");
-    assert_eq!(
-        rig.core.lookup(dir_ino("jobs"), "1f3a").err(),
-        Some(Errno::Io)
-    );
-    assert_eq!(rig.core.parent(dir_ino("jobs")).err(), Some(Errno::Io));
-    answer(&rig, "mounted", r#"["jobs/1f3a/root"]"#);
-    assert_eq!(rig.core.parent(dir_ino("jobs/1f3a")), Ok(dir_ino("jobs")));
-    assert_eq!(rig.core.parent(dir_ino("jobs")), Ok(ino::ROOT));
-    assert_eq!(rig.core.parent(dir_ino("other")).err(), Some(Errno::NoEnt));
+/// Asserts that a core with nothing in memory finds the directories above the locations through
+/// the tree store's paths of the locations, and that a directory above no location is not there;
+/// and that where the tree store's paths cannot be had (the cache stays read-only for the whole
+/// wait), a lookup in an unknown directory and its parent are I/O errors.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unknown_directory_above_the_locations_is_found_through_the_node_or_not_at_all() {
+    let read_only = |bench: &Bench| {
+        let _holder = bench.rig.locked();
+        bench.rig.locked()
+    };
+    let blocked = Live::in_process_with("tfs-placed-mounted-ro", read_only, SHORT).await;
+    blocked
+        .on_core(|core| {
+            assert_eq!(
+                core.lookup(dir_ino("jobs"), "1f3a").err(),
+                Some(Errno::Io)
+            );
+            assert_eq!(core.parent(dir_ino("jobs")).err(), Some(Errno::Io));
+        })
+        .await;
+    let live = Live::new("tfs-placed-mounted").await;
+    let _ = live.place(vec![fs_at("jobs/1f3a/root")]);
+    let next = live.successor();
+    tokio::task::spawn_blocking(move || {
+        assert_eq!(next.parent(dir_ino("jobs/1f3a")), Ok(dir_ino("jobs")));
+        assert_eq!(next.parent(dir_ino("jobs")), Ok(ino::ROOT));
+        assert_eq!(next.parent(dir_ino("other")).err(), Some(Errno::NoEnt));
+    })
+    .await
+    .unwrap();
 }
 
 /// Asserts that a tree of manifests still mounts and reads as before the placements: a lookup of
-/// `trees/<digest>` reads its manifests through the fill socket and a file of it reads its bytes,
-/// with no request about placements.
+/// `trees/<digest>` reads its manifests through the cache's fill and a file of it reads its bytes,
+/// each filled once from the upstream.
 #[test]
 fn old_manifest_tree_still_mounts() {
     use crate::server::treefs::testing::file;
@@ -295,6 +311,8 @@ fn old_manifest_tree_still_mounts() {
         rig.core.read_ino(file.attr.ino, 0, 100).unwrap(),
         b"hello, tree"
     );
-    assert!(rig.upstream.asked("place").is_empty());
-    assert!(rig.upstream.asked("flat").is_empty());
+    let asked = rig.upstream.asked("fill");
+    assert!(asked.contains(&format!("fill {root}")), "{asked:?}");
+    let blob = format!("fill {} 11 from {PACK} @ {PACK_START}", sha(b"hello, tree"));
+    assert!(asked.contains(&blob), "{asked:?}");
 }

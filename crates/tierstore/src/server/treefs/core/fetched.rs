@@ -1,5 +1,5 @@
 //! What one read of a tree from its manifests fetched (`core/placed.rs`): each manifest read from
-//! the cache directory, filled through the fill socket and then read, or not had; and how long each
+//! the cache directory, filled through the cache and then read, or not had; and how long each
 //! fill took on the core's clock. The fetches of a read run on several threads at once, so the
 //! counts are atomic. The read reports them to the node when it ends (`fetched`, see
 //! `local_cache/attaches.rs`), and an attach on a lookup says them on stderr.
@@ -7,8 +7,8 @@
 //! The fetches are also counted by the level of the tree they are of (0 for the root): how many
 //! levels the read went down, the fills of each level and the longest of them, since a level's
 //! fills are waited for before the level below is asked for. A read that asked the node to fill the
-//! tree's new manifests itself (`fill-tree`) keeps its answer and how long it took on the socket.
-//! The levels of the read and its rounds of fills over the socket go to the node too (`levels`).
+//! tree's new manifests itself (`fill-tree`) keeps its answer and how long it took.
+//! The levels of the read and its rounds of fills go to the node's cache too (`levels`).
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -77,7 +77,7 @@ impl Fetched {
         self.at(0, |_| {});
     }
 
-    /// A manifest of the level `level` was asked of the fill socket, which took `ms` milliseconds
+    /// A manifest of the level `level` was asked of the node's cache, which took `ms` milliseconds
     /// to answer; `had` says whether the manifest was then read from the cache directory.
     pub(super) fn filled(&self, level: usize, ms: u64, had: bool) {
         bump(if had { &self.filled } else { &self.failed });
@@ -106,7 +106,7 @@ impl Fetched {
         }
     }
 
-    /// The levels the read went down and its rounds of fills over the socket so far: one for each
+    /// The levels the read went down and its rounds of fills so far: one for each
     /// level with a fill, since each waits for the one above it, and one for a `fill-tree`.
     pub(in crate::server::treefs) fn levels(&self) -> Levels {
         let levels = locked(&self.levels);

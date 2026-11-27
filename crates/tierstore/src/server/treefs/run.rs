@@ -6,7 +6,7 @@
 //! at the mount point; the cache directory must be on a file system that is not stacked (the job's
 //! overlay above this mount must stay within the kernel's depth of stacking); the neutral start is
 //! done (`Setup`: a table of tree numbers afresh, the attachments made again, the thread started
-//! that tells the cache which trees are attached once its fill socket answers, the control socket
+//! that tells the cache which trees are attached once the cache answers, the control socket
 //! bound); the mount is made and the record of its `INIT` handshake written. Each step's time is
 //! said as it ends (`steps.rs`). That is [`Running::start`]. [`Running::adopt`] is the
 //! start of a process that takes a connection over (after a crash or a restart, with the
@@ -424,9 +424,9 @@ impl Running {
     /// commit waiting for a release ends at once; one that uploads, by its deadline). Blocks until
     /// then.
     ///
-    /// What asks the node's tierstore over the fill socket is waited for first, while the readers
+    /// What asks the node's cache is waited for first, while the readers
     /// still serve: the uploads of the commits that run now, the unpins of the detaches decided
-    /// now, and the announcement being sent. Each lasts until its deadline while that socket does
+    /// now, and the announcement being sent. Each lasts until its deadline while the cache does
     /// not answer (the tierstore restarting), and with the readers stopped the mount would answer
     /// nothing for that long. A request that takes the lifecycle lock (a lookup that attaches a
     /// tree) can still wait for the unpins, as a detach decided in the meantime waits for them under

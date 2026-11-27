@@ -6,6 +6,7 @@ use std::io::{BufRead as _, BufReader, Write as _};
 use std::os::unix::fs::MetadataExt as _;
 use std::os::unix::net::UnixStream as StdStream;
 
+use super::super::error::NfsError;
 use super::handoff_tests::{WAIT, getattr, handing, running, taking_over};
 use super::{Leaving, Running};
 use crate::server::handoff::testing::{ask, connect, send, within};
@@ -111,7 +112,7 @@ async fn a_successor_whose_start_fails_after_done_leaves_the_old_instance_servin
     std::fs::create_dir(&blocked).unwrap();
     settings.control_socket = blocked;
     let why = Running::start(
-        &settings,
+        (&settings, &rig.calls()),
         crate::server::treefs::nfs::run::tests::Recorder::mounted_at(&rig.mountpoint),
         crate::server::treefs::nfs::run::tests::euid(),
         Some(crate::server::treefs::nfs::fixtures::endless()),
@@ -233,7 +234,7 @@ async fn a_successor_whose_ready_finds_the_old_instance_gone_does_not_serve() {
         Some(vec!["done".to_owned()]),
     );
     let why = Running::start(
-        &handing(&rig, addr.port()),
+        (&handing(&rig, addr.port()), &rig.calls()),
         crate::server::treefs::nfs::run::tests::Recorder::mounted_at(&rig.mountpoint),
         crate::server::treefs::nfs::run::tests::euid(),
         Some(crate::server::treefs::nfs::fixtures::endless()),
@@ -248,7 +249,7 @@ async fn a_successor_whose_ready_finds_the_old_instance_gone_does_not_serve() {
             .contains("telling the running instance it can end"),
         "{why}"
     );
-    assert_eq!(why.status(), 1);
+    assert!(matches!(why, NfsError::Handoff(_)), "{why}");
 }
 
 /// Asserts that when the hold is let go and the control socket cannot be bound again where the

@@ -1,5 +1,5 @@
 //! The bytes of a file of a tree: the cache file of its blob, or the span of the pack a file of a
-//! placed tree is, filled through the fill socket first if the cache does not hold them.
+//! placed tree is, filled through the cache first if the cache does not hold them.
 //!
 //! # One descriptor per file of the cache
 //!
@@ -29,7 +29,7 @@
 //! A file of the cache that cannot be opened for lack of descriptors (`EMFILE`, `ENFILE`) is not
 //! filled (the cache holds it; a fill would find it there) and not tried again: the open fails at
 //! once with `EIO`, its reason is `no descriptor: ` and what the system said, and it is counted
-//! ([`Core::descriptor_failures`]), as is a fill that could not connect to the fill socket for the
+//! ([`Core::descriptor_failures`]), as is a fill that could not be made for the
 //! same lack. A failed open is recorded on the
 //! attachments of the tree, the runs' and the lookup's (`attach.rs`), and said on stderr at warn:
 //! the tree, the path of the file in it, the blob and where it is read from, and the last answer.
@@ -317,7 +317,7 @@ impl Core {
     }
 
     /// The cache file of a blob, filled by `until` if the cache does not hold it, which sets
-    /// `asked` to [`Source::Filled`]; why not, in the words of the fill socket's answer, or `io: `
+    /// `asked` to [`Source::Filled`]; why not, in the words of the cache's answer, or `io: `
     /// (`no descriptor: `) and what the system said. A file that cannot be opened for lack of
     /// descriptors is not filled.
     pub(super) fn cache_file(

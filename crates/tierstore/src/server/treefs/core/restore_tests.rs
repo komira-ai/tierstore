@@ -1,5 +1,5 @@
-//! The restore of the attachments against a fake fill socket whose fills of manifests the test
-//! paces by its own events.
+//! The restore of the attachments over the node's cache, whose fills of manifests the test paces
+//! by its own events at the upstream.
 
 use crate::server::treefs::testing::{Built, Rig, file, sample};
 use crate::tree_manifest::TreeDigest;

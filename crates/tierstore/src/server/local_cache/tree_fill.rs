@@ -1,27 +1,27 @@
-//! The fill of a tree's new manifests by the cache itself: `fill-tree <sha256> <ms>` of the fill
-//! socket, and the same call made in process (`treefs/in_process.rs`).
+//! The fill of a tree's new manifests by the cache itself: `fill_tree`, which the file system's
+//! core calls in this process (`treefs/in_process.rs`).
 //!
 //! A tree the mount reads whose root manifest the cache directory does not hold is a new tree, and
 //! its new manifests are a chain down from the root: a directory that changed changes the manifest
 //! of every directory above it. The mount learns the digests of a level only once it has read the
-//! level above, so a fill of each new manifest over the socket ([`LocalCache::fill_manifest`])
-//! costs a round trip of the socket for each level of the chain. Here the cache goes down the
+//! level above, so a fill of each new manifest by the core ([`LocalCache::fill_manifest`]) costs a
+//! call for each level of the chain, each waiting on the one before. Here the cache goes down the
 //! chain itself and answers once: the root, filled if it is not held; then, a level at a time, every
 //! directory of the manifests it read that the cache does not hold, filled up to
 //! [`FILL_SOCKET_CONCURRENCY`] at once, each level before the one below. A directory the cache
 //! holds is not gone into: the tree below it was filled with it, or is filled by the mount's own
-//! read if it was not (an eviction took part of it). So the socket is crossed once, and the levels
-//! of the chain cost a round of the upstream's answers each, with no socket between.
+//! read if it was not (an eviction took part of it). So the core calls once, and the levels of the
+//! chain cost a round of the upstream's answers each, with no call between.
 //!
 //! Each manifest is filled as `fill <sha256>` fills it (one fill for a digest, whichever path
-//! asks; a permit of the fill socket's pool), then read from its file and checked by its digest.
-//! The limits of a tree are judged as each manifest comes in, as the mount's read judges them
-//! (`tree_manifest/waves.rs`): the children of the manifests filled over [`MAX_ENTRIES`], or a
-//! manifest with children deeper than [`MAX_DEPTH`], end the fill with no level below fetched.
-//! The children of the manifests the cache held are not counted, since they are not read, so the
-//! mount's read may refuse a tree that this passes; it never passes one that this refuses. The
-//! fill ends by the time the request was given ([`TreeFillError::Spent`]); the fills it started
-//! go on, as every fill does when its caller stops waiting.
+//! asks; a permit of the pool of `fill_socket_concurrency`), then read from its file and checked
+//! by its digest. The limits of a tree are judged as each manifest comes in, as the mount's read
+//! judges them (`tree_manifest/waves.rs`): the children of the manifests filled over
+//! [`MAX_ENTRIES`], or a manifest with children deeper than [`MAX_DEPTH`], end the fill with no
+//! level below fetched. The children of the manifests the cache held are not counted, since they
+//! are not read, so the mount's read may refuse a tree that this passes; it never passes one that
+//! this refuses. The fill ends by the time the request was given ([`TreeFillError::Spent`]); the
+//! fills it started go on, as every fill does when its caller stops waiting.
 //!
 //! A root that is a version 2 tree list (its file begins with [`TREE_LIST_V2_MAGIC`]) has no
 //! manifests below it: the list is the whole tree, in the one object. The fill stops once the root
@@ -29,11 +29,11 @@
 //! with no other request (`treefs/core/placed.rs`). A list below the root is not looked for: it is
 //! read as a manifest, and refused as one.
 //!
-//! The answer to the socket is `ok <ms> <filled> [<filled> ...]`: the milliseconds the fill took
-//! on the cache's clock, and the manifests it filled at each level it went down, the root's first
-//! ([`TreeFilled`]); or the words of a [`TreeFillError`]. Either way the mount then reads the
-//! tree from the cache directory as before, filling what it does not find there one manifest at a
-//! time, so a failure here is the failure of that read, in its words.
+//! The answer is a [`TreeFilled`]: the milliseconds the fill took on the cache's clock, and the
+//! manifests it filled at each level it went down, the root's first; or a [`TreeFillError`].
+//! Either way the mount then reads the tree from the cache directory as before, filling what it
+//! does not find there one manifest at a time, so a failure here is the failure of that read, in
+//! its words.
 
 use std::collections::HashSet;
 use std::io::Read as _;
@@ -63,7 +63,9 @@ pub(in crate::server) struct TreeFilled {
 }
 
 impl TreeFilled {
-    /// The answer of the socket: `ok`, the milliseconds and the manifests of each level.
+    /// The text `ok <ms> <filled> [<filled> ...]`: the milliseconds and the manifests of each
+    /// level. Only the tests of the core still build a fill's answer from it.
+    #[cfg(test)]
     pub(in crate::server) fn answer(&self) -> String {
         let mut answer = format!("ok {}", self.ms);
         for filled in &self.levels {
@@ -71,26 +73,10 @@ impl TreeFilled {
         }
         answer
     }
-
-    /// What the answer `answer` of the socket says, if it is one of [`TreeFilled::answer`].
-    pub(in crate::server) fn parse(answer: &str) -> Option<Self> {
-        let mut words = answer.strip_prefix("ok ")?.split(' ');
-        let ms = number(words.next()?)?;
-        let levels = words.map(number).collect::<Option<Vec<u64>>>()?;
-        Some(Self { ms, levels })
-    }
 }
 
-/// The number `word` writes in decimal digits, with no sign; none for anything else.
-fn number(word: &str) -> Option<u64> {
-    if word.is_empty() || !word.bytes().all(|byte| byte.is_ascii_digit()) {
-        return None;
-    }
-    word.parse().ok()
-}
-
-/// Why a fill of a tree's new manifests did not fill them all. The text is the answer of the
-/// socket.
+/// Why a fill of a tree's new manifests did not fill them all. The text is the words of the
+/// failure.
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub(in crate::server) enum TreeFillError {
     /// The fill of a manifest failed, in the words of `fill <sha256>`.

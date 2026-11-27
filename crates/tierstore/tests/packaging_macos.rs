@@ -292,12 +292,11 @@ fn the_mac_ingests_its_jobs_put_directories() {
     assert_eq!(cache["write_through"].as_bool(), Some(true));
 }
 
-/// Asserts that the Mac's node binds the fill socket `tierstore fs` reads every file through: the
-/// file names `local_cache.fill_socket` itself, in the directory the installer package makes
-/// (`run`, beside the provider's socket and apart from it, outside the cache), because launchd
-/// sets no `STATE_DIRECTORY` for either plist (neither has `EnvironmentVariables`), and the
-/// default socket is made only in that directory. It would catch a Mac whose node binds no fill
-/// socket, so that its mount cannot fill one file of a tree, of a job's input or of a placement.
+/// Asserts that the Mac's file still names `local_cache.fill_socket` itself, in the directory the
+/// installer package makes (`run`, beside the provider's socket and apart from it, outside the
+/// cache), because launchd sets no `STATE_DIRECTORY` for either plist (neither has
+/// `EnvironmentVariables`). The node reads the key and ignores it: no fill socket is served, and
+/// the file keeps the key until the packaging drops it.
 #[test]
 fn the_mac_names_its_fill_socket_since_launchd_gives_no_state_directory() {
     for dict in [plist(), plist_in(&package_plist_text())] {
@@ -558,12 +557,12 @@ fn the_plist_waits_210_seconds_on_exit() {
 }
 
 /// Asserts that the shipped `fs.toml` is the file the job's command line names and that it agrees
-/// with `tierstore.toml`: its `fs.fill_socket` is `local_cache.fill_socket`, its `fs.mountpoint` is
-/// the mount provider's `mountpoint`, its `fs.cache_path` is `local_cache.path`, its runtime
-/// directory is under `run` beside the sockets, the account it names is `_tierstore`, the job's,
-/// and its NFS socket is on loopback. It would catch a file service that reads the fill socket,
-/// cache or mount point of another place than the node's, so that the mount cannot fill a file or
-/// the provider's trees appear where no job looks.
+/// with `tierstore.toml`: its `fs.fill_socket` is `local_cache.fill_socket` (both read and ignored),
+/// its `fs.mountpoint` is the mount provider's `mountpoint`, its `fs.cache_path` is
+/// `local_cache.path`, its runtime directory is under `run` beside the sockets, the account it
+/// names is `_tierstore`, the job's, and its NFS socket is on loopback. It would catch a file
+/// service that reads the cache or mount point of another place than the node's, so that the
+/// provider's trees appear where no job looks.
 #[test]
 fn the_fs_file_repeats_the_nodes_fill_socket_cache_and_mountpoint() {
     let node = config();

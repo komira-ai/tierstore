@@ -80,7 +80,7 @@ pub(super) enum Live {
 }
 
 /// How a fill ended, as every path that waits for it can read it: the fill's own verdict, from
-/// which the S3 front and the fill socket each take their answer.
+/// which the S3 front and the core's requests each take their answer.
 pub(super) type Ended = Result<Filled, Stop>;
 
 /// A fill that is running: its end, which every reader of the name waits on, and its progress,
@@ -129,7 +129,7 @@ impl Pending {
     /// The place a keep of a key holds in the table of the fills that run: [`Pending::finished`]
     /// with no object, so that a reader of the S3 front is answered from the upstream, and a
     /// sender that the keep's [`Flight`] holds until it leaves the table, which ends the wait of
-    /// [`Pending::released`]: a request of the fill socket waits for the keep to end (it is
+    /// [`Pending::released`]: a request of the core waits for the keep to end (it is
     /// bounded by the keep's deadline) and then fills, since the keep is no reason for it to be
     /// answered `no space`.
     pub(super) fn keeping() -> (Self, watch::Sender<Live>) {
@@ -150,7 +150,7 @@ impl Pending {
         let _ = self.live.changed().await;
     }
 
-    /// The end of the fill, as the fill socket reads it.
+    /// The end of the fill, as the core's request reads it.
     pub(super) async fn ended(self) -> Ended {
         self.done.await
     }
@@ -243,7 +243,7 @@ impl Plan {
 pub(super) enum Class {
     /// A miss of the S3 front: a permit of `max_concurrent_fills`, which is not waited for.
     S3,
-    /// A fill asked for over the fill socket, which has waited for a permit of
+    /// A fill asked for by the core, which has waited for a permit of
     /// `fill_socket_concurrency`.
     Mount(OwnedSemaphorePermit),
 }
@@ -738,7 +738,7 @@ impl Inner {
                         // upstream's bytes are read instead (see `held`). No reader was given
                         // bytes of the first try: a fill of a span is followed by nobody (an S3
                         // read that meets it goes to the upstream, see `join_or_start`, and the
-                        // fill socket waits for its end).
+                        // core's request waits for its end).
                         Err(Stop::Short | Stop::Mismatch) => tracing::warn!(
                             "tierstore: the copy of {from} in the cache does not give the blob \
                              {} at {offset}: it is read from the upstream",

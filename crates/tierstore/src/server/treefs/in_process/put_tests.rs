@@ -13,11 +13,11 @@ use tracing::Level;
 use tracing::subscriber::{DefaultGuard, set_default};
 
 use super::{answer, send};
-use crate::server::put_ingest::chunks::chunks;
 use crate::server::build_info::stderr_log::LineLog;
 use crate::server::local_cache::blob_path;
 use crate::server::local_cache::pack_testing::Pack;
 use crate::server::local_cache::testing::{Rig, until};
+use crate::server::put_ingest::chunks::chunks;
 use crate::{Backend as _, Error, Op, TreeDigest};
 
 const CREATED: &str = r#"{"ok":true,"created":true}"#;
@@ -186,8 +186,8 @@ async fn the_put_is_sent_without_a_head_first_and_the_cache_keeps_its_copy() {
 }
 
 /// Asserts that a tree read on the node that wrote it is served from the pack its job put: the
-/// pack goes through the socket's `put` (a job's commit), and each file of the tree, a span of
-/// that pack, is then filled as the socket's `fill` fills it, with exactly its bytes and no GET
+/// pack goes through the put of a staged file (a job's commit), and each file of the tree, a span
+/// of that pack, is then filled by the cache's fill of a blob, with exactly its bytes and no GET
 /// or HEAD at the upstream. Catches a fill that fetches the span from the upstream again although
 /// the cache kept the pack.
 #[tokio::test]

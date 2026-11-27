@@ -5,7 +5,6 @@ use std::time::Duration;
 
 use super::*;
 use crate::server::treefs::core::Settings;
-use crate::server::treefs::fill_client::FillClient;
 use crate::server::treefs::table::TreeTable;
 use crate::server::treefs::testing::{Logged, Rig, file, logged, open_cached, sample};
 use crate::server::treefs::{ino, testing};
@@ -21,11 +20,11 @@ const ENFILE: i32 = 23;
 /// `EACCES`: a file that may not be opened.
 const EACCES: i32 = 13;
 
-/// The pauses a fill client took, in order.
+/// The pauses the core took between its tries, in order.
 type Pauses = Arc<std::sync::Mutex<Vec<Duration>>>;
 
 /// A rig over the sample tree with `RUN` attached, whose core opens the files of the cache with
-/// `open` (its own table of tree numbers, the same fill socket and clock).
+/// `open` (its own table of tree numbers, the same cache and clock).
 fn rig_opening(
     name: &str,
     open: impl Fn(&Path) -> io::Result<File> + Send + Sync + 'static,
@@ -33,7 +32,7 @@ fn rig_opening(
     rig_pausing(name, open).0
 }
 
-/// [`rig_opening`], and the pauses its core's fill client takes, which take no time.
+/// [`rig_opening`], and the pauses its core takes between its tries, which take no time.
 fn rig_pausing(
     name: &str,
     open: impl Fn(&Path) -> io::Result<File> + Send + Sync + 'static,
@@ -43,17 +42,12 @@ fn rig_pausing(
     std::fs::create_dir_all(&runtime).unwrap();
     let pauses = Pauses::default();
     let taken = Arc::clone(&pauses);
-    let fills = FillClient::pausing(
-        rig.dir.path().join("fill.sock"),
-        3,
-        Duration::from_secs(30),
-        Arc::new(move |pause| taken.lock().unwrap().push(pause)),
-    );
+    let fills = rig.asks_pausing(Arc::new(move |pause| taken.lock().unwrap().push(pause)));
     let settings: Settings = rig.core.settings().clone();
     rig.core = Arc::new(
         Core::new(
             settings,
-            Arc::new(fills),
+            fills,
             TreeTable::create(&runtime).unwrap(),
             &runtime,
         )
@@ -86,7 +80,7 @@ fn blob_for(rig: &Rig, len: usize) -> String {
         .unwrap()
 }
 
-/// The fills of blobs the fake received, for the blob `sha`.
+/// The fills of blobs the upstream received, for the blob `sha`.
 fn blob_fills(rig: &Rig, sha: &str) -> usize {
     rig.upstream
         .asked("fill")
@@ -110,10 +104,10 @@ fn files() -> [u64; 4] {
     [ino::of(1, 1), ino::of(1, 3), ino::of(1, 4), ino::of(1, 7)]
 }
 
-/// Asserts that a hundred cold opens of the files of one tree at once, whose fills all wait for
-/// the node, kept open together by a process whose descriptors are just enough for one per blob,
-/// all succeed once the fills are answered and hold one descriptor per blob: the opener is called
-/// once per blob. Catches the open that took a descriptor for every handle,
+/// Asserts that a hundred cold opens of the files of one tree at once, whose fills wait at the
+/// upstream (the cache runs one fill for each of the blobs, which the opens of it join), kept open
+/// together by a process whose descriptors are just enough for one per blob, all succeed once the
+/// fills are answered and hold one descriptor per blob: the opener is called once per blob. Catches the open that took a descriptor for every handle,
 /// which ran out of them past the budget and failed those opens with `EIO`.
 #[test]
 fn a_hundred_opens_of_one_tree_hold_one_descriptor_per_blob() {
@@ -129,15 +123,15 @@ fn a_hundred_opens_of_one_tree_hold_one_descriptor_per_blob() {
         }
         File::open(path)
     });
-    // Every open is cold: each asks for its fill, and the fills wait at the gate until all the
-    // hundred have come, then are answered at once.
+    // Every open is cold: each asks for its fill, and the cache's fills of the blobs wait at the
+    // gate until each has come, then are answered at once.
     let core = &rig.core;
     rig.upstream.gate_verb("fill");
     let more: Vec<Result<u64, Errno>> = std::thread::scope(|scope| {
         let threads: Vec<_> = (0..100)
             .map(|i| scope.spawn(move || open_cached(core, files()[i % budget], false)))
             .collect();
-        rig.upstream.wait_for_verb("fill", 100);
+        rig.upstream.wait_for_verb("fill", budget);
         assert_eq!(core.open_descriptors(), 0);
         rig.upstream.permit_verb("fill", 100);
         threads.into_iter().map(|t| t.join().unwrap()).collect()
@@ -208,7 +202,7 @@ fn passes_names_the_reasons_a_fill_may_pass() {
         "io: Too many open files (os error 24)",
         "no space",
         "the filled range is no longer in the cache",
-        "the fill socket gave no answer in time",
+        "the cache gave no answer in time",
         "upstream 503",
         "upstream 500",
         "fill: busy",
@@ -225,8 +219,8 @@ fn passes_names_the_reasons_a_fill_may_pass() {
         "mismatch",
         "fill: mismatch",
         "too large",
-        "the fill socket is not answering",
-        "the fill socket did not answer within the time the request was given",
+        "the cache is not answering this mount while its successor takes over",
+        "the cache did not answer within the time the request was given",
         "the file has no source",
         "refused unknown request",
         "upstream abc",
@@ -244,13 +238,13 @@ fn a_fill_that_passes_is_asked_again_and_the_open_succeeds() {
     let (rig, _) = counted("tfs-blob-retry");
     let core = &rig.core;
     let cc = blob_for(&rig, 3000);
-    fail_with(&rig, &cc, "busy");
+    fail_with(&rig, &cc, "upstream 503");
     rig.upstream.gate_verb("fill");
     let opened = std::thread::scope(|scope| {
         let open = scope.spawn(|| open_cached(core, ino::of(1, 3), false));
         rig.upstream.wait_for_verb("fill", 1);
         rig.upstream.permit_verb("fill", 1);
-        // The second request is the fill asked again: the first was answered `busy`.
+        // The second request is the fill asked again: the first was answered `upstream 503`.
         rig.upstream.wait_for_verb("fill", 2);
         let _ = rig.upstream.failing.lock().unwrap().remove(&cc);
         rig.upstream.permit_verb("fill", 1);
@@ -271,7 +265,7 @@ fn a_fill_is_asked_at_most_three_times_and_a_permanent_answer_once() {
     let core = &rig.core;
     let cc = blob_for(&rig, 3000);
     let tool = blob_for(&rig, 10);
-    fail_with(&rig, &cc, "busy");
+    fail_with(&rig, &cc, "upstream 503");
     fail_with(&rig, &tool, "mismatch");
     let second = Duration::from_secs(1);
     assert_eq!(open_cached(core, ino::of(1, 3), false), Err(Errno::Io));
@@ -284,7 +278,7 @@ fn a_fill_is_asked_at_most_three_times_and_a_permanent_answer_once() {
         Failure {
             path: "/bin/cc".into(),
             digest: cc,
-            reason: "busy".into(),
+            reason: "upstream 503".into(),
         },
         Failure {
             path: "/bin/tool".into(),
@@ -305,13 +299,14 @@ fn a_failed_open_is_said_once_in_ten_seconds_for_each_tree() {
     let core = &rig.core;
     let root = rig.upstream.built.lock().unwrap().root.clone();
     let cc = blob_for(&rig, 3000);
-    fail_with(&rig, &cc, "busy");
+    let cc_at = rig.upstream.built.lock().unwrap().offsets[&cc];
+    fail_with(&rig, &cc, "upstream 503");
     let log = Logged::default();
     let guard = logged(&log, tracing::Level::WARN);
     let line = |more: &str| {
         format!(
             "tierstore fs: cannot open /bin/cc in the tree {root} (number 1): the blob {cc} of \
-             3000 bytes from packs/one @ 4096: busy (after 3 fills){more}"
+             3000 bytes from packs/one @ {cc_at}: upstream 503 (after 3 fills){more}"
         )
     };
     assert_eq!(open_cached(core, ino::of(1, 3), false), Err(Errno::Io));
@@ -340,7 +335,8 @@ fn a_failed_open_is_said_once_in_ten_seconds_for_each_tree() {
         .add_tree(vec![("x", file(b"other bytes"))]);
     let _ = core.attach(&other, "run-2").unwrap();
     let x = testing::sha(b"other bytes");
-    fail_with(&rig, &x, "busy");
+    let x_at = rig.upstream.built.lock().unwrap().offsets[&x];
+    fail_with(&rig, &x, "upstream 503");
     assert_eq!(open_cached(core, ino::of(2, 1), false), Err(Errno::Io));
     drop(guard);
     let text = log.text();
@@ -350,14 +346,14 @@ fn a_failed_open_is_said_once_in_ten_seconds_for_each_tree() {
         last,
         format!(
             "tierstore fs: cannot open /x in the tree {other} (number 2): the blob {x} of 11 \
-             bytes from packs/one @ 4096: busy (after 3 fills)"
+             bytes from packs/one @ {x_at}: upstream 503 (after 3 fills)"
         )
     );
 }
 
 /// Asserts that an open whose cache file cannot be opened for lack of descriptors (`EMFILE`, and
 /// `ENFILE`) fails with `EIO` at once: recorded as `no descriptor: ` and what the system said,
-/// counted, asked of the fill socket once for a blob the cache does not hold (the look at the
+/// counted, asked of the cache once for a blob it does not hold (the look at the
 /// cache finds no file, so the opener runs only after the fill) and never again, with no pause.
 #[test]
 fn a_cache_file_that_cannot_be_opened_for_lack_of_descriptors_fails_at_once_as_such() {
@@ -424,10 +420,10 @@ fn a_cached_blob_that_cannot_be_opened_for_lack_of_descriptors_is_not_filled_and
 }
 
 /// Asserts that an open whose cache file cannot be opened for another reason (`EACCES`) fails with
-/// `EIO`, recorded as `io: ` and what the system said, after `FILL_TRIES` tries: the fill is asked
-/// each time, and the file is opened twice for each (the look at the cache first, then after the
-/// fill; none before the first fill, which finds no file). It is not counted as a lack of
-/// descriptors.
+/// `EIO`, recorded as `io: ` and what the system said, after `FILL_TRIES` tries: the file is
+/// opened twice for each (the look at the cache first, then after the fill; none before the first
+/// fill, which finds no file). The cache answers the later fills at once, as it holds the blob
+/// then: only the first reaches the upstream. It is not counted as a lack of descriptors.
 #[test]
 fn a_cache_file_that_cannot_be_opened_otherwise_is_an_io_failure_tried_three_times() {
     let calls = Arc::new(AtomicUsize::new(0));
@@ -439,7 +435,7 @@ fn a_cache_file_that_cannot_be_opened_otherwise_is_an_io_failure_tried_three_tim
     let core = &rig.core;
     let cc = blob_for(&rig, 3000);
     assert_eq!(open_cached(core, ino::of(1, 3), false), Err(Errno::Io));
-    assert_eq!(blob_fills(&rig, &cc), 3);
+    assert_eq!(blob_fills(&rig, &cc), 1);
     assert_eq!(calls.load(Ordering::SeqCst), 5);
     assert_eq!(core.descriptor_failures(), 0);
     let failures = core.detach(RUN).unwrap();

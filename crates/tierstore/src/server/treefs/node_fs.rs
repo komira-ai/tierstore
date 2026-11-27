@@ -34,10 +34,10 @@
 //! - FORGET and BATCH_FORGET reach the core (or the put directory) through [`Fs::forget`].
 //!
 //! Every request of the core is answered on the reader that read it, inline, but those that may
-//! wait on the fill socket: an open whose bytes the core cannot have without asking the node
+//! wait on the node's cache: an open whose bytes the core cannot have without asking the cache
 //! (`core/now.rs`), a read of a handle an earlier process gave out, and a lookup in the namespace
 //! are parked and answered by the fetches' threads (`fetches.rs`), so that a node that takes fills
-//! and does not answer holds none of the readers. (A rename of the put
+//! and does not end holds none of the readers. (A rename of the put
 //! directory whose commit waits or uploads is parked and answered from the commit's thread,
 //! `put_fs.rs`.) The session leaves INTERRUPTs unanswered (`serving.rs`), so every request gets
 //! its own answer; where the kernel does not take one (the connection is gone, or a session that
@@ -165,11 +165,11 @@ pub(super) struct NodeFs {
     core: Arc<Core>,
     /// The put directory, where it is served (the core's).
     put: Option<PutFs>,
-    /// The threads that answer the requests that may wait on the fill socket (`fetches.rs`).
+    /// The threads that answer the requests that may wait on the node's cache (`fetches.rs`).
     fetches: Fetches,
 }
 
-/// Whether a LOOKUP of `name` in `parent` may ask the fill socket: one in the namespace (a tree
+/// Whether a LOOKUP of `name` in `parent` may ask the node's cache: one in the namespace (a tree
 /// of `trees/` resolved, a placement looked up), but that of `trees` in the root.
 fn lookup_asks(parent: u64, name: &[u8]) -> bool {
     let namespace = ino::split(parent).0 == 0 || ino::is_placed_dir(parent);
@@ -253,7 +253,7 @@ fn answer_open(
 }
 
 impl NodeFs {
-    /// A frontend over `core`, whose requests that may wait on the fill socket are answered by
+    /// A frontend over `core`, whose requests that may wait on the node's cache are answered by
     /// `fetchers` threads of their own (`fetches.rs`).
     ///
     /// # Errors

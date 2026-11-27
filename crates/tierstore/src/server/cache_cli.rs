@@ -66,7 +66,7 @@
 //! stops the fronts as a signal does, and the start ends in failure.
 //!
 //! On SIGTERM or SIGINT the process drains as a storage node does; the eviction pass, the lock
-//! task, the scrub and the fill socket are the only things running beside the server, and they stop
+//! task and the scrub are the only things running beside the server, and they stop
 //! with it. Nothing is owed to the upstream: no journal, no lease, no copy in flight.
 //!
 //! A storage node with a cache in front of its own proxy (see

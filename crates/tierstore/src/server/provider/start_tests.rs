@@ -1,7 +1,7 @@
 //! `tierstore_request_to_start_seconds` across the scheduler's request and the mount: the first
 //! `Prepare` of a run stamps it, a release or a sweep forgets it, and the first look of the mount
-//! into one of the run's trees ends its span, end to end through a core of `tierstore fs` over the
-//! real tree store and fill socket, on the cache's clock, which only the test moves.
+//! into one of the run's trees ends its span, end to end through a core of the fs interface over the
+//! real tree store, called in process, on the cache's clock, which only the test moves.
 
 use std::sync::Arc;
 
@@ -71,8 +71,8 @@ async fn the_first_prepare_of_a_run_stamps_it_and_a_release_or_a_sweep_forgets_i
 /// looked up as the agent and the overlay's mount do, which is no start. At 200 ms a lookup in
 /// `js.1`'s first tree samples 0.2 s (in the bucket of 0.2 and not that of 0.1); at 500 ms a
 /// lookup in `js.1`'s second tree adds nothing (the run is sampled) and a lookup in `js.2`'s
-/// tree samples 0.46 s. The mount's reports leave on one thread in order, so once the second
-/// sample is in, the report of `js.1`'s second tree was answered before it.
+/// tree samples 0.46 s. The mount's reports reach the cache at once, in order, so once the second
+/// sample is in, the report of `js.1`'s second tree was made before it.
 #[tokio::test(flavor = "multi_thread")]
 async fn request_to_start_seconds_spans_the_prepare_of_the_scheduler_and_the_first_look_of_the_mount()
  {

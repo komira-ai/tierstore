@@ -31,7 +31,7 @@ pub(super) struct Failure {
     pub path: String,
     /// The SHA-256 of the file's contents.
     pub digest: String,
-    /// The words of the fill socket's answer, or what else failed.
+    /// The words of the cache's answer to the fill, or what else failed.
     pub reason: String,
 }
 

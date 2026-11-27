@@ -1,4 +1,4 @@
-//! What the mount (`tierstore fs`) asks of the tree store, through the fill socket: where a path of
+//! What the mount (`tierstore fs`) asks of the tree store, by calling the cache in this process (`treefs/in_process.rs`): where a path of
 //! the mount is among the fs locations of the placements, the paths of those locations, and the
 //! tree of a placement whole, flattened in the order the mount numbers its inodes.
 //!

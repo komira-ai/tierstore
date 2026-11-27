@@ -51,8 +51,8 @@ impl fmt::Debug for Sha256Digest {
 
 /// Checks one component of a directory or a file name.
 ///
-/// A name holds no white space and no control character: a key is one word of the one line of the
-/// fill socket's `put` request, so a name that a job chooses can neither split it nor end it.
+/// A name holds no white space and no control character: a key is one word of the
+/// put's request, so a name that a job chooses can neither split it nor end it.
 ///
 /// # Errors
 /// [`PutError::InvalidName`] for an empty name, `.`, `..`, or a name with `/`, NUL, white space or

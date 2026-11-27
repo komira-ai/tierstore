@@ -1,7 +1,6 @@
-//! What the mounts report of their tree lists, as the cache counts and renders it: the report read
-//! back as written and every other form refused; the gauges taking the last report and the
-//! counters adding what each process's totals grew by; the families in the order of the mounts;
-//! the bound on the mounts.
+//! What the core reports of its tree lists, as the cache counts and renders it: the gauges taking
+//! the last report and the counters adding what each process's totals grew by; the families in the
+//! order of the mounts; the bound on the mounts.
 
 use super::{MOST_MOUNTS, Totals, TreeLists};
 use crate::server::local_cache::testing::Rig;
@@ -31,41 +30,6 @@ fn families(rig: &Rig) -> Vec<String> {
         .filter(|line| line.contains("tierstore_fs_tree_list"))
         .map(str::to_owned)
         .collect()
-}
-
-/// Asserts that a report reads back as written, the largest numbers too, and that a missing or
-/// extra word, an empty word, a number with a sign or a non-digit, a number over 64 bits and a bad
-/// mount name are refused.
-#[test]
-fn a_treelists_report_reads_back_as_written_and_any_other_form_is_refused() {
-    let one = report("boot-1", 4242, [3, 12288, 536_870_912], [1, 2, 0]);
-    assert_eq!(one.line(), "treelists boot-1 4242 3 12288 536870912 1 2 0");
-    assert_eq!(
-        TreeLists::parse("boot-1 4242 3 12288 536870912 1 2 0"),
-        Some(one)
-    );
-    let most = report("m", u64::MAX, [u64::MAX; 3], [u64::MAX; 3]);
-    let rest = most.line().replacen("treelists ", "", 1);
-    assert_eq!(TreeLists::parse(&rest), Some(most));
-    let big = format!("m 7 1 1 1 1 1 {}0", u64::MAX);
-    let too_long = format!("{} 7 1 1 1 1 1 1", "m".repeat(129));
-    for refused in [
-        "",
-        "m",
-        "m 7 1 1 1 1 1",
-        "m 7 1 1 1 1 1 1 1",
-        "m  7 1 1 1 1 1 1",
-        " 7 1 1 1 1 1 1",
-        "m 7 1 1 1 1 1 ",
-        "m 7 1 1 1 1 1 -1",
-        "m 7 1 1 +1 1 1 1",
-        "m 7 1 x 1 1 1 1",
-        "m 7 1 1 1 1.0 1 1",
-        big.as_str(),
-        too_long.as_str(),
-    ] {
-        assert_eq!(TreeLists::parse(refused), None, "{refused:?}");
-    }
 }
 
 /// Asserts the five families exactly: each with its `# TYPE` line before any mount reported, then

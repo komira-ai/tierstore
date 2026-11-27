@@ -479,3 +479,42 @@ fn proxy_id_from_facts_is_read_here_and_refused_by_the_release_before() {
     assert_eq!(both(&file), (refused.clone(), refused));
     assert_eq!(both(&node.file("", "", "")), (ok.clone(), ok));
 }
+
+/// A build node's file in the scratch directory of `node`, with `cache_extra` in `[local_cache]`:
+/// a cache in front of a memory tier, keeping `cas/`.
+fn build_node_file(node: &Node, cache_extra: &str) -> OsString {
+    let text = format!(
+        "[server]\nlisten = \"127.0.0.1:0\"\nproxy_id = \"c1\"\nbucket = \"tier-bucket\"\n\
+         access_key_file = \"{key}\"\n\n\
+         [local_cache]\npath = \"{cache}\"\nbudget = 1000\n{cache_extra}\n\n\
+         [cold_store]\nkind = \"memory\"\n\n\
+         [[policy]]\nprefix = \"cas/\"\ncache = true\n",
+        key = node.key,
+        cache = node.dir.path().join("cache").display(),
+    );
+    let path = node.dir.path().join("build-node.toml");
+    std::fs::write(&path, text).unwrap();
+    path.into_os_string()
+}
+
+/// Asserts that a build node's file with `local_cache.fill_socket` at an absolute path, as the
+/// build nodes' files of the release before have it, starts on both releases (the release before
+/// binds its fill socket there; this branch reads the key and ignores it, serving no fill socket),
+/// so that a host rolled back to the release before, or forward to this one, starts on the same
+/// file; that the file without the key starts on both; and that a relative path, which the release
+/// before refuses with status 2, starts on this branch, which no longer reads it.
+#[test]
+fn a_build_node_file_with_local_cache_fill_socket_starts_on_both_releases() {
+    let node = Node::new("compat-config-fill-socket");
+    let ok = status(ExitCode::SUCCESS);
+    let refused = status(ExitCode::from(2));
+    let socket = node.dir.path().join("fill.sock");
+    let named = format!("fill_socket = \"{}\"", socket.display());
+    assert_eq!(
+        both(&build_node_file(&node, &named)),
+        (ok.clone(), ok.clone())
+    );
+    assert_eq!(both(&build_node_file(&node, "")), (ok.clone(), ok.clone()));
+    let relative = build_node_file(&node, "fill_socket = \"fill.sock\"");
+    assert_eq!(both(&relative), (ok, refused));
+}

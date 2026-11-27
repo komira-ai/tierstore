@@ -1,19 +1,19 @@
-//! What a start tells the node's tierstore over the fill socket: the trees this mount has attached,
+//! What a start tells the node's cache: the trees this mount has attached,
 //! so that the cache drops every other pin of the mount (`pins-live`), and the placements, so that
 //! the tree store ends every other hold of it (`places-live`). Together they are the announcement.
 //!
 //! The announcement is not part of the start. After a boot the tierstore of the node reads its
-//! whole cache before it binds the fill socket, minutes for a cache of hundreds of thousands of
-//! objects, and a start that waited for the socket would not be ready within the service
+//! whole cache before it answers the file system's calls, minutes for a cache of hundreds of thousands of
+//! objects, and a start that waited for the cache would not be ready within the service
 //! manager's start timeout. So a start marks the announcement owed ([`Core::tell_live_later`]) and
-//! a thread of its own sends it once the socket answers, asking again until it does.
+//! a thread of its own sends it once the cache answers, asking again until it does.
 //!
 //! Until then every request that changes what the node holds for this mount (`pin`, `unpin`,
 //! `place`, `unplace`) waits for the announcement first ([`Core::settled`]): a pin or a hold made
 //! after the start is never undone by an announcement that comes after it. One announcement is
-//! sent at a time, with no lock held across its round trips: a request that finds one being sent
+//! sent at a time, with no lock held across its calls: a request that finds one being sent
 //! waits for it and takes its outcome, and one that finds it owed and none being sent sends it.
-//! So a request that finds the socket away waits for one attempt, at most `fs.fetch_timeout` of
+//! So a request that finds the cache not answering waits for one attempt, at most `fs.fetch_timeout` of
 //! pauses, and fails as it would have without the announcement. The announcement says what is
 //! attached when it is sent, not when the start was made.
 //!
@@ -70,11 +70,11 @@ impl Announcement {
 }
 
 impl Core {
-    /// Tells the fill socket the trees and the placements attached now (see the module), and
+    /// Tells the node's cache the trees and the placements attached now (see the module), and
     /// waits for both answers.
     ///
     /// # Errors
-    /// [`AskError`]: the socket did not take a request, or did not answer one, in
+    /// [`AskError`]: the cache did not take a request, or did not answer one, in
     /// `fs.fetch_timeout`.
     pub(in crate::server::treefs) fn tell_live(&self) -> Result<(), AskError> {
         let attached = self.state().attachments.trees();
@@ -125,13 +125,13 @@ impl Core {
         };
         live.changed.notify_all();
         if told.is_ok() {
-            tracing::info!("tierstore fs: the fill socket has the mount's pins and placements");
+            tracing::info!("tierstore fs: the cache has the mount's pins and placements");
         }
         told
     }
 
     /// Marks the announcement owed and starts the thread that sends it. The thread asks until the
-    /// socket answers, resting between attempts and while a successor is taking over, and ends
+    /// cache answers, resting between attempts and while a successor is taking over, and ends
     /// once it is told or the core is dropped.
     ///
     /// # Errors
@@ -154,7 +154,7 @@ fn announce(core: &Weak<Core>) {
             Err(_) if core.is_held() => core.fills.rest(),
             Err(why) => {
                 tracing::warn!(
-                    "tierstore fs: the fill socket does not have the mount's pins yet ({why}); \
+                    "tierstore fs: the cache does not have the mount's pins yet ({why}); \
                      asking again"
                 );
                 core.fills.rest();

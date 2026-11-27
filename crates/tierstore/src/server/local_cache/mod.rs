@@ -47,17 +47,17 @@
 //! into `obj/` with a create-only link, so a name appears whole or not at all (layout:
 //! [`layout`]). A fill that fails is counted by reason and removed.
 //!
-//! # Fills for the fill socket
+//! # Fills for the file system
 //!
-//! The filesystem process of the node asks for blobs over the fill socket (see
-//! [`fill_socket`](crate::server::fill_socket)): `source` fills a blob that lies inside a larger
+//! The file system's core asks for blobs by calling the cache in this process
+//! (`treefs/in_process.rs`): `source` fills a blob that lies inside a larger
 //! upstream object, ranged, as the entry named by `<sha256>` (the entry of the object
 //! `cas/l/<sha256>`, of origin `span`), and a whole `cas/l/<sha256>`, with the same fetch as every
 //! fill. Those fills have their own permits (`fill_socket_concurrency`) and wait for one up to
 //! `fill_socket_wait`; they never take one of `max_concurrent_fills`, and the S3 path never takes
 //! theirs. There is one table of running fills for both paths: a request for a digest that has a
 //! fill running, whichever path started it, joins it and takes no permit. A cache that does not
-//! hold the lock fills nothing for the socket.
+//! hold the lock fills nothing for the core.
 //!
 //! # A read
 //!
@@ -305,10 +305,10 @@ pub const PASS_INTERVAL: Duration = Duration::from_secs(10);
 /// otherwise.
 pub const LOCK_INTERVAL: Duration = Duration::from_secs(1);
 
-/// The fills of the fill socket that may run at once, unless the settings say otherwise.
+/// The fills of the core that may run at once, unless the settings say otherwise.
 pub const FILL_SOCKET_CONCURRENCY: usize = 16;
 
-/// How long a request of the fill socket waits for a permit of its pool, unless the settings say
+/// How long a request of the core waits for a permit of its pool, unless the settings say
 /// otherwise.
 pub const FILL_SOCKET_WAIT: Duration = Duration::from_secs(60);
 
@@ -359,11 +359,11 @@ pub struct CacheConfig {
     /// The most fills that run at once. A miss that finds all of them running is served from
     /// the upstream and keeps nothing. At least one (0 is read as 1).
     pub max_concurrent_fills: usize,
-    /// The most fills that the fill socket runs at once: a pool of its own, which the S3 path's
+    /// The most fills that the core's requests run at once: a pool of its own, which the S3 path's
     /// `max_concurrent_fills` never draws on. A request that finds them all running waits for one
     /// (see `fill_socket_wait`). At least one (0 is read as 1).
     pub fill_socket_concurrency: usize,
-    /// The longest a request of the fill socket waits for a permit of its pool before it is
+    /// The longest a request of the core waits for a permit of its pool before it is
     /// answered `busy`.
     pub fill_socket_wait: Duration,
     /// The most create-only puts that are copied to the stage directory at once, apart from the
@@ -505,7 +505,7 @@ pub(super) struct Inner {
     reserved: AtomicU64,
     /// One permit for each fill that may run; a fill holds one until it ends.
     permits: Arc<Semaphore>,
-    /// One permit for each fill of the fill socket that may run; a request waits for one.
+    /// One permit for each fill of the core that may run; a request waits for one.
     source_permits: Arc<Semaphore>,
     /// The blobs that wait to be filled, and the workers that fill them.
     prefetch: prefetch::Prefetch,

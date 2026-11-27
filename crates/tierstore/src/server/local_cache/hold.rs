@@ -164,8 +164,8 @@ pub(super) struct Hold {
     /// from its last look at the notes until `read_write` is set: a delete is noted before the
     /// promotion looks at the notes, or finds the cache read-write and removes the files itself.
     forgotten: Mutex<Forgotten>,
-    /// The mode, for whoever acts when it changes (the fill socket is bound while the cache is
-    /// read-write): set by the tick that changes `read_write`.
+    /// The mode, for whoever acts when it changes (the mount provider's socket and the put ingest
+    /// serve while the cache is read-write): set by the tick that changes `read_write`.
     mode: watch::Sender<Mode>,
     /// Whether the process this cache's lock was handed over from still holds a descriptor of
     /// it: until it is gone the lock is offered to no successor (`handing.rs`).

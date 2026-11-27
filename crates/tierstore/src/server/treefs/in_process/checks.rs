@@ -27,7 +27,9 @@ pub(in crate::server::treefs) enum Refusal {
     /// A key under a prefix the proxy keeps for itself.
     #[error("reserved key")]
     Reserved,
-    /// A path that is not absolute.
+    /// A path that is not absolute: the staged file of a put, which the put directory makes on
+    /// Linux alone.
+    #[cfg(any(target_os = "linux", test))]
     #[error("not an absolute path")]
     Path,
     /// A placement id that is not thirty-two lower-case hex digits.

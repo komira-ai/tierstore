@@ -14,8 +14,8 @@
 //!   whole object in `obj/`) asks the upstream nothing. The fills of one range are one flight:
 //!   a second request for the same `(pack, range, sha256)` joins it, and a request for a range
 //!   that overlaps a running flight of the pack waits for it and looks again, so that no two
-//!   fills write the same bytes of a file. A fill takes a permit of the fill socket's pool
-//!   (`fill_socket_concurrency`, waited for up to `fill_socket_wait`) and never one of
+//!   fills write the same bytes of a file. A fill takes a permit of the pool of
+//!   `fill_socket_concurrency` (waited for up to `fill_socket_wait`) and never one of
 //!   `max_concurrent_fills`.
 //! - [`LocalCache::fill_parts`] fills several parts of a pack, each with its own digest, in one
 //!   such pass from the first part's start to the last one's end: each part is hashed as its
