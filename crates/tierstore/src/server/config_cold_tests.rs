@@ -112,9 +112,8 @@ fn what_a_node_over_the_cold_tier_does_not_use_is_refused() {
     let trees = format!("{COLD}\n[[interface]]\ntype = \"trees\"\nparams = {{ port = 9600 }}\n");
     assert_eq!(
         refusal(&trees),
-        "trees interface: a node over the cold tier alone has no tree store: a trees interface \
-         needs a build node ([local_cache] and [cold_store] without [hot_store]), whose [trees] \
-         keep the trees"
+        "interface[1].type: the trees interface was removed: delete this [[interface]] entry \
+         (the tree store, the mount provider and the fs interface are unchanged)"
     );
     let table = format!("{COLD}\n[trees]\nttl = \"1h\"\n");
     assert!(

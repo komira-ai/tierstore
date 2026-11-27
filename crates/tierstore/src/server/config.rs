@@ -18,7 +18,7 @@
 //!
 //! The tables:
 //!
-//! - `[[interface]]`: the fronts, one entry each: a `type` (`s3`, `oci`, `trees`,
+//! - `[[interface]]`: the fronts, one entry each: a `type` (`s3`, `oci`,
 //!   `mount-provider` or `fs`) and `params` (see [`config_interface`](super::config_interface)). At least one `s3` entry is needed. A
 //!   build node serves the registry from its cache.
 //!   The keys of the release before, `server.listen` and the `[oci]` table, are still read and
@@ -67,7 +67,7 @@ use super::config_handoff::handoff_of;
 use super::config_hot_only::{refuse_hot_keys, warn_retired_keys};
 pub(super) use super::config_interface::OciFlags;
 use super::config_interface::{
-    InterfaceTable, Interfaces, OciTable, interfaces, no_trees, with_legacy,
+    InterfaceTable, Interfaces, OciTable, interfaces, no_tree_store, with_legacy,
 };
 use super::config_io::io_tuning;
 use super::config_load::facts::FactsId;
@@ -691,7 +691,7 @@ pub(super) fn settings(
     match (hot_store, cold_store, local_cache) {
         (Some(hot), Some(cold), None) => {
             check_policies(&policy, false)?;
-            no_trees(&fronts, "a storage node")?;
+            no_tree_store(&fronts, "a storage node")?;
             let cli = storage(server, (hot, cold), fronts, per_run)?;
             Ok(Settings::Storage(Box::new(cli)))
         }
@@ -700,7 +700,7 @@ pub(super) fn settings(
             Ok(Settings::Cache(Box::new(cache)))
         }
         (Some(hot), Some(cold), Some(cache)) => {
-            no_trees(&fronts, "a storage node with a cache")?;
+            no_tree_store(&fronts, "a storage node with a cache")?;
             let tiers = (hot, cold);
             let node = combined(server, tiers, cache, fronts, &policy, per_run)?;
             Ok(Settings::Combined(Box::new(node)))

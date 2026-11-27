@@ -120,7 +120,6 @@ use super::listen::joined;
 use super::local_cache::LocalTierFailure;
 use super::lock::check_lock_path;
 use super::oci::{self, OciAuth, OciLimits, OciMetrics, OciPrefix, Upstream};
-use super::trees::trees_setup_of;
 
 #[path = "cli_s3.rs"]
 mod s3_tier;
@@ -883,9 +882,7 @@ pub(super) fn checked(settings: &Settings) -> Result<(), Error> {
         Settings::Cache(cache) => {
             let server = server_config(&cache.front, clock, false)?;
             // The `[oci]` table, with the checks a start makes of it.
-            oci_setup_of(&cache.oci, &server, false)?;
-            let max = cache.trees.max_request_bytes;
-            trees_setup_of(&cache.trees_front, &server, max, false).map(drop)
+            oci_setup_of(&cache.oci, &server, false).map(drop)
         }
         Settings::Combined(combined) => {
             let server = server_config(&combined.node.front(), clock, false)?;

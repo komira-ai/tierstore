@@ -30,7 +30,7 @@
 //! What the one file adds to the rules of `[fs]`, each a refusal by name at load:
 //!
 //! - the interface is a build node's alone (a file with `[local_cache]` and `[cold_store]` and no
-//!   `[hot_store]`), as the `trees` and `mount-provider` interfaces are (`no_trees`), and a file has
+//!   `[hot_store]`), as the `mount-provider` interface is (`no_tree_store`), and a file has
 //!   at most one;
 //! - a `mount-provider` interface's `mountpoint`, left out, is the `fs` interface's, and one that is
 //!   given must be it ([`provider_mountpoint`]);

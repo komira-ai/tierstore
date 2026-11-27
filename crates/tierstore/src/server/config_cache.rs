@@ -24,14 +24,6 @@
 //! # fill_socket_concurrency = 16
 //! # fill_socket_wait        = "60s"
 //! # put_ingest              = "/usr/local/tierstore/put"   # a Mac's: needs write_through = true
-//! # prefetch_concurrency    = 2
-//! # prefetch_queue          = 16384
-//! # prefetch_queue_ttl      = "120s"
-//! # hydrate_max_trees       = 64
-//! # hydrate_max_blobs       = 500000
-//! # hydrate_max_bytes       = "32GiB"
-//! # hold_max                = "4h"
-//! # hold_max_count          = 256
 //!
 //! [cold_store]                  # the upstream: an S3 endpoint
 //! kind             = "s3"
@@ -95,7 +87,6 @@ use super::provider::ProviderFlags;
 use super::provider::config::check_provider_socket;
 use super::put_ingest::config::put_ingest_of;
 use super::treefs::FsSettings;
-use super::trees::TreesFlags;
 
 /// The only layout of the cache directory.
 const LAYOUT: &str = "digest-v1";
@@ -238,30 +229,6 @@ pub(super) struct LocalCacheTable {
     /// plain directories `cas/b/<build>/<nonce>` (a Mac's). Left out, nothing is ingested.
     #[serde(default)]
     pub put_ingest: Option<std::path::PathBuf>,
-    /// The blobs the prefetch queue fills at once (0 to 64, default 2; 0 turns the queue off).
-    #[serde(default)]
-    pub prefetch_concurrency: Option<u32>,
-    /// The blobs that may wait in the prefetch queue (1 to 1000000, default 16384).
-    #[serde(default)]
-    pub prefetch_queue: Option<u32>,
-    /// The longest a blob waits in the prefetch queue (1s to 1h, default `120s`).
-    #[serde(default)]
-    pub prefetch_queue_ttl: Option<Dur>,
-    /// The trees one call may expand into the queue (1 to 4096, default 64).
-    #[serde(default)]
-    pub hydrate_max_trees: Option<u32>,
-    /// The blobs one call may queue, all its trees together (1 to 10000000, default 500000).
-    #[serde(default)]
-    pub hydrate_max_blobs: Option<u32>,
-    /// The bytes of the blobs one call may queue (1MiB to 1TiB, default 32GiB).
-    #[serde(default)]
-    pub hydrate_max_bytes: Option<Size>,
-    /// The longest a hold of the prefetch queue lives (1m to 24h, default `4h`).
-    #[serde(default)]
-    pub hold_max: Option<Dur>,
-    /// The most holds open at once (1 to 100000, default 256).
-    #[serde(default)]
-    pub hold_max_count: Option<u32>,
 }
 
 /// What a build-node file stands for.
@@ -280,8 +247,6 @@ pub(super) struct CacheSettings {
     pub cache: CacheConfig,
     /// The OCI front, as the `oci` interfaces make it: `listen` is empty for none.
     pub oci: OciFlags,
-    /// The trees front, as the `trees` interfaces make it: `listen` is empty for none.
-    pub trees_front: TreesFlags,
     /// The rate of the scrub in bytes a second: the default if the file gave none; none if the
     /// file turned it off.
     pub scrub_rate: Option<u64>,
@@ -484,7 +449,7 @@ impl CacheSettings {
         if let Some(socket) = &fill_socket {
             check_fill_outside_cache(socket, &part.config.path)?;
         }
-        let (oci, trees_front, provider) = (fronts.oci, fronts.trees, fronts.provider);
+        let (oci, provider) = (fronts.oci, fronts.provider);
         let sockets = [
             (
                 "server.handoff_socket",
@@ -518,7 +483,6 @@ impl CacheSettings {
             cache: part.config,
             scrub_min_round: part.scrub_min_round,
             oci,
-            trees_front,
             scrub_rate: part.scrub_rate,
             handoff,
             fill_socket,

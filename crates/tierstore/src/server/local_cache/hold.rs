@@ -261,10 +261,9 @@ impl Inner {
         self.config.path.join(LOCK)
     }
 
-    /// The end of the holds whose time has passed, one try of the lock, and the write of the pins
-    /// file if the cache holds the lock and the file is due; see [`LocalCache::tick`].
+    /// One try of the lock, and the write of the pins file if the cache holds the lock and the
+    /// file is due; see [`LocalCache::tick`].
     pub(super) fn tick(&self) -> io::Result<Tick> {
-        self.expire_holds();
         let outcome = self.try_lock();
         if matches!(outcome, Ok(Tick::Held | Tick::Took)) {
             self.save_pins(false);

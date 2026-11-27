@@ -365,7 +365,6 @@ fn the_start_line_names_the_shape_and_each_front() {
         oci: None,
         oci_all: Vec::new(),
         oci_mode: None,
-        trees_all: Vec::new(),
     };
     assert_eq!(
         announce_line(&plain),

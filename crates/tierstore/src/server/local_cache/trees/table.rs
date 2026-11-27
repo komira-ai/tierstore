@@ -3,8 +3,7 @@
 //! whose `mod.rs` is at the cap of a file.
 //!
 //! The table is the build node's: a file that has it and has no `[local_cache]`, or has
-//! `[hot_store]`, is refused, as the keys of the prefetch queue are. Each key has a range, and
-//! `ttl` may not be above `ttl_max`.
+//! `[hot_store]`, is refused. Each key has a range, and `ttl` may not be above `ttl_max`.
 
 use std::time::Duration;
 
@@ -48,7 +47,7 @@ pub(in crate::server) struct TreesTable {
     /// The children of one directory (1 to 1000000, default 1000000).
     #[serde(default)]
     pub max_dir_entries: Option<u32>,
-    /// The body of one create (1KiB to 1GiB, default `256MiB`).
+    /// The body of one create (1KiB to 1GiB, default `256MiB`); checked, and used by no call.
     #[serde(default)]
     pub max_request_bytes: Option<Size>,
     /// The file bytes of one tree (1MiB to 1TiB, default `32GiB`).
@@ -60,7 +59,8 @@ pub(in crate::server) struct TreesTable {
     /// The ranged reads of creates at once, node-wide (1 to 1024, default 8).
     #[serde(default)]
     pub fill_concurrency: Option<u32>,
-    /// What a create with no `prefetch` does: `none`, `background` or `wait` (default `wait`).
+    /// What a create with no `prefetch` did: `none`, `background` or `wait` (default `wait`);
+    /// checked, and used by no call.
     #[serde(default)]
     pub prefetch_default: Option<Prefetch>,
     /// What the mount provider's `Prepare` does about the files of a tree: `background` or `none`
@@ -68,10 +68,11 @@ pub(in crate::server) struct TreesTable {
     /// it does not take is refused naming the key.
     #[serde(default)]
     pub prepare_prefetch: Option<String>,
-    /// The longest a create that waits for its files waits (1s to 1h, default `120s`).
+    /// The longest a create that waits for its files waited (1s to 1h, default `120s`); checked,
+    /// and used by no call.
     #[serde(default)]
     pub create_timeout: Option<Dur>,
-    /// The failed entries an answer names (1 to 1000, default 20).
+    /// The failed entries an answer named (1 to 1000, default 20); checked, and used by no call.
     #[serde(default)]
     pub max_failures: Option<u32>,
 }

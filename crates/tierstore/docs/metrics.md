@@ -112,24 +112,17 @@ These four are gauges, measured when `/metricz` is read.
 | `tierstore_cache_fs_free_bytes` | gauge | free bytes of the file system of the cache directory |
 | `tierstore_cache_staging_files` | gauge | files in the stage directory now: fills that are running |
 
-### The prefetch queue
+### Fills and extents
 
-Blobs queued to be filled before a read asks for them (see [operations](operations.md#the-prefetch-queue)). A fill of the queue is also counted as any fill is, in `fills_total` and `upstream_reads_total`.
+The fills that the fill socket and the S3 front share, and the entries by extents (see [the fill socket](operations.md#the-fill-socket)). The hydrate and release calls, the holds and the prefetch queue were removed with their series (see [operations](operations.md#the-hydrate-and-release-calls-were-removed)).
 
 | name | type | labels | increments when |
 |---|---|---|---|
-| `tierstore_cache_hydrate_blobs_total` | counter | `outcome`: `present`, `joined`, `queued`, `too_large`, `busy`, `off`, `read_only`, `too_many_blobs`, `too_many_bytes`, `reserved_key`, `access_denied` | a blob was handed to the queue: the cache held it, a fill of it was queued or running, it was queued, it is larger than the whole budget, the queue was full, `prefetch_concurrency` is 0, or the cache is read-only; or a blob of a tree was not handed over: the call had queued `hydrate_max_blobs` (this ends the walk), the blob would take it past `hydrate_max_bytes` (it is left out and the walk goes on), its `source.key` is under `_journal/`, `_tiering/` or `_entries/` (the walk goes on), or its `source.key` is outside the read prefixes of the scoped key of the call (`access_denied`; the walk goes on) |
-| `tierstore_cache_prefetch_fills_total` | counter | none | a worker's fill left its blob in the cache |
-| `tierstore_cache_hydrate_trees_total` | counter | `outcome`: `expanded`, `refused`, `cut`, `access_denied` | a tree of a call was walked to its end, was refused (a manifest could not be fetched or read, or the library refused it or the tree it makes), was cut (the walk stopped at a bound of the call, or because its hold ended, or never began because the call had reached one), or was not expanded because the scoped key of the call may not read its manifest (`access_denied`) |
-| `tierstore_cache_prefetch_fill_failures_total` | counter | `reason`: `upstream`, `not_found`, `bad_digest`, `no_space`, `changed`, `expired`, `other` | a queued blob was dropped or its fill left nothing: `no_space` is a blob that would take the cache past its high water mark when its turn came (or past `critical` when it started), `expired` one that waited longer than `prefetch_queue_ttl`; a blob the cache held by its turn is dropped and counted nowhere |
-| `tierstore_cache_prefetch_promotions_total` | counter | none | a read of a queued blob started it before a worker did |
-| `tierstore_cache_fill_joins_total` | counter | `path`: `mount`, `s3` | a request of the fill socket (`mount`) or a read of the S3 front joined a fill that was running instead of starting one; a read that started a queued blob counts a promotion, not a join |
+| `tierstore_cache_fill_joins_total` | counter | `path`: `mount`, `s3` | a request of the fill socket (`mount`) or a read of the S3 front joined a fill that was running instead of starting one |
 | `tierstore_cache_fill_socket_waiting` | gauge | none | requests of the fill socket (blob, manifest and range fills) waiting now for a permit of `fill_socket_concurrency`; counts down when the request gets a permit, is answered `busy` or is dropped |
 | `tierstore_cache_fill_socket_running` | gauge | none | fills that hold a permit of `fill_socket_concurrency` now (the size of the pool less its free permits) |
 | `tierstore_cache_upstream_reads_in_flight` | gauge | none | HEADs and GETs the cache has sent the upstream and not had answered: a GET counts until its body has been read; a call that is dropped counts down. Requests waiting in `tierstore_cache_fill_socket_waiting` while this is 0 for a long time are a stall of the cache itself (see [the fill socket](operations.md#the-fill-socket)) |
 | `tierstore_cache_fill_socket_busy_total` | counter | none | requests of the fill socket answered `busy` because no permit of `fill_socket_concurrency` came free within `fill_socket_wait` |
-| `tierstore_cache_prefetch_queue_depth` | gauge | none | blobs waiting for a worker now |
-| `tierstore_cache_holds_open` | gauge | none | holds open now (see [holds](operations.md#holds)): opened and not yet released or expired |
 | `tierstore_cache_extent_entries` | gauge | none | the packs the cache holds only some ranges of (entries by extents, in `extents-v1/` beside `obj/`); `tierstore_cache_objects` does not count them |
 | `tierstore_cache_extent_bytes` | gauge | none | the bytes those entries have filled, each counted once; they are in `tierstore_cache_bytes`, in the budget and in the marks |
 | `tierstore_cache_extent_fills_total` | counter | none | ranges filled from the upstream and hashed against the digest the caller gave |
@@ -139,8 +132,6 @@ Blobs queued to be filled before a read asks for them (see [operations](operatio
 | `tierstore_cache_extent_held_total` | counter | none | a request for a range found it in the cache (an entry by extents or the whole pack) and asked the upstream nothing |
 | `tierstore_cache_extent_promotions_total` | counter | none | an entry filled to the whole pack and was moved into `obj/` as an ordinary object |
 | `tierstore_cache_extent_evictions_total` | counter | none | an entry was removed by the eviction pass (`tierstore_cache_evictions_total` counts objects only) |
-| `tierstore_cache_hydrate_requests_total` | counter | none | a hydrate call was accepted (see [the hydrate call](operations.md#the-hydrate-call)): the hold was opened and the expansion of its trees started |
-| `tierstore_cache_hold_handovers_total` | counter | none | trees of a hold whose pins moved to an attachment, at the first pin of a mount for the tree (see [holds](operations.md#holds)); a tree attached before the hold asked for its blobs moves nothing and is not counted |
 
 ### The cache mode
 
@@ -340,7 +331,7 @@ ships. Do not build alerts on these series until they are in a release.
 The series of "The build-node cache (v1)" above change as follows, and the cache gains the series
 of the sections after this one. They all start with `tierstore_cache_`.
 
-- Each family gets one `# TYPE` line, before its samples: a counter, or a gauge for `tierstore_cache_bytes`, `tierstore_cache_objects`, `tierstore_cache_fs_free_bytes`, `tierstore_cache_staging_files`, `tierstore_cache_prefetch_queue_depth`, `tierstore_cache_holds_open`, `tierstore_cache_fill_socket_waiting`, `tierstore_cache_fill_socket_running`, `tierstore_cache_upstream_reads_in_flight` and `tierstore_cache_mode`. `tierstore_cache_discarded_at_start_total` is declared a counter that is set once, when the cache is opened.
+- Each family gets one `# TYPE` line, before its samples: a counter, or a gauge for `tierstore_cache_bytes`, `tierstore_cache_objects`, `tierstore_cache_fs_free_bytes`, `tierstore_cache_staging_files`, `tierstore_cache_fill_socket_waiting`, `tierstore_cache_fill_socket_running`, `tierstore_cache_upstream_reads_in_flight` and `tierstore_cache_mode`. `tierstore_cache_discarded_at_start_total` is declared a counter that is set once, when the cache is opened.
 - A read of a kept key that the cache does not serve is one miss on every path, counted right after the lookup and before any call the read itself makes to the upstream (only the HEAD that checks an old hit, with `local_cache.revalidate_after`, comes before the lookup): a ranged GET whose size HEAD to the upstream then fails, a ranged GET of an object over the whole-object limit, a fill that then fails, and every miss of a read-only cache. So a ranged GET whose HEAD fails now counts a miss. A range past the end of a held object is still neither a hit nor a miss.
 - The bytes the cache fetched from the upstream are `tierstore_cache_upstream_bytes_read_total`, in the next section.
 
@@ -416,7 +407,6 @@ What it does not count:
 
 - A run whose command never looks inside its trees, and a run released or swept first.
 - A run whose `Prepare` this process did not take. This happens when the process started after it, when the run's request was forgotten because 4096 runs were kept at once (the oldest is forgotten first), or when an `fs` report was lost. A report is lost when 1024 reports wait at once, when the fill socket is away, or when the node is of a release before this one.
-- A tree placed through the trees API rather than the provider.
 
 A report that waits while the fill socket is away (an update of the node's tierstore) ends its
 span when the node takes it, so such a span is longer than the job's real start.

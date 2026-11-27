@@ -40,8 +40,8 @@
 //! (`pin`: the blobs now pinned by the tree, the blobs refused for the cache's `pin_limit`, the
 //! blobs the cache does not hold), `ok <blobs>` (`unpin`: the blobs the tree had pinned) and
 //! `ok <trees>` (`pins-live`: the trees whose pins were taken away), or `read-only` from an
-//! instance that does not hold the lock of the cache directory; the mount id `hold`, which the
-//! cache's holds pin under, is refused with its words (`the mount id "hold" is reserved for holds`).
+//! instance that does not hold the lock of the cache directory; the mount id `hold`, which is reserved
+//! and used by no caller, is refused with its words (`the mount id "hold" is reserved for holds`).
 //! A `put` is answered with one line of JSON (see [`put`]), the one request whose answer is not
 //! plain words; a `put` line that is not a request is answered `refused <why>` as any other.
 //! The mount's requests about the placements of the node (`place`, `mounted`, `flat`, `image`,
@@ -356,7 +356,7 @@ pub(in crate::server) fn pins_live(cache: &LocalCache, mount: &str, trees: &[Str
 
 /// The answer to a pin request: `ok` and the numbers, or the words of the failure. Every digest
 /// was checked when the line was parsed, so the failures left are a read-only cache and the mount
-/// id of the holds.
+/// id `hold`, which is reserved.
 fn pinned(done: Result<String, PinError>) -> String {
     match done {
         Ok(numbers) => format!("ok {numbers}"),

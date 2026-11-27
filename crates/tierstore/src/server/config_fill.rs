@@ -9,7 +9,7 @@
 
 use std::path::{Path, PathBuf};
 
-use super::config::{ConfigError, invalid, refuse};
+use super::config::{ConfigError, invalid};
 use super::config_cache::LocalCacheTable;
 use super::config_combined::normalised;
 use super::config_handoff::MOST_SOCKET_PATH;
@@ -68,27 +68,6 @@ pub(super) fn check_fill_outside_cache(socket: &Path, cache: &Path) -> Result<()
         return Err(invalid(key, why));
     }
     Ok(())
-}
-
-/// Refuses the keys of the prefetch queue in a file whose node has none: a storage node with a
-/// cache in front of its proxy. The keys of the fill socket are not refused there: that node
-/// answers the fill socket from its cache, with its proxy as the upstream.
-///
-/// # Errors
-/// A key of the prefetch queue that is given; it names the key.
-pub(super) fn refuse_prefetch_keys(table: &LocalCacheTable) -> Result<(), ConfigError> {
-    let why = "only a build node has a prefetch queue";
-    let keys = [
-        ("prefetch_concurrency", table.prefetch_concurrency.is_some()),
-        ("prefetch_queue", table.prefetch_queue.is_some()),
-        ("prefetch_queue_ttl", table.prefetch_queue_ttl.is_some()),
-        ("hydrate_max_trees", table.hydrate_max_trees.is_some()),
-        ("hydrate_max_blobs", table.hydrate_max_blobs.is_some()),
-        ("hydrate_max_bytes", table.hydrate_max_bytes.is_some()),
-        ("hold_max", table.hold_max.is_some()),
-        ("hold_max_count", table.hold_max_count.is_some()),
-    ];
-    refuse("local_cache", why, &keys)
 }
 
 #[cfg(test)]

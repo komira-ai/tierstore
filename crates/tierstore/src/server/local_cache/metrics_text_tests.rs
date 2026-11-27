@@ -34,12 +34,12 @@ fn families(text: &str) -> Result<Vec<(String, String, Vec<String>)>, String> {
 
 /// Asserts that every family of the block has exactly one `# TYPE` line, before its first
 /// sample, that its samples follow it together, that the gauges (bytes, objects, free
-/// bytes, staging files, the mode, the depth of the prefetch queue, the holds open, the requests of the fill socket that wait or run and the reads of the upstream in flight) are typed `gauge` and every other family `counter`, and
+/// bytes, staging files, the mode, the requests of the fill socket that wait or run and the reads of the upstream in flight) are typed `gauge` and every other family `counter`, and
 /// that a labelled family has one sample for each of its values. It fails on a sample with no
 /// type, a family typed twice or with the wrong kind, and a missing label value.
 #[test]
 fn every_family_has_one_type_line_of_its_kind_before_its_samples() {
-    let text = Counters::default().render(3, 2, 1, true, 4, 5);
+    let text = Counters::default().render(3, 2, 1, true, 5);
     let found = families(&text).unwrap_or_else(|problem| panic!("{problem}\n{text}"));
     let kinds: BTreeMap<&str, &str> = found
         .iter()
@@ -51,8 +51,6 @@ fn every_family_has_one_type_line_of_its_kind_before_its_samples() {
         "tierstore_cache_fs_free_bytes",
         "tierstore_cache_staging_files",
         "tierstore_cache_mode",
-        "tierstore_cache_prefetch_queue_depth",
-        "tierstore_cache_holds_open",
         "tierstore_cache_fill_socket_waiting",
         "tierstore_cache_fill_socket_running",
         "tierstore_cache_upstream_reads_in_flight",

@@ -10,9 +10,8 @@ use futures::stream;
 use crate::server::local_cache::layout::{Origin, Sidecar, meta_path, name_of};
 use crate::server::local_cache::metrics::{FailedFill, read};
 use crate::server::local_cache::pack_testing::Pack;
-use crate::server::local_cache::prefetch::Prefetched;
 use crate::server::local_cache::source::blob_path;
-use crate::server::local_cache::testing::{Rig, until};
+use crate::server::local_cache::testing::Rig;
 use crate::server::treefs::testing::{Logged, logged};
 use crate::{Backend as _, Op, PutOutcome, TreeDigest};
 
@@ -82,23 +81,6 @@ async fn a_blob_larger_than_a_chunk_is_read_from_the_copy_in_chunks() {
     let pack = kept(&rig, "cas/b/2/n/pack", &[100, 10_000, 50]).await;
     let before = reads(&rig);
     rig.cache.fill_blob(&pack.blob(1)).await.unwrap();
-    assert_eq!(blob_bytes(&rig, &pack, 1), pack.content(1));
-    assert_eq!(reads(&rig), before);
-}
-
-/// Asserts that a blob the prefetch queue fills (the blobs of a tree a hydrate names) is read from
-/// the copy of its pack too: the worker keeps it, and the upstream is read for nothing.
-#[tokio::test]
-async fn a_prefetched_blob_of_a_kept_pack_is_read_from_the_copy() {
-    let rig = Rig::with("theld-prefetch", |config| {
-        config.write_through = true;
-        config.prefetch.concurrency = 1;
-    });
-    let pack = kept(&rig, "cas/b/3/n/pack", &[400, 600]).await;
-    let before = reads(&rig);
-    assert_eq!(rig.cache.prefetch(&pack.blob(1)), Prefetched::Queued);
-    let file = blob_path(&rig.config.path, &pack.blobs[1].0);
-    until("the worker kept the blob", || file.is_file()).await;
     assert_eq!(blob_bytes(&rig, &pack, 1), pack.content(1));
     assert_eq!(reads(&rig), before);
 }

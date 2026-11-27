@@ -86,13 +86,14 @@ fn an_address_listened_on_twice_is_refused() {
     );
 }
 
-/// Asserts that a type that is not one is refused with the list of the types, `fs` among them.
+/// Asserts that a type that is not one is refused with the list of the types, `fs` among them
+/// and `trees` (removed) not.
 #[test]
 fn an_unknown_type_is_refused_with_the_types() {
     let unknown = refusal(&[entry("s3", "port = 9300"), entry("ftp", "port = 21")]);
     assert_eq!(
         unknown,
-        "interface[1].type: not an interface type; the types are \"s3\", \"oci\", \"trees\", \
+        "interface[1].type: not an interface type; the types are \"s3\", \"oci\", \
          \"mount-provider\" and \"fs\""
     );
 }

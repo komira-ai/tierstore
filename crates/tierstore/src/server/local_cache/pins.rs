@@ -15,10 +15,9 @@
 //!   by recency only: pins buy speed, and running out of them must not stop a job.
 //! - [`LocalCache::unpin`] takes away every pin of a tree.
 //! - [`LocalCache::pins_live`] takes away every pin of another mount and of a tree not in the
-//!   list: the pins never outlive their mount or their attachment. The pins of a hold (module
-//!   `holds`) and of a created tree (module `trees`) are the exception: they have an owner of
-//!   their own, are not in the file below, and end with their hold or their tree. A `pin` of a
-//!   mount for a tree a hold lists moves the hold's pins on it to that mount.
+//!   list: the pins never outlive their mount or their attachment. The pins of a created tree
+//!   (module `trees`) are the exception: they have an owner of their own, are not in the file
+//!   below, and end with their tree.
 //!
 //! A pinned object is skipped by the eviction pass and counted in `pin_skips`; it stays charged
 //! to the budget. Removals that are not eviction (the scrub finding bad bytes, a revalidation, a
@@ -61,7 +60,7 @@ pub enum PinError {
     /// A blob is named by something that is not the lower-case hex of a SHA-256.
     #[error("{0:?} is not the lower-case hex of a SHA-256")]
     NotADigest(String),
-    /// The mount id is the one that holds pin under, which no caller may name.
+    /// The mount id `hold` is reserved, and no caller may name it: no caller uses it now.
     #[error("the mount id {0:?} is reserved for holds")]
     ReservedMount(String),
     /// The mount id is the one that created trees pin under, which no caller may name.
@@ -80,8 +79,8 @@ pub struct PinAnswer {
     pub absent: usize,
 }
 
-/// Refuses the mount ids that holds and created trees pin under: only the cache's holds and tree
-/// store name them, so that no request makes pins that nothing ends.
+/// Refuses the mount ids `hold` (reserved, used by no caller) and the one created trees pin under:
+/// only the cache's tree store names the latter, so that no request makes pins that nothing ends.
 fn not_reserved(mount: &str) -> Result<(), PinError> {
     match mount {
         HOLD_MOUNT => Err(PinError::ReservedMount(mount.to_owned())),
@@ -203,12 +202,10 @@ impl LocalCache {
     /// # Errors
     /// [`PinError::ReadOnly`] if this cache does not hold the lock of its directory;
     /// [`PinError::NotADigest`] for a name that is not a digest, with nothing pinned;
-    /// [`PinError::ReservedMount`] for the mount id of the holds.
+    /// [`PinError::ReservedMount`] for the reserved mount id `hold`.
     pub fn pin(&self, mount: &str, tree: &str, sha256: &[String]) -> Result<PinAnswer, PinError> {
         not_reserved(mount)?;
-        let answer = self.inner.pin(mount, tree, sha256)?;
-        self.inner.attach_holds(mount, tree);
-        Ok(answer)
+        self.inner.pin(mount, tree, sha256)
     }
 
     /// Takes away every pin of `tree` of `mount`; gives the number of blobs it pinned.
@@ -218,8 +215,6 @@ impl LocalCache {
     pub fn unpin(&self, mount: &str, tree: &str) -> Result<usize, PinError> {
         not_reserved(mount)?;
         self.inner.pins_writable()?;
-        self.inner
-            .detach_holds(|attached, attached_tree| attached != mount || attached_tree != tree);
         let owner = Owner {
             mount: mount.to_owned(),
             tree: tree.to_owned(),
@@ -235,9 +230,6 @@ impl LocalCache {
     pub fn pins_live(&self, mount: &str, trees: &[String]) -> Result<usize, PinError> {
         not_reserved(mount)?;
         self.inner.pins_writable()?;
-        self.inner.detach_holds(|attached, attached_tree| {
-            attached == mount && trees.iter().any(|tree| tree == attached_tree)
-        });
         Ok(locked(&self.inner.index).pins.retain_live(mount, trees))
     }
 

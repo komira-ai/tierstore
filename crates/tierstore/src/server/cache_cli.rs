@@ -49,7 +49,7 @@
 //! On Linux, with an `[[interface]]` of type `fs` the start serves the mount of the virtual build
 //! file system too (see [`Service`]): after the cache and the tree store are open it takes the
 //! mount from a running instance, or serves the descriptor the service manager kept, or mounts
-//! afresh, and only then binds the trees front and takes or binds the S3 and OCI sockets; a start
+//! afresh, and only then takes or binds the S3 and OCI sockets; a start
 //! that fails after that leaves the mount as a stop does. The S3 and OCI sockets of a running
 //! instance are asked for with the `ready` step and the cache lock (`take 1`, `ready`): the running
 //! instance serves them until this start says `ready`, then starts no cache write and says
@@ -64,7 +64,7 @@
 //! On macOS, with an `[[interface]]` of type `fs` the start serves the NFS front of the file system
 //! too (see [`NfsService`]): after the cache and the tree store are open it serves the front (on the
 //! sockets it was handed, or on its own) and mounts the export where the `mount` listing does not
-//! show it mounted, and only then binds the trees front and takes or binds the S3 and OCI sockets; a
+//! show it mounted, and only then takes or binds the S3 and OCI sockets; a
 //! start that fails after that leaves the mount where it is. A stop drains the fronts, serving the
 //! mount, and then unmounts while the NFS front still answers; an NFS server that stops by itself
 //! stops the fronts as a signal does, and the start ends in failure.
@@ -107,14 +107,11 @@ use super::local_cache::{CacheConfig, Disk, Every, LocalCache, Mode, SystemDisk,
 use super::oci::OciListener;
 use super::provider::{self, Provider, ProviderFlags};
 use super::put_ingest::PutIngest;
-use super::stop_watcher::{
-    oci_cut_note, serve_fronts, serve_oci, serve_trees, stop_watcher, trees_cut_note,
-};
+use super::stop_watcher::{oci_cut_note, serve_fronts, serve_oci, stop_watcher};
 #[cfg(any(target_os = "macos", test))]
 use super::treefs::{NfsServed, NfsService};
 #[cfg(target_os = "linux")]
 use super::treefs::{Served, Service};
-use super::trees::{TreesSetup, trees_setup_of};
 use super::{Drained, Server, ServerConfig};
 use next_image::{NextImage, stop_or_next, take_write_role};
 
@@ -342,12 +339,6 @@ pub(super) async fn serve_cache_on(
     let mut config = server_config(&settings.front, Arc::clone(&clock), true)?;
     // The front's flags and files are checked before the cache is opened, as the storage node's.
     let oci = oci_setup_of(&settings.oci, &config, true)?;
-    let trees_front = trees_setup_of(
-        &settings.trees_front,
-        &config,
-        settings.trees.max_request_bytes,
-        true,
-    )?;
     config.oci_metrics = oci.as_ref().map(|setup| Arc::clone(&setup.metrics));
     let run = probe_run_id(&settings.front.proxy_id, clock.now(), std::process::id());
     let cache = open(&settings.cache, &upstream, &disk, &run).await?;
@@ -364,7 +355,6 @@ pub(super) async fn serve_cache_on(
         handoff: settings.handoff.as_ref(),
         fill_socket: settings.fill_socket.as_deref(),
         trees: Some(settings.trees.clone()),
-        trees_front,
         provider: settings.provider.as_ref(),
         put_ingest: settings.put_ingest.as_deref(),
         system,
@@ -408,8 +398,6 @@ pub(super) struct Fronts<'a> {
     /// The node-local trees (`[trees]`), kept beside the cache; none for a node whose file has no
     /// such table (a storage node with a cache).
     pub(super) trees: Option<TreesConfig>,
-    /// The trees front, if the settings have a `trees` interface.
-    pub(super) trees_front: Option<TreesSetup>,
     /// The mount provider, if the settings have a `mount-provider` interface: served over the
     /// node's trees, while the cache holds the lock of its directory (see
     /// [`provider`](super::provider)).
@@ -618,19 +606,8 @@ pub(super) async fn serve_front(
     // The registry front reads what the S3 front reads: through the cache.
     let backend: Arc<dyn Backend> = Arc::new(cache.clone());
     let server = Server::new(Arc::clone(&backend), config);
-    // The trees sockets are bound beside a running instance's (`SO_REUSEPORT`, they are not handed
-    // over), and before the S3 and OCI sockets are taken from it: a trees address that cannot be
-    // bound fails the start while the running instance still serves.
     let got = handed.or(sockets).map(|taken| Got::Taken(Box::new(taken)));
     let fronts_bound = async {
-        let trees_front = match fronts.trees_front {
-            Some(setup) => Some(setup.bind().await?),
-            None => None,
-        };
-        let trees_all = match &trees_front {
-            Some(front) => front.local_addrs()?,
-            None => Vec::new(),
-        };
         let bound = bind_fronts(
             fronts.handoff,
             got,
@@ -641,20 +618,16 @@ pub(super) async fn serve_front(
         )
         .await
         .map_err(super::cli::HandingError::into_boxed)?;
-        Ok::<_, Error>((trees_front, trees_all, bound))
+        Ok::<_, Error>(bound)
     };
-    let (
-        trees_front,
-        trees_all,
-        Bound {
-            s3: listeners,
-            oci,
-            addresses,
-            offer,
-            lock,
-            follow,
-        },
-    ) = match fronts_bound.await {
+    let Bound {
+        s3: listeners,
+        oci,
+        addresses,
+        offer,
+        lock,
+        follow,
+    } = match fronts_bound.await {
         Ok(bound) => bound,
         Err(why) => {
             // The mount was served: it is left, as at a stop, for the next start.
@@ -701,8 +674,6 @@ pub(super) async fn serve_front(
         }
     };
     let stop = stopped_by(stop, offer);
-    let mut addresses = addresses;
-    addresses.trees_all = trees_all;
     ready(addresses);
     #[cfg(target_os = "linux")]
     if let Some(served) = &served {
@@ -711,7 +682,6 @@ pub(super) async fn serve_front(
     let oci_drain = oci.as_ref().map(OciListener::drain);
     let (late_s3, late_oci) = (Arc::clone(&server), oci_drain.clone());
     let (watcher, oci_stopped) = stop_watcher(stop, Arc::clone(&server), oci_drain, fronts.lb_wait);
-    let trees_stopped = oci_stopped.clone();
     // One Notify for each loop: `notify_one` wakes one waiter, and keeps the wake for a loop that
     // is not waiting just now.
     let halts: [Arc<Notify>; 10] = [
@@ -747,12 +717,7 @@ pub(super) async fn serve_front(
         };
         let ended = serve_fronts(
             server.serve_all(listeners),
-            async {
-                tokio::join!(
-                    serve_oci(oci, oci_stopped),
-                    serve_trees(trees_front, trees_stopped)
-                )
-            },
+            serve_oci(oci, oci_stopped),
             after,
         )
         .await;
@@ -829,7 +794,7 @@ pub(super) async fn serve_front(
         let _unmounted = (fs_halt, failed);
         Ok::<Option<Handing>, Error>(None)
     };
-    let ((drained, (oci_cut, trees_cut)), (), (), (), (), (), (), (), (), (), mounted) = tokio::join!(
+    let ((drained, oci_cut), (), (), (), (), (), (), (), (), (), mounted) = tokio::join!(
         serving,
         beside,
         maintaining,
@@ -854,7 +819,6 @@ pub(super) async fn serve_front(
     }
     super::build_info::stderr_log::notes(&cut_note(drained));
     super::build_info::stderr_log::notes(&oci_cut_note(oci_cut));
-    super::build_info::stderr_log::notes(&trees_cut_note(trees_cut));
     super::build_info::stderr_log::notes(&late_of(&late_s3, late_oci.as_ref()));
     mounted?;
     Ok(drained)
@@ -928,9 +892,6 @@ pub(super) async fn serve_cache_until_signalled(
         if bound.oci.is_some() {
             let how = bound.oci_mode.unwrap_or_default().as_str();
             line.push_str(&format!(" oci-listen={} ({how})", joined(&bound.oci_all)));
-        }
-        if !bound.trees_all.is_empty() {
-            line.push_str(&format!(" trees-listen={}", joined(&bound.trees_all)));
         }
         super::build_info::stderr_log::answer(&format!("{line} commit={COMMIT}\n"));
     };

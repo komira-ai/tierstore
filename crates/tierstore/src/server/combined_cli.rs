@@ -109,7 +109,6 @@ pub(super) async fn serve_combined(
         handoff: cli.handoff.as_ref(),
         fill_socket: settings.fill_socket.as_deref(),
         trees: None,
-        trees_front: None,
         provider: None,
         put_ingest: None,
         system: OnSystem::default(),

@@ -1,7 +1,6 @@
 //! The set of pins, in memory: which trees pin which blobs, and how many bytes that is.
 //!
-//! A pin is held for a tree of a mount by the owner `(mount id, tree)` (or for a tree of a hold, by
-//! the owner `("hold", "<hold>/<tree>")`, see `holds`); a blob is pinned while
+//! A pin is held for a tree of a mount by the owner `(mount id, tree)`; a blob is pinned while
 //! any owner pins it, and its bytes count once however many trees pin it. The set knows nothing
 //! of the objects but their sizes, which the caller gives when it pins; the index calls
 //! [`PinSet::forget`] when it removes an object and [`PinSet::resize`] when it replaces one.
@@ -14,19 +13,20 @@ use serde::{Deserialize, Serialize};
 /// The least time, in milliseconds, between two writes of the file.
 pub(super) const SAVE_EVERY: u64 = 1000;
 
-/// The mount of the owners that are holds (see the module `holds`): their pins are in memory only,
-/// are not in the file, and `pins_live` leaves them.
+/// A mount id that is reserved and that nothing pins under: no caller may name it (see
+/// `not_reserved` in `pins`), so that a request refused under it by an earlier release is refused
+/// the same way by this one.
 pub(super) const HOLD_MOUNT: &str = "hold";
 
-/// The mount of the owners that are created trees (see the module `trees`): as the holds', their
-/// pins are in memory only, are not in the file, and `pins_live` leaves them. The tree store
-/// pins again what it keeps when it starts.
+/// The mount of the owners that are created trees (see the module `trees`): their pins are in
+/// memory only, are not in the file, and `pins_live` leaves them. The tree store pins again what
+/// it keeps when it starts.
 pub(super) const TREE_MOUNT: &str = "tree";
 
-/// Whether pins of `mount` are the cache's own, kept in memory and out of the file: a hold's or a
-/// created tree's.
+/// Whether pins of `mount` are the cache's own, kept in memory and out of the file: those of a
+/// created tree.
 pub(super) fn is_internal(mount: &str) -> bool {
-    mount == HOLD_MOUNT || mount == TREE_MOUNT
+    mount == TREE_MOUNT
 }
 
 /// The holder of a pin: a tree attached on a mount.
@@ -164,31 +164,8 @@ impl PinSet {
         blobs.len()
     }
 
-    /// Moves every pin of `from` to `to`, whatever `to` pins already; gives the number of blobs
-    /// moved. The pinned bytes do not change: each blob stays pinned, by another owner.
-    pub(super) fn transfer(&mut self, from: &Owner, to: &Owner) -> usize {
-        let Some(blobs) = self.by_owner.remove(from) else {
-            return 0;
-        };
-        self.dirty = true;
-        let shared = self
-            .by_owner
-            .get_key_value(to)
-            .map_or_else(|| Arc::new(to.clone()), |(known, _)| Arc::clone(known));
-        for hex in &blobs {
-            let pin = self.by_blob.get_mut(hex);
-            pin.into_iter().for_each(|pin| {
-                pin.owners.remove(from);
-                pin.owners.insert(Arc::clone(&shared));
-            });
-        }
-        let moved = blobs.len();
-        self.by_owner.entry(shared).or_default().extend(blobs);
-        moved
-    }
-
     /// Takes away the pins of every owner that is not a tree of `mount` in `trees`, except the
-    /// owners that are holds or created trees; gives the number of owners dropped.
+    /// owners that are created trees; gives the number of owners dropped.
     pub(super) fn retain_live(&mut self, mount: &str, trees: &[String]) -> usize {
         let dead: Vec<Owner> = self
             .by_owner
@@ -230,7 +207,7 @@ impl PinSet {
     }
 
     /// The pins as a file holds them, the trees in order and their blobs in order; the pins of
-    /// holds and of created trees are not in it.
+    /// created trees are not in it.
     pub(super) fn to_file(&self) -> PinsFile {
         let trees = self
             .by_owner

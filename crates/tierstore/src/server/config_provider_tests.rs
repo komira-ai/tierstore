@@ -214,7 +214,6 @@ fn the_params_of_the_other_types_are_not_the_providers() {
 fn the_providers_params_are_not_the_other_types() {
     for (kind, listen) in [
         ("s3", "port = 9301"),
-        ("trees", "port = 9600"),
         ("oci", "addresses = [\"127.0.0.1:5000\"]"),
     ] {
         for param in [

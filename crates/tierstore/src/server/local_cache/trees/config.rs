@@ -5,14 +5,15 @@
 //! `max_depth` and `max_dir_entries` are the limits [`TreesConfig::limits`] hands the builder of a
 //! tree. `fill_concurrency` and `prepare_prefetch` are read by the mount provider's `Prepare`
 //! (`server/provider`). The others (`max_request_bytes`, `prefetch_default`, `create_timeout`,
-//! `max_failures`) are read and checked at start and held here for the create call that fetches
-//! the files of a tree; nothing in this module uses them.
+//! `max_failures`) are read and checked at start so that a file that sets them still loads;
+//! nothing in this module uses them, since the create call that read them was removed.
 
 use std::time::Duration;
 
 use crate::TreeLimits;
 
-/// What a create does about the bytes of the tree's files.
+/// What a create did about the bytes of the tree's files, a value of `prefetch_default` that is
+/// read and checked and used by no call now.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Prefetch {
@@ -58,7 +59,7 @@ impl PreparePrefetch {
 /// The settings of a [`TreeStore`](super::TreeStore).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TreesConfig {
-    /// Whether the node makes trees. Off, a create is refused and nothing is placed.
+    /// Whether the node makes trees. Off, nothing is placed.
     pub enabled: bool,
     /// How long a placement lasts after its last create when the request gives no `ttl`.
     pub ttl: Duration,
@@ -70,7 +71,7 @@ pub struct TreesConfig {
     pub max_depth: usize,
     /// The most children of one directory.
     pub max_dir_entries: usize,
-    /// The most bytes of the body of one create.
+    /// The most bytes of the body of one create; checked, and used by no call.
     pub max_request_bytes: u64,
     /// The most file bytes of one tree.
     pub max_bytes: u64,
@@ -78,13 +79,13 @@ pub struct TreesConfig {
     pub max_placements: usize,
     /// The most ranged reads of creates that run at once, node-wide.
     pub fill_concurrency: usize,
-    /// What a create with no `prefetch` does.
+    /// What a create with no `prefetch` did; checked, and used by no call.
     pub prefetch_default: Prefetch,
     /// What the mount provider's `Prepare` does about the bytes of the tree's files.
     pub prepare_prefetch: PreparePrefetch,
-    /// The longest a create that waits for its files waits.
+    /// The longest a create that waits for its files waited; checked, and used by no call.
     pub create_timeout: Duration,
-    /// The most failed entries an answer names.
+    /// The most failed entries an answer named; checked, and used by no call.
     pub max_failures: usize,
 }
 

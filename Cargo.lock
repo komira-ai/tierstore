@@ -3690,9 +3690,7 @@ name = "tierstore-trees-api"
 version = "0.1.0"
 dependencies = [
  "prost",
- "prost-types",
  "protox",
- "tierstore-trees-api",
  "tonic",
  "tonic-prost",
  "tonic-prost-build",

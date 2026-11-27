@@ -135,11 +135,9 @@ mod calls;
 pub(super) mod descriptors;
 mod disk;
 mod evict;
-pub(super) mod expand;
 mod extents;
 mod fill;
 mod hold;
-pub(super) mod holds;
 mod index;
 mod keep;
 pub mod large;
@@ -149,7 +147,6 @@ mod metrics;
 pub(super) mod opens;
 mod pin_set;
 mod pins;
-mod prefetch;
 mod revalidate;
 mod scrub;
 mod selfcheck;
@@ -174,11 +171,7 @@ mod front_tests;
 #[cfg(test)]
 mod hit_tests;
 #[cfg(test)]
-mod hold_handover_tests;
-#[cfg(test)]
 mod hold_tests;
-#[cfg(test)]
-mod holds_tests;
 #[cfg(test)]
 mod keep_head_tests;
 #[cfg(test)]
@@ -205,8 +198,6 @@ pub(in crate::server) mod pack_testing;
 mod pin_set_tests;
 #[cfg(test)]
 mod pins_tests;
-#[cfg(test)]
-mod prefetch_tests;
 #[cfg(test)]
 mod read_only_tasks_tests;
 #[cfg(test)]
@@ -266,10 +257,6 @@ pub use extents::{PartsWant, RangeError, RangePart, RangeWant, Span};
 pub use hold::{Mode, Tick};
 pub use metrics::Counters;
 pub use pins::{PinAnswer, PinError};
-pub use prefetch::{
-    HYDRATE_MAX_BLOBS, HYDRATE_MAX_BYTES, HYDRATE_MAX_TREES, PREFETCH_CONCURRENCY, PREFETCH_QUEUE,
-    PREFETCH_QUEUE_TTL, PrefetchConfig,
-};
 pub use scrub::{Every, SCRUB_MIN_ROUND, SCRUB_RATE, SCRUB_TICK, ScrubPass, Scrubber, Ticker};
 pub use selfcheck::{LocalTierFailure, check_local};
 
@@ -410,8 +397,6 @@ pub struct CacheConfig {
     /// requests more of the proxy for every put of a new key (a hot HEAD, a marker GET and a cold
     /// HEAD), and with `false` the put is only the upstream's own (see `put_through`, in `keep`).
     pub head_before_put: bool,
-    /// The queue of blobs filled before a read asks for them (see the module `prefetch`).
-    pub prefetch: PrefetchConfig,
 }
 
 impl CacheConfig {
@@ -445,7 +430,6 @@ impl CacheConfig {
             listing_calls: listing::LISTING_CALLS,
             revalidate_after: None,
             head_before_put: true,
-            prefetch: PrefetchConfig::default(),
         }
     }
 
@@ -507,8 +491,6 @@ pub(super) struct Inner {
     permits: Arc<Semaphore>,
     /// One permit for each fill of the fill socket that may run; a request waits for one.
     source_permits: Arc<Semaphore>,
-    /// The blobs that wait to be filled, and the workers that fill them.
-    prefetch: prefetch::Prefetch,
     /// One permit for each put that may be copied to the stage directory; held until it ends.
     keeps: Arc<Semaphore>,
     /// The fills of ranges of packs and their counters (see `extents`).
@@ -631,7 +613,6 @@ impl LocalCache {
             upstream,
             disk,
             clock,
-            prefetch: prefetch::Prefetch::new(&config.prefetch),
             config,
             index: Mutex::new(index),
             counters,

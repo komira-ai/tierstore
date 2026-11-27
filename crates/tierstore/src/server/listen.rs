@@ -101,20 +101,6 @@ impl Default for ListenTuning {
 /// # Errors
 /// The address cannot be bound.
 pub(crate) fn bind_with(addr: SocketAddr, backlog: i32) -> io::Result<TcpListener> {
-    bind_sharing(addr, backlog, false)
-}
-
-/// [`bind_with`], and with `shared` the socket may be bound beside the sockets of other processes
-/// of the same user on the same address (`SO_REUSEPORT`), which is how an instance that is
-/// started while another still serves binds the same port.
-///
-/// # Errors
-/// The address cannot be bound.
-pub(crate) fn bind_sharing(
-    addr: SocketAddr,
-    backlog: i32,
-    shared: bool,
-) -> io::Result<TcpListener> {
     let family = match addr {
         SocketAddr::V4(_) => AddressFamily::INET,
         SocketAddr::V6(_) => AddressFamily::INET6,
@@ -125,9 +111,6 @@ pub(crate) fn bind_sharing(
     fcntl_setfd(&socket, FdFlags::CLOEXEC)?;
     // As `std` does for a listener: a restart does not wait for the connections of the last run.
     sockopt::set_socket_reuseaddr(&socket, true)?;
-    if shared {
-        sockopt::set_socket_reuseport(&socket, true)?;
-    }
     if addr.is_ipv6() {
         sockopt::set_ipv6_v6only(&socket, true)?;
     }
