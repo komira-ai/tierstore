@@ -48,6 +48,7 @@ mod groups;
 mod listener;
 mod names;
 mod prepare;
+mod queued;
 mod service;
 mod socket;
 mod sources;
@@ -56,6 +57,8 @@ mod sources;
 mod groups_tests;
 #[cfg(test)]
 mod names_tests;
+#[cfg(test)]
+mod prepare_bound_tests;
 #[cfg(test)]
 mod prepare_image_tests;
 #[cfg(test)]

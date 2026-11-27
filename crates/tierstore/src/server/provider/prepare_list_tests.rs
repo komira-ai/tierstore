@@ -183,3 +183,24 @@ fn a_v2_list_that_does_not_hash_to_the_id_is_refused() {
         )))
     );
 }
+
+/// Asserts that a version 1 list with no sidecar whose reads do not fit under the node's bound of
+/// queued reads is placed with none queued, as a version 2 list is: the tree placed and not marked
+/// ready, no file read, nothing held, the skip counted, and the tree counted as placed from its
+/// list.
+#[tokio::test]
+async fn a_v1_list_with_no_sidecar_over_the_queued_bound_is_placed_with_no_read() {
+    let rig = Rig::with("prov-fallback-bound", TreesConfig::default(), |settings| {
+        settings.max_queued_bytes = 0;
+    })
+    .await;
+    let key = rig.put_list(&list_of(&rig.bench.pack)).await;
+    assert_eq!(prepared(&rig, "js.1", &key).await, Stage::Placed);
+    let reads = &rig.provider.shared.queued;
+    assert_eq!((reads.bytes(), reads.skipped()), (0, 1));
+    assert_eq!(gets(&rig, &rig.bench.pack.key), 0);
+    let store = &rig.bench.store;
+    let located = store.locate_fs(&Rig::place_of("js.1", 0)).unwrap();
+    assert!(!store.placement(&located.placement).unwrap().ready);
+    counted(&rig, 1, 1);
+}
