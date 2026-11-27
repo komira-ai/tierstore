@@ -20,7 +20,9 @@ use super::super::super::{
 use super::macos::{Mac, mac_update};
 use super::{Linux, lin, staged, update};
 use crate::server::build_info::gauge;
-use crate::server::live_configs::{LINUX, MAC, MAC_BEFORE_SWITCH, MAC_FS, MAC_MOUNT, swap};
+use crate::server::config_testing::live_configs::{
+    LINUX, MAC, MAC_BEFORE_SWITCH, MAC_FS, MAC_MOUNT, swap,
+};
 use crate::server::update_hook::launchd::fs::mountpoint_of;
 use crate::server::update_hook::shape::fs_interface;
 use Step::{Cleanup, Cutover, Prepare, Rollback, Verify};

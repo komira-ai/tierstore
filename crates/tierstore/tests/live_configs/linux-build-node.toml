@@ -16,7 +16,7 @@ tree_list_ram_bytes = 2147483648
 [interface.params.put]
 enabled              = true
 prefixes             = ["cas/b/"]
-stage_dir            = "/var/lib/tierstore-cache/kbf-cas/put-stage"
+stage_dir            = "/var/lib/tierstore-cache/build-cas/put-stage"
 stage_ttl_secs       = 86400
 commit_deadline_secs = 120
 min_free_bytes       = 21474836480
@@ -24,17 +24,17 @@ min_free_bytes       = 21474836480
 [server]
 handoff_socket = "/var/lib/tierstore/handoff.sock"
 proxy_id_from_facts = { path = "/var/lib/hostkeeper/facts.json", prefix = "tierstore-" }
-bucket = "kbf-cas"
+bucket = "build-cas"
 max_request_bytes = 536870912
 access_key_file = "/etc/tierstore/access.key"
 read_only_key_files = ["/etc/tierstore/mac-build-upstream-1.key"]
 presign_key_files = []
 presign_max_expires = "4h"
-scoped_key_files = ["/etc/tierstore/kbf-cold.key"]
+scoped_key_files = ["/etc/tierstore/build-cold.key"]
 gc_key_files = []
 
 [local_cache]
-path = "/var/lib/tierstore-cache/kbf-cas"
+path = "/var/lib/tierstore-cache/build-cas"
 layout = "digest-v1"
 budget = "185GiB"
 high_water = 90
@@ -46,7 +46,7 @@ whole_fill_limit = "1MiB"
 
 [cold_store]
 kind = "s3"
-bucket = "kbf-cas"
+bucket = "build-cas"
 endpoint = "http://127.0.0.1:8333"
 credentials_file = "/etc/tierstore/swfs.credentials"
 

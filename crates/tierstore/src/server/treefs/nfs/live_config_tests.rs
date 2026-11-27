@@ -20,8 +20,8 @@ use super::{
 };
 use crate::server::cache_cli_tests::{Node, QUICK};
 use crate::server::config::{PerRun, settings_from_text};
+use crate::server::config_testing::live_configs::{self, HOST, MAC_KEYS};
 use crate::server::handoff::testing::within;
-use crate::server::live_configs::{self, HOST, MAC_KEYS};
 use crate::server::local_cache::Disk;
 use crate::server::local_cache::pack_testing::Pack;
 use crate::server::local_cache::testing::{FakeDisk, until};

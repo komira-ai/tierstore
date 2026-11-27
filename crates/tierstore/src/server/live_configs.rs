@@ -40,7 +40,7 @@ pub(in crate::server) const LINUX_KEYS: [&str; 3] =
     ["etc/access.key", "etc/mac-build-upstream-1.key", SCOPED_KEY];
 /// The Linux file's scoped key (`server.scoped_key_files`): JSON with its prefixes, where the
 /// others are a key id and a secret on two lines.
-const SCOPED_KEY: &str = "etc/kbf-cold.key";
+const SCOPED_KEY: &str = "etc/build-cold.key";
 /// The key files of the Mac's file.
 pub(in crate::server) const MAC_KEYS: [&str; 2] = ["etc/access.key", "etc/daemons.key"];
 

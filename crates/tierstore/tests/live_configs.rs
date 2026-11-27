@@ -210,7 +210,7 @@ fn assert_no_secret(run: &Run, secrets: &[String]) {
     for secret in secrets {
         assert!(
             !run.stdout.contains(secret) && !run.stderr.contains(secret),
-            "{secret}"
+            "the output holds the secret of a key file"
         );
     }
 }
@@ -229,8 +229,8 @@ fn the_binary_accepts_the_linux_build_node_file() {
         dir.path(),
         &["access.key", "mac-build-upstream-1.key", "swfs.credentials"],
     );
-    secrets.push(write_scoped_key(dir.path(), "kbf-cold.key"));
-    std::fs::create_dir_all(dir.path().join("cache/kbf-cas")).unwrap();
+    secrets.push(write_scoped_key(dir.path(), "build-cold.key"));
+    std::fs::create_dir_all(dir.path().join("cache/build-cas")).unwrap();
     let file = dir.path().join("config.toml");
     std::fs::write(&file, linux_on(dir.path())).unwrap();
     let run = check(&file);
@@ -250,7 +250,7 @@ fn the_binary_accepts_the_linux_build_node_file() {
 fn the_binary_accepts_the_mac_build_node_file() {
     let dir = TestDir::under(std::env::temp_dir(), "lc-bin-mac");
     let secrets = write_keys(dir.path(), &["access.key", "daemons.key", "upstream.key"]);
-    std::fs::create_dir_all(dir.path().join("cache/kbf-cas")).unwrap();
+    std::fs::create_dir_all(dir.path().join("cache/build-cas")).unwrap();
     let file = dir.path().join("tierstore.toml");
     std::fs::write(&file, mac_on(MAC, dir.path(), 2)).unwrap();
     let run = check(&file);
@@ -271,7 +271,7 @@ fn the_binary_accepts_the_mac_build_node_file() {
 fn the_binary_refuses_the_mac_file_from_before_the_switch() {
     let dir = TestDir::under(std::env::temp_dir(), "lc-bin-before");
     let secrets = write_keys(dir.path(), &["access.key", "daemons.key", "upstream.key"]);
-    std::fs::create_dir_all(dir.path().join("cache/kbf-cas")).unwrap();
+    std::fs::create_dir_all(dir.path().join("cache/build-cas")).unwrap();
     let file = dir.path().join("tierstore.toml");
     std::fs::write(&file, mac_on(MAC_BEFORE_SWITCH, dir.path(), 1)).unwrap();
     let run = check(&file);

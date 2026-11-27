@@ -11,7 +11,7 @@ use crate::server::config::{PerRun, settings_from_text};
 use crate::server::config_cache::CacheSettings;
 use crate::server::config_interface::NO_FS;
 use crate::server::config_testing::DEFAULTS;
-use crate::server::live_configs::{self, HOST};
+use crate::server::config_testing::live_configs::{self, HOST};
 use crate::server::update_hook::launchd::fs::mountpoint_of;
 
 /// The knobs of a run on the farm's accounts.
@@ -54,10 +54,10 @@ fn the_linux_file_loads_as_a_build_node_serving_its_provider_over_fuse() {
     assert_eq!(fs.client_group, rustix::process::getegid().as_raw());
     let owner = live_configs::SUBID_START + 1000;
     assert_eq!(fs.owner, (owner, owner));
-    assert_eq!(fs.cache_path, dir.path().join("cache/kbf-cas"));
+    assert_eq!(fs.cache_path, dir.path().join("cache/build-cas"));
     let put = fs.put.expect("a put directory");
     assert_eq!(put.store.prefixes, ["cas/b/"]);
-    assert_eq!(put.stage_dir, dir.path().join("cache/kbf-cas/put-stage"));
+    assert_eq!(put.stage_dir, dir.path().join("cache/build-cas/put-stage"));
     let provider = node.provider.expect("a mount provider");
     assert_eq!(provider.mountpoint, mount);
     assert_eq!(provider.socket, dir.path().join("state/provider.sock"));

@@ -405,8 +405,6 @@ mod list_uploads_delimiter_tests;
 mod list_versions_tests;
 mod listen;
 mod listing;
-#[cfg(test)]
-mod live_configs;
 pub mod local_cache;
 mod lock;
 #[cfg(test)]

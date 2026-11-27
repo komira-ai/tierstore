@@ -19,13 +19,13 @@ listen = "127.0.0.1:12049"
 
 [server]
 proxy_id_from_facts  = { path = "/var/lib/hostkeeper/facts.json", prefix = "tierstore-cache-" }
-bucket               = "kbf-cas"
+bucket               = "build-cas"
 access_key_file      = "/usr/local/tierstore/etc/access.key"
 read_only_key_files  = ["/usr/local/tierstore/etc/daemons.key"]
 s3_endpoint_attempts = 6
 
 [local_cache]
-path             = "/usr/local/tierstore/cache/kbf-cas"
+path             = "/usr/local/tierstore/cache/build-cas"
 budget           = "200GiB"
 whole_fill_limit = "128MiB"
 write_through    = true
@@ -33,7 +33,7 @@ put_ingest       = "/usr/local/tierstore/put"
 
 [cold_store]
 kind             = "s3"
-bucket           = "kbf-cas"
+bucket           = "build-cas"
 endpoints        = [
   "http://192.0.2.1:9300",
   "http://192.0.2.2:9300",

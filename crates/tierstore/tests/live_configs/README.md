@@ -26,6 +26,8 @@ From the farm's file, in this order, and nothing else:
 3. The six addresses of the farm's storage network (the Mac's upstreams) are the documentation
    addresses `192.0.2.1` to `192.0.2.6`, in order.
 4. A second cached prefix of the Linux node's `[[policy]]` is named `tools/`.
+5. The name of the farm's content-addressed store, the first word of its bucket (`<name>-cas`) and of
+   the Linux node's scoped key file (`<name>-cold.key`), is `build`: `build-cas`, `build-cold.key`.
 
 Every key, table, path, account name and number is the farm's.
 
