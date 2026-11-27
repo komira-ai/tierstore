@@ -1,7 +1,9 @@
 //! The SHA-256 checksums and the metadata of the fake service, as S3 keeps them.
 //!
 //! - A PUT that carries `x-amz-checksum-sha256` is refused 400 `BadDigest` unless the base64
-//!   SHA-256 of its body is that value, and the object keeps it (type `FULL_OBJECT`).
+//!   SHA-256 of its body is that value, and the object keeps it (type `FULL_OBJECT`). One that
+//!   carries `Content-MD5` is refused 400 `BadDigest` unless the base64 MD5 of its body is that
+//!   value, as S3 refuses it.
 //! - CreateMultipartUpload with `x-amz-checksum-algorithm: SHA256` makes an upload whose every
 //!   part must carry `x-amz-checksum-sha256` (400 `InvalidRequest` without one, 400 `BadDigest`
 //!   for a wrong one); the object it completes to keeps the checksum of the part checksums, the
@@ -12,9 +14,10 @@
 //!
 //! A test can make the service a store that does no checksums
 //! ([`FakeS3::ignore_checksums`](super::FakeS3::ignore_checksums)): it takes the headers, checks
-//! nothing and keeps no checksum; it still keeps the metadata.
+//! nothing (`Content-MD5` neither) and keeps no checksum; it still keeps the metadata.
 
 use base64::Engine as _;
+use md5::Md5;
 use sha2::{Digest as _, Sha256};
 
 use super::{Request, error};
@@ -33,6 +36,11 @@ fn base64_sha256(bytes: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(Sha256::digest(bytes))
 }
 
+/// The base64 MD5 of `bytes`, as `Content-MD5` carries it.
+fn base64_md5(bytes: &[u8]) -> String {
+    base64::engine::general_purpose::STANDARD.encode(Md5::digest(bytes))
+}
+
 /// The `x-amz-meta-*` headers of `request`.
 fn meta_of(request: &Request) -> Vec<(String, String)> {
     let meta = request.headers.iter();
@@ -45,6 +53,10 @@ fn meta_of(request: &Request) -> Vec<(String, String)> {
 /// not have.
 pub(super) fn of_put(request: &Request, ignore: bool) -> Result<Sums, Vec<u8>> {
     let meta = meta_of(request);
+    let md5 = request.headers.get("content-md5").filter(|_| !ignore);
+    if md5.is_some_and(|said| *said != base64_md5(&request.body)) {
+        return Err(error("400 Bad Request", "BadDigest"));
+    }
     let said = request.headers.get("x-amz-checksum-sha256");
     let sha256 = match said.filter(|_| !ignore) {
         Some(said) if *said != base64_sha256(&request.body) => {

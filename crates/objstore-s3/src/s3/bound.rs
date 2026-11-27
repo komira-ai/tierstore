@@ -16,8 +16,10 @@
 //! Without either header it keeps what it read: a PUT without `Content-Type` has its first read
 //! taken by the MIME sniff (`mimeDetect` in `s3api_object_handlers.go`), which drops the read's
 //! error, so a body cut short before its first byte reads as an empty one and is kept as a
-//! 0-byte object, which a create-only write can then never replace. The repair is for that
-//! object, and for any other a store kept short.
+//! 0-byte object, which a create-only write can then never replace. The look after a PUT that
+//! got no answer (`cut_put.rs`) deletes such an object when the PUT that made it is this store's;
+//! the repair is for the one left by a PUT of another writer, or of a release before the look,
+//! and for any other a store kept short.
 
 use crate::{BodyStream, ContentBoundPut, ObjectKey, ObjectStoreError};
 

@@ -363,6 +363,7 @@ mod drain_tests;
 mod first_beat;
 mod first_format;
 mod front;
+mod front_counts;
 pub mod gc;
 #[cfg(test)]
 mod gc_server_tests;
@@ -590,6 +591,8 @@ pub struct Server {
     next_request: AtomicU64,
     /// One permit for each streamed body that may be taken at once.
     puts: Arc<Semaphore>,
+    /// The front's own counts (`front_counts.rs`).
+    counts: front_counts::FrontCounts,
 }
 
 impl Server {
@@ -608,6 +611,7 @@ impl Server {
             inflight: AtomicUsize::new(0),
             open: AtomicUsize::new(0),
             next_request: AtomicU64::new(1),
+            counts: front_counts::FrontCounts::default(),
         })
     }
 
@@ -646,12 +650,6 @@ impl Server {
     #[must_use]
     pub fn lingering_connections(&self) -> usize {
         self.drain.lingering()
-    }
-
-    /// The connections whose peer wrote after the server shut its end, in the drain: the
-    /// requests that came too late to be answered.
-    pub(super) fn late_requests(&self) -> u64 {
-        self.drain.late()
     }
 
     /// Begins the drain: `/readyz` says 503 from now on, and [`Server::serve`] runs the rest of
@@ -987,9 +985,10 @@ impl Server {
         if text.is_empty() {
             text = "# this server has no proxy, no OCI read front and no local cache\n".to_owned();
         }
-        let late = self.drain.late();
+        let late = self.late_requests();
         text.push_str("# TYPE tierstore_drain_late_requests_total counter\n");
         text.push_str(&format!("tierstore_drain_late_requests_total {late}\n"));
+        text.push_str(&self.put_failure_family());
         let (version, commit) = (build_info::VERSION, build_info::COMMIT);
         text.push_str(&build_info::gauge(version, commit, self.config.slot));
         text
