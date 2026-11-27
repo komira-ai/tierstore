@@ -7,16 +7,36 @@ use std::path::PathBuf;
 use tierstore_examples::Error;
 use tierstore_examples::report::Report;
 use tierstore_examples::run::{Options, run};
+use tierstore_testkit::dir::TestDir;
 
 use crate::{examples, scratch, tierstore};
+
+/// Every log of the run in `work`, each after its name, for the message of a failed run: the
+/// steps', tierstore's and sccache's own (`SCCACHE_ERROR_LOG`).
+fn logs(work: &std::path::Path) -> String {
+    let mut text = String::new();
+    let mut paths: Vec<PathBuf> = std::fs::read_dir(work.join("logs"))
+        .map(|dir| dir.filter_map(|e| e.ok().map(|e| e.path())).collect())
+        .unwrap_or_default();
+    paths.sort();
+    for path in paths {
+        let log = std::fs::read_to_string(&path).unwrap_or_default();
+        text.push_str(&format!("--- {}\n{log}", path.display()));
+    }
+    text
+}
 
 /// The example run with `config` in place of its tierstore.toml, or `None` where sccache is not
 /// installed.
 fn run_example(work: PathBuf, config: Option<PathBuf>) -> Option<Report> {
+    // sccache binds a Unix socket under TMPDIR at its start: a directory under the system's
+    // temporary directory keeps that path short enough, as the work directory may not.
+    let tmp = TestDir::under(std::env::temp_dir(), "example-tmp");
     let options = Options {
         example: examples().join("build-cache"),
         tierstore: tierstore(),
         work,
+        tmp: Some(tmp.path().to_path_buf()),
         config,
     };
     match run(&options) {
@@ -25,7 +45,7 @@ fn run_example(work: PathBuf, config: Option<PathBuf>) -> Option<Report> {
             eprintln!("skipped: the client {program} is not installed ({source})");
             None
         }
-        Err(other) => panic!("{other}"),
+        Err(other) => panic!("{other}\n{}", logs(&options.work)),
     }
 }
 

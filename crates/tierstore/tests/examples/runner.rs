@@ -177,6 +177,7 @@ fn standin(dir: &TestDir, spec: &str, config: &str, expected: &str) -> Options {
         example,
         tierstore: tierstore(),
         work: dir.path().join("work"),
+        tmp: None,
         config: None,
     }
 }
@@ -477,12 +478,12 @@ fn a_check_that_cannot_be_evaluated_is_named_with_its_reason() {
         (
             "missing",
             "json = { file = \"none.json\", pointer = \"/n\" }",
-            "{work}/none.json: No such file or directory (os error 2)",
+            "<work>/none.json: No such file or directory (os error 2)",
         ),
         (
             "not-json",
             "json = { file = \"bad/1.json\", pointer = \"/n\" }",
-            "{work}/bad/1.json: expected ident at line 1 column 2",
+            "<work>/bad/1.json: expected ident at line 1 column 2",
         ),
         (
             "table",
@@ -497,7 +498,7 @@ fn a_check_that_cannot_be_evaluated_is_named_with_its_reason() {
         (
             "same",
             "same = { a = \"data\", b = \"none\" }",
-            "{work}/none: No such file or directory (os error 2)",
+            "<work>/none: No such file or directory (os error 2)",
         ),
     ];
     for (name, kind, why) in cases {
@@ -506,7 +507,7 @@ fn a_check_that_cannot_be_evaluated_is_named_with_its_reason() {
         let options = standin(&dir, &spec(&["tierstore", "--version"], &rest), CONFIG, "");
         let error = run_err(&options);
         let work = std::fs::canonicalize(&options.work).unwrap();
-        let why = why.replace("{work}", path(&work));
+        let why = why.replace("<work>", path(&work));
         assert_eq!(error.to_string(), format!("check c: {why}"), "{name}");
     }
 }
@@ -522,17 +523,17 @@ fn a_generator_that_cannot_write_its_files_says_why() {
         (
             "missing",
             generator("none.in", "x/${n}"),
-            "{example}/none.in: No such file or directory (os error 2)",
+            "<example>/none.in: No such file or directory (os error 2)",
         ),
         (
             "value",
             generator("data.json.in", "${work}/${n}"),
-            "{example}/example.toml: ${work} is not a value of the run",
+            "<example>/example.toml: ${work} is not a value of the run",
         ),
         (
             "twice",
             generator("data.json.in", "x/${n}") + &generator("data.json.in", "x/${n}"),
-            "{work}/x/1: File exists (os error 17)",
+            "<work>/x/1: File exists (os error 17)",
         ),
     ];
     for (name, generators, why) in cases {

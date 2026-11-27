@@ -86,10 +86,13 @@ pub fn scrape(addr: SocketAddr) -> Result<Reading, Error> {
         addr: addr.to_string(),
         why,
     };
+    // One write: a server may close once it has read the request, and bytes of it still unread
+    // then would make the connection reset.
+    let request = format!("GET /metricz HTTP/1.0\r\nHost: {addr}\r\n\r\n");
     let mut stream = TcpStream::connect(addr).map_err(|e| fail(e.to_string()))?;
     stream
         .set_read_timeout(Some(SCRAPE_WAIT))
-        .and_then(|()| write!(stream, "GET /metricz HTTP/1.0\r\nHost: {addr}\r\n\r\n"))
+        .and_then(|()| stream.write_all(request.as_bytes()))
         .map_err(|e| fail(e.to_string()))?;
     let mut answer = Vec::new();
     stream

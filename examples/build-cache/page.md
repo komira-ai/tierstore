@@ -7,6 +7,10 @@ tierstore's S3 front and builds a small C project three times. What it shows: th
 compiles nothing; the objects are in the store; and a fresh sccache over a warm tierstore cache
 reads every object from tierstore's disk, with no request to the tier behind it.
 
+The checks are of reads and of correct results only. The example claims nothing about the
+speed of writes: a put is answered once the cold tier has it, and a build that waits on its
+writes gains nothing from the cache here.
+
 It runs in CI as a test of the workspace (`crates/tierstore/tests/examples`), with sccache
 0.19.0 fetched by its version and SHA-256. Nothing is in a cloud: both of tierstore's tiers are
 directories of the run.
@@ -18,15 +22,19 @@ repository:
 
 ```sh
 cargo run -p tierstore-examples -- run examples/build-cache \
-  --tierstore "$(command -v tierstore)" --work /path/to/an/empty/directory
+  --tierstore "$(command -v tierstore)" --work /path/to/an/empty/directory --tmp /tmp/sccache-example
 ```
+
+sccache binds a Unix socket under `TMPDIR` when its server starts, and a socket's path may be
+about 100 bytes at most: `--tmp` gives the commands a short `TMPDIR` (without it, `TMPDIR` is
+`tmp/` in the work directory).
 
 The runner checks that this page shows each file of the example as it is, starts tierstore on a
 free port with `tierstore.toml`, checks sccache's version, writes the project, runs the three
 builds with a reading of tierstore's `/metricz` before and after each, evaluates the checks and
 compares their lines with `expected.txt`. It prints the report and exits 0 when they are the
 same, and prints what differs and exits 1 when they are not. Each command runs with an
-environment of its own: `PATH`, a `HOME` and a `TMPDIR` in the work directory, `LC_ALL=C`, and
+environment of its own: `PATH`, a `HOME` in the work directory, that `TMPDIR`, `LC_ALL=C`, and
 what `example.toml` sets; nothing else of yours reaches sccache. The logs are in `logs/` of the
 work directory.
 

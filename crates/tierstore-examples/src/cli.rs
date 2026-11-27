@@ -1,7 +1,8 @@
 //! The command line of `tierstore-example`.
 //!
 //! ```text
-//! tierstore-example run <example> --tierstore <binary> --work <dir> [--tierstore-config <file>]
+//! tierstore-example run <example> --tierstore <binary> --work <dir> [--tmp <dir>]
+//!                       [--tierstore-config <file>]
 //! tierstore-example check-page <example>
 //! ```
 //!
@@ -40,6 +41,10 @@ enum Verb {
         /// The work directory: made if it is not there; it must be empty.
         #[arg(long)]
         work: PathBuf,
+        /// The TMPDIR of the commands (default: tmp in the work directory); a short path where a
+        /// client binds a Unix socket there.
+        #[arg(long)]
+        tmp: Option<PathBuf>,
         /// A configuration to run tierstore with in place of the example's tierstore.toml.
         #[arg(long)]
         tierstore_config: Option<PathBuf>,
@@ -75,6 +80,7 @@ pub fn main(
             example,
             tierstore,
             work,
+            tmp,
             tierstore_config,
         } => {
             let config = tierstore_config;
@@ -82,6 +88,7 @@ pub fn main(
                 example,
                 tierstore,
                 work,
+                tmp,
                 config,
             })
             .map(|report| {

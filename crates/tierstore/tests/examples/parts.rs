@@ -254,8 +254,12 @@ fn a_metrics_page_that_cannot_be_read_is_an_error() {
     let addr = listener.local_addr().unwrap();
     let answering = std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();
-        let mut request = [0_u8; 1024];
-        let _ = stream.read(&mut request).unwrap();
+        let mut request = Vec::new();
+        let mut byte = [0_u8; 1];
+        while !request.ends_with(b"\r\n\r\n") {
+            stream.read_exact(&mut byte).unwrap();
+            request.push(byte[0]);
+        }
         stream
             .write_all(b"HTTP/1.0 404 Not Found\r\n\r\nno")
             .unwrap();

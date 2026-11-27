@@ -2,7 +2,8 @@
 //! builds, never the caller's.
 //!
 //! The environment of a command is `PATH` (the caller's, so that the client and the tools it
-//! calls are found), `HOME` (`${work}/home`), `TMPDIR` (`${work}/tmp`) and `LC_ALL=C`, then the
+//! calls are found), `HOME` (`${work}/home`), `TMPDIR` (the run's temporary directory, `${work}/tmp`
+//! unless the caller names another) and `LC_ALL=C`, then the
 //! example's `[env]`, then its step's `env`. So a setting of the caller's (an `AWS_PROFILE`, a
 //! configuration file in its home directory) reaches no client.
 
@@ -33,12 +34,14 @@ pub struct Runner<'a> {
 }
 
 impl<'a> Runner<'a> {
-    /// The runner of the commands of an example whose `[env]` is `env`.
+    /// The runner of the commands of an example whose `[env]` is `env`, with `tmp` as their
+    /// `TMPDIR`.
     ///
     /// # Errors
     /// A value of `env` names an unknown value of the run.
     pub fn new(
         work: &'a Path,
+        tmp: &Path,
         example: &'a Path,
         vars: &'a BTreeMap<String, String>,
         env: &BTreeMap<String, String>,
@@ -46,7 +49,7 @@ impl<'a> Runner<'a> {
         let mut base = BTreeMap::new();
         base.insert("PATH".to_owned(), search_path().unwrap_or_default());
         base.insert("HOME".to_owned(), work.join("home").into_os_string());
-        base.insert("TMPDIR".to_owned(), work.join("tmp").into_os_string());
+        base.insert("TMPDIR".to_owned(), tmp.as_os_str().to_owned());
         base.insert("LC_ALL".to_owned(), OsString::from("C"));
         let logs = work.join("logs");
         let mut runner = Self {

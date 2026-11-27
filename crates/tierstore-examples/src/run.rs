@@ -31,6 +31,10 @@ pub struct Options {
     pub tierstore: PathBuf,
     /// The work directory: made if it is not there, and refused if it holds anything.
     pub work: PathBuf,
+    /// The `TMPDIR` of the commands, made if it is not there; `None` for `${work}/tmp`. A client
+    /// that binds a Unix socket there (sccache does, at its start) needs a path short enough for
+    /// one, about 100 bytes, which a work directory deep in a build tree can pass.
+    pub tmp: Option<PathBuf>,
     /// A tierstore configuration to run with in place of the example's `tierstore.toml` (the
     /// same placeholders): to see the checks fail over a tierstore set up another way.
     pub config: Option<PathBuf>,
@@ -79,7 +83,9 @@ pub fn run(options: &Options) -> Result<Report, Error> {
     let server = Tierstore::start(&options.tierstore, &config_file, &log)?;
     let addr = server.addr();
     vars.insert("endpoint".to_owned(), format!("http://{addr}"));
-    let runner = Runner::new(&work, &example, &vars, &spec.env)?;
+    let tmp = options.tmp.clone().unwrap_or_else(|| work.join("tmp"));
+    fs::create_dir_all(&tmp).map_err(io_at(&tmp))?;
+    let runner = Runner::new(&work, &tmp, &example, &vars, &spec.env)?;
     runner.check_client(&spec.client)?;
     generate(&example, &work, &spec.generate)?;
     let steps = run_steps(&runner, &spec, addr);
