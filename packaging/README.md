@@ -312,7 +312,8 @@ in it (`a..b`, `.hidden`) is a name, and tab, line feed, carriage return, U+007F
 | AbortMultipartUpload | `write_prefixes` (a GC key: its abort prefix) | of an upload of such a key (a delete prefix does not allow an abort) |
 | DeleteObject | `delete_prefixes` | from both tiers, on the entry of the key as for any delete |
 | DeleteObjects (`POST ?delete`) | none | no: the keys are in the body, and only the full key calls it |
-| a put with `If-Match` or any other `If-None-Match`, a copy (`x-amz-copy-source`, also on a part) | none | no: a scoped key never replaces or copies |
+| a put with `If-Match` or any other `If-None-Match` | none | no: a scoped key never replaces |
+| a copy (`x-amz-copy-source`, CopyObject or UploadPartCopy) | `read_prefixes` for the source and `write_prefixes` for the destination | of a source such a key may read into a key it may write; a CopyObject creates only (`412` if the key exists) |
 | the calls on the bucket (CreateBucket, HeadBucket, GetBucketLocation, the reads of its settings, delete) and the root (ListBuckets), any other method | none | no |
 | `_journal/`, `_tiering/`, `_entries/`, any key outside the list the call needs | none | no |
 

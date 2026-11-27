@@ -53,6 +53,7 @@ server = [
     "dep:toml",
     "dep:tierstore-fetch-api",
     "dep:tierstore-format",
+    "dep:tierstore-list",
     "dep:tierstore-trees-api",
     "dep:tonic",
     "dep:tracing",
@@ -125,6 +126,11 @@ rustls-native-certs = { workspace = true, optional = true }
 tierstore-fetch-api = { workspace = true, optional = true }
 # The generation of a large object, its ETag (`server`).
 tierstore-format = { workspace = true, optional = true }
+# The L2 sidecar of a tree list (`cas/l2/<id>`), the one object of a tree the mount provider reads:
+# its reader checks it and its projection is the version 2 list the tree is placed as (`server`,
+# `server/provider/prepare.rs`; section 3.5 of docs/design/fetch-cache-serve.md). The list crate
+# has this crate as its dev-dependency, for its tests' version 2 writer, which Cargo allows.
+tierstore-list = { workspace = true, optional = true }
 # The wire contract of the mount provider and its server stub (`server`).
 tierstore-trees-api = { workspace = true, features = ["server"], optional = true }
 # `Status` and the body of a gRPC call, which the mount provider answers with; tonic's own transport
@@ -178,9 +184,6 @@ nix = { workspace = true, optional = true }
 # The tests of the tree mount serve a tree from the rig of `tierstore-tree`: the real mount server
 # over the real entry store, with a fake engine.
 tierstore-tree = { workspace = true, features = ["testing"] }
-# The L2 sidecar the kernel test of the tree mount builds its tree's list into (a dev-dependency
-# only: the list crate has this crate as its own dev-dependency, for its writer).
-tierstore-list.workspace = true
 
 [dev-dependencies]
 # A stock S3 SDK (aws-sdk-rust) and its plain-HTTP client, which tests/s3_front/sdk.rs drives
