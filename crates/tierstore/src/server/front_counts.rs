@@ -1,6 +1,6 @@
-//! The families of `/metricz` that the front counts itself, whatever it serves from: the requests
-//! that came too late in a drain, and the puts of an object whose body it streams to the backend
-//! (`put_streamed`, in `ops`) that failed, by the reason the answer to the client gives.
+//! The front's count of the puts of an object whose body it streams to the backend
+//! (`put_streamed`, in `ops`) that failed, by the reason the answer to the client gives, and its
+//! family of `/metricz`; and the front's count of the requests that came too late in a drain.
 
 use std::fmt::Write as _;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -85,13 +85,9 @@ impl Server {
         self.drain.late()
     }
 
-    /// The front's families of `/metricz` (module docs): one series of the failed puts for each
-    /// reason.
-    pub(super) fn front_families(&self) -> String {
-        let late = self.late_requests();
-        let mut text = String::from("# TYPE tierstore_drain_late_requests_total counter\n");
-        let _ = writeln!(text, "tierstore_drain_late_requests_total {late}");
-        let _ = writeln!(text, "# TYPE {PUT_FAILURES} counter");
+    /// The family of the failed puts on `/metricz`: one series for each reason.
+    pub(super) fn put_failure_family(&self) -> String {
+        let mut text = format!("# TYPE {PUT_FAILURES} counter\n");
         for (reason, count) in REASONS.iter().zip(&self.counts.put_failures) {
             let count = count.load(Ordering::Relaxed);
             let _ = writeln!(text, "{PUT_FAILURES}{{reason=\"{reason}\"}} {count}");

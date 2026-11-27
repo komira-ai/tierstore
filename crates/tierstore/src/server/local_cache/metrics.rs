@@ -4,7 +4,7 @@ use std::fmt::Write as _;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::{Backend as _, Error, ShortObjects};
+use crate::{Error, ShortObjects};
 
 use super::prefetch::Prefetched;
 use super::stall::BusyLog;

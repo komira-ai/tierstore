@@ -988,7 +988,10 @@ impl Server {
         if text.is_empty() {
             text = "# this server has no proxy, no OCI read front and no local cache\n".to_owned();
         }
-        text.push_str(&self.front_families());
+        let late = self.late_requests();
+        text.push_str("# TYPE tierstore_drain_late_requests_total counter\n");
+        text.push_str(&format!("tierstore_drain_late_requests_total {late}\n"));
+        text.push_str(&self.put_failure_family());
         let (version, commit) = (build_info::VERSION, build_info::COMMIT);
         text.push_str(&build_info::gauge(version, commit, self.config.slot));
         text

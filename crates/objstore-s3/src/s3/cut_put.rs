@@ -27,7 +27,7 @@
 //! The look never changes what the put gives: the error it ended with.
 
 use std::collections::hash_map::RandomState;
-use std::hash::{BuildHasher as _, Hash as _, Hasher as _};
+use std::hash::BuildHasher as _;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use bytes::Bytes;
@@ -78,11 +78,7 @@ impl CutCounts {
 pub(super) fn token() -> String {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
-    let half = |salt: u8| {
-        let mut hasher = RandomState::new().build_hasher();
-        (n, salt).hash(&mut hasher);
-        hasher.finish()
-    };
+    let half = |salt: u8| RandomState::new().hash_one((n, salt));
     format!("{:016x}{:016x}", half(0), half(1))
 }
 
