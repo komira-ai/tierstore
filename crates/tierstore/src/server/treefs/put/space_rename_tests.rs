@@ -11,7 +11,6 @@ use std::thread::{self, ThreadId};
 use rustix::io::Errno;
 
 use super::super::super::changes::{Changes, Topic};
-use super::super::super::fake::failed;
 use super::super::super::testing::{DEADLINE, SpaceRig, warnings};
 use super::super::PutSpace;
 use crate::server::treefs::ino::{self, PutIno};
@@ -239,8 +238,9 @@ fn what_is_decided_at_once_is_answered_on_the_calling_thread() {
     assert_eq!(space.changes.waits.load(Ordering::Acquire), 0);
 }
 
-/// An upload that fails answers the store's errno from the commit's thread and leaves the file
-/// staged; a commit of the same key that waited for it then goes on and gets its own answer.
+/// An upload that fails (here, bytes that are not those of the digest, which the cache finds as
+/// it sends them) answers the store's errno from the commit's thread and leaves the file staged; a
+/// commit of the same key that waited for it then goes on and gets its own answer.
 #[test]
 fn a_failed_upload_wakes_the_commit_of_its_key() {
     let rig = SpaceRig::new("put-rename-key");
@@ -254,7 +254,8 @@ fn a_failed_upload_wakes_the_commit_of_its_key() {
     puts.wait_for_held(1);
     let second = rename(&space, dir, "b.part", "k");
     until(|| space.changes.waits.load(Ordering::Acquire) > 0);
-    puts.script.lock().unwrap().push_back(failed("checksum"));
+    // The bytes the cache reads for the held put are no longer the ones that hashed to the digest.
+    rig.rig.corrupt_staged(b"first");
     puts.let_go();
     assert_eq!(first.recv().unwrap().0, Err(Errno::BADMSG));
     assert_eq!(second.recv().unwrap().0, Ok(()));

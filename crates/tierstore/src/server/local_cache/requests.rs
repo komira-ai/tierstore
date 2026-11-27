@@ -8,8 +8,8 @@
 //! protocol layer into the file system (`treefs/nfs/fs.rs`); a request of any other kind, an
 //! opcode the frontend does not serve among them, is `other`. At each look for idle trees (every
 //! quarter of `fs.tree_idle_secs`, at most a minute apart) and when its readers stop for a
-//! hand-over, if it answered a request since the report before, it sends, as `opens` is sent
-//! (`opens.rs`), `requests <mount> <process> <spans>...`:
+//! hand-over, if it answered a request since the report before, it reports, as `opens` are reported
+//! (`opens.rs`), by calling the cache in its process (`LocalCache::requests_reported`):
 //!
 //! - `<mount>`: the id of the mount;
 //! - `<process>`: the id of the mount process (its pid);
@@ -21,24 +21,18 @@
 //! The node adds to `tierstore_fs_request_seconds` what each process's totals grew by since its
 //! report before, by the rule of the opens ([`grown`], `opens.rs`): the totals of the
 //! [`PROCESSES`](super::super::descriptors::PROCESSES) latest processes of a mount are kept, and at most
-//! [`MOST_MOUNTS`] mounts; a report of another, when that many are, is answered `ok` and counted
-//! nowhere.
+//! [`MOST_MOUNTS`] mounts; a report of another, when that many are, is counted nowhere.
 //!
-//! The report is advice, like the others of the mount: one is lost when the thread that sends it
-//! has a queue of 1024, when the fill socket is away, or when the node is of a release before
-//! this one (it answers `refused unknown request`, which the mount ignores). A report this node
-//! cannot read (another number of kinds or of buckets, from a mount of another release) is refused
-//! and adds nothing.
+//! The report is advice, like the others of the mount: one is lost when the thread that reports it
+//! has a queue of 1024.
 
 use std::collections::BTreeMap;
-use std::fmt::Write as _;
 use std::sync::Mutex;
 
-use super::super::attaches::{BUCKETS, Histogram};
-use super::super::descriptors::{MOST_MOUNTS, number};
+use super::super::attaches::Histogram;
+use super::super::descriptors::MOST_MOUNTS;
 use super::super::{LocalCache, locked};
 use super::{Spans, grown};
-use crate::server::fill_socket::request::is_name;
 
 /// The family, with a `# TYPE` line, and its series, each written out for `docs/metrics.md`.
 const REQUEST: &str = "tierstore_fs_request_seconds";
@@ -112,48 +106,6 @@ pub(in crate::server) struct Requests {
     pub process: u64,
     /// The requests of each kind of [`KINDS`] since the mount process started.
     pub spans: [Spans; KINDS.len()],
-}
-
-impl Requests {
-    /// The line of the report.
-    pub(in crate::server) fn line(&self) -> String {
-        let mut line = format!("requests {} {}", self.mount, self.process);
-        for spans in &self.spans {
-            let _ = write!(line, " {}", spans.ms);
-            for count in spans.buckets {
-                let _ = write!(line, " {count}");
-            }
-        }
-        line
-    }
-
-    /// The report whose words after `requests` are `rest`: a mount name, the process, and for each
-    /// kind the milliseconds and one number for each bucket. None for anything else, among it a
-    /// report of another number of kinds or of buckets.
-    pub(in crate::server) fn parse(rest: &str) -> Option<Self> {
-        let (mount, numbers) = rest.split_once(' ')?;
-        if !is_name(mount) {
-            return None;
-        }
-        let numbers: Vec<u64> = numbers.split(' ').map(number).collect::<Option<_>>()?;
-        if numbers.len() != 1 + KINDS.len() * (1 + BUCKETS) {
-            return None;
-        }
-        let (process, cells) = (numbers[0], &numbers[1..]);
-        let mut spans = [Spans::default(); KINDS.len()];
-        // Each chunk is the milliseconds and then the buckets: `1 + BUCKETS` numbers.
-        for (spans, cells) in spans.iter_mut().zip(cells.chunks_exact(1 + BUCKETS)) {
-            spans.ms = cells[0];
-            for (count, cell) in spans.buckets.iter_mut().zip(&cells[1..]) {
-                *count = *cell;
-            }
-        }
-        Some(Self {
-            mount: mount.to_owned(),
-            process,
-            spans,
-        })
-    }
 }
 
 /// The reports taken so far.

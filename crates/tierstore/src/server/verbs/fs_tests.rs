@@ -6,7 +6,7 @@ use std::os::unix::net::UnixListener;
 
 use tierstore_testkit::dir::TestDir;
 
-use super::run;
+use super::{NOT_A_PROCESS, run};
 use crate::server::treefs::testing::{Rig, sample};
 use crate::server::verbs::testing::{args, status};
 
@@ -28,11 +28,10 @@ fn config(rig: &Rig, extra: &str) -> std::path::PathBuf {
     let gid = std::fs::metadata(&rig.runtime).unwrap().gid();
     let text = format!(
         "[fs]\nmountpoint = {:?}\nruntime_dir = {:?}\ncontrol_socket = {:?}\nclient_group = \"{gid}\"\n\
-         owner = \"1:2\"\nfill_socket = {:?}\ncache_path = {:?}\n{extra}",
+         owner = \"1:2\"\ncache_path = {:?}\n{extra}",
         rig.mountpoint,
         rig.runtime,
         rig.dir.path().join("control.sock"),
-        rig.dir.path().join("fill.sock"),
         rig.cache,
     );
     let path = rig.dir.path().join("fs.toml");
@@ -58,12 +57,12 @@ fn the_arguments_of_the_verb_are_parsed() {
 }
 
 /// Asserts that a file that is missing, or has no usable `[fs]` table, is status 2 and the message
-/// names the key or the file.
+/// names the key or the file, for a check of the file and for `attachments`.
 #[test]
 fn a_file_that_is_missing_or_wrong_is_status_two() {
     let dir = TestDir::under(std::env::temp_dir(), "tfs-verb-config");
     let missing = dir.path().join("none.toml");
-    let (code, _, err) = fs(&["--config", missing.to_str().unwrap()]);
+    let (code, _, err) = fs(&["--config", missing.to_str().unwrap(), "--check-config"]);
     assert_eq!(code, status(2));
     assert!(err.contains("none.toml"), "{err}");
     let bad = dir.path().join("bad.toml");
@@ -73,18 +72,19 @@ fn a_file_that_is_missing_or_wrong_is_status_two() {
     assert!(err.contains("fs.client_group"), "{err}");
 }
 
-/// Asserts that a start that fails is its status and its words on stderr: the cache directory is
-/// not there, status 1.
-#[cfg(target_os = "linux")]
+/// Asserts that a start of the verb (`--config` alone, with no `attachments` and no
+/// `--check-config`) is status 2 whatever the file, which need not exist: nothing on stdout and, on
+/// stderr, the one line that says the file system is the `fs` interface of the node's file.
 #[test]
-fn a_start_that_fails_says_why_with_its_status() {
-    let rig = Rig::new("tfs-verb-start", sample());
-    let path = config(&rig, "");
-    std::fs::remove_dir_all(&rig.cache).unwrap();
-    let (code, out, err) = fs(&["--config", path.to_str().unwrap()]);
-    assert_eq!(code, status(1));
-    assert!(out.is_empty());
-    assert!(err.starts_with("tierstore fs: fs.cache_path "), "{err}");
+fn the_fs_verb_exits_2_and_names_the_interface() {
+    let dir = TestDir::under(std::env::temp_dir(), "tfs-verb-not-a-process");
+    let file = dir.path().join("fs.toml");
+    let (code, out, err) = fs(&["--config", file.to_str().unwrap()]);
+    assert_eq!(code, status(2));
+    assert!(out.is_empty(), "{out}");
+    assert_eq!(err, format!("{NOT_A_PROCESS}\n"));
+    assert!(err.contains("[[interface]]"), "{err}");
+    assert!(err.contains("type = \"fs\""), "{err}");
 }
 
 /// Asserts that `attachments` lists one line for each attachment of the running process, the digest
@@ -143,46 +143,11 @@ fn the_attachments_of_a_socket_that_does_not_answer_are_an_error() {
     server.join().unwrap();
 }
 
-/// Asserts that the verb is answered by name before the flags of a start are read.
+/// Asserts that the verb is answered by name before its flags are read.
 #[test]
 fn the_verb_is_answered_by_name() {
     let answered = crate::server::verbs::answer(&args(&["fs", "--help"])).unwrap();
     assert_eq!(format!("{answered:?}"), status(0));
-}
-
-/// Asserts the status of a serve: success for a mount that ended well, and for one that did not the
-/// status of its error (3 for a stacked cache, 1 for the rest) with its words on stderr.
-#[cfg(target_os = "linux")]
-#[test]
-fn the_status_of_a_serve_is_the_status_of_its_error() {
-    use crate::server::treefs::StartError;
-    let mut err = Vec::new();
-    assert_eq!(
-        format!("{:?}", super::finished(Ok(()), &mut err)),
-        status(0)
-    );
-    assert!(err.is_empty());
-    let stacked = StartError::Stacked {
-        path: "/c".to_owned(),
-        name: "overlayfs",
-    };
-    assert_eq!(
-        format!("{:?}", super::finished(Err(stacked), &mut err)),
-        status(3)
-    );
-    let io = StartError::Io {
-        what: "mounting".to_owned(),
-        source: std::io::Error::other("busy"),
-    };
-    assert_eq!(
-        format!("{:?}", super::finished(Err(io), &mut err)),
-        status(1)
-    );
-    let text = String::from_utf8(err).unwrap();
-    assert!(
-        text.contains("tierstore fs: fs.cache_path /c") && text.contains("mounting: busy"),
-        "{text}"
-    );
 }
 
 /// Asserts that `--check-config` of a file that loads is status 0 with nothing on stdout or stderr,
@@ -199,9 +164,9 @@ fn check_config_of_a_good_file_says_nothing_and_serves_nothing() {
     assert!(!rig.dir.path().join("control.sock").exists());
 }
 
-/// Asserts that `--check-config` of a file that is refused is status 2 with the line a start prints
-/// (`tierstore fs: ` and the reason), whichever side of `--config` the flag is on, and that a
-/// missing file is the same. Catches a check that loads less than a start does.
+/// Asserts that `--check-config` of a file that is refused is status 2 with the line the verb prints
+/// for a refused file (`tierstore fs: ` and the reason), whichever side of `--config` the flag is
+/// on, and that a missing file is the same.
 #[test]
 fn check_config_of_a_refused_file_is_status_two_with_the_reason_of_a_start() {
     let dir = TestDir::under(std::env::temp_dir(), "tfs-verb-check-bad");
@@ -215,8 +180,8 @@ fn check_config_of_a_refused_file_is_status_two_with_the_reason_of_a_start() {
         err.starts_with("tierstore fs: fs.owner: must be user:group"),
         "{err}"
     );
-    let (_, _, start) = fs(&["--config", bad]);
-    assert_eq!(err, start);
+    let (_, _, flag_last) = fs(&["--config", bad, "--check-config"]);
+    assert_eq!(err, flag_last);
     let missing = dir.path().join("none.toml");
     let (code, _, err) = fs(&["--config", missing.to_str().unwrap(), "--check-config"]);
     assert_eq!(code, status(2));

@@ -1,7 +1,7 @@
 //! The `fs` interface of the one process on macOS (`docs/design/one-service.md`, sections 2.3, 3.4
 //! and 3.5): the NFS front a build node's `tierstore` serves itself when its file has an
 //! `[[interface]]` of type `fs`, with a core that calls the node's cache and tree store
-//! (`in_process.rs`) instead of asking a fill socket. Linux serves the same interface by FUSE
+//! (`in_process.rs`) instead of asking another process. Linux serves the same interface by FUSE
 //! (`interface.rs` of the parent).
 //!
 //! The start (`cache_cli.rs`) opens the cache and the tree store and starts the front before it
@@ -40,7 +40,7 @@ use crate::server::handoff::{Handed, Handing};
 use crate::server::local_cache::LocalCache;
 use crate::server::local_cache::trees::TreeStore;
 use crate::server::treefs::config::FsSettings;
-use crate::server::treefs::fills::{Calls, Reach};
+use crate::server::treefs::fills::Calls;
 
 /// The `fs` interface of a build node's file, and what its NFS front runs on: the commands of the
 /// mount, the user of the process, the boot, and the server of the protocol.
@@ -111,11 +111,11 @@ impl NfsService {
             serve,
         } = self;
         let runtime = Handle::current();
-        let reach = Reach::Calls(Calls {
+        let reach = Calls {
             cache,
             trees,
             runtime: runtime.clone(),
-        });
+        };
         // The start waits for the cache's answers (the attachments are made again through it),
         // which are worked out on the runtime: it runs on a thread of its own.
         let started = tokio::task::spawn_blocking(move || {

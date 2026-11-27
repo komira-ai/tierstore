@@ -8,7 +8,7 @@
 //! ```
 //!
 //! `params.socket` is needed: an absolute path of a file, at most as long as a Unix socket's path
-//! can be, and neither the hand-off socket nor the fill socket. `params.mountpoint` is the node's
+//! can be, and not the hand-off socket. `params.mountpoint` is the node's
 //! file system mount, under which the provider answers a source's directory: an absolute path. In a
 //! file with an `fs` interface it is that interface's `mountpoint`, which it takes when left out and
 //! must equal when given (`config_fs.rs`); in a file without one it is the mount of `tierstore fs`
@@ -89,8 +89,8 @@ pub(in crate::server) fn provider_of(
     })
 }
 
-/// Refuses a provider's socket that is another socket of the node (the hand-off socket or the fill
-/// socket, each of which replaces the file at its path when it is bound) or is inside the cache
+/// Refuses a provider's socket that is another socket of the node (such as the hand-off socket,
+/// each of which replaces the file at its path when it is bound) or is inside the cache
 /// directory `cache`, which is not a place for it.
 ///
 /// # Errors

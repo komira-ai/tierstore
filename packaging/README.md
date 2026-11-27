@@ -312,7 +312,8 @@ in it (`a..b`, `.hidden`) is a name, and tab, line feed, carriage return, U+007F
 | AbortMultipartUpload | `write_prefixes` (a GC key: its abort prefix) | of an upload of such a key (a delete prefix does not allow an abort) |
 | DeleteObject | `delete_prefixes` | from both tiers, on the entry of the key as for any delete |
 | DeleteObjects (`POST ?delete`) | none | no: the keys are in the body, and only the full key calls it |
-| a put with `If-Match` or any other `If-None-Match`, a copy (`x-amz-copy-source`, also on a part) | none | no: a scoped key never replaces or copies |
+| a put with `If-Match` or any other `If-None-Match` | none | no: a scoped key never replaces |
+| a copy (`x-amz-copy-source`, CopyObject or UploadPartCopy) | `read_prefixes` for the source and `write_prefixes` for the destination | of a source such a key may read into a key it may write; a CopyObject creates only (`412` if the key exists) |
 | the calls on the bucket (CreateBucket, HeadBucket, GetBucketLocation, the reads of its settings, delete) and the root (ListBuckets), any other method | none | no |
 | `_journal/`, `_tiering/`, `_entries/`, any key outside the list the call needs | none | no |
 
@@ -645,9 +646,9 @@ put 403.
 | `local_cache.forget_limit` | the most keys a read-only cache remembers it deleted or replaced through the upstream (1 to 100000000, default 65536); past it the cache is emptied when it takes the lock |
 | `local_cache.fill_chunk` | the bytes a fill reads from the upstream at a time (4KiB to 1GiB, default `8MiB`) |
 | `local_cache.keep_queue_bytes` | the most bytes of a put's body that may wait for the disk before its copy is dropped (1 byte to 1GiB, default `4MiB`) |
-| `local_cache.fill_socket` | the Unix socket over which the node's filesystem process asks it to put blobs in the cache; default `fill.sock` in the service's state directory; a build node's key (not in a release yet; see crates/tierstore/docs/configuration.md) |
-| `local_cache.fill_socket_concurrency` | the most fills the fill socket runs at once (1 to 1024, default 16), a pool apart from `max_concurrent_fills` |
-| `local_cache.fill_socket_wait` | the longest a request of the fill socket waits for a permit of that pool (1ms to 1h, default `60s`) |
+| `local_cache.fill_socket` | read and ignored, with a line on stderr: no fill socket is served, the file system of an `fs` interface calls the cache in the process (see crates/tierstore/docs/configuration.md) |
+| `local_cache.fill_socket_concurrency` | the most fills of the file system the cache runs at once (1 to 1024, default 16), a pool apart from `max_concurrent_fills` |
+| `local_cache.fill_socket_wait` | the longest a fill of the file system waits for a permit of that pool (1ms to 1h, default `60s`) |
 | `local_cache.put_ingest` | a Mac's: the root of the jobs' put directories (`cas/b/<build>/<nonce>`), whose committed objects the node stores and removes; an absolute path apart from the cache, and it needs `write_through = true` (default none: nothing is ingested; see `crates/tierstore/docs/operations.md`, "The put ingest") |
 | `local_cache.prefetch_concurrency` | the blobs the prefetch queue fills at once (0 to 64, default 2; 0 turns the queue off), a pool apart from the pools of the reads; a build node's key (not in a release yet) |
 | `local_cache.prefetch_queue` | the most blobs that may wait in the prefetch queue (1 to 1000000, default 16384); past it a blob is turned away |

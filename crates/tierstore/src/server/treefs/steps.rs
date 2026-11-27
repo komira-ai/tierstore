@@ -1,4 +1,4 @@
-//! The time each step of a start of `tierstore fs` takes, said as the step ends, so that the
+//! The time each step of a start of the file system takes, said as the step ends, so that the
 //! journal of a start the service manager waits for shows where the time went.
 
 use std::sync::Arc;
@@ -9,6 +9,7 @@ use crate::Clock;
 pub(super) struct Steps {
     clock: Arc<dyn Clock>,
     /// When the steps began, on the clock.
+    #[cfg(any(target_os = "linux", test))]
     begun: u64,
     /// When the step before ended, on the clock.
     last: u64,
@@ -20,6 +21,7 @@ impl Steps {
         let now = clock.now();
         Self {
             clock,
+            #[cfg(any(target_os = "linux", test))]
             begun: now,
             last: now,
         }
@@ -35,7 +37,9 @@ impl Steps {
         took
     }
 
-    /// The milliseconds since the steps began.
+    /// The milliseconds since the steps began: what the start of the mount of the `fs` interface
+    /// says it took (`interface.rs`, Linux).
+    #[cfg(any(target_os = "linux", test))]
     pub(super) fn total(&self) -> u64 {
         self.clock.now().saturating_sub(self.begun)
     }

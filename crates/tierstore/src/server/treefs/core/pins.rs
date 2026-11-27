@@ -2,7 +2,7 @@
 //! of trees.
 //!
 //! An open of a blob pins it for its tree, the first time, while the tree is attached; the end of
-//! the last attachment of a tree unpins it. Both are round trips on the fill socket. The pin
+//! the last attachment of a tree unpins it. Both are calls of the cache. The pin
 //! reads the lock of its tree's set, from its look at whether the tree is attached to its record
 //! of the pin, and the unpin writes it, from its look at whether the tree is attached to the
 //! end of the round trip. So a pin is never made after the unpin of a tree it saw attached, and a

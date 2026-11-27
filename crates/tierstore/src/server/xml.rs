@@ -481,6 +481,17 @@ pub(crate) fn completed(bucket: &str, key: &str, etag: &str) -> String {
     )
 }
 
+/// The answer to a copy: the document `root` (`CopyObjectResult` for CopyObject,
+/// `CopyPartResult` for UploadPartCopy) with the `ETag` of what the copy made, quotes included,
+/// and its time of last write.
+pub(crate) fn copied(root: &str, etag: &str, modified_ms: u64) -> String {
+    let (modified, etag) = (iso8601(modified_ms), escape(etag));
+    format!(
+        "{PROLOG}<{root} xmlns=\"{NAMESPACE}\"><LastModified>{modified}</LastModified>\
+         <ETag>{etag}</ETag></{root}>"
+    )
+}
+
 /// The text of the first child of `node` named `name`, in any namespace.
 fn child_text<'a>(node: Node<'a, '_>, name: &str) -> Option<&'a str> {
     node.children()
