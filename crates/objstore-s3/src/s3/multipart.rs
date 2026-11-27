@@ -5,10 +5,12 @@
 //! only while it is sent), then CompleteMultipartUpload naming every part's ETag. Any
 //! failure before the object is complete (the body's, a part's, the completion's,
 //! including a conditional write refused at completion) aborts the upload with
-//! AbortMultipartUpload before the error is returned, so no incomplete upload is left
-//! holding storage. A write dropped mid-upload (its caller went away) aborts it from a
-//! task of its own. An abort that itself fails is logged; a bucket lifecycle rule
-//! (`AbortIncompleteMultipartUpload`) is the backstop for those and for a crash.
+//! AbortMultipartUpload, so no incomplete upload is left holding storage; so does a write
+//! dropped mid-upload (its caller went away). The abort runs in a task of its own, bounded in
+//! number and in time, and the write gives its error at once; an abort that fails, or finds
+//! no place to run, is kept on a bounded list and sent again when the store answers again
+//! (`cleanup.rs`). A bucket lifecycle rule (`AbortIncompleteMultipartUpload`) is the backstop
+//! for the aborts that list drops and for a crash.
 //!
 //! An upload that names the SHA-256 of the whole object ([`put`] given `sha256`) is created with
 //! `x-amz-checksum-algorithm: SHA256` and the digest as the object's metadata `x-amz-meta-sha256`
@@ -140,21 +142,15 @@ pub(super) async fn put_unsized(
     settle(upload, sent).await
 }
 
-/// Ends `upload` as `sent` says: nothing more to do if it completed, an abort if it failed.
+/// Ends `upload` as `sent` says: nothing more to do if it completed, an abort in a task of its
+/// own if it failed (dropping the open upload hands it to `cleanup.rs`), and the error at once.
 async fn settle(
     upload: Upload,
     sent: Result<Option<String>, ObjectStoreError>,
 ) -> Result<Option<String>, ObjectStoreError> {
-    match sent {
-        Ok(etag) => {
-            upload.finished();
-            Ok(etag)
-        }
-        Err(e) => {
-            upload.abort().await;
-            Err(e)
-        }
-    }
+    let etag = sent?;
+    upload.finished();
+    Ok(etag)
 }
 
 /// `first`, then every part of `rest` while it has bytes, then the completion. A part number
@@ -174,7 +170,8 @@ async fn send_unsized(
     complete(upload, &sent, Rule::Match(etag)).await
 }
 
-/// An upload in progress. Dropped while open, it is aborted from a task of its own.
+/// An upload in progress. Dropped while open (its write failed, or was dropped), it is aborted
+/// from a task of its own (`cleanup.rs`).
 struct Upload {
     conn: Arc<Conn>,
     key: ObjectKey,
@@ -189,30 +186,17 @@ impl Upload {
     fn finished(mut self) {
         self.open = false;
     }
-
-    /// Aborts the upload; a failure is logged (the lifecycle rule is the backstop).
-    /// Still open until the abort ended: a write dropped while it is on the wire (its
-    /// caller went away) is aborted again by [`Drop`], from a task of its own.
-    async fn abort(mut self) {
-        abort(&self.conn, &self.key, &self.id).await;
-        self.open = false;
-    }
 }
 
 impl Drop for Upload {
-    /// Aborts an upload still open from a task of its own; outside a runtime it is left
-    /// for the bucket's lifecycle rule.
+    /// Hands an upload still open to the work after failed writes, which aborts it from a task
+    /// of its own, or keeps it to abort later (outside a runtime, or with no place for a task).
     fn drop(&mut self) {
         if !self.open {
             return;
         }
-        let (conn, key, id) = (
-            Arc::clone(&self.conn),
-            self.key.clone(),
-            std::mem::take(&mut self.id),
-        );
-        let runtime = tokio::runtime::Handle::try_current().ok();
-        runtime.map(|r| r.spawn(async move { abort(&conn, &key, &id).await }));
+        let key = self.key.clone();
+        self.conn.cleaner.abort(key, std::mem::take(&mut self.id));
     }
 }
 
@@ -431,15 +415,9 @@ pub(super) async fn complete_replacing(
     }
 }
 
-/// AbortMultipartUpload; a failure is logged. An upload the store no longer knows
-/// (completed after all, or aborted already) needs nothing more.
-async fn abort(conn: &Conn, key: &ObjectKey, id: &str) {
-    if let Err(e) = try_abort(conn, key, id).await {
-        tracing::warn!(%key, error = %e, "a multipart upload could not be aborted; the bucket's lifecycle rule must remove it");
-    }
-}
-
-async fn try_abort(conn: &Conn, key: &ObjectKey, id: &str) -> Result<(), ObjectStoreError> {
+/// AbortMultipartUpload. An upload the store no longer knows (completed after all, or aborted
+/// already) needs nothing more.
+pub(super) async fn try_abort(conn: &Conn, key: &ObjectKey, id: &str) -> Result<(), ObjectStoreError> {
     let query = [("uploadId", id.to_owned())];
     let resp = conn
         .send(Method::DELETE, Some(key), &query, Vec::new(), Bytes::new())

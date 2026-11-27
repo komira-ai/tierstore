@@ -287,6 +287,8 @@ const FILL_SOCKET_RUNNING: &str = "tierstore_cache_fill_socket_running";
 const UPSTREAM_READS_IN_FLIGHT: &str = "tierstore_cache_upstream_reads_in_flight";
 const FILL_SOCKET_BUSY: &str = "tierstore_cache_fill_socket_busy_total";
 const UPSTREAM_SHORT_OBJECTS: &str = "tierstore_cache_upstream_short_objects_total";
+const UPSTREAM_FAILED_ABORTS: &str = "tierstore_cache_upstream_failed_aborts";
+const UPSTREAM_ABORTS_DROPPED: &str = "tierstore_cache_upstream_failed_aborts_dropped_total";
 const PREFETCH_QUEUED_BYTES: &str = "tierstore_provider_prefetch_queued_bytes";
 const PREFETCH_SKIPPED: &str = "tierstore_provider_prefetch_skipped_total";
 
@@ -704,15 +706,23 @@ pub(super) fn queued_reads(bytes: u64, skipped: u64) -> String {
     )
 }
 
-/// The family of what the upstream did about the objects its store kept of its puts that got no
-/// answer ([`Backend::short_objects`](crate::Backend::short_objects)): one series for each
-/// `result`, `removed`, `left` and `failed`, 0 for an upstream that is not an S3 store.
+/// The families of what the upstream did after its writes that failed
+/// ([`Backend::short_objects`](crate::Backend::short_objects)), each 0 for an upstream that is not
+/// an S3 store: about the objects its store kept of its puts that got no answer, one series for
+/// each `result`, `removed`, `left`, `failed` and `skipped`; the aborts of multipart uploads that
+/// failed and are kept to be sent again, a gauge; and those dropped from that list, a counter.
 pub(super) fn short_objects(short: ShortObjects) -> String {
-    let mut text = format!("# TYPE {UPSTREAM_SHORT_OBJECTS} {COUNTER}\n");
+    let mut text = format!(
+        "# TYPE {UPSTREAM_FAILED_ABORTS} {GAUGE}\n{UPSTREAM_FAILED_ABORTS} {}\n\
+         # TYPE {UPSTREAM_ABORTS_DROPPED} {COUNTER}\n{UPSTREAM_ABORTS_DROPPED} {}\n\
+         # TYPE {UPSTREAM_SHORT_OBJECTS} {COUNTER}\n",
+        short.failed_aborts, short.aborts_dropped
+    );
     let results = [
         ("removed", short.removed),
         ("left", short.left),
         ("failed", short.failed),
+        ("skipped", short.skipped),
     ];
     for (result, value) in results {
         let _ = writeln!(

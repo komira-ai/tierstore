@@ -35,7 +35,10 @@
 //! Every single PUT names itself with a token of its own, and one that got no answer from the
 //! store (its body or its transport failed) is followed by one look at the key, which deletes an
 //! object of the wrong length that the PUT made, and only that one (`cut_put.rs`,
-//! [`S3Store::cut_puts`]). A streamed write can send digests of its body for the store to check
+//! [`S3Store::cut_puts`]). The look, and the abort of a multipart upload that failed, run in
+//! tasks of their own, bounded in number and in time, after the write has given its error;
+//! aborts that fail are kept, a bounded list, and sent again when the store answers again
+//! (`cleanup.rs`, [`S3Store::cleanups`]). A streamed write can send digests of its body for the store to check
 //! ([`S3Store::put_stream_new_checked`], [`S3Store::put_stream_replacing_checked`]).
 //!
 //! A copy within the bucket is the store's own (`copy.rs`): [`S3Store::copy_object`] and
@@ -43,6 +46,7 @@
 
 mod bound;
 mod checksum;
+mod cleanup;
 mod copy;
 mod credentials;
 mod cut_put;
@@ -61,6 +65,10 @@ mod tuning;
 mod xml;
 
 pub use checksum::StoredSha256;
+pub use cleanup::{
+    ABORT_TRIES, CLEANUP_DEADLINE, CLEANUPS_AT_ONCE, Cleanups, FAILED_ABORTS_KEPT, RETRY_CAP,
+    RETRY_FIRST,
+};
 pub use copy::{CopyAnswer, CopyConditions, CopySource};
 pub use credentials::{AwsEnv, CredentialSource, Credentials, CredentialsError};
 pub use cut_put::CutPuts;
@@ -255,6 +263,8 @@ struct Conn {
     tuning: S3Tuning,
     /// What the looks after PUTs that got no answer did (`cut_put.rs`).
     cut: cut_put::CutCounts,
+    /// The work after failed writes, in tasks of its own (`cleanup.rs`).
+    cleaner: cleanup::Cleaner,
 }
 
 impl fmt::Debug for S3Store {
@@ -350,7 +360,7 @@ impl S3Store {
             })
         };
         let credentials = Live::new(&config.credentials, http, &config.region, system_clock())?;
-        let conn = Conn {
+        let conn = |weak: &std::sync::Weak<Conn>| Conn {
             client,
             targets,
             sent: AtomicUsize::new(0),
@@ -362,9 +372,10 @@ impl S3Store {
             min_body_rate: config.min_body_rate,
             tuning,
             cut: cut_put::CutCounts::default(),
+            cleaner: cleanup::Cleaner::new(weak.clone()),
         };
         Ok(Self {
-            conn: Arc::new(conn),
+            conn: Arc::new_cyclic(conn),
         })
     }
 }
@@ -504,24 +515,43 @@ impl Conn {
     /// request at once. With one endpoint the next send is to the same address on a new
     /// connection. The keys are had again for each send, so a send never signs with keys that
     /// expired; when none can be had, nothing is sent and the error is
-    /// [`ObjectStoreError::Credentials`].
+    /// [`ObjectStoreError::Credentials`]. An answer, of any status, proves the store is there and
+    /// begins a pass over the aborts that failed (`cleanup.rs`).
     pub(super) async fn failing_over<F, Fut>(
         &self,
-        mut attempt: F,
+        attempt: F,
     ) -> Result<Response, ObjectStoreError>
+    where
+        F: FnMut(Arc<Keys>) -> Fut,
+        Fut: Future<Output = Result<Response, Failed>>,
+    {
+        self.failing_over_marked(attempt)
+            .await
+            .map_err(|failed| failed.error)
+    }
+
+    /// [`failing_over`](Self::failing_over), whose failure says whether the store never saw the
+    /// request: [`Failed::unsent`] for the last send, and for a request that was never signed
+    /// for want of keys.
+    pub(super) async fn failing_over_marked<F, Fut>(
+        &self,
+        mut attempt: F,
+    ) -> Result<Response, Failed>
     where
         F: FnMut(Arc<Keys>) -> Fut,
         Fut: Future<Output = Result<Response, Failed>>,
     {
         let mut sends = 1;
         loop {
-            let keys = self
-                .credentials
-                .keys()
-                .await
-                .map_err(ObjectStoreError::Credentials)?;
+            let keys = self.credentials.keys().await.map_err(|e| Failed {
+                error: ObjectStoreError::Credentials(e),
+                unsent: true,
+            })?;
             match attempt(keys).await {
-                Ok(resp) => return Ok(resp),
+                Ok(resp) => {
+                    self.cleaner.answered();
+                    return Ok(resp);
+                }
                 Err(failed) if failed.unsent && sends < self.tuning.endpoint_attempts => {
                     tracing::warn!(
                         error = %failed.error,
@@ -530,7 +560,7 @@ impl Conn {
                     );
                     sends += 1;
                 }
-                Err(failed) => return Err(failed.error),
+                Err(failed) => return Err(failed),
             }
         }
     }
