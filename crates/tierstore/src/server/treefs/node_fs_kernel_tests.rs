@@ -329,7 +329,7 @@ fn a_file_whose_fill_fails_is_an_io_error_until_the_blob_can_be_had() {
             errno_of(&directory),
             rustix::io::Errno::ISDIR.raw_os_error()
         );
-        let failures = m.rig.core.detach(RUN).unwrap();
+        let failures = m.rig.core.detach(RUN).unwrap().failures;
         assert_eq!(failures.len(), 1);
         assert_eq!(failures[0].path, "/include/a.h");
         assert_eq!(failures[0].reason, "upstream 503");
