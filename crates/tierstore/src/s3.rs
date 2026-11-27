@@ -39,6 +39,8 @@
 //!   of an object (a suffix) and a range the store answers 416 to are a HEAD and then a ranged
 //!   GET, as the size is needed to say what they cover. An answer without a `Content-Length`, a
 //!   `Last-Modified` or an `ETag` is an [`Error::Other`].
+//! - `copy_in_store` is the store's CopyObject (no condition on the key, as a plain PUT) or
+//!   UploadPartCopy, with the source's conditions as `x-amz-copy-source-if-*` (`s3/copy.rs`).
 //! - `head` is a HEAD: `Content-Length`, `ETag` (the content tag, without its quotes, as the
 //!   other backends give it and the S3 front, which quotes it, expects) and `Last-Modified`.
 //! - `get_tagged` is one GET, whole or ranged, and the content tag is the `ETag` (without its
@@ -156,10 +158,11 @@ use tokio::sync::mpsc;
 use crate::backend::open_by_head;
 use crate::{
     Backend, BodyDigests, ByteRange, Error, Listed, Meta, OpenUpload, Opened, PartBody, PutAnswer,
-    PutClaim, PutKind, PutOutcome, ReadBody, ShortObjects, Span, TreeDigest, UploadedPart,
-    UploadsAfter, Window,
+    PutClaim, PutKind, PutOutcome, ReadBody, ShortObjects, Span, StoreCopy, TreeDigest,
+    UploadedPart, UploadsAfter, Window,
 };
 
+mod copy;
 mod digested;
 mod sha256;
 
@@ -797,6 +800,12 @@ impl Backend for S3Backend {
             meta,
             body: body.boxed(),
         })
+    }
+
+    /// The store's CopyObject or UploadPartCopy, for a copy of at most `server.s3_single_put_max`
+    /// bytes (`s3/copy.rs`).
+    async fn copy_in_store(&self, copy: &StoreCopy<'_>) -> Result<Option<PutAnswer>, Error> {
+        copy::copy(self, copy).await
     }
 
     async fn head(&self, key: &str) -> Result<Meta, Error> {

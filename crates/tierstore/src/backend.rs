@@ -5,7 +5,9 @@ use bytes::{Bytes, BytesMut};
 use futures::StreamExt;
 use futures::stream::BoxStream;
 
-use crate::{BodyDigests, Error, PutClaim, PutKind, PutOutcome, ShortObjects, TreeDigest};
+use crate::{
+    BodyDigests, Error, PutClaim, PutKind, PutOutcome, ShortObjects, StoreCopy, TreeDigest,
+};
 
 /// The body of a part of a multipart upload, as the chunks it arrives in, so that a part of any
 /// size is stored without being held in memory whole.
@@ -718,6 +720,24 @@ pub trait Backend: Send + Sync {
     /// # Errors
     /// [`Error::NotFound`] if no object has the key.
     async fn head(&self, key: &str) -> Result<Meta, Error>;
+
+    /// A copy that the store makes of its own object, with no byte of it passing through the
+    /// caller (S3's CopyObject and UploadPartCopy): the object [`StoreCopy::source`] into the object
+    /// [`StoreCopy::key`], replacing one the key has, or into a part of an open upload of it, if
+    /// the source's conditions hold of the object the store copies. The answer is the content tag
+    /// of the object or the part made, as [`Meta::tag`] has it, and its time when the store says.
+    ///
+    /// `None`: the backend makes no such copy (the provided implementation), or not this one (S3:
+    /// more bytes than one request copies). The caller then copies with a read and a put. A
+    /// backend that keeps a copy of what it reads (a cache) forwards the call and forgets the key.
+    ///
+    /// # Errors
+    /// [`Error::NotFound`] naming the source if it does not exist, or the upload id for an upload
+    /// the backend does not hold; [`Error::PreconditionFailed`] if a condition fails, and nothing
+    /// is written.
+    async fn copy_in_store(&self, _copy: &StoreCopy<'_>) -> Result<Option<PutAnswer>, Error> {
+        Ok(None)
+    }
 
     /// Deletes the object. Deleting a key that does not exist succeeds, so a retried delete
     /// is safe.
