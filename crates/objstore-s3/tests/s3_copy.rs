@@ -38,8 +38,10 @@ async fn holding(body: &'static [u8]) -> (FakeS3, S3Store) {
     let s3 = FakeS3::start().await;
     s3.set_time(WRITTEN);
     let store = s3.store(CONDITIONAL);
-    let put = store.put_new(&key("src"), Bytes::from_static(body), None);
-    put.await.unwrap();
+    store
+        .put_new(&key("src"), Bytes::from_static(body), None)
+        .await
+        .unwrap();
     (s3, store)
 }
 
@@ -62,8 +64,10 @@ async fn copy(
 #[tokio::test]
 async fn a_copy_makes_the_destination_and_replaces_one_that_exists() {
     let (s3, store) = holding(b"hello").await;
-    let put = store.put_new(&key("dst"), Bytes::from_static(b"old bytes"), None);
-    put.await.unwrap();
+    store
+        .put_new(&key("dst"), Bytes::from_static(b"old bytes"), None)
+        .await
+        .unwrap();
     s3.set_time(WRITTEN + 60);
     let before = s3.requests().len();
 
