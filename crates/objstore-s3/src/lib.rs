@@ -62,12 +62,15 @@ pub trait ObjectStore: Send + Sync + 'static {
     /// as a multipart upload, a part at a time, above it, aborting it on any failure; the local-directory store writes the pieces to its
     /// file as they come.
     ///
-    /// A store that keeps the bytes of a PUT whose body was cut short breaks this contract, and
-    /// the S3 store cannot keep it there: SeaweedFS 4.54 can keep a PUT without `Content-Type`
-    /// whose body carries no checksum as an object of the bytes that came, 0 of them when the
-    /// body failed before its first byte (see `s3/bound.rs`). A write whose key names the SHA-256
-    /// of the bytes is [`ObjectStore::put_stream_content_bound`], which sends the digest for the
-    /// store to check.
+    /// A store that keeps the bytes of a PUT whose body was cut short breaks this contract:
+    /// SeaweedFS 4.54 can keep a PUT without `Content-Type` whose body carries no checksum as an
+    /// object of the bytes that came, 0 of them when the body failed before its first byte (see
+    /// `s3/bound.rs`). The S3 store mends it there after the fact: its PUT carries a token of its
+    /// own, and one that got no answer is followed by one look at the key, which deletes an object
+    /// of another length than `len` that carries the token, and no other object (see
+    /// `s3/cut_put.rs`). A write whose key names the SHA-256 of the bytes is
+    /// [`ObjectStore::put_stream_content_bound`], which sends the digest for the store to check,
+    /// so that such a store refuses the body cut short and keeps nothing.
     fn put_stream(
         &self,
         key: &ObjectKey,

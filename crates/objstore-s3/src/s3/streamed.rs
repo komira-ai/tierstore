@@ -20,9 +20,9 @@ use futures::StreamExt;
 use futures::stream::{self, BoxStream};
 use reqwest::{Response, StatusCode};
 
-use super::multipart::Rule;
+use super::multipart::{Rule, base64_of};
 use super::tagged::{PutAnswer, header, retrying};
-use super::{Conn, S3Store, SINGLE_PUT_MAX, failure, multipart, times, transport};
+use super::{Conn, S3Store, SINGLE_PUT_MAX, cut_put, failure, multipart, times, transport};
 use crate::body::Unsized;
 use crate::{BodyStream, ByteRange, ObjectKey, ObjectStoreError};
 
@@ -237,9 +237,12 @@ impl S3Store {
     /// `parts.rs`, whose watchdog and rules for the body it shares): a body that fails or has
     /// another length than `len` stores nothing on a store that takes a request as whole only
     /// when its body has its `Content-Length` bytes. A store may keep the bytes that came of a
-    /// body cut short, as SeaweedFS 4.54 can (see `bound.rs`); there only a checksum of the body
-    /// sent with it ([`put_whole_with`](Self::put_whole_with)'s headers, as
-    /// [`put_stream_new_sha256`](Self::put_stream_new_sha256) sends) refuses it.
+    /// body cut short, as SeaweedFS 4.54 can (see `bound.rs`); there a checksum of the body sent
+    /// with it ([`put_whole_with`](Self::put_whole_with)'s headers, as
+    /// [`put_stream_new_sha256`](Self::put_stream_new_sha256) and
+    /// [`put_stream_new_checked`](Self::put_stream_new_checked) send) refuses it, and the look
+    /// after a PUT that got no answer removes an object of the wrong length it made
+    /// (`cut_put.rs`).
     pub(super) async fn put_whole(
         &self,
         key: &ObjectKey,
@@ -268,21 +271,29 @@ impl S3Store {
             .await
     }
 
-    /// [`put_whole_answered`](Self::put_whole_answered) with `headers` as they are; a 412 is
+    /// [`put_whole_answered`](Self::put_whole_answered) with `headers` as they are, and the
+    /// PUT's own token (`x-amz-meta-write-token`); a 412 is
     /// [`ObjectStoreError::AlreadyExists`] if `create_only` (the headers carry
-    /// `If-None-Match: *`).
+    /// `If-None-Match: *`). A PUT that got no answer is followed by the look at the key of
+    /// `cut_put.rs` before its error is given.
     pub(super) async fn put_whole_with(
         &self,
         key: &ObjectKey,
         len: u64,
         body: BodyStream,
-        headers: Vec<(&'static str, String)>,
+        mut headers: Vec<(&'static str, String)>,
         create_only: bool,
     ) -> Result<PutAnswer, ObjectStoreError> {
-        let resp = self
-            .conn
-            .send_streamed(key, &[], headers, len, body)
-            .await?;
+        let token = cut_put::token();
+        headers.push((cut_put::TOKEN_META, token.clone()));
+        let sent = self.conn.send_streamed(key, &[], headers, len, body).await;
+        let resp = match sent {
+            Ok(resp) => resp,
+            Err(error) => {
+                self.look_after_cut(key, len, &token).await;
+                return Err(error);
+            }
+        };
         match resp.status() {
             StatusCode::OK => Ok(PutAnswer {
                 etag: header(&resp, "etag").map(str::to_owned),
@@ -310,15 +321,34 @@ impl S3Store {
         len: u64,
         body: BodyStream,
     ) -> Result<PutAnswer, ObjectStoreError> {
+        let none = PutChecksums::default();
+        self.put_stream_new_checked(key, len, body, none).await
+    }
+
+    /// [`put_stream_new_answered`](Self::put_stream_new_answered), with the digests of the body
+    /// that `checksums` names on its PUT for the store to check (see [`PutChecksums`]). A body
+    /// sent as a multipart upload carries none of them.
+    ///
+    /// # Errors
+    /// As [`put_stream_new_answered`](Self::put_stream_new_answered), and a
+    /// [`ObjectStoreError::Service`] error 400 (code `BadDigest` among others) for a body the
+    /// store found not to be what `checksums` says.
+    pub async fn put_stream_new_checked(
+        &self,
+        key: &ObjectKey,
+        len: u64,
+        body: BodyStream,
+        checksums: PutChecksums,
+    ) -> Result<PutAnswer, ObjectStoreError> {
         if !self.conn.capabilities.conditional_put {
             return Err(ObjectStoreError::Unsupported(
                 "a create-only write on a store without conditional puts",
             ));
         }
         if self.sends_whole(len) {
-            return self
-                .put_whole_answered(key, len, body, self.create_only())
-                .await;
+            let mut headers = checksums.headers();
+            headers.extend(self.create_only());
+            return self.put_whole_with(key, len, body, headers, true).await;
         }
         let etag = multipart::put(&self.conn, key, len, body, Rule::Create, None).await?;
         Ok(PutAnswer {
@@ -347,8 +377,29 @@ impl S3Store {
         len: u64,
         body: BodyStream,
     ) -> Result<PutAnswer, ObjectStoreError> {
+        let none = PutChecksums::default();
+        self.put_stream_replacing_checked(key, len, body, none)
+            .await
+    }
+
+    /// [`put_stream_replacing_answered`](Self::put_stream_replacing_answered), with the digests of
+    /// the body that `checksums` names on its PUT for the store to check (see [`PutChecksums`]).
+    /// A body sent as a multipart upload carries none of them.
+    ///
+    /// # Errors
+    /// As [`put_stream_replacing_answered`](Self::put_stream_replacing_answered), and a
+    /// [`ObjectStoreError::Service`] error 400 (code `BadDigest` among others) for a body the
+    /// store found not to be what `checksums` says.
+    pub async fn put_stream_replacing_checked(
+        &self,
+        key: &ObjectKey,
+        len: u64,
+        body: BodyStream,
+        checksums: PutChecksums,
+    ) -> Result<PutAnswer, ObjectStoreError> {
         if self.sends_whole(len) {
-            return self.put_whole_answered(key, len, body, None).await;
+            let headers = checksums.headers();
+            return self.put_whole_with(key, len, body, headers, false).await;
         }
         let etag = multipart::put(&self.conn, key, len, body, Rule::Replace, None).await?;
         Ok(PutAnswer {
@@ -380,6 +431,30 @@ impl S3Store {
         }
         let done = multipart::put_unsized(&self.conn, key, first, rest, etag).await?;
         done.ok_or_else(|| bad(key, "the completion carries no ETag"))
+    }
+}
+
+/// The digests of a body that its PUT names for the store to check against the bytes it takes:
+/// a store that checks them refuses a body that is not them (400 `BadDigest`), one cut short
+/// included, and keeps nothing of it. Amazon S3, MinIO and SeaweedFS check both. Each is the
+/// digest of the whole body, known before it is sent; a body whose digests are not known is sent
+/// with none ([`PutChecksums::default`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PutChecksums {
+    /// The MD5 of the body, sent as `Content-MD5`.
+    pub md5: Option<[u8; 16]>,
+    /// The SHA-256 of the body, sent as `x-amz-checksum-sha256`.
+    pub sha256: Option<[u8; 32]>,
+}
+
+impl PutChecksums {
+    /// The headers that carry the digests.
+    fn headers(self) -> Vec<(&'static str, String)> {
+        let md5 = self.md5.map(|md5| ("content-md5", base64_of(&md5)));
+        let sha256 = self
+            .sha256
+            .map(|sha256| ("x-amz-checksum-sha256", base64_of(&sha256)));
+        md5.into_iter().chain(sha256).collect()
     }
 }
 
