@@ -48,9 +48,9 @@
 //!
 //! On Linux, with an `[[interface]]` of type `fs` the start serves the mount of the virtual build
 //! file system too (see [`Service`] and `cache_cli_mount.rs`): after the cache and the tree store
-//! are open it takes the mount from a running instance, or serves the descriptor the service
-//! manager kept, or mounts afresh, and only then binds the trees front and takes or binds the S3
-//! and OCI sockets; a start that fails after that leaves the mount as a stop does. A running
+//! are open, and the trees front bound beside a running instance, it takes the mount from a
+//! running instance, or serves the descriptor the service manager kept, or mounts afresh, and only
+//! then takes or binds the S3 and OCI sockets; a start that fails after that leaves the mount as a stop does. A running
 //! instance of the one process is asked for its mount, its S3 and OCI sockets and its cache lock in
 //! one conversation (`take 1`, `ready`, `mount`); one that holds no mount (the S3 process of the
 //! two-process layout) for its sockets and lock alone, and the mount is then taken on `take-fs 1`.
@@ -66,8 +66,8 @@
 //! On macOS, with an `[[interface]]` of type `fs` the start serves the NFS front of the file system
 //! too (see [`NfsService`]): after the cache and the tree store are open it serves the front (on the
 //! sockets it was handed, or on its own) and mounts the export where the `mount` listing does not
-//! show it mounted, and only then binds the trees front and takes or binds the S3 and OCI sockets; a
-//! start that fails after that leaves the mount where it is. A stop drains the fronts, serving the
+//! show it mounted (the trees front bound before it), and only then takes or binds the S3 and OCI
+//! sockets; a start that fails after that leaves the mount where it is. A stop drains the fronts, serving the
 //! mount, and then unmounts while the NFS front still answers; an NFS server that stops by itself
 //! stops the fronts as a signal does, and the start ends in failure.
 //!
@@ -499,6 +499,17 @@ pub(super) async fn serve_front(
             )
         })?;
     config.trees.clone_from(&trees);
+    // The trees sockets are bound beside a running instance's (`SO_REUSEPORT`, they are not handed
+    // over), and before anything is asked of it: a trees address that cannot be bound fails the
+    // start while the running instance still serves everything, the mount included.
+    let trees_front = match fronts.trees_front {
+        Some(setup) => Some(setup.bind().await?),
+        None => None,
+    };
+    let trees_all = match &trees_front {
+        Some(front) => front.local_addrs()?,
+        None => Vec::new(),
+    };
     let OnSystem {
         #[cfg(target_os = "linux")]
         service,
@@ -578,20 +589,9 @@ pub(super) async fn serve_front(
     // The registry front reads what the S3 front reads: through the cache.
     let backend: Arc<dyn Backend> = Arc::new(cache.clone());
     let server = Server::new(Arc::clone(&backend), config);
-    // The trees sockets are bound beside a running instance's (`SO_REUSEPORT`, they are not handed
-    // over), and before the S3 and OCI sockets are taken from it: a trees address that cannot be
-    // bound fails the start while the running instance still serves.
     let got = handed.map(|taken| Got::Taken(Box::new(taken))).or(sockets);
     let fronts_bound = async {
-        let trees_front = match fronts.trees_front {
-            Some(setup) => Some(setup.bind().await?),
-            None => None,
-        };
-        let trees_all = match &trees_front {
-            Some(front) => front.local_addrs()?,
-            None => Vec::new(),
-        };
-        let bound = bind_fronts(
+        bind_fronts(
             fronts.handoff,
             got,
             &bind_set(fronts.listen, true),
@@ -600,21 +600,16 @@ pub(super) async fn serve_front(
             backend,
         )
         .await
-        .map_err(super::cli::HandingError::into_boxed)?;
-        Ok::<_, Error>((trees_front, trees_all, bound))
+        .map_err(super::cli::HandingError::into_boxed)
     };
-    let (
-        trees_front,
-        trees_all,
-        Bound {
-            s3: listeners,
-            oci,
-            addresses,
-            offer,
-            lock,
-            follow,
-        },
-    ) = match fronts_bound.await {
+    let Bound {
+        s3: listeners,
+        oci,
+        addresses,
+        offer,
+        lock,
+        follow,
+    } = match fronts_bound.await {
         Ok(bound) => bound,
         Err(why) => {
             // The mount was served: it is left, as at a stop, for the next start.

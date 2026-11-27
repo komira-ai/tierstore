@@ -54,7 +54,6 @@
 //! be answered on it; it stops the fronts as a signal does, and the process ends in failure, so
 //! that the unit starts again.
 
-use std::os::fd::AsFd as _;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use tokio::runtime::Handle;
@@ -69,7 +68,7 @@ use super::fills::{Calls, Reach};
 use super::handover::{self, HandoverError, Offer};
 use super::launch::{self, End, Platform, Started, ended, hang, leave_to_kernel};
 use super::run::{Prepared, Running};
-use super::sd::{FUSE_NAME, Manager};
+use super::sd::Manager;
 use super::start::StartError;
 use super::steps::Steps;
 
@@ -179,13 +178,7 @@ impl Mounted {
             control: &settings.control_socket,
             wait: settings.handoff_wait,
             device: self.platform.kernel.device,
-            prepare: Box::new(move |device| {
-                Prepared::load(settings).map_err(|why| why.to_string())?;
-                manager
-                    .store(FUSE_NAME, device.as_fd())
-                    .and_then(|()| manager.barrier())
-                    .map_err(|why| format!("the descriptor cannot be stored: {why}"))
-            }),
+            prepare: Box::new(move |device| launch::prepare(settings, manager, device)),
         }
     }
 

@@ -181,20 +181,21 @@ pub(in crate::server) fn offered(
     manager: Manager,
     (stuck, claim): (Stuck, Arc<Claim>),
 ) -> Mount {
-    let (sharing, quiescing, resuming, leaving) = (
-        Arc::clone(running),
-        Arc::clone(running),
-        Arc::clone(running),
-        Arc::clone(running),
-    );
+    // Weak: the offer that holds these does not keep the mount's state alive, so a process that
+    // ends its service of the mount (a hang, a stop) takes it whole whatever the offer is doing.
+    let weak = Arc::downgrade(running);
+    let (sharing, quiescing, resuming, leaving) = (weak.clone(), weak.clone(), weak.clone(), weak);
     Mount {
         mountpoint: settings.mountpoint.clone(),
         control: settings.control_socket.clone(),
-        share: Arc::new(move || sharing.share()),
-        quiesce: Arc::new(move || quiescing.quiesce()),
-        resume: Arc::new(move || stuck_on(resuming.resume(), &*stuck)),
+        share: Arc::new(move || alive(&sharing)?.share()),
+        quiesce: Arc::new(move || drop(alive(&quiescing).map(|running| running.quiesce()))),
+        resume: Arc::new(move || {
+            let resumed = alive(&resuming).map(|running| running.resume());
+            stuck_on(resumed.unwrap_or(Ok(())), &*stuck);
+        }),
         give_up: Arc::new(move || {
-            leaving.give_up();
+            drop(alive(&leaving).map(|running| running.give_up()));
             if let Err(why) = manager.unstore(FUSE_NAME) {
                 tracing::warn!("tierstore: the descriptor's store entry was not removed: {why}");
             }
@@ -202,6 +203,16 @@ pub(in crate::server) fn offered(
         wait: settings.handoff_wait,
         claim,
     }
+}
+
+/// The mount's state, while the process still serves it.
+///
+/// # Errors
+/// `NotFound`: the process has ended its service of the mount.
+fn alive(running: &std::sync::Weak<Running>) -> std::io::Result<Arc<Running>> {
+    running.upgrade().ok_or_else(|| {
+        std::io::Error::new(ErrorKind::NotFound, "the mount is no longer served here")
+    })
 }
 
 /// Calls `stuck` with the error of a resume that failed: the mount cannot be served again.

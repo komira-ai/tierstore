@@ -412,18 +412,19 @@ impl Offered {
     /// As [`accept`](Self::accept), and an offer without the mount, which is not answered: the
     /// connection ends, which the running instance takes for a `nak`.
     pub(crate) async fn accept_with_mount(
-        self,
+        mut self,
     ) -> Result<(Inherited, TakenMount, Ready), HandoffError> {
-        if !self.has_mount() {
+        let Some(mount) = self.inherited.mount.take() else {
             return Err(HandoffError::Protocol(
                 "an offer without the mount it was asked for",
             ));
-        }
+        };
         let mut inherited = self.accept().await?;
-        let taken = inherited.mount.take().zip(inherited.ready.take());
-        let (mount, ready) =
-            taken.ok_or(HandoffError::Protocol("an offer without the ready step"))?;
-        Ok((inherited, mount, ready))
+        // A request for the mount asks for the `ready` step: the connection is there.
+        let ready = inherited.ready.take();
+        ready
+            .map(|ready| (inherited, mount, ready))
+            .ok_or(HandoffError::Protocol("an offer without the ready step"))
     }
 
     /// Says `ack`, and waits for the running instance's `done`, within the wait of the hand-off.

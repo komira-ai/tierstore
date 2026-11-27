@@ -534,13 +534,15 @@ impl Old {
     }
 }
 
-/// What a running instance played by the test does at its `ack`, before it says `done`.
-type AtAck = Box<dyn FnOnce() + Send>;
+/// What a running instance played by the test does at its `ack`: whether it then says `done`
+/// (or goes away, as one that dies there does).
+type AtAck = Box<dyn FnOnce() -> bool + Send>;
 
 /// A running instance of the one process played by the test at `control`: it offers its S3
 /// socket `s3`, the mount of `fs` (the device `device`, and a control socket it binds at its
-/// path) and the lock file `lock`, reads `ack`, does `at_ack` and says `done`. It gives what the
-/// taker sent next: none when the connection ended instead. It answers no `ready`.
+/// path) and the lock file `lock`, reads `ack`, does `at_ack` and says `done` if it says so. It
+/// gives what the taker sent next: none when the connection ended instead, or it went away. It
+/// answers no `ready`.
 fn played(
     control: &Path,
     fs: &crate::server::treefs::config::FsSettings,
@@ -566,7 +568,9 @@ fn played(
         let fds = [s3.as_fd(), device.as_fd(), fs_control.as_fd(), file.as_fd()];
         wire::send(&stream, &lines, &fds).await.unwrap();
         assert_eq!(wire::recv(&stream).await.unwrap().lines, ["ack"]);
-        at_ack();
+        if !at_ack() {
+            return None;
+        }
         wire::send(&stream, &["done".to_owned()], &[])
             .await
             .unwrap();
@@ -612,7 +616,7 @@ async fn a_start_whose_predecessor_says_no_bye_fails_and_leaves_the_mount_to_its
     let s3 = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = s3.local_addr().unwrap();
     let lock = node.node.cache_dir().join(".lock");
-    let old = played(&control, &fs, (s3, device, lock), Box::new(|| {}));
+    let old = played(&control, &fs, (s3, device, lock), Box::new(|| true));
     let (error, manager) = start_failing(&node, &control, addr).await;
     assert!(error.starts_with("hand-off: "), "{error}");
     assert_eq!(
@@ -641,7 +645,7 @@ async fn a_take_over_that_fails_after_done_ends_the_connection_before_ready() {
     let record = fs
         .runtime_dir
         .join(crate::server::treefs::init_record::FILE);
-    let gone: AtAck = Box::new(move || std::fs::remove_file(record).unwrap());
+    let gone: AtAck = Box::new(move || std::fs::remove_file(record).is_ok());
     let old = played(&control, &fs, (s3, device, lock), gone);
     let (error, manager) = start_failing(&node, &control, addr).await;
     assert!(!error.starts_with("hand-off: "), "{error}");
@@ -695,4 +699,27 @@ async fn a_resume_that_cannot_serve_the_mount_again_ends_the_node_in_failure() {
     );
     told(&manager, &["READY=1"]);
     drop(stored);
+}
+
+/// Asserts that a start whose predecessor in the one hand-over goes away after its `ack` and before
+/// `done` (it died there) fails by name before it reads the device or serves anything, with the
+/// descriptor in its store for its restart, which takes the mount again or adopts it. Catches a
+/// start that serves a mount whose predecessor may still read it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_start_whose_predecessor_dies_after_ack_fails_with_the_mount_in_its_store() {
+    let node = FsNode::new("tsfs-svc-diesack");
+    let control = node.dir.path().join("control.sock");
+    let fs = node.settings("", "", "127.0.0.1:0").fs.unwrap();
+    left_state(&fs);
+    let (device, kernel) = fakedev::pair();
+    let s3 = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = s3.local_addr().unwrap();
+    let lock = node.node.cache_dir().join(".lock");
+    let old = played(&control, &fs, (s3, device, lock), Box::new(|| false));
+    let (error, manager) = start_failing(&node, &control, addr).await;
+    assert!(error.starts_with("hand-off: "), "{error}");
+    assert_eq!(within("the old goes", old).await.unwrap(), None);
+    assert_unanswered(&kernel, 1);
+    assert!(!fs.handoff_socket.exists());
+    told(&manager, &["FDSTORE=1\nFDNAME=fuse", "BARRIER=1"]);
 }
