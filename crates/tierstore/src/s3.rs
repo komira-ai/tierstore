@@ -248,6 +248,7 @@ impl S3Backend {
     }
 
     /// The bucket's client, for the reads of the fetch engine's upstream, which carry `If-Match`.
+    #[cfg(feature = "server")]
     pub(crate) fn store(&self) -> &S3Store {
         &self.store
     }

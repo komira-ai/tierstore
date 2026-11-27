@@ -103,7 +103,8 @@ async fn the_service_keeps_every_read_with_its_range_and_its_if_match() {
         .await
         .unwrap();
     assert_eq!(whole(plain.body).await, b"ab");
-    let conditional = store.get_stream_if_match(&key("k"), range(4, 4), &etag);
+    let k = key("k");
+    let conditional = store.get_stream_if_match(&k, range(4, 4), &etag);
     assert_eq!(whole(conditional.await.unwrap().body).await, b"efgh");
     assert!(etag.starts_with('"') && etag.ends_with('"'), "{etag}");
     assert_eq!(
