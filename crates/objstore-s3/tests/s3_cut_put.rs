@@ -28,8 +28,9 @@ fn key(name: &str) -> ObjectKey {
     ObjectKey::new(name).unwrap()
 }
 
-/// A store, shared by the test and the put it spawns, that looks at the key at once after a PUT that got no answer: the service's
-/// [`FakeS3::hold_heads`] orders the look after the cut PUT, as the wait does on a real store.
+/// A store, shared by the test and the put it spawns, that looks at the key at once after a PUT
+/// that got no answer: the service's [`FakeS3::hold_heads`] orders the look after the cut PUT, as
+/// the wait does on a real store.
 fn store(s3: &FakeS3) -> Arc<S3Store> {
     let tuning = S3Tuning {
         cut_put_look_after: Duration::ZERO,
