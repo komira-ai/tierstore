@@ -557,7 +557,6 @@ pub async fn run_engine(
     let input = PlanInput {
         list,
         needed: &needed,
-        profile: &[],
         media: &media,
         backlog: Backlog::default(),
     };

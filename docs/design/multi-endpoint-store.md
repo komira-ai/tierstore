@@ -64,6 +64,8 @@ No extra store request: the client sends the same requests as before, to a diffe
 
 Tests, in the pull request: nine requests over three loopback fakes that verify the signature against the Host land round robin; one entry behaves as `endpoint`; config refusals (both, empty, repeated, neither, a list in a `dir` or `memory` tier); and a compat test that the release before refuses `endpoints` in a storage node's `[hot_store]` and reads the same file with `endpoint` (B8: the key is additive, and a host that may roll back keeps `endpoint` until every process has this release).
 
+Section 4 has its tests in `crates/tierstore/tests/tierstore/s3_multi_endpoint.rs` (komira-ai/tierstore#515), over fronts of one loopback S3 service, each logging the requests it took: one upload's creation, two parts and completion through three endpoints land creation and completion on the first and one part on each of the others, and the object has both parts in order; an abort at an endpoint that did not create the upload removes it for all; with one endpoint refusing connections the part whose turn it is lands on the next; a listing read two keys a page goes to the endpoints in turn and gives each key once; and an upload of the hot tier begun through one proxy is continued, completed or aborted through others, each over its own front.
+
 ## 7. Later work, not decided
 
 None of these is part of this design, and none is a decision against it; each would be its own design and pull request.

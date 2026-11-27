@@ -123,7 +123,14 @@ taker goes before `ready`, and gives it up at `ready` (its store entry removed) 
 none refuses the line (`this instance holds no mount`) and the taker asks again without it, and an instance that holds one
 refuses a taker that does not ask for it. A cache instance offers its lock (`lock <path>`, a descriptor of `<cache>/.lock`) to a
 taker that asked for `ready`, starts no cache write from `ready` on, and says `written` after `bye` once its writes in flight
-have ended; the taker takes the write role then, or when the connection ends (`handoff/written.rs`). The taker checks that
+have ended; the taker takes the write role then, or when the connection ends (`handoff/written.rs`). Its cache tells
+the requests that wait for the write role that it is read-write only after its tree store has read the cache directory again
+(`LocalCache::before_read_write`; a read that fails is said, and the store's next pass reads it again), so the placements
+the old instance made after the taker opened its store are there for the first request that waited for the write role: a
+read of a file the old instance opened for a job under one of them is answered with its bytes, not `EIO`, which a job that
+maps the file would take as SIGBUS
+(`a_handed_lock_is_taken_with_the_placements_the_holder_made_after_the_store_opened`,
+`a_file_opened_before_the_hand_over_under_a_newer_placement_is_read_by_the_successor`). The taker checks that
 the running instance is its own user and the kind of each descriptor (the sockets listen, the lock is the regular file at
 its path) before `ack`. A build node's instance takes part in all but the mount today (`serve_front`); the Linux start of a node with a cache asks for the lock
 with the sockets (komira-ai/tierstore#571, `handoff::offered_with_lock`, `handoff::follow`), and the start of the one process that asks for
