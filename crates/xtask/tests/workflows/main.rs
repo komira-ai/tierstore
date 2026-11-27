@@ -37,6 +37,8 @@ mod expr;
 mod farm;
 mod farm_lane;
 mod farm_lane_tests;
+mod farm_steps;
+mod farm_steps_tests;
 mod farm_tests;
 mod glibc_floor;
 mod glibc_floor_tests;

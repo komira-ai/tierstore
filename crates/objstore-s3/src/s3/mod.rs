@@ -53,6 +53,7 @@ mod cut_put;
 mod endpoint;
 #[cfg(feature = "testkit")]
 pub mod fake;
+mod health;
 mod multipart;
 mod parts;
 #[cfg(test)]
@@ -70,6 +71,7 @@ pub use copy::{CopyAnswer, CopyConditions, CopySource};
 pub use credentials::{AwsEnv, CredentialSource, Credentials, CredentialsError};
 pub use cut_put::CutPuts;
 pub use endpoint::Addressing;
+pub use health::EndpointState;
 pub use multipart::{
     MAX_PART_BYTES, MAX_PARTS, MIN_PART_BYTES, PART_BYTES, SINGLE_PUT_MAX, part_size, part_size_of,
 };
@@ -80,9 +82,9 @@ pub use tuning::{READ_RETRIES, S3Tuning};
 
 use std::fmt;
 use std::future::Future;
+use std::hash::{BuildHasher, RandomState};
 use std::num::NonZeroU64;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime};
 
 use base64::Engine as _;
@@ -100,6 +102,7 @@ use crate::{
 };
 use credentials::{Keys, Live, system_clock};
 use endpoint::{Target, system_roots, target_of, tls_config};
+use health::{FIRST_ASIDE, Health};
 use sigv4::{EMPTY_SHA256, Request, Signer, Utc};
 use streamed::{check_partial, too_long};
 
@@ -108,7 +111,9 @@ pub const WAIT_RETRY: Duration = Duration::from_millis(250);
 
 /// Whether a failed read may be sent again: it failed in transport and not by running
 /// out of time (a store that is `request_timeout` slow stays slow, and a resend would
-/// multiply the wait of a read that cannot succeed).
+/// multiply the wait of a read that cannot succeed). A read whose endpoint stalled is sent to
+/// another endpoint before it gets here, when the stalled one was set aside
+/// ([`Conn::failing_over`]).
 ///
 /// Two timeouts are not that. After the request went out, the kernel giving up on a
 /// dead connection (`ETIMEDOUT`) says nothing of the store, and a fresh connection may
@@ -248,10 +253,10 @@ pub struct S3Store {
 struct Conn {
     /// One client for all the endpoints; it keeps a connection pool for each `host:port`.
     client: reqwest::Client,
-    /// The endpoints, at least one. Each request goes to the next in turn.
+    /// The endpoints, at least one. Each request goes to the next of those in turn (`health.rs`).
     targets: Vec<Target>,
-    /// How many requests were signed so far; the request number modulo the endpoints picks one.
-    sent: AtomicUsize,
+    /// Which of `targets` are in turn, and which are set aside; shared with their probes.
+    health: Arc<Health>,
     bucket: String,
     region: String,
     credentials: Live,
@@ -300,6 +305,11 @@ impl S3Store {
     /// endpoints of `also`, in that order: each request goes to the next endpoint in turn, and
     /// is signed for the `Host` it goes to. All of them must be the same store. An endpoint
     /// given twice is refused. With an empty `also` this is [`S3Store::new_tuned`].
+    ///
+    /// An endpoint that stalled (no answer within `request_timeout`) or refused a connection is
+    /// set aside: the requests skip it for 2 s, doubling with each failure after that up to
+    /// 30 s, until a probe of it on a task of its own is answered. The last endpoint in turn is
+    /// never set aside. [`S3Store::endpoints`] says which are aside.
     pub fn new_rotating(
         config: S3Config,
         tuning: S3Tuning,
@@ -358,10 +368,14 @@ impl S3Store {
             })
         };
         let credentials = Live::new(&config.credentials, http, &config.region, system_clock())?;
+        // A seed of the process's own: the clients of one store do not draw the same times aside.
+        let seed = RandomState::new().hash_one(targets.len());
+        let probe_hold = config.request_timeout.saturating_add(FIRST_ASIDE);
+        let health = Arc::new(Health::new(targets.len(), seed, probe_hold));
         let conn = |weak: &std::sync::Weak<Conn>| Conn {
             client,
             targets,
-            sent: AtomicUsize::new(0),
+            health,
             bucket: config.bucket,
             region: config.region,
             credentials,
@@ -397,6 +411,8 @@ pub(super) struct Failed {
     pub(super) error: ObjectStoreError,
     /// The request certainly never reached a store, so sending it again cannot land it twice.
     pub(super) unsent: bool,
+    /// No byte of an answer came within the limit of the request: the endpoint stalled.
+    pub(super) stalled: bool,
 }
 
 /// The failure `e` of a send.
@@ -413,20 +429,19 @@ pub(super) struct Failed {
 /// and died before it answered, and a resend of a conditional PUT that landed would break the
 /// protocol of the markers. (hyper-util's own client already sends again a request that hyper
 /// returns unwritten on a pooled connection that turned out closed.)
+///
+/// A timeout of the request's own limit, after the connection was made, is a stall of the
+/// endpoint ([`Failed::stalled`]); the kernel giving up on a dead connection (`ETIMEDOUT`) is not:
+/// it says nothing of the endpoint.
 pub(super) fn failed(e: reqwest::Error) -> Failed {
     Failed {
         unsent: e.is_connect(),
+        stalled: !e.is_connect() && e.is_timeout() && !os_timed_out(&e),
         error: transport(e),
     }
 }
 
 impl Conn {
-    /// The endpoint for the next request: the endpoints in turn, one step for each call.
-    fn next_target(&self) -> &Target {
-        let n = self.sent.fetch_add(1, Ordering::Relaxed);
-        &self.targets[n % self.targets.len()]
-    }
-
     /// The limit on a whole request with a `body_len`-byte body.
     fn timeout_for(&self, body_len: usize) -> Duration {
         let Some(rate) = self.min_body_rate else {
@@ -439,9 +454,10 @@ impl Conn {
     }
 
     /// Signs and sends one request, limited as a whole to [`Conn::timeout_for`] its
-    /// body. `key` of `None` addresses the bucket. A send that never reached a store is made
-    /// again to the next endpoint (see [`Conn::failing_over`]); the body is held as `Bytes`, so
-    /// every send has all of it, and each is signed again for the `Host` it goes to.
+    /// body. `key` of `None` addresses the bucket. A send that never reached a store, or a GET or
+    /// HEAD that stalled, is made again to the next endpoint (see [`Conn::failing_over`]); the
+    /// body is held as `Bytes`, so every send has all of it, and each is signed again for the
+    /// `Host` it goes to.
     async fn send(
         &self,
         method: Method,
@@ -458,9 +474,18 @@ impl Conn {
             hex::encode(Sha256::digest(&body))
         };
         let timeout = self.timeout_for(body.len());
-        self.failing_over(|keys| {
+        let idempotent = matches!(method, Method::GET | Method::HEAD);
+        self.failing_over(idempotent, |keys, target| {
             let req = self
-                .signed_payload(&keys, method.clone(), key, query, headers.clone(), &payload)
+                .signed_payload(
+                    &keys,
+                    target,
+                    method.clone(),
+                    key,
+                    query,
+                    headers.clone(),
+                    &payload,
+                )
                 .timeout(timeout);
             let req = if body.is_empty() {
                 req
@@ -481,9 +506,10 @@ impl Conn {
         headers: Vec<(&'static str, String)>,
     ) -> Result<Response, ObjectStoreError> {
         let resp = self
-            .failing_over(|keys| {
+            .failing_over(true, |keys, target| {
                 let req = self.signed_payload(
                     &keys,
+                    target,
                     Method::GET,
                     Some(key),
                     &[],
@@ -496,6 +522,7 @@ impl Conn {
                         Err(stalled) => Err(Failed {
                             error: stalled,
                             unsent: false,
+                            stalled: true,
                         }),
                     }
                 }
@@ -506,24 +533,28 @@ impl Conn {
         Ok(resp)
     }
 
-    /// Runs `attempt`, which signs a request with the keys it is given for the next endpoint and
-    /// sends it, again after a failure that proves the store never saw the request
-    /// ([`Failed::unsent`]), until the sends are [`S3Tuning::endpoint_attempts`] in all. The last
-    /// failure is the error, as it is for a request sent once; any other failure ends the
-    /// request at once. With one endpoint the next send is to the same address on a new
-    /// connection. The keys are had again for each send, so a send never signs with keys that
-    /// expired; when none can be had, nothing is sent and the error is
-    /// [`ObjectStoreError::Credentials`]. An answer, of any status, proves the store is there and
+    /// Runs `attempt`, which signs a request with the keys it is given for the endpoint it is
+    /// given (the next in turn, `health.rs`) and sends it, again after a failure that proves the
+    /// store never saw the request ([`Failed::unsent`]), and, for an `idempotent` request, after
+    /// a stall of an endpoint that was then set aside, until the sends are
+    /// [`S3Tuning::endpoint_attempts`] in all. The last failure is the error, as it is for a
+    /// request sent once; any other failure ends the request at once. An answer of any status
+    /// puts its endpoint back in turn; a stall or a failed connect sets it aside unless it is the
+    /// last in turn. With one endpoint the next send after a failed connect is to the same
+    /// address on a new connection, and a stall is the error. The keys are had again for each
+    /// send, so a send never signs with keys that expired; when none can be had, nothing is
+    /// sent and the error is [`ObjectStoreError::Credentials`]. An answer, of any status, also
     /// begins a pass over the aborts that failed (`cleanup.rs`).
     pub(super) async fn failing_over<F, Fut>(
         &self,
+        idempotent: bool,
         attempt: F,
     ) -> Result<Response, ObjectStoreError>
     where
-        F: FnMut(Arc<Keys>) -> Fut,
+        F: FnMut(Arc<Keys>, &Target) -> Fut,
         Fut: Future<Output = Result<Response, Failed>>,
     {
-        self.failing_over_marked(attempt)
+        self.failing_over_marked(idempotent, attempt)
             .await
             .map_err(|failed| failed.error)
     }
@@ -533,10 +564,11 @@ impl Conn {
     /// for want of keys.
     pub(super) async fn failing_over_marked<F, Fut>(
         &self,
+        idempotent: bool,
         mut attempt: F,
     ) -> Result<Response, Failed>
     where
-        F: FnMut(Arc<Keys>) -> Fut,
+        F: FnMut(Arc<Keys>, &Target) -> Fut,
         Fut: Future<Output = Result<Response, Failed>>,
     {
         let mut sends = 1;
@@ -544,22 +576,30 @@ impl Conn {
             let keys = self.credentials.keys().await.map_err(|e| Failed {
                 error: ObjectStoreError::Credentials(e),
                 unsent: true,
+                stalled: false,
             })?;
-            match attempt(keys).await {
+            let index = self.pick();
+            let failed = match attempt(keys, &self.targets[index]).await {
                 Ok(resp) => {
+                    self.answered(index);
                     self.cleaner.answered();
                     return Ok(resp);
                 }
-                Err(failed) if failed.unsent && sends < self.tuning.endpoint_attempts => {
-                    tracing::warn!(
-                        error = %failed.error,
-                        sends,
-                        "request never reached the store; sending it to the next endpoint"
-                    );
-                    sends += 1;
-                }
-                Err(failed) => return Err(failed),
+                Err(failed) => failed,
+            };
+            let aside =
+                (failed.unsent || failed.stalled) && self.endpoint_failed(index, &failed.error);
+            let again = failed.unsent || (failed.stalled && idempotent && aside);
+            if !again || sends >= self.tuning.endpoint_attempts {
+                return Err(failed);
             }
+            let why = if failed.unsent {
+                "request never reached the store; sending it to the next endpoint"
+            } else {
+                "request got no answer in time; sending it to the next endpoint"
+            };
+            tracing::warn!(error = %failed.error, sends, "{why}");
+            sends += 1;
         }
     }
 
@@ -596,19 +636,22 @@ impl Conn {
     }
 
     /// The request signed with `keys` for a body whose hex SHA-256 is `payload` (or
-    /// `UNSIGNED-PAYLOAD`), with no limit set and no body attached. It goes to the next endpoint
-    /// in turn. The session token of temporary keys is sent, and signed, as
-    /// `x-amz-security-token`.
+    /// `UNSIGNED-PAYLOAD`), with no limit set and no body attached, to `target`. The session
+    /// token of temporary keys is sent, and signed, as `x-amz-security-token`.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the parts of one signed request, each used once; a struct of them would be built for this call alone"
+    )]
     pub(super) fn signed_payload(
         &self,
         keys: &Keys,
+        target: &Target,
         method: Method,
         key: Option<&ObjectKey>,
         query: &[(&str, String)],
         mut headers: Vec<(&'static str, String)>,
         payload: &str,
     ) -> reqwest::RequestBuilder {
-        let target = self.next_target();
         // The key is percent-encoded here, once, and that text is both signed and sent: `Url`
         // keeps an escape it is given as it is (it would leave a bare `%` or `+` alone). In
         // virtual-hosted style the bucket is in the host, and a request for the bucket is `/`.
