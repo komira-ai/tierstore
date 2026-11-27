@@ -8,6 +8,7 @@ use tierstore_testkit::dir::TestDir;
 
 use super::{Host, not_served, volume_of};
 use crate::server::config::{PerRun, settings_from_text};
+use crate::server::config_interface::NO_FS;
 use crate::server::config_testing::DEFAULTS;
 use crate::server::treefs::{self, FsSettings, builders};
 
@@ -252,26 +253,16 @@ fn an_fs_interface_makes_the_settings_the_fs_table_made() {
     assert_eq!(got, want);
 }
 
-/// Asserts that a file of today, with no `fs` interface, loads as it did: a build node with a
-/// provider at the default mount has no file system and keeps its provider's default mount and
-/// its own given one, and a storage node, a storage node with a cache and a node over the cold
-/// tier load as before.
+/// Asserts that a file of today, with neither an `fs` interface nor a mount provider, loads as it
+/// did: a build node has no file system and no provider, and a storage node, a storage node with
+/// a cache and a node over the cold tier load as before.
 #[test]
 fn a_file_of_today_without_an_fs_interface_loads_as_today() {
-    let text = format!("{}{}{}", s3(), provider(""), build_node("", ""));
+    let text = format!("{}{}", s3(), build_node("", ""));
     let settings = settings_from_text(&text, DEFAULTS).expect("a build node");
     let cache = settings.into_cache().expect("a build node");
     assert_eq!(cache.fs, None);
-    let flags = cache.provider.expect("a provider");
-    assert_eq!(flags.mountpoint, PathBuf::from("/run/tierstore/fs"));
-    let own = provider(", mountpoint = \"/mnt/elsewhere\"");
-    let text = format!("{}{own}{}", s3(), build_node("", ""));
-    let settings = settings_from_text(&text, DEFAULTS).expect("a build node");
-    let flags = settings.into_cache().expect("a build node").provider;
-    assert_eq!(
-        flags.expect("a provider").mountpoint,
-        PathBuf::from("/mnt/elsewhere")
-    );
+    assert_eq!(cache.provider, None);
     for node in [COMBINED_NODE, STORAGE_NODE, COLD_NODE] {
         let text = format!("{}{node}", s3());
         assert!(settings_from_text(&text, DEFAULTS).is_ok(), "{node}");
@@ -471,20 +462,28 @@ fn a_provider_mountpoint_left_out_is_the_fs_mountpoint() {
     assert!(flags.served);
 }
 
-/// Asserts that a mount provider in a file with no `fs` interface, as a Mac of the two-process
-/// layout has (`mountpoint` given, `local_cache.fill_socket` set), loads with its own mountpoint
-/// and is not served: no process of this release serves that mount. Catches a provider that
-/// answers directories under a mount nothing serves.
+/// Asserts that a mount provider in a file with no `fs` interface is refused at load, naming the
+/// provider's entry by its place and giving the reason in full, wherever the entry is and whether
+/// it gives its `mountpoint` or not; the Mac's two-process file (`mountpoint` given,
+/// `local_cache.fill_socket` set) is one. Catches a start of a node whose provider would answer
+/// every job's tree `UNAVAILABLE`, because no process serves the mount it names.
 #[test]
-fn a_provider_without_an_fs_interface_is_not_served() {
-    let node = build_node("", "fill_socket = \"/var/lib/tierstore/fill.sock\"\n");
+fn a_provider_without_an_fs_interface_is_refused() {
+    let two_process = build_node("", "fill_socket = \"/var/lib/tierstore/fill.sock\"\n");
     let given = provider(", mountpoint = \"/private/var/tierstore/fs\"");
-    let text = format!("{}{given}{node}", s3());
-    let settings = settings_from_text(&text, run(one_volume)).expect("a build node");
-    let flags = settings.into_cache().expect("a build node").provider;
-    let flags = flags.expect("a provider");
-    assert_eq!(flags.mountpoint, PathBuf::from("/private/var/tierstore/fs"));
-    assert!(!flags.served);
+    assert_eq!(
+        refusal(&[s3(), given.clone()], &two_process),
+        format!("interface[1].type: {NO_FS}")
+    );
+    let node = build_node("", "");
+    assert_eq!(
+        refusal(&[given, s3()], &node),
+        format!("interface[0].type: {NO_FS}")
+    );
+    assert_eq!(
+        refusal(&[s3(), provider("")], &node),
+        format!("interface[1].type: {NO_FS}")
+    );
 }
 
 /// Asserts that a mount provider that gives a `mountpoint` other than the `fs` interface's is

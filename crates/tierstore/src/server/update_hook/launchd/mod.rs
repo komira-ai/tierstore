@@ -54,7 +54,7 @@
 //!   when it is not loaded, then boots the fs job in when there is one and it is not loaded.
 
 mod exec;
-pub(super) mod fs;
+pub(in crate::server) mod fs;
 
 use std::cell::Cell;
 use std::path::Path;

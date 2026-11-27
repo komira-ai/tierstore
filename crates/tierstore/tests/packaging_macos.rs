@@ -149,10 +149,15 @@ fn interfaces<'a>(file: &'a toml::Table, kind: &str) -> Vec<&'a toml::Value> {
 }
 
 /// The addresses of the one `s3` interface of the file, which has, besides it, only its mount
-/// provider, which listens on no address.
+/// provider, which listens on no address, and its `fs` interface, whose NFS address the file
+/// names beside its other params.
 fn interface_addresses(file: &toml::Table) -> Vec<String> {
     let entries = file["interface"].as_array().expect("[[interface]]");
-    assert_eq!(entries.len(), 2, "the s3 interface and the mount provider");
+    assert_eq!(
+        entries.len(),
+        3,
+        "the s3 interface, the mount provider and the fs interface"
+    );
     let s3 = interfaces(file, "s3");
     assert_eq!(s3.len(), 1, "one s3 interface");
     let addresses = s3[0]["params"]["addresses"].as_array().expect("addresses");
@@ -259,8 +264,10 @@ fn the_file_is_a_cache_of_the_storage_nodes_with_a_proxy_id_from_the_facts_file(
 
 /// Asserts that the Mac runs the mount provider jobscheduler's agent asks for a job's tree: one
 /// `mount-provider` interface, on a socket in a directory of its own under the Mac's tierstore
-/// directory, answering trees under the Mac's mount of `tierstore fs`. It would catch a Mac whose
-/// jobs cannot have their inputs made local before they start.
+/// directory, answering trees under the mount of the file's own `fs` interface (the mount the
+/// provider names is the one that interface serves). It would catch a Mac whose jobs cannot have
+/// their inputs made local before they start, or whose provider answers under a mount that
+/// nothing serves.
 #[test]
 fn the_mac_runs_the_mount_provider_on_its_socket() {
     let file = config();
@@ -276,6 +283,42 @@ fn the_mac_runs_the_mount_provider_on_its_socket() {
         params["mountpoint"].as_str(),
         Some("/private/var/tierstore/fs")
     );
+    let fs = interfaces(&file, "fs");
+    assert_eq!(fs.len(), 1, "the one fs interface that serves the mount");
+    assert_eq!(fs[0]["params"]["mountpoint"], params["mountpoint"]);
+}
+
+/// Asserts that the Mac serves its trees from its own process: the file has one `fs` interface,
+/// which mounts `/private/var/tierstore/fs` over NFS on the loopback address `127.0.0.1:12049`,
+/// for the group and the owner `_tierstore`, with its runtime directory under `run` beside the
+/// sockets (launchd makes none) and the process's own user as the mount's (no `mount_user`), and
+/// the file names no fill socket, which no process serves any more. It would catch a Mac whose
+/// jobs find no tree where the provider places it, an NFS server that listens beyond loopback, and
+/// a file that keeps the fill socket of the two-process layout.
+#[test]
+fn the_mac_serves_its_trees_over_nfs_on_loopback_from_its_own_process() {
+    let file = config();
+    let fs = interfaces(&file, "fs");
+    assert_eq!(fs.len(), 1);
+    let params = fs[0]["params"].as_table().expect("params");
+    assert_eq!(
+        params.keys().map(String::as_str).collect::<Vec<_>>(),
+        ["client_group", "mountpoint", "nfs", "owner", "runtime_dir"]
+    );
+    assert_eq!(
+        params["mountpoint"].as_str(),
+        Some("/private/var/tierstore/fs")
+    );
+    assert_eq!(params["client_group"].as_str(), Some("_tierstore"));
+    assert_eq!(params["owner"].as_str(), Some("_tierstore:_tierstore"));
+    assert_eq!(
+        params["runtime_dir"].as_str(),
+        Some(format!("{LAUNCHD_LINKS_DIR}/run/fs").as_str())
+    );
+    let nfs = table(params, "nfs");
+    assert_eq!(nfs.len(), 1, "{nfs:?}");
+    assert_eq!(nfs["listen"].as_str(), Some("127.0.0.1:12049"));
+    assert!(!table(&file, "local_cache").contains_key("fill_socket"));
 }
 
 /// Asserts that the Mac ingests the put directories of its jobs: `local_cache.put_ingest` is the
@@ -292,36 +335,43 @@ fn the_mac_ingests_its_jobs_put_directories() {
     assert_eq!(cache["write_through"].as_bool(), Some(true));
 }
 
-/// Asserts that the Mac's file still names `local_cache.fill_socket` itself, in the directory the
-/// installer package makes (`run`, beside the provider's socket and apart from it, outside the
-/// cache), because launchd sets no `STATE_DIRECTORY` for either plist (neither has
-/// `EnvironmentVariables`). The node reads the key and ignores it: no fill socket is served, and
-/// the file keeps the key until the packaging drops it.
+/// Asserts that the runtime directory the file names for its `fs` interface is in the directory
+/// the installer package makes (`run`, beside the provider's socket and apart from it, outside the
+/// cache), because launchd sets no `RUNTIME_DIRECTORY` for either plist (neither has
+/// `EnvironmentVariables`), so the default runtime directory would be a path no package makes. It
+/// would catch a runtime directory left to the default, or put inside the cache, which a start
+/// refuses.
 #[test]
-fn the_mac_names_its_fill_socket_since_launchd_gives_no_state_directory() {
+fn the_mac_names_its_runtime_directory_since_launchd_gives_no_runtime_directory() {
     for dict in [plist(), plist_in(&package_plist_text())] {
         assert!(!dict.contains_key("EnvironmentVariables"), "{dict:?}");
     }
     let file = config();
-    let cache = table(&file, "local_cache");
-    let socket = format!("{LAUNCHD_LINKS_DIR}/run/fill.sock");
-    assert_eq!(
-        cache.get("fill_socket").and_then(toml::Value::as_str),
-        Some(socket.as_str()),
-        "local_cache.fill_socket"
+    let runtime = interfaces(&file, "fs")[0]["params"]["runtime_dir"]
+        .as_str()
+        .expect("fs params.runtime_dir");
+    assert_eq!(runtime, format!("{LAUNCHD_LINKS_DIR}/run/fs"));
+    let provider = interfaces(&file, "mount-provider")[0]["params"]["socket"]
+        .as_str()
+        .expect("the provider's socket");
+    assert_eq!(Path::new(provider).parent(), Path::new(runtime).parent());
+    let cache = table(&file, "local_cache")["path"]
+        .as_str()
+        .expect("local_cache.path");
+    assert!(
+        !Path::new(runtime).starts_with(cache),
+        "{runtime} in {cache}"
     );
-    let provider = interfaces(&file, "mount-provider")[0]["params"]["socket"].as_str();
-    assert_ne!(provider, Some(socket.as_str()));
-    let path = cache["path"].as_str().expect("local_cache.path");
-    assert!(!Path::new(&socket).starts_with(path), "{socket} in {path}");
 }
 
 /// Asserts that the binary itself takes the plist's command line and the shipped file: the
-/// file, copied into a scratch directory with its key files and its cache there (keys of the
-/// form the process reads, mode 0600), is checked by the binary run with the plist's own
+/// file, copied into a scratch directory with its key files, its cache, its mount point and its
+/// runtime directory there (keys of the form the process reads, mode 0600) and the two account
+/// names of its `fs` interface replaced by the numbers of the user and group of this process (a
+/// unit test has no `_tierstore` to look up), is checked by the binary run with the plist's own
 /// arguments and `--check-config`, which reads the file and the key files and binds nothing, and
-/// it exits 0 and says only that the file's `local_cache.fill_socket` is ignored. It would catch a
-/// file or a flag the binary refuses, which would leave the job restarting for ever.
+/// it exits 0 and says nothing. It would catch a file or a flag the binary refuses, which would
+/// leave the job restarting for ever.
 #[test]
 fn the_binary_accepts_the_plists_command_line_and_file() {
     let scratch = TestDir::under(std::env::temp_dir(), "packaging-macos-check");
@@ -344,6 +394,32 @@ fn the_binary_accepts_the_plists_command_line_and_file() {
     text = text.replace(FACTS_PATH, &facts.display().to_string());
     let cache = format!("{LAUNCHD_LINKS_DIR}/cache");
     text = text.replace(&cache, &scratch.path().join("cache").display().to_string());
+    let (uid, gid) = (
+        rustix::process::geteuid().as_raw(),
+        rustix::process::getegid().as_raw(),
+    );
+    for (shipped, own) in [
+        (
+            "owner        = \"_tierstore:_tierstore\"",
+            format!("owner        = \"{uid}:{gid}\""),
+        ),
+        (
+            "client_group = \"_tierstore\"",
+            format!("client_group = \"{gid}\""),
+        ),
+    ] {
+        assert!(text.contains(shipped), "{shipped}");
+        text = text.replace(shipped, &own);
+    }
+    for (shipped, name) in [
+        ("/private/var/tierstore/fs", "mount"),
+        ("/usr/local/tierstore/run/fs", "runtime"),
+    ] {
+        let own = scratch.path().join(name);
+        std::fs::create_dir(&own).unwrap();
+        assert!(text.contains(shipped), "{shipped}");
+        text = text.replace(shipped, &own.display().to_string());
+    }
     let file = scratch.path().join("tierstore.toml");
     std::fs::write(&file, text).unwrap();
     let mut words = arguments();
@@ -359,13 +435,7 @@ fn the_binary_accepts_the_plists_command_line_and_file() {
             String::from_utf8_lossy(&out.stdout).into_owned(),
             String::from_utf8_lossy(&out.stderr).into_owned()
         ),
-        (
-            Some(0),
-            String::new(),
-            "tierstore: local_cache.fill_socket is ignored: no fill socket is served, the file \
-             system of an fs interface calls the cache in this process\n"
-                .to_owned()
-        )
+        (Some(0), String::new(), String::new())
     );
 }
 
@@ -563,30 +633,36 @@ fn the_plist_waits_210_seconds_on_exit() {
 }
 
 /// Asserts that the shipped `fs.toml` is the file the job's command line names and that it agrees
-/// with `tierstore.toml`: its `fs.fill_socket` is `local_cache.fill_socket` (both read and
-/// ignored), its `fs.mountpoint` is the mount provider's `mountpoint`, its `fs.cache_path` is
-/// `local_cache.path`, its runtime directory is under `run` beside the sockets, the account it
-/// names is `_tierstore`, the job's, and its NFS socket is on loopback. It would catch a file
-/// service that reads the cache or mount point of another place than the node's, so that the
-/// provider's trees appear where no job looks.
+/// with the `fs` interface of `tierstore.toml`: its `fs.mountpoint` is that interface's mount and
+/// the mount provider's `mountpoint`, its `fs.cache_path` is `local_cache.path`, its runtime
+/// directory, its account and its NFS socket (on loopback) are the interface's, and its
+/// `fs.fill_socket`, which is read and ignored, is a path in the same `run` directory; the node's
+/// file names none. It would catch a file service that reads the cache or mount point of another
+/// place than the node's, so that the provider's trees appear where no job looks.
 #[test]
-fn the_fs_file_repeats_the_nodes_fill_socket_cache_and_mountpoint() {
+fn the_fs_file_repeats_the_nodes_cache_mountpoint_and_account() {
     let node = config();
     let file = fs_config();
     assert_eq!(file.keys().collect::<Vec<_>>(), ["fs"]);
     let fs = table(&file, "fs");
     let cache = table(&node, "local_cache");
-    assert_eq!(fs["fill_socket"], cache["fill_socket"]);
+    assert!(!cache.contains_key("fill_socket"));
+    assert_eq!(
+        fs["fill_socket"].as_str(),
+        Some(format!("{LAUNCHD_LINKS_DIR}/run/fill.sock").as_str())
+    );
     assert_eq!(fs["cache_path"], cache["path"]);
     let providers = interfaces(&node, "mount-provider");
     assert_eq!(fs["mountpoint"], providers[0]["params"]["mountpoint"]);
-    assert_eq!(
-        fs["runtime_dir"].as_str(),
-        Some(format!("{LAUNCHD_LINKS_DIR}/run/fs").as_str())
-    );
+    let served = interfaces(&node, "fs");
+    let params = served[0]["params"].as_table().expect("params");
+    for key in ["mountpoint", "runtime_dir", "owner", "client_group"] {
+        assert_eq!(fs[key], params[key], "{key}");
+    }
     assert_eq!(fs["owner"].as_str(), Some("_tierstore:_tierstore"));
     assert_eq!(fs["client_group"].as_str(), Some("_tierstore"));
     let nfs = table(fs, "nfs");
+    assert_eq!(nfs["listen"], table(params, "nfs")["listen"]);
     assert_eq!(nfs["listen"].as_str(), Some("127.0.0.1:12049"));
     assert!(!nfs.contains_key("mount_user"), "the process's own user");
     for key in fs.keys() {

@@ -406,6 +406,8 @@ mod listen;
 mod listing;
 #[cfg(test)]
 mod live_configs;
+#[cfg(test)]
+mod live_configs_tests;
 pub mod local_cache;
 mod lock;
 #[cfg(test)]

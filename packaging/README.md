@@ -208,7 +208,7 @@ bootout`, then `launchctl bootstrap`.
 The edits of the host's configuration file (the bucket, the tiers, the endpoints, `hot_store.budget`)
 go into `/etc/tierstore/config.toml` on Linux and `/usr/local/tierstore/etc/tierstore.toml` on a
 Mac, the files the two units name. `packaging/macos/tierstore.toml` is the example of that
-file for a Mac (only a read cache on loopback, its proxy id from hostkeeper's facts file, its upstream the storage nodes' S3 servers); `packaging/macos/fs.toml` is the example of `/usr/local/tierstore/etc/fs.toml`, the file of the `tierstore-fs` job; the declaration and plist that directory held for the earlier update path are removed.
+file for a Mac (only a read cache on loopback, its trees one NFS mount of the same process, its proxy id from hostkeeper's facts file, its upstream the storage nodes' S3 servers); `packaging/macos/fs.toml` is the example of `/usr/local/tierstore/etc/fs.toml`, the file of the `tierstore-fs` job; the declaration and plist that directory held for the earlier update path are removed.
 
 ## Presigned PUT URLs
 
@@ -711,8 +711,8 @@ params = { socket = "/var/lib/tierstore/provider.sock", mountpoint = "/run/tiers
 
 `mountpoint` is the node's file system mount, under which the provider places each job's tree:
 the `fs` interface's `params.mountpoint` in the same file. Since 0.3.196 `tierstore fs` is no longer
-a process of its own, so a file with no `fs` interface has no process serving the mount, and the
-provider answers every `Prepare` and `Mount` `UNAVAILABLE` there. jobscheduler's agent on the node takes the socket and the provider's directory as a
+a process of its own, so a file with a `mount-provider` entry and no `fs` interface has no process
+serving the mount, and the load refuses it. jobscheduler's agent on the node takes the socket and the provider's directory as a
 read-only mount root, in flags of its own:
 
 ```text
@@ -723,7 +723,7 @@ read-only mount root, in flags of its own:
 The socket is mode 0600 and owned by `tierstore`; the agent, which runs as root, connects to it. It
 is bound only while the instance holds the lock of the cache directory, so during a hand-over the
 old instance answers until it exits, and the new one binds when it takes the lock. A Mac's file
-(`macos/tierstore.toml`) has the entry with its own paths. What the provider does, and what each of
+(`macos/tierstore.toml`) has the entry with its own paths, and the `fs` interface it needs, served over NFS on loopback. What the provider does, and what each of
 its answers means to a job, is in `crates/tierstore/docs/operations.md`, "The mount provider".
 
 ### A unit that needs the mount

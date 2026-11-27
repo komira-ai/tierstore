@@ -2,7 +2,8 @@
 # starts it. root:_tierstore, mode 0640. crates/tierstore/docs/configuration.md says what every key does.
 #
 # On a Mac tierstore is a local cache on loopback: no hot tier, no server role, no hand-off socket and
-# no firewall redirect. Reads that miss the cache go to the tierstore S3 servers of the storage
+# no firewall redirect. The jobs' trees are one NFS mount of this same process (the `fs` interface
+# below), on loopback too. Reads that miss the cache go to the tierstore S3 servers of the storage
 # nodes, port 9300. It writes one kind of object there: the objects the Mac's jobs commit into their
 # put directories under the put ingest's root (crates/tierstore/docs/operations.md, "The put
 # ingest"), so the node takes writes (write_through) and its upstream key may write cas/b/.
@@ -26,12 +27,29 @@ params = { addresses = ["127.0.0.1:9300"] }
 
 # The mount provider jobscheduler's agent on this Mac asks for a job's input tree
 # (crates/tierstore/docs/operations.md, "The mount provider"): a Unix socket only, mode 0600, in a
-# directory _tierstore owns; `mountpoint` is the Mac's `fs.mountpoint` of tierstore fs. Since 0.3.196
-# no process serves that mount for a file with no `fs` interface, as this one has: the provider then
-# answers every Prepare and Mount UNAVAILABLE (komira-ai/tierstore#623, #624).
+# directory _tierstore owns. `mountpoint` is the `fs` interface's below, which serves the trees the
+# provider places; a file with this entry and no `fs` interface is refused at load.
 [[interface]]
 type   = "mount-provider"
 params = { socket = "/usr/local/tierstore/run/provider.sock", mountpoint = "/private/var/tierstore/fs" }
+
+# The virtual build file system, in this process: the trees of the node's tree store over NFSv3 on
+# loopback, mounted by the process itself at `mountpoint` (crates/tierstore/docs/configuration.md,
+# "The fs interface"). The jobs run as _tierstore, so its group is the group of the control socket
+# and _tierstore:_tierstore the owner every entry reports; names, because the numeric id of
+# _tierstore differs from Mac to Mac. `runtime_dir` is named because launchd gives the job no
+# RuntimeDirectory: it is the directory the installer package makes for the file system's state.
+# The NFS port is fixed, so that a restart finds its mount and the clients' hard mount waits for the
+# same address. `mount_user` is left out: the user of the process, _tierstore, owns the mount point.
+[[interface]]
+type = "fs"
+[interface.params]
+mountpoint   = "/private/var/tierstore/fs"
+client_group = "_tierstore"
+owner        = "_tierstore:_tierstore"
+runtime_dir  = "/usr/local/tierstore/run/fs"
+[interface.params.nfs]
+listen = "127.0.0.1:12049"
 
 [server]
 proxy_id_from_facts = { path = "/var/lib/hostkeeper/facts.json", prefix = "tierstore-cache-" }
@@ -44,12 +62,6 @@ read_only_key_files = ["/usr/local/tierstore/etc/daemons.key"]
 path             = "/usr/local/tierstore/cache"
 budget           = "200GiB"
 whole_fill_limit = "128MiB"
-# The fill socket tierstore fs reads every file of a tree through (crates/tierstore/docs/operations.md,
-# "The fill socket"), named here because launchd gives the job no state directory, the only place
-# the default socket is made: without it the node binds no fill socket and the mount cannot fill a
-# file. In the directory the installer package makes (_tierstore, 0700). The operator's
-# /usr/local/tierstore/etc/fs.toml, which no package ships, must set fs.fill_socket to the same path.
-fill_socket      = "/usr/local/tierstore/run/fill.sock"
 write_through    = true
 # The root of the jobs' put directories, made by the installer package (_tierstore, 0755);
 # jobscheduler's agent makes each job's cas/b/<build>/<nonce> under it.
