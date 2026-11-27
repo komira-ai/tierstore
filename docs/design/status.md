@@ -44,7 +44,7 @@ The slices below were decided after this page was first written. Each slice row 
 | [multi-endpoint-store.md](multi-endpoint-store.md) | 20 | 1 | 3 | 0 | 0 | 0 | 1 |
 | [node-local-trees.md](node-local-trees.md) | 14 | 8 | 4 | 1 | 3 | 2 | 6 |
 | [one-service.md](one-service.md) | 14 | 3 | 5 | 0 | 1 | 2 | 4 |
-| [overwrite.md](overwrite.md) | 5 | 3 | 8 | 11 | 0 | 0 | 7 |
+| [overwrite.md](overwrite.md) | 6 | 3 | 7 | 11 | 0 | 0 | 7 |
 | [pluggable-interfaces.md](pluggable-interfaces.md) | 10 | 3 | 6 | 0 | 0 | 1 | 1 |
 | [prefetch-api.md](prefetch-api.md) | 14 | 0 | 1 | 1 | 1 | 2 | 1 |
 | [put-without-lock.md](put-without-lock.md) | 20 | 4 | 4 | 1 | 0 | 2 | 5 |
@@ -108,7 +108,7 @@ Each issue says what to build, the failing test to write first (name, file, what
 | komira-ai/tierstore#522 | one-service.md | One-process start on Linux takes the sockets, the mount, the control socket and the cache lock in one conversation (P3 wiring) | Being built |
 | komira-ai/tierstore#523 | one-service.md | Remove the fill socket and the `Fills` trait: the core calls the cache directly | Being built |
 | komira-ai/tierstore#524 | one-service.md | Release M+1: delete the two-process layout (tierstore fs exits 2, tierstore attachments, fill_socket ignored, the hook's second arm, the old units and fs.toml) (P9) | Being built, after the release with both layouts runs on every host |
-| komira-ai/tierstore#525 | overwrite.md | Put and completion answer the ETag of the object they landed (G17) | Parked |
+| komira-ai/tierstore#525 | overwrite.md | Put and completion answer the ETag of the object they landed (G17) | Done by komira-ai/tierstore#600 |
 | komira-ai/tierstore#526 | overwrite.md | If-Match on PutObject and CompleteMultipartUpload as a compare-and-swap over the markers, and a copy onto an existing key | Parked |
 | komira-ai/tierstore#527 | overwrite.md | Completion rejects an x-amz-mp-object-size that differs from the parts' total (400 InvalidRequest) | Parked |
 | komira-ai/tierstore#528 | overwrite.md | CopyObject and UploadPartCopy through open_read: copy onto a key, source conditions, self-copy refused | Parked |
@@ -532,7 +532,7 @@ Slices of this page: komira-ai/tierstore#522, komira-ai/tierstore#523, komira-ai
 | 6.5, 14 PR 5 | Reap aborts only the multipart upload named in the entry (`upload` field) | superseded | put-without-lock.md 5.13 / tiered/uploads.rs, tiered/uploads_tests.rs | Nothing: no entry `upload` field; reap is by marker. |
 | 6.6, 12, 14 PR 10 | Operator verb `tierstore entries adopt --key K` (held, dry-run default) | superseded | none; format-epoch --restore-entries (komira-ai/tierstore#223) is the operator path back | Nothing: it repaired a lost `replace` entry, and no replace entries exist. |
 | 4, 14 PR 4 | Version identity: ETag as the S3 ETag of the content (MD5 / md5-N), same in every tier, kept in a record; Backend::still_current(key, &Meta); the cache fill check uses still_current instead of size-only same_version | unbuilt |  | No still_current on Backend; Proxy and cache still compare sizes (same_version, backend.rs:657, cache.rs:180, local_cache/mod.rs:685,770); no per-object record, no MD5 ETag, no tier-independent ETag (tierstore-design.md section 16 / komira-ai/tierstore#173 not built). limits.md:41-42 still lists 'Versions are compared by size' and 'ETag of a hit may differ'. |
-| 5.4, 14 PR 4 and 12 | PUT answers an ETag header of the landed object (G17) | unbuilt |  | put_streamed returns answer(StatusCode::OK, &[], ..) with no headers; put_stream_replacing's result is dropped (`.map(drop)`). CompleteMultipartUpload does answer the ETag (ops.rs:946, :984). |
+| 5.4, 14 PR 4 and 12 | PUT answers an ETag header of the landed object (G17) | built | komira-ai/tierstore#600: server/ops.rs put_streamed keeps the backend's answer and server/ops/landed.rs answers its tag, or that of one HEAD after the write when the answer names none (a cold landing, a `dir:` tier); the write-through cache passes on its upstream's answer. CompleteMultipartUpload already answered the ETag (ops.rs, complete_upload) | Nothing for G17 itself. The ETag is still the tier's tag, not the MD5 of section 4 (that is komira-ai/tierstore#548). |
 | 5.4, 9, 14 PR 4 and 12 | If-Match on a put and on a completion: 404 if absent, 412 if the ETag differs, replace if equal; If-None-Match with a value is 501 | unbuilt | put-without-lock.md 5.4(b) designs it (409 on a race) and leaves it for komira-ai/tierstore#173; If-None-Match: * is built (ops.rs:482) | replace_object still answers 412 for another tag and 501 'objects are immutable and cannot be replaced' for the right one; plain_complete.rs uses complete_upload_if_match only internally on hot. |
 | 5.4, 14 PR 7 | Completion with a wrong x-amz-mp-object-size is 400 InvalidRequest | unbuilt |  | Header is not read. |
 | 5.4 | Completion with If-None-Match: * is 412 for an existing key | built | komira-ai/tierstore#220 (Writes::Creates when the header is present; replaces flag in complete_upload) | If-Match on completion is the unbuilt part, row above. |
