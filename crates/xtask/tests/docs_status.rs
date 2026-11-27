@@ -10,7 +10,7 @@
 //!   only under a section, is not one;
 //! - a Status line that still makes a claim main has made false, from the list of such claims
 //!   in `STALE` (the Status line of `virtual-build-fs.md` saying "nothing here is built", among
-//!   others);
+//!   others); the same words below the Status line are not such a claim;
 //! - a section of `fetch-cache-serve.md` the owner decided not to build (10, the storage tier, and
 //!   24, its operations and repair) whose first paragraph is not a Status line saying
 //!   "not planned";
@@ -41,10 +41,7 @@ const STATUSES: &[&str] = &[
 const STALE: &[(&str, &str)] = &[
     ("docs/design/virtual-build-fs.md", "nothing here is built"),
     ("docs/design/virtual-build-fs.md", "phase 1 starts now"),
-    (
-        "docs/design/fetch-cache-serve.md",
-        "nothing in it was run",
-    ),
+    ("docs/design/fetch-cache-serve.md", "nothing in it was run"),
     (
         "docs/design/one-service.md",
         "No code changes come with this document",
@@ -60,7 +57,10 @@ const STALE: &[(&str, &str)] = &[
         "proposed (CEO direction, 2026-11-05), not built",
     ),
     ("docs/design/prefetch-api.md", "not built.** This text"),
-    ("docs/design/node-local-trees.md", "not built.** This is a design"),
+    (
+        "docs/design/node-local-trees.md",
+        "not built.** This is a design",
+    ),
     ("docs/design/tierstore-design.md", "probe_tiers"),
 ];
 
@@ -193,7 +193,10 @@ fn status_page_findings(text: &str) -> Vec<String> {
             continue;
         }
         let row = cells(line);
-        if row.iter().all(|c| c.chars().all(|ch| ch == '-' || ch == ':')) {
+        if row
+            .iter()
+            .all(|c| c.chars().all(|ch| ch == '-' || ch == ':'))
+        {
             continue;
         }
         if in_summary {
@@ -263,9 +266,8 @@ fn status_page_findings(text: &str) -> Vec<String> {
                 .copied()
                 .unwrap_or(0);
             if said != counted {
-                let finding = format!(
-                    "{name}: the summary says {said} {status}, the tables have {counted}"
-                );
+                let finding =
+                    format!("{name}: the summary says {said} {status}, the tables have {counted}");
                 if !found.contains(&finding) {
                     found.push(finding);
                 }
@@ -302,16 +304,42 @@ fn the_virtual_build_fs_status_line_does_not_say_nothing_is_built() {
     );
 }
 
-#[test]
-fn no_status_line_keeps_a_claim_main_has_made_false() {
-    let kept: Vec<String> = STALE
+/// The claims of `stale` that the Status line of their page still makes, each as
+/// `page: "words"`; `text_of` gives a page's text.
+fn kept_claims(stale: &[(&str, &str)], text_of: impl Fn(&str) -> String) -> Vec<String> {
+    stale
         .iter()
         .filter_map(|(page, words)| {
-            let line = status_line(&read(page))?;
+            let line = status_line(&text_of(page))?;
             line.contains(words).then(|| format!("{page}: {words:?}"))
         })
-        .collect();
+        .collect()
+}
+
+#[test]
+fn no_status_line_keeps_a_claim_main_has_made_false() {
+    let kept = kept_claims(STALE, read);
     assert!(kept.is_empty(), "stale claims kept: {kept:?}");
+}
+
+/// Asserts that a claim kept in a Status line is named, and that the same words elsewhere in
+/// the page, or a Status line without them, are not.
+#[test]
+fn a_stale_claim_is_named_only_in_its_page_s_status_line() {
+    let pages = |page: &str| match page {
+        "kept.md" => "# K\n\nStatus: proposed; nothing here is built.\n\n## 1. A\n".to_owned(),
+        "below.md" => "# B\n\nStatus: built.\n\n## 1. A\n\nnothing here is built\n".to_owned(),
+        _ => "# N\n\nNo status.\n".to_owned(),
+    };
+    let stale = [
+        ("kept.md", "nothing here is built"),
+        ("below.md", "nothing here is built"),
+        ("none.md", "nothing here is built"),
+    ];
+    assert_eq!(
+        kept_claims(&stale, pages),
+        vec!["kept.md: \"nothing here is built\"".to_owned()]
+    );
 }
 
 #[test]
@@ -344,7 +372,10 @@ fn a_status_line_is_found_only_at_the_head_of_a_page() {
         status_line("# T\n\nIntro.\n\nStatus: built\n## 1. A\n").as_deref(),
         Some("Status: built")
     );
-    assert_eq!(status_line("# T\n\nIntro.\n\n## 1. A\n\nStatus: built\n"), None);
+    assert_eq!(
+        status_line("# T\n\nIntro.\n\n## 1. A\n\nStatus: built\n"),
+        None
+    );
     assert_eq!(status_line("# T\n\nThe Status: built\n"), None);
     assert_eq!(status_line("# T\n\n **Status:** built\n"), None);
     assert_eq!(status_line(""), None);

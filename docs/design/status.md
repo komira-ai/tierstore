@@ -382,7 +382,7 @@ Slices of this page: komira-ai/tierstore#515.
 
 ## [node-local-trees.md](node-local-trees.md)
 
-**Status line.** Yes, as of this change. It says the page is partly built: the record, the extents cache, the tree store, the trees gRPC front, the S3 and fs readers and the version 2 list as tree are on main (komira-ai/tierstore#321, #325, #328, #330, #332, #334, #574, #342, #476, #581). The front is not yet connected to the tree store: calls that pass the key check answer UNAVAILABLE NotServing (komira-ai/tierstore#516). komira-ai/tierstore#517 to #521 are open. Tasks 6 and 7 are not in this repository. Section 15's heading no longer says "none started".
+**Status line.** Yes, as of this change. It says the page is partly built: the record, the extents cache, the tree store, the trees gRPC front, the S3 and fs readers and the version 2 list as tree are on main (komira-ai/tierstore#321, komira-ai/tierstore#325, komira-ai/tierstore#328, komira-ai/tierstore#330, komira-ai/tierstore#332, komira-ai/tierstore#334, komira-ai/tierstore#574, komira-ai/tierstore#342, komira-ai/tierstore#476, komira-ai/tierstore#581). The front is not yet connected to the tree store: calls that pass the key check answer UNAVAILABLE NotServing (komira-ai/tierstore#516). komira-ai/tierstore#517 to komira-ai/tierstore#521 are open. Tasks 6 and 7 are not in this repository. Section 15's heading no longer says "none started".
 
 | Section | Item | Status | Built by | Unbuilt |
 |---|---|---|---|---|
@@ -748,7 +748,7 @@ Slices of this page: komira-ai/tierstore#539, komira-ai/tierstore#540, komira-ai
 
 ## [tsfuse-kernel-findings.md](tsfuse-kernel-findings.md)
 
-**Status line.** The page's Status line matches main as of this change: it says the /dev/fuse checks and the harness are built (komira-ai/tierstore#385, #390, #391), the io_uring transport is built under the R2 grant in crates/tsfuse/src/uring/sys.rs (komira-ai/tierstore#392), and K10 to K14 are partly covered by a fake kernel and by kernel_uring_integration.rs but still open against the real kernel (komira-ai/tierstore#552, #553, #554). The page's 'What is left' and 'Not run' notes no longer wait for an R2 exception and list the fake-kernel tests by name.
+**Status line.** The page's Status line matches main as of this change: it says the /dev/fuse checks and the harness are built (komira-ai/tierstore#385, komira-ai/tierstore#390, komira-ai/tierstore#391), the io_uring transport is built under the R2 grant in crates/tsfuse/src/uring/sys.rs (komira-ai/tierstore#392), and K10 to K14 are partly covered by a fake kernel and by kernel_uring_integration.rs but still open against the real kernel (komira-ai/tierstore#552, komira-ai/tierstore#553, komira-ai/tierstore#554). The page's 'What is left' and 'Not run' notes no longer wait for an R2 exception and list the fake-kernel tests by name.
 
 | Section | Item | Status | Built by | Unbuilt |
 |---|---|---|---|---|

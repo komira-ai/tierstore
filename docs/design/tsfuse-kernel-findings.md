@@ -1,13 +1,13 @@
 # tsfuse: the kernel behaviour the design assumes, checked on the farm kernel (T-F0)
 
 Status: main has every part of this page that can run on `/dev/fuse`: the raw-protocol harness and
-the five kernel test targets (21 tests; komira-ai/tierstore#385, #390, #391), and the design changes
+the five kernel test targets (21 tests; komira-ai/tierstore#385, komira-ai/tierstore#390, komira-ai/tierstore#391), and the design changes
 the page lists. The io_uring transport (komira-ai/tierstore#392) is built, and AGENTS.md R2 grants
 its `unsafe` in `crates/tsfuse/src/uring/sys.rs`, so no exception is waited for. K10 to K14 are
 still read from the kernel's source: a fake kernel (`crates/tsfuse/src/uring/tests/`) covers part of
 them, and `crates/tsfuse/tests/kernel_uring_integration.rs` runs part on a node with
 `fuse.enable_uring=1`, but no node runs it by default. The rest is open against the real kernel:
-komira-ai/tierstore#552, #553 and #554.
+komira-ai/tierstore#552, komira-ai/tierstore#553 and komira-ai/tierstore#554.
 
 Row T-F0 of `docs/design/fetch-cache-serve.md` (section 18): every Linux behaviour the design labels
 **[K]** (kernel behaviour from source knowledge, not yet checked), and the kernel facts it states
