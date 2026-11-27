@@ -43,6 +43,7 @@ pub(super) fn settings() -> Settings {
         mount_wait: long,
         ttl: long,
         max_list_bytes: crate::MAX_TREE_LIST_BYTES,
+        max_queued_bytes: super::sources::PREFETCH_QUEUE_BYTES,
     }
 }
 
@@ -137,6 +138,12 @@ impl Rig {
             key,
             provider,
         }
+    }
+
+    /// Puts the version 1 bytes of `list` in the upstream under its key, and no sidecar (none is
+    /// made of a version 1 list); the key.
+    pub(super) async fn put_list(&self, list: &TreeList) -> String {
+        put(&self.bench, &list.encode()).await
     }
 
     /// Puts the version 2 bytes of `list` in the upstream under its key, and its L2 sidecar

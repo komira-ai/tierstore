@@ -150,6 +150,7 @@ pub(super) mod opens;
 mod pin_set;
 mod pins;
 mod prefetch;
+mod queued_reads;
 mod revalidate;
 mod scrub;
 mod selfcheck;
@@ -285,6 +286,7 @@ use index::Index;
 use keep::Sent;
 use layout::{Name, name_of};
 use metrics::{add, bump};
+pub(super) use queued_reads::QueuedReads;
 use revalidate::Verdict;
 pub(super) use source::{Blob, FillError};
 pub(super) use source::{TreeFilled, blob_path, is_list, manifest_path};
@@ -526,6 +528,8 @@ pub(super) struct Inner {
     before_insert: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
     /// The runs between request and start, and what the mounts report for `/metricz`.
     starts: starts::Starts,
+    /// The room of the reads the mount provider queues (`queued_reads`).
+    queued_reads: Arc<queued_reads::QueuedReads>,
     /// Whether a pass of the eviction is running.
     evicting: AtomicBool,
     /// Whether this cache may write to its directory, and the lock that says so.
@@ -655,6 +659,7 @@ impl LocalCache {
             #[cfg(test)]
             before_insert: Mutex::new(None),
             starts: starts::Starts::default(),
+            queued_reads: Arc::default(),
             evicting: AtomicBool::new(false),
             hold: Hold::new(standing),
             large: std::sync::OnceLock::new(),

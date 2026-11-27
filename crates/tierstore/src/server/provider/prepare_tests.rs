@@ -11,6 +11,7 @@ use tokio::sync::watch;
 use super::groups::Group;
 use super::names::SourceId;
 use super::prepare::{Job, fill, report, run};
+use super::queued::{Queued, admit};
 use super::sources::Shared;
 use super::sources::Stage;
 use super::testing::{AGENT, READ_ONLY, Rig, member, source};
@@ -64,10 +65,24 @@ fn singles(rig: &Rig, pack: &str) -> Vec<Group> {
         .collect()
 }
 
+/// `groups` queued as a preparation queues them, under no bound.
+fn queued(
+    shared: &Shared,
+    groups: Vec<Group>,
+) -> futures::stream::Iter<std::vec::IntoIter<Queued>> {
+    let reads = admit(&shared.queued, groups, u64::MAX).expect("no bound");
+    futures::stream::iter(reads)
+}
+
+/// The ends of a fill with the release flag `released` and a stage that is never released.
+fn ends(released: &AtomicBool) -> (&AtomicBool, watch::Receiver<Stage>) {
+    (released, watch::channel(Stage::Placed).1)
+}
+
 /// Reads `groups`, with no refusal.
 async fn fill_groups(shared: &Shared, groups: Vec<Group>, released: &AtomicBool) -> (usize, usize) {
-    let reads = futures::stream::iter(groups);
-    fill(shared, reads, released, &AtomicBool::new(false)).await
+    let reads = queued(shared, groups);
+    fill(shared, reads, ends(released), &AtomicBool::new(false)).await
 }
 
 /// Asserts that the spans of a refused list still queued are not read: each is counted as not
@@ -75,14 +90,10 @@ async fn fill_groups(shared: &Shared, groups: Vec<Group>, released: &AtomicBool)
 #[tokio::test]
 async fn a_refused_list_reads_no_more_files() {
     let rig = Rig::new("prov-fill-refused").await;
-    let spans = futures::stream::iter(singles(&rig, &rig.bench.pack.key));
-    let read = fill(
-        &rig.provider.shared,
-        spans,
-        &AtomicBool::new(false),
-        &AtomicBool::new(true),
-    )
-    .await;
+    let shared = &rig.provider.shared;
+    let spans = queued(shared, singles(&rig, &rig.bench.pack.key));
+    let unreleased = AtomicBool::new(false);
+    let read = fill(shared, spans, ends(&unreleased), &AtomicBool::new(true)).await;
     assert_eq!(read, (0, 3));
     assert_eq!(pack_reads(&rig), 0);
 }
@@ -156,16 +167,22 @@ async fn a_source_released_before_its_tree_is_placed_gives_the_placement_up() {
 
 /// Asserts that a source released while its files are being read ends its preparation without
 /// error once the reads in flight end, its tree gone with its placement.
+///
+/// The reads are queued as soon as the list is walked, before the tree is placed, so the read can
+/// be at the upstream before the stage is `Placed`: the test waits for each of the two, the stage
+/// first.
 #[tokio::test]
 async fn a_source_released_during_its_reads_ends_with_its_tree_gone() {
     let rig = Rig::new("prov-run-release-reads").await;
     let gate = rig.bench.rig.tamper.hold_key(&rig.bench.pack.key);
-    let (job, seen) = held(&rig, "js.1", &rig.key);
+    let (job, mut seen) = held(&rig, "js.1", &rig.key);
     let released = Arc::clone(&job.released);
     let running = tokio::spawn(run(Arc::clone(&rig.provider.shared), job));
-    // The three files are one range of the list: one read of the pack.
+    let reported = seen.wait_for(|stage| *stage != Stage::Preparing).await;
+    let reported = reported.expect("the preparation reports").clone();
+    assert_eq!(reported, Stage::Placed);
+    // The three files are one range of the list: one read of the pack, held at the upstream.
     until("the read is at the upstream", || pack_reads(&rig) == 1).await;
-    assert_eq!(*seen.borrow(), Stage::Placed);
     released.store(true, std::sync::atomic::Ordering::SeqCst);
     let store = &rig.bench.store;
     let located = store.locate_fs(&Rig::place_of("js.1", 0)).unwrap();
@@ -299,14 +316,9 @@ fn group_of(rig: &Rig, blobs: &[usize], wrong: Option<usize>) -> Group {
 
 /// Reads `group` alone, with no release and no refusal.
 async fn fill_group(shared: &Shared, group: Group, refused: bool) -> (usize, usize) {
-    let reads = futures::stream::iter([group]);
-    fill(
-        shared,
-        reads,
-        &AtomicBool::new(false),
-        &AtomicBool::new(refused),
-    )
-    .await
+    let reads = queued(shared, vec![group]);
+    let unreleased = AtomicBool::new(false);
+    fill(shared, reads, ends(&unreleased), &AtomicBool::new(refused)).await
 }
 
 /// Asserts that a group of three spans read in one GET of the pack is counted as three spans in

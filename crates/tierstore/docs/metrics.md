@@ -424,6 +424,28 @@ An object of the length the put declared, or no object, counts nothing. A put th
 (even with an error) is not looked after, and a body sent as a multipart upload never leaves an
 object of a failed put. The series stay 0 for an upstream that is not an S3 store.
 
+### Build node: the reads the mount provider queues
+
+The mount provider's `Prepare` queues a read of every file of a source's tree (unless
+`trees.prepare_prefetch = "none"`), and the queue drains only as fast as the node's
+`trees.fill_concurrency` reads go. A queued read holds about a hundred bytes of heap for each file until it is made or dropped.
+While the upstream does not answer, the reads drain at a few a minute, so the queues of every
+source prepared meanwhile stay in memory. The reads of every source together are held under a
+bound of 256 MiB: a source whose reads do not fit queues none, and its files are read when they
+are first opened, as with `"none"`. A release of a source drops its queued reads at once.
+
+| name | type | labels | value |
+|---|---|---|---|
+| `tierstore_provider_prefetch_queued_bytes` | gauge | none | the bytes of heap the reads queued by every source's `Prepare` hold now (the reads and their spans; not the pack names they share) |
+| `tierstore_provider_prefetch_skipped_total` | counter | none | the sources whose reads were not queued because they did not fit under the bound |
+
+```promql
+# The queued reads near their bound: the upstream is slow to answer the node's reads.
+tierstore_provider_prefetch_queued_bytes > 200 * 1024 * 1024
+# Sources prepared with no read queued: their files are read when first opened.
+increase(tierstore_provider_prefetch_skipped_total[10m]) > 0
+```
+
 ### Build node: request to start
 
 A build node whose cache has a tree store and serves jobscheduler's mount provider (the
@@ -468,27 +490,38 @@ histogram_quantile(0.99, sum by (le) (rate(tierstore_request_to_start_seconds_bu
 
 ### Build node: tree lists the mount provider refused
 
-The mount provider reads a tree's L2 sidecar, `cas/l2/<id>`, and refuses a tree it cannot mount
-through tierstore with `tree list not supported: <reason>` (`ListVersionUnsupported`,
-`docs/design/fetch-cache-serve.md`, 3.5), on which the CAS service takes its miss path. The two
-families are in the cache's block, with a `# TYPE` line, on every process with a cache, and stay
-at zero on one that serves no provider.
+The mount provider reads a tree's L2 sidecar, `cas/l2/<id>`, and refuses a tree whose sidecar is
+there and not of a version it reads with `tree list not supported: <reason>`
+(`ListVersionUnsupported`, `docs/design/fetch-cache-serve.md`, 3.5). A tree whose sidecar is not
+there is not refused: the provider places it from its list `cas/l/<id>`, as the release before
+the sidecar did ([operations](operations.md#the-mount-provider)). The three families are in the
+cache's block, with a `# TYPE` line, on every process with a cache, and stay at zero on one that
+serves no provider.
 
 | name | type | labels | what it says |
 |---|---|---|---|
-| `tierstore_list_refused_total` | counter | `reason`: `v1_list`, `missing_sidecar`, `unknown_cell_digest`, `unknown_version` | the preparations refused because the tree has no sidecar (`missing_sidecar`) or the object at the sidecar's key is a version 1 or 2 list (`v1_list`) or an L2 list of a major version or a cell digest function this release does not read |
-| `tierstore_l2_sidecar_missing_total` | counter | none | the preparations refused because the tree has no sidecar: the same count as `reason="missing_sidecar"`, the one the rollout watches |
+| `tierstore_list_refused_total` | counter | `reason`: `v1_list`, `missing_sidecar`, `unknown_cell_digest`, `unknown_version` | the preparations refused because the object at the sidecar's key is a version 1 or 2 list (`v1_list`) or an L2 list of a major version or a cell digest function this release does not read; `missing_sidecar` is kept and stays at zero, since a tree with no sidecar is placed from its list |
+| `tierstore_l2_sidecar_missing_total` | counter | none | the preparations that found no sidecar of their tree, whether its list was then placed or refused: the one the rollout watches |
+| `tierstore_l2_sidecar_fallback_total` | counter | none | the trees placed from their list `cas/l/<id>` for want of a sidecar; the preparations it is below `tierstore_l2_sidecar_missing_total` by are those whose list was not there, not read or refused |
 
 What it does not count:
 
 - A sidecar that is there and refused as malformed (another tree's, a projection that does not hash to the id, a cell shift other than 20): the provider's log line names it.
 - A `Mount` asked again of a refused source: a preparation is counted once.
 
-Trees refused for want of a sidecar, over a day, which must stay at zero for 7 days before the CAS
-service stops writing version 2 lists:
+Trees with no sidecar, over a day, which must stay at zero for 7 days before the CAS service stops
+writing version 2 lists:
 
 ```promql
 sum(increase(tierstore_l2_sidecar_missing_total[1d]))
+```
+
+Preparations with no sidecar whose list did not place the tree either, over an hour: a list not
+there or refused, which fails the job's start, or one not read, which the next `Mount` reads
+again:
+
+```promql
+sum(increase(tierstore_l2_sidecar_missing_total[1h])) - sum(increase(tierstore_l2_sidecar_fallback_total[1h]))
 ```
 
 ### Build node: tree attach on a lookup

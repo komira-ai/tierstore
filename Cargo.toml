@@ -188,6 +188,14 @@ tierstore-tree = { path = "crates/tierstore-tree" }
 # dev-dependencies of `crates/compat`. When a release is made, move both to the new release's
 # commit: the tests then hold this branch to the release before.
 tierstore_prev = { package = "tierstore", git = "https://github.com/komira-ai/tierstore", rev = "6b60319efd148fba3d7fc0f7e6217d64b097642e" }
+# The previous release for the tree store's directories, `trees/` and `placements/` of the cache
+# directory: `v0.3.190`, the tag of the commit below, pinned by `rev` the same way. Used only by
+# `crates/compat/tests/trees.rs`. It is a pin of its own because `tierstore_prev` is a release with
+# no tree store; the tests of `tierstore_prev` are written against that release's API and move
+# with it. Move this one to a newer release's commit when a release changes what the tree store
+# writes or reads, and at the latest when the change after it would be tested against a release no
+# host runs any more.
+tierstore_trees_prev = { package = "tierstore", git = "https://github.com/komira-ai/tierstore", rev = "967ae437288a1dc52e442883e3887b6e3ad0fa69" }
 
 # hostkeeper's own code for its package, taken from hostkeeper's public repository at one pinned
 # commit, so the package is unpacked and its manifest loaded with the code a host runs.
