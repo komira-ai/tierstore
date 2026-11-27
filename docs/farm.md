@@ -16,10 +16,10 @@ binaries and every test target, with `[workspace.lints]` and `clippy.toml`, warn
 and, for the members not listed below, its `:test`. A test target runs as a build action: its
 `.passed` marker exists only if every test of the target passed, and a cached marker means the
 tests passed on byte-identical inputs. The summary line must read
-`Commands: N (cached: N, remote: N, local: 0)`: no action ran on the runner. `farm.yml` runs the
-build as one command, `cargo xtask farm-build` (`crates/xtask/src/farm.rs`): it refuses to start
-without the farm's worker property set, fails a build that does not say `local: 0`, and stops
-buck2's daemon however the build ended.
+`Commands: N (cached: N, remote: N, local: 0)`: no action ran on the runner. `farm.yml` first runs
+`cargo xtask farm-check` (`crates/xtask/src/farm.rs`), which refuses to go on without the farm's
+worker property set, then the build through komira's buck2-farm action (below), which fails a
+build that does not say `local: 0`, and last stops buck2's daemon however the build ended.
 
 The files of the build, all generated or written once by `buildrules`:
 
@@ -109,14 +109,91 @@ starts that holds a write scope (AGENTS.md, B10 of this repository). The workflo
 (`crates/xtask/tests/workflows/farm_lane.rs`, and the table of `lint.rs`) holds it to: exactly that
 scope and `contents: read`; the exact `if:` that skips a fork's pull request (which gets no OIDC
 token) and Dependabot's; farm-connect's inputs exactly the variables above, and farm-connect the
-one action pinned by commit with no version comment, in this file alone; a step after
-farm-connect's that runs `cargo xtask farm-build` of `//:ci`; and the triggers, one job and one
-runner. It does not fix the job's other steps, each of which could ask for the token: a change to
+two actions (with buck2-farm) pinned by commit with no version comment, in this file alone; the
+build of `//:ci` through buck2-farm with exactly its three inputs, after the farm check, after
+farm-connect, after the build of the action's tool from komira's sources, all at one komira commit;
+and the triggers, one job and one runner. It does not fix the job's other steps, each of which could ask for the token: a change to
 them is reviewed like any change to a workflow.
 
 A pull request's build and a build of `main` share the farm's action cache, as every build of
 every repository on the farm does: a result one writes, the other reads. The farm's cache is
 keyed by the action's digest, so a result is reused only for byte-identical inputs and command.
+
+## A run that hangs on a dead connection to the farm
+
+buck2 on its own does not notice a connection to the farm that died without being closed: it keeps
+waiting on the open stream for an answer that never comes, and its `Waiting on ...` line goes on
+every few seconds whether the action runs or is lost. So the build runs through komira's
+buck2-farm action (`uses: komira-ai/komira/.github/actions/buck2-farm@<commit>`, komira-ai/komira#2439),
+pinned to the same komira commit as farm-connect. While buck2 runs, the action's watchdog reads the
+runner's TCP connections to the farm from the kernel once a second; when one has heard nothing from
+the farm for 5 minutes (a live farm sends something at least every 30 seconds, however long the
+action), it ends buck2 and its daemon and runs the build again once the farm's port answers. A
+build that fails on a cut connection is run again the same way. A step runs at most three times; a
+build that fails for its own reasons is never run again, and a build that is slow but whose
+connection is alive is never ended. It never reads the log and never bounds how long an action
+runs.
+
+What a contributor sees in the step's log when the watchdog ends a run (the port is the runner's
+own; the farm's address is masked):
+
+    buck2-farm: watchdog: the connection to the farm from local port 41022 has heard nothing from the farm for 5 min 1 s, past the bound of 5 min 0 s: the farm has closed it and buck2 would wait on it for ever; ending buck2 (SIGINT)
+    buck2-farm: stopping buck2's daemon, which holds the dead connection (`<runner temp>/bin/buck2 kill`)
+    buck2-farm: the first run hung on a dead connection to the farm and was ended; waiting for the farm's port to answer, up to 20 min 0 s
+
+then buck2's output of the next run, and one line in the job's summary naming the hang, the wait
+and the run (`run 2 of at most 3`). The first run's log is kept on the runner as
+`buck2-farm.first.log`. A third run that hangs too fails the step, with
+`buck2-farm: FAILED: the third run hung on a dead connection to the farm too: the connection to the
+farm was lost in each of 3 runs; not run again`.
+
+The action's tool, `assert_remote`, is built in the job from komira's sources at that commit
+(`tools/build/ci/assert_remote/*.zig`, checked out alone, into `target/komira`) with Zig 0.15.2,
+fetched by `cargo xtask fetch` once its SHA-256 matches, as komira builds it (`-OReleaseSafe -fstrip`,
+a static musl binary). This repository keeps no copy of it. To move to a newer komira, change the
+one commit in all three places (farm-connect, buck2-farm, the `ref:` of the sources); the lint
+refuses them apart.
+
+## Time limits
+
+Every step of `farm.yml` and of `macos-farm.yml`, the two workflows that reach the build farm, has
+a `timeout-minutes` of its own, under its job's, so no step can hang the job to its limit. The
+workflow lint holds it (`crates/xtask/tests/workflows/farm_steps.rs`): in any workflow with a step
+that uses farm-connect or buck2-farm or runs `cargo xtask mac-farm`, every job with steps has a
+whole-number `timeout-minutes` and every step one of its own from 1 and under the job's; and no
+workflow runs buck2's `build`, `test`, `bxl` or `run` in a `run:` step of its own.
+
+The bounds come from the longest successful run of each step in the 100 newest successful runs of
+`farm.yml` (`gh run list --workflow farm.yml --status success -L 100`, each run's steps from
+`gh run view --json jobs`; measured): the build step 45.2 minutes at most (20.8 at the 90th
+percentile), farm-connect 1.6, every other step 0.3 or less. `macos-farm.yml` has never run (its
+caller in `artifacts.yml` was skipped in all 49 of its runs among the 60 newest successful pushes),
+so its steps' bounds come from the same steps elsewhere: checkout and `rustup toolchain install`
+0.2 minutes at most, `Compile xtask` (cold, no cache) 1.0 in `artifacts.yml`'s `version` job, and
+the farm step keeps its bound.
+
+| workflow | step | longest green run | bound (minutes) |
+|---|---|---|---|
+| `farm.yml` (job 150) | checkout, `rustup toolchain install`, cache restore and save | 0.2 | 10 |
+| | Install buck2 (builds xtask on a cache miss) | 0.3 | 20 |
+| | Install Zig, komira's sources, Build assert_remote | new | 10 |
+| | Connect to the farm (its own wait for the farm is at most 20) | 1.6 | 30 |
+| | `cargo xtask farm-check` | new | 10 |
+| | `buck2 build //:ci` through buck2-farm | 45.2 | 120 |
+| | Stop buck2 | new | 5 |
+| `macos-farm.yml` (job 90) | checkout, `rustup toolchain install`, the tailnet join, the two uploads | 0.2 | 10 |
+| | Compile xtask | 1.0 | 20 |
+| | `cargo xtask mac-farm` | never run | 75 (unchanged) |
+
+120 for the build leaves room for a run that hangs (5 minutes), the wait for the farm (at most
+20) and a run again, beside the longest green run.
+
+What the watchdog does not cover: every step that does not run buck2. `cargo xtask mac-farm`
+(`macos-farm.yml`) is its own client of the farm: it follows a cut Execute stream again (at most
+three cuts) but has no deadline of its own after its 60-second connect, so a connection that dies
+silently there ends at its step's 75 minutes. The tailnet joins, the downloads and the cargo steps
+end at their own bounds above. The workflows that do not reach the build farm (`ci.yml`,
+`artifacts.yml`, `release.yml` and the rest) are not changed.
 
 ## Measured
 

@@ -1,11 +1,15 @@
 //! The rules of `farm.yml` ([`super::farm_lane`]), the farm lane: the one job that holds
 //! `id-token: write` on a pull request, and only under its exact `if:`; farm-connect pinned by
 //! commit in that file alone, with exactly the variables it is given; the triggers, the runner,
-//! the rights, and the build through `cargo xtask farm-build` after farm-connect. Each rule is shown
+//! the rights, and the build through komira's buck2-farm action after farm-connect and the farm
+//! check, with the tool built from komira's sources at the actions' one commit. Each rule is shown
 //! to refuse its defect by putting it into the committed workflow and reading the exact problems
 //! the lint reports.
 
-use super::farm_lane::{BUILD_RUN, CONNECT_INPUTS, FARM_CONNECT, FILE, JOB_IF, ON_PROBLEM, RUNNER};
+use super::farm_lane::{
+    BUCK2_FARM, BUILD_INPUTS, CHECK_RUN, CONNECT_INPUTS, FARM_CONNECT, FILE, JOB_IF, ON_PROBLEM,
+    RUNNER, TOOL_RUN, unversioned_pin_allowed,
+};
 use super::lint::lint;
 use super::text_of;
 
@@ -214,31 +218,142 @@ fn farm_connect_takes_exactly_its_variables() {
     }
 }
 
+/// The committed buck2-farm step's `uses:` line, from its value on.
+fn build_pin() -> String {
+    let at = committed();
+    let start = at.find(BUCK2_FARM).expect("buck2-farm is used");
+    at[start..].lines().next().expect("its line").to_owned()
+}
+
+/// The committed step that runs `run`, from its `- name:` line to the end of its `run:` line.
+fn step_running(run: &str) -> String {
+    let text = committed();
+    let at = text.find(run).expect("the run is in farm.yml");
+    let end = at + text[at..].find('\n').expect("the line ends") + 1;
+    let start = text[..end]
+        .rfind("      - name:")
+        .expect("the step is named");
+    text[start..end].to_owned()
+}
+
 #[test]
-fn the_job_runs_farm_build_of_ci_after_farm_connect() {
-    // Catches: a build of another target, a plain `buck2 build` that checks no `local: 0`, or the
-    // build moved before the join (it would find no farm).
-    let no_build = format!("job build: no step runs `{BUILD_RUN}`");
-    for other in [
-        BUILD_RUN.replace("//:ci", "//:lint"),
-        "buck2 build //:ci".to_owned(),
+fn the_build_goes_through_buck2_farm_with_exactly_its_inputs() {
+    // Catches: a build of another target, an input added or missing (the job's own buck2 not
+    // passed, so the action would run a `./buck2` this repository does not have), or the action
+    // replaced by a plain buck2 build that no watchdog watches and that checks no `local: 0`.
+    let inputs =
+        format!("job build: the buck2-farm step's `with:` must be exactly {BUILD_INPUTS:?}");
+    let buck2 = "          buck2: ${{ runner.temp }}/bin/buck2\n";
+    for (from, to) in [
+        (
+            "          args: build //:ci\n",
+            "          args: build //:lint\n",
+        ),
+        (buck2, ""),
+        (buck2, &format!("{buck2}          extra: x\n")),
     ] {
         assert_eq!(
-            problems_with(BUILD_RUN, &other),
-            std::slice::from_ref(&no_build),
-            "{other}"
+            problems_with(from, to),
+            std::slice::from_ref(&inputs),
+            "{to:?}"
         );
     }
-    let build =
-        format!("      - name: buck2 build //:ci on the farm, local 0\n        run: {BUILD_RUN}\n");
-    let moved = with(&build, "").replace(
-        "      - name: Connect to the farm\n",
-        &format!("{build}      - name: Connect to the farm\n"),
+    let plain = with(
+        &format!("        uses: {}\n", build_pin()),
+        "        run: buck2 build //:ci\n",
     );
     assert_eq!(
-        lint(FILE, &moved),
-        ["job build: the build does not come after the farm-connect step"]
+        lint(FILE, &plain),
+        [
+            format!("job build: exactly one step must use {BUCK2_FARM}"),
+            "job build: no step uses buck2-farm".to_owned(),
+            format!(
+                "job build, step 11 (buck2 build //:ci on the farm, local 0): runs `buck2 build` itself; a buck2 build goes through {BUCK2_FARM}, whose watchdog ends a run hung on a dead connection to the farm"
+            ),
+        ]
     );
+}
+
+#[test]
+fn the_tool_sources_the_tool_the_join_the_check_and_the_build_come_in_order() {
+    // Catches: the farm check dropped (a build with no farm says so only at analysis) or moved
+    // after the build, and the tool built before its sources are there.
+    let check = step_running(CHECK_RUN);
+    assert_eq!(
+        problems_with(&check, ""),
+        ["job build: no step runs the farm check"]
+    );
+    let late = with(&check, "").replace(
+        "      # The daemon outlives the build",
+        &format!("{check}      # The daemon outlives the build"),
+    );
+    assert_eq!(
+        lint(FILE, &late),
+        [
+            "job build: the step that runs the farm check must come before the step that uses buck2-farm"
+        ]
+    );
+    let tool = step_running(TOOL_RUN);
+    let early = with(&tool, "").replace(
+        "      - name: Install Zig",
+        &format!("{tool}      - name: Install Zig"),
+    );
+    assert_eq!(
+        lint(FILE, &early),
+        [
+            "job build: the step that checks out komira's sources must come before the step that builds assert_remote"
+        ]
+    );
+    assert_eq!(
+        problems_with(TOOL_RUN, &TOOL_RUN.replace("ReleaseSafe", "Debug")),
+        ["job build: no step builds assert_remote"]
+    );
+}
+
+#[test]
+fn the_actions_and_the_tool_sources_are_at_one_komira_commit() {
+    // Catches: buck2-farm moved to a commit whose tool is not the one built here, or the tool
+    // built from other sources than the action that runs it, or a checkout with no ref (komira's
+    // main at the time of the run).
+    let pin = build_pin();
+    let commit = pin.split_once('@').expect("pinned").1.to_owned();
+    let other = "0123456789abcdef0123456789abcdef01234567";
+    let mut both = vec![commit.clone(), other.to_owned()];
+    both.sort_unstable();
+    let one = format!(
+        "job build: farm-connect, buck2-farm and komira's sources must be at one komira commit, not {both:?}"
+    );
+    assert_eq!(
+        problems_with(&pin, &pin.replace(&commit, other)),
+        std::slice::from_ref(&one)
+    );
+    let source_ref = format!("          ref: {commit}\n");
+    assert_eq!(
+        problems_with(&source_ref, &format!("          ref: {other}\n")),
+        std::slice::from_ref(&one)
+    );
+    assert_eq!(
+        problems_with(&source_ref, ""),
+        [format!(
+            "job build: farm-connect, buck2-farm and komira's sources must be at one komira commit, not [\"\", \"{commit}\"]"
+        )]
+    );
+}
+
+#[test]
+fn only_farm_connect_and_buck2_farm_go_unversioned_and_only_in_farm_yml() {
+    // Catches: the exception for komira's two actions let through in another workflow, or for
+    // another komira action, or for an action at no ref.
+    let at = "@0123456789abcdef0123456789abcdef01234567";
+    for action in [FARM_CONNECT, BUCK2_FARM] {
+        assert!(unversioned_pin_allowed(FILE, &format!("{action}{at}")));
+        assert!(!unversioned_pin_allowed("ci.yml", &format!("{action}{at}")));
+        assert!(!unversioned_pin_allowed(FILE, action));
+    }
+    assert!(!unversioned_pin_allowed(
+        FILE,
+        &format!("komira-ai/komira/.github/actions/other{at}")
+    ));
 }
 
 #[test]

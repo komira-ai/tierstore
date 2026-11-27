@@ -108,15 +108,12 @@ enum Verb {
     /// Download a pinned file, check its SHA-256 and install it (mode 0755); with `--cache`,
     /// from the actions cache's copy when it is the pinned file, else from each `--url` in turn.
     Fetch(fetch::Args),
-    /// Build a target with Buck2 on the build farm: refused without the farm's worker property
-    /// set, and failed unless the summary line says `local: 0` (docs/farm.md).
-    FarmBuild {
+    /// Check, before the farm lane's build, that buck2 has the farm's worker property set
+    /// (docs/farm.md).
+    FarmCheck {
         /// The buck2 binary.
         #[arg(long)]
         buck2: PathBuf,
-        /// The target, such as `//:ci`.
-        #[arg(long)]
-        target: String,
     },
     /// Run one Cargo command of this workspace on a Mac of the build farm, as one remote action,
     /// and write the files it makes (`--output`) below the checkout.
@@ -625,9 +622,7 @@ fn run(cli: Cli) -> Result<Vec<String>, Error> {
             let unpack = args.unpack().map_err(Error::Usage)?;
             Ok(vec![fetch::run(&args, &unpack)?])
         }
-        Verb::FarmBuild { buck2, target } => {
-            Ok(vec![farm::build(&buck2, &target, &mut std::io::stderr())?])
-        }
+        Verb::FarmCheck { buck2 } => Ok(vec![farm::check(&buck2)?]),
         Verb::MacFarm(args) => mac_farm::run(&args, &root),
         Verb::Licenses {
             metadata,

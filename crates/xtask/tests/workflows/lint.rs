@@ -7,8 +7,8 @@
 //!   secrets on code from a fork), or any key or value names `self-hosted`;
 //! - a step's (or a job's) `uses:` is not an action pinned to a full 40-character commit SHA
 //!   followed on the same line by a version comment (`# v1.2.3`), or names a local path. In
-//!   [`farm_lane::FILE`] alone, [`farm_lane::FARM_CONNECT`] is pinned by commit with no version
-//!   comment: komira tags no release of it; in `artifacts.yml` alone, the job
+//!   [`farm_lane::FILE`] alone, farm-connect and buck2-farm are pinned by commit with no version
+//!   comment: komira tags no release of them; in `artifacts.yml` alone, the job
 //!   [`macos_farm::CALLER`] calls [`macos_farm::CALL`], the workflow of the same commit, by its
 //!   path ([`macos_farm::local_call_allowed`]);
 //! - a job's `permissions` is not a mapping, or grants `write` for a scope that is not in
@@ -31,8 +31,9 @@
 //!   by the release's `publish` job alone; `issues` by `advisories.yml` and by the `red` job of
 //!   `release.yml` and of `beta.yml` (the issue `RELEASE-RED: tierstore <stage>`).
 //!
-//! - it is [`farm_lane::FILE`] and breaks a rule of its own ([`farm_lane::problems`]: its
-//!   triggers, its one job, its rights, farm-connect's inputs, and the `local: 0` build after it).
+//! - it is [`farm_lane::FILE`] and breaks a rule of its own ([`farm_lane::problems`]: its triggers,
+//!   job, rights, farm-connect's inputs, the buck2-farm build after it); or a step runs buck2's build
+//!   itself, or a workflow that reaches the farm has a step with no bound under its job's ([`super::farm_steps`]).
 //!
 //! Keys are matched exactly. What this does not evaluate it refuses: a YAML tag, a second
 //! document, an alias to an unfinished node, a document that does not parse.
@@ -444,9 +445,8 @@ pub fn lint(file: &str, text: &str) -> Vec<String> {
         let name = name.as_str().unwrap_or_default();
         problems.extend(permission_problems(file, name, job));
     }
-    if file == farm_lane::FILE {
-        problems.extend(farm_lane::problems(&doc));
-    }
+    problems.extend(farm_lane::problems(file, &doc));
+    problems.extend(super::farm_steps::problems(&doc));
     problems
 }
 
