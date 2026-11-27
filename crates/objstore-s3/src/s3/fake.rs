@@ -1,4 +1,5 @@
-//! An S3 service on loopback, for tests (feature `testkit`): PUT, GET (whole or one range),
+//! An S3 service on loopback, for tests (feature `testkit`): PUT, GET (whole or one range, with
+//! `If-Match` refused as for a write, and kept: [`FakeS3::reads`]),
 //! HEAD, ListObjectsV2 (prefix, `max-keys`, `continuation-token`, `start-after`), and
 //! multipart upload (create, parts, complete, abort, and ListMultipartUploads with `prefix`,
 //! `max-uploads`, `key-marker` and `upload-id-marker`, in the order of key and id; and ListParts
@@ -65,6 +66,7 @@ mod cut;
 mod dates;
 mod escape;
 mod kept;
+mod read;
 mod tls;
 mod uploads;
 
@@ -72,6 +74,7 @@ use self::checksums::Sums;
 use self::dates::{http_date, iso_date, system_seconds};
 use self::escape::{unescape, xml_text};
 use self::kept::Kept;
+pub use self::read::FakeRead;
 use self::uploads::{list_parts, list_uploads};
 use super::sigv4::{Request as Signed, Signer};
 use super::{Addressing, Credentials, S3Config, S3Store, S3Tuning};
@@ -216,6 +219,8 @@ struct State {
     failures: Vec<Failure>,
     stats: FakeStats,
     requests: Vec<String>,
+    /// Every GET of an object, in the order it came ([`FakeS3::reads`]).
+    reads: Vec<FakeRead>,
     /// The only key pair a request may be signed with, when a test set one.
     credentials: Option<(String, String)>,
     /// The host name under which a request is virtual-hosted style ([`FakeS3::store_resolving`]).
@@ -438,6 +443,13 @@ impl FakeS3 {
     #[must_use]
     pub fn requests(&self) -> Vec<String> {
         self.lock().requests.clone()
+    }
+
+    /// Every GET of an object so far, whole or ranged, conditional or not, in order: its key,
+    /// its `Range` and its `If-Match` as they came.
+    #[must_use]
+    pub fn reads(&self) -> Vec<FakeRead> {
+        self.lock().reads.clone()
     }
 }
 
@@ -673,7 +685,7 @@ fn handle(state: &mut State, request: &Request) -> Vec<u8> {
             delete_object(state, &key, request)
         }
         ("GET", None, None, None) if key.is_empty() => list(state, request),
-        ("GET", None, None, None) => get(state, &key, request.headers.get("range")),
+        ("GET", None, None, None) => read::get(state, &key, request),
         ("HEAD", None, None, None) => {
             state.heads += 1;
             if state.take(Failure::Head(state.heads)) {
@@ -685,8 +697,9 @@ fn handle(state: &mut State, request: &Request) -> Vec<u8> {
     }
 }
 
-/// The answer to a write that carries `If-Match` and is refused: 404 if there is no object, 412 if
-/// it has another entity tag; `None` for a write without the header or one the object matches.
+/// The answer to a write or a read that carries `If-Match` and is refused: 404 if there is no
+/// object, 412 if it has another entity tag; `None` for a write or a read without the header or
+/// one the object matches.
 fn if_match_refusal(state: &State, key: &str, request: &Request) -> Option<Vec<u8>> {
     let expected = request.headers.get("if-match")?;
     match state.objects.get(key) {
@@ -931,38 +944,6 @@ fn list(state: &State, request: &Request) -> Vec<u8> {
     body.push_str(&tail);
     body.push_str("</ListBucketResult>");
     answer("200 OK", &[], body.as_bytes())
-}
-
-/// A GET of the whole object, or of one `bytes=first-last` range; the answer carries the entity
-/// tag and the time of last write.
-fn get(state: &State, key: &str, range: Option<&String>) -> Vec<u8> {
-    let Some(stored) = state.objects.get(key) else {
-        return error("404 Not Found", "NoSuchKey");
-    };
-    let object = &stored.kept;
-    let Some(range) = range else {
-        let headers = [
-            ("etag", stored.etag()),
-            ("last-modified", http_date(stored.modified)),
-        ];
-        return answer("200 OK", &headers, &object.read(0, object.len));
-    };
-    let parsed = range
-        .strip_prefix("bytes=")
-        .and_then(|r| r.split_once('-'))
-        .and_then(|(a, b)| Some((a.parse::<u64>().ok()?, b.parse::<u64>().ok()?)));
-    let Some((first, last)) = parsed.filter(|(f, l)| f < &object.len && f <= l) else {
-        return error("416 Range Not Satisfiable", "InvalidRange");
-    };
-    let end = (last + 1).min(object.len);
-    let content_range = format!("bytes {first}-{}/{}", end - 1, object.len);
-    let bytes = object.read(first, end);
-    let headers = [
-        ("etag", stored.etag()),
-        ("last-modified", http_date(stored.modified)),
-        ("content-range", content_range),
-    ];
-    answer("206 Partial Content", &headers, &bytes)
 }
 
 #[cfg(test)]

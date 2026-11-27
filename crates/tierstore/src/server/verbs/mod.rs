@@ -7,9 +7,11 @@
 //! tierstore format-epoch (--check|--drain|--cancel|--activate|--activate-marks|--restore-entries) --hot <tier> [flags]
 //! tierstore entries (ls|show --key <key>) --hot <tier> [flags]
 //! tierstore fs [attachments] --config <file>
+//! tierstore gc legacy --config <file> [--apply]
 //! ```
 //!
-//! `fs` ([`fs`]) is the virtual build file system. `update-hook` is [`update_hook`], and `config-hook`, the hook of a package of the node's configuration files, is [`update_hook::config_hook`]. `format-epoch` ([`format_epoch`]) and `entries`
+//! `fs` ([`fs`]) is the virtual build file system. `gc legacy` ([`gc_legacy`]) removes the
+//! `digest-v1` layout of a build node's cache directory and never `packs-v2/`; it is held too. `update-hook` is [`update_hook`], and `config-hook`, the hook of a package of the node's configuration files, is [`update_hook::config_hook`]. `format-epoch` ([`format_epoch`]) and `entries`
 //! ([`entries`]) are the operator's: they read and write only tierstore's own objects in the hot
 //! tier (`_tiering/format`, `_tiering/proxies/`, `_entries/`) and never ask a store how it behaves.
 //! Both take the hot tier by the flags of the server that name it (`--hot`, `--hot-endpoint`,
@@ -19,6 +21,7 @@
 mod entries;
 mod format_epoch;
 mod fs;
+mod gc_legacy;
 mod registrations;
 
 use std::ffi::OsString;
@@ -244,6 +247,7 @@ pub(super) fn answer(args: &[OsString]) -> Option<ExitCode> {
         )),
         Some(ENTRIES) => Some(entries::run(args, &mut out, &mut err, &SystemClock)),
         Some(FS) => Some(fs::run(args, &mut out, &mut err)),
+        Some(gc_legacy::VERB) => Some(gc_legacy::run(args, &mut out, &mut err)),
         _ => None,
     }
 }

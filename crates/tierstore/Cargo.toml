@@ -51,8 +51,15 @@ server = [
     "dep:tokio-rustls",
     "dep:x509-parser",
     "dep:toml",
+    "dep:tierstore-budget",
+    "dep:tierstore-entry",
+    "dep:tierstore-evict",
+    "dep:tierstore-fetch",
     "dep:tierstore-fetch-api",
     "dep:tierstore-format",
+    "dep:tierstore-hashpool",
+    "dep:tierstore-journal",
+    "dep:tierstore-metrics",
     "dep:tierstore-trees-api",
     "dep:tonic",
     "dep:tracing",
@@ -123,6 +130,17 @@ rustls-native-certs = { workspace = true, optional = true }
 # The interfaces the S3 front's large objects are served through: the fetch engine, its upstream
 # and its entry store (`server`, section 9 of docs/design/fetch-cache-serve.md).
 tierstore-fetch-api = { workspace = true, optional = true }
+# The read path the daemon builds under `[cache]` (`server`, `local_cache::large::stack`): the
+# fetch engine and its budget, the hash pool, the in-process entry store with its journal and
+# committer, the evictor behind `packs-v2/.lock`, and the registry of the section 12 families
+# that `/metricz` shows.
+tierstore-budget = { workspace = true, optional = true }
+tierstore-entry = { workspace = true, optional = true }
+tierstore-evict = { workspace = true, optional = true }
+tierstore-fetch = { workspace = true, optional = true }
+tierstore-hashpool = { workspace = true, optional = true }
+tierstore-journal = { workspace = true, optional = true }
+tierstore-metrics = { workspace = true, optional = true }
 # The generation of a large object, its ETag (`server`).
 tierstore-format = { workspace = true, optional = true }
 # The wire contract of the trees interface and its server stub (`server`).
@@ -199,9 +217,6 @@ objstore-s3 = { workspace = true, features = ["testkit"] }
 objstore-conformance.workspace = true
 # Encodes the messages the tests of the trees front send.
 prost.workspace = true
-# The fetch engine the tests of the S3 front's large objects attach to a cache, and its verifier.
-tierstore-fetch.workspace = true
-tierstore-hashpool.workspace = true
 # Scratch directories and key files of the tests of the binary.
 tierstore-testkit.workspace = true
 # A test CA and a leaf with IP subjectAltNames, for the tests of the OCI read front.

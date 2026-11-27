@@ -5,6 +5,8 @@
 //! an `If-Match` other than the object's generation.
 
 use std::num::NonZeroUsize;
+use std::os::unix::fs::PermissionsExt as _;
+use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -29,10 +31,14 @@ use tokio::sync::{Notify, Semaphore};
 use super::super::CacheConfig;
 use super::super::testing::Rig;
 use super::{LargeObjects, LargeParts};
+use crate::server::cache_cli_tests::QUICK;
+use crate::server::config::settings_from_text;
+use crate::server::config_cache::CacheSettings;
+use crate::server::testing::{BUCKET, KEY_ID, SECRET};
 use crate::{Backend, Error, Meta, Span, Window};
 
 /// One cell: 1 MiB.
-pub(in crate::server::local_cache) const MIB: u64 = 1 << 20;
+pub(in crate::server) const MIB: u64 = 1 << 20;
 
 /// The `whole_fill_limit` of the rig's cache: an object of more than one cell is large.
 pub(in crate::server::local_cache) const LIMIT: u64 = MIB;
@@ -317,7 +323,7 @@ pub(in crate::server::local_cache) fn pack_id(key: &str, generation: Generation)
 }
 
 /// `len` bytes that differ from cell to cell and with `seed`.
-pub(in crate::server::local_cache) fn object(len: u64, seed: u8) -> Bytes {
+pub(in crate::server) fn object(len: u64, seed: u8) -> Bytes {
     (0..len)
         .map(|i| (i % 251) as u8 ^ ((i >> 20) as u8).wrapping_mul(17) ^ seed)
         .collect::<Vec<u8>>()
@@ -347,4 +353,64 @@ pub(in crate::server::local_cache) fn span(first: u64, last: u64) -> Option<Span
         first,
         last: Some(last),
     })
+}
+
+/// The text of a build node's file over an S3 cold store at `endpoint` (bucket `tier-cold`), its
+/// cache in `dir/cache` with a `whole_fill_limit` of one cell, keeping `cas/`, its front signed
+/// with the key of `server::testing`, and `cache` as the body of its `[cache]` table (no table
+/// if it is empty). The key files it names are written under `dir`, mode 0600.
+pub(in crate::server) fn build_node_file(dir: &Path, endpoint: &str, cache: &str) -> String {
+    let key = dir.join("access.key");
+    let credentials = dir.join("cold.credentials");
+    for (path, text) in [
+        (&key, format!("{KEY_ID}\n{SECRET}\n")),
+        (&credentials, "fake-key\nfake-secret\n".to_owned()),
+    ] {
+        std::fs::write(path, text).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let table = if cache.is_empty() {
+        String::new()
+    } else {
+        format!("[cache]\n{cache}\n")
+    };
+    format!(
+        r#"
+[[interface]]
+type   = "s3"
+params = {{ addresses = ["127.0.0.1:0"] }}
+
+[server]
+proxy_id        = "c1"
+bucket          = "{BUCKET}"
+access_key_file = "{key}"
+
+[local_cache]
+path             = "{cache_dir}"
+budget           = "64MiB"
+whole_fill_limit = "1MiB"
+
+[cold_store]
+kind             = "s3"
+bucket           = "tier-cold"
+endpoint         = "{endpoint}"
+credentials_file = "{credentials}"
+
+{table}
+[[policy]]
+prefix = "cas/"
+cache  = true
+"#,
+        key = key.display(),
+        cache_dir = dir.join("cache").display(),
+        credentials = credentials.display(),
+    )
+}
+
+/// The settings of the build node's file `text`.
+pub(in crate::server) fn cache_settings(text: &str) -> CacheSettings {
+    settings_from_text(text, QUICK)
+        .unwrap()
+        .into_cache()
+        .unwrap()
 }

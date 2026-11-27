@@ -28,6 +28,12 @@ tierstore = { workspace = true, features = ["s3", "server"] }
 # The previous release, pinned in the root `[workspace.dependencies]`.
 tierstore_prev = { workspace = true, features = ["s3", "server"] }
 tierstore-testkit.workspace = true
+# This branch's new cache (`[cache]`): its entry store, the types of its entries and the boot id
+# of its journal, which `tests/cache_root.rs` writes `packs-v2/` with.
+tierstore-entry.workspace = true
+tierstore-fetch-api.workspace = true
+tierstore-format.workspace = true
+tierstore-journal.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 [lints]

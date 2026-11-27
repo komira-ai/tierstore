@@ -247,6 +247,11 @@ impl S3Backend {
         self.chunks_waiting
     }
 
+    /// The bucket's client, for the reads of the fetch engine's upstream, which carry `If-Match`.
+    pub(crate) fn store(&self) -> &S3Store {
+        &self.store
+    }
+
     /// This backend with `delete_if_match` sent as a DELETE with `If-Match` (`true`), or as a read
     /// of the tag before a plain DELETE (`false`, as [`S3Backend::new`] makes it). The store is
     /// not asked which it enforces: the caller says, from what its store documents.

@@ -94,6 +94,7 @@ use super::cli_serve::{Bound, Got, bind_fronts, bind_s3, cut_note, sockets_of, s
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 use super::config::fs::not_served;
 use super::config_cache::CacheSettings;
+use super::config_tier::TierParts;
 use super::drain::late_of;
 use super::fill_socket;
 use super::front::{InvalidFlags, server_config};
@@ -102,6 +103,7 @@ use super::handoff::Inherited;
 use super::handoff::Offered;
 use super::handoff::{self, Handed, Handing, Handoff, Image, Own, Want, read_handed};
 use super::listen::{LoopbackBind, bind_set, bind_with, joined};
+use super::local_cache::large::stack::for_build_node;
 use super::local_cache::trees::{TreeStore, TreesConfig};
 use super::local_cache::{CacheConfig, Disk, Every, LocalCache, Mode, SystemDisk, check_local};
 use super::oci::OciListener;
@@ -351,6 +353,8 @@ pub(super) async fn serve_cache_on(
     config.oci_metrics = oci.as_ref().map(|setup| Arc::clone(&setup.metrics));
     let run = probe_run_id(&settings.front.proxy_id, clock.now(), std::process::id());
     let cache = open(&settings.cache, &upstream, &disk, &run).await?;
+    // Kept until the fronts have drained: dropping it commits and folds the new cache's entries.
+    let _read_path = for_build_node(settings, &cache)?;
     if settings.cache.write_through {
         config.cache_writes = true;
     }
@@ -888,24 +892,29 @@ async fn run_cache_imaging(
         return Err("--s3-request-timeout must be longer than zero".into());
     }
     let tier = &settings.upstream;
-    let s3 = S3Flags {
-        endpoint: tier.endpoint.as_deref(),
-        more_endpoints: &tier.more_endpoints,
-        region: tier.region.as_deref(),
-        credentials: tier.credentials_file.as_deref(),
-        source: tier.credential_source.as_ref(),
-        conditional_delete: tier.conditional_delete,
-    };
     let upstream = open_tier(
         "--cold",
         &tier.spec,
-        &s3,
+        &upstream_flags(tier),
         settings.s3_request_timeout,
         &settings.s3_client,
     )?;
     let disk: Arc<dyn Disk> = Arc::new(SystemDisk);
     let system = OnSystem::of_process(settings);
     serve_cache_on(settings, (upstream, disk), system, stop, ready, imaging).await
+}
+
+/// The flags of the S3 bucket of `tier`, the upstream of a build node (unused by a tier of
+/// another kind).
+pub(super) fn upstream_flags(tier: &TierParts) -> S3Flags<'_> {
+    S3Flags {
+        endpoint: tier.endpoint.as_deref(),
+        more_endpoints: &tier.more_endpoints,
+        region: tier.region.as_deref(),
+        credentials: tier.credentials_file.as_deref(),
+        source: tier.credential_source.as_ref(),
+        conditional_delete: tier.conditional_delete,
+    }
 }
 
 /// Runs the cache until SIGTERM or SIGINT, or, on a Mac, SIGUSR2: then it gives back the next image
@@ -946,3 +955,7 @@ pub(super) async fn serve_cache_until_signalled(
 
 #[path = "next_image.rs"]
 pub(super) mod next_image;
+
+#[cfg(test)]
+#[path = "s3_large_tests.rs"]
+mod s3_large_tests;
