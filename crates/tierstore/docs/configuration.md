@@ -223,7 +223,7 @@ A file written for the release before still loads: its `listen` key of `[server]
 
 ### The `fs` interface
 
-The virtual build file system of a build node, as the node's own file says it: the params of an `[[interface]]` entry of type `fs`, with the names, defaults and ranges of [fs](configuration.md#fs) below. Its tables `fs.nfs` and `fs.put` are the params `nfs` and `put`; TOML lets them be written as tables of the entry, `[interface.params]`, `[interface.params.nfs]` and `[interface.params.put]`. The params of an `fs` entry refuse a key they do not know, in `nfs` and `put` too, as every interface's params do. The cache directory is `local_cache.path` of the same file, and `handoff.sock` in `params.runtime_dir` is the hand-over socket of the mount.
+The virtual build file system of a build node, as the node's own file says it: the params of an `[[interface]]` entry of type `fs`, with the names, defaults and ranges of [fs](configuration.md#fs) below. Its tables `fs.nfs` and `fs.put` are the params `nfs` and `put`; TOML lets them be written as tables of the entry, `[interface.params]`, `[interface.params.nfs]` and `[interface.params.put]`. The params of an `fs` entry refuse a key they do not know, in `nfs` and `put` too, as every interface's params do. The cache directory is `local_cache.path` of the same file; the mount is handed over with the sockets on `server.handoff_socket`.
 
 Each of these is refused at load, and so by `--check-config`, naming the key:
 

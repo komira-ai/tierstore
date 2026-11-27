@@ -273,7 +273,35 @@ fn the_staged_binary_is_resolved_under_bin() {
     let done = run(&top_only, &runner, Step::Prepare, &params(""));
     assert_eq!(done.outcome, Outcome::Failure, "{done:?}");
     assert_eq!(done.report.reason, Some(Reason::HostFailed), "{done:?}");
-    assert!(runner.calls().is_empty(), "{:?}", runner.calls());
+    only_the_looks_at_the_old_layout(&runner.calls());
+}
+
+/// Asserts that `calls` are the two looks `prepare` takes at the units of the old layout before it
+/// asks any release (`systemctl show` of `tierstore-fs@a` and `@b`), and nothing else: no release's
+/// binary is run.
+fn only_the_looks_at_the_old_layout(calls: &[Call]) {
+    let looked: Vec<(&str, Vec<&str>)> = calls
+        .iter()
+        .map(|call| {
+            (
+                call.program.as_str(),
+                call.args.iter().map(String::as_str).collect(),
+            )
+        })
+        .collect();
+    let show = |unit| {
+        (
+            "/usr/bin/systemctl",
+            vec!["show", "--property=ActiveState", "--value", "--", unit],
+        )
+    };
+    assert_eq!(
+        looked,
+        [
+            show("tierstore-fs@a.service"),
+            show("tierstore-fs@b.service")
+        ]
+    );
 }
 
 /// Asserts that a staged binary of another owner than the configured release owner is refused as
@@ -289,7 +317,7 @@ fn a_staged_binary_of_another_owner_is_refused() {
     };
     let done = run_on(&config, &invocation(Step::Prepare), &params(""));
     assert_eq!(done.report.reason, Some(Reason::HostFailed), "{done:?}");
-    assert!(runner.calls().is_empty());
+    only_the_looks_at_the_old_layout(&runner.calls());
 }
 
 /// Asserts that a state directory owned by a user other than the configured owner is refused

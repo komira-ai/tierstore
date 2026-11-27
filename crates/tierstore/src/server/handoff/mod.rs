@@ -103,8 +103,6 @@ pub(crate) use mount::{Claim, Mount, MountWant, TakenMount};
 pub(crate) use take::offered;
 #[cfg(test)]
 pub(crate) use take::take_service;
-#[cfg(test)]
-pub(crate) use take::take_with_ready;
 pub(crate) use take::{Ask, Inherited, Offered, Ready, Want, offered_with, take};
 pub(crate) use written::{Predecessor, follow};
 

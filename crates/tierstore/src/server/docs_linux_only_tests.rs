@@ -135,7 +135,7 @@ fn the_put_example_of_the_page_is_marked_linux() {
     assert!(
         marked[0]
             .body
-            .contains("[interface.params.put]\nenabled   = true\n")
+            .contains("[interface.params.put]\nenabled = true\n")
     );
 }
 
