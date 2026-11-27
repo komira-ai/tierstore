@@ -135,7 +135,10 @@ async fn the_thread_asks_again_until_the_cache_takes_the_write_role() {
     };
     let core = core_over(&live, pause);
     core.tell_live_later().unwrap();
-    until("the announcement ends the hold", || held(&live, &created) == 0).await;
+    until("the announcement ends the hold", || {
+        held(&live, &created) == 0
+    })
+    .await;
     let settled = Arc::clone(&core);
     tokio::task::spawn_blocking(move || settled.settled().unwrap())
         .await
@@ -180,11 +183,10 @@ async fn a_request_that_finds_the_cache_read_only_fails_and_the_announcement_sta
     })
     .await;
     let asked = Arc::clone(&core);
-    let (looked, settled) = tokio::task::spawn_blocking(move || {
-        (asked.lookup(ino::ROOT, "jobs"), asked.settled())
-    })
-    .await
-    .unwrap();
+    let (looked, settled) =
+        tokio::task::spawn_blocking(move || (asked.lookup(ino::ROOT, "jobs"), asked.settled()))
+            .await
+            .unwrap();
     assert_eq!(looked, Err(Errno::Io));
     assert_eq!(settled, Err(AskError::ReadOnly));
     // The end of a tree of manifests (`unpin`) and of a placement (`unplace`) is not sent either.
@@ -219,7 +221,10 @@ async fn a_held_core_sends_no_announcement_until_the_hold_is_let_go() {
     assert_eq!(live.core.settled(), Err(AskError::Unavailable));
     assert_eq!(held(&live, &created), 1);
     live.core.hold(false);
-    until("the announcement ends the hold", || held(&live, &created) == 0).await;
+    until("the announcement ends the hold", || {
+        held(&live, &created) == 0
+    })
+    .await;
     live.on_core(|core| core.settled().unwrap()).await;
 }
 

@@ -108,7 +108,9 @@ struct Trees {
 
 impl Trees {
     fn gate(&self) -> &Gate {
-        self.gate.as_ref().expect("a core over a cache with no role")
+        self.gate
+            .as_ref()
+            .expect("a core over a cache with no role")
     }
 
     /// The bytes the cache of the core keeps pinned.

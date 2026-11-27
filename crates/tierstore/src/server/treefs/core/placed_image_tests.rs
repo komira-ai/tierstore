@@ -192,18 +192,12 @@ async fn a_listing_of_an_image_directory_has_the_dots_then_the_children_and_resu
             names(listed(core, dir, 1, 99)),
             ["..", "bin", "empty", "lib", "link", "zero"]
         );
-        assert_eq!(
-            names(listed(core, dir, 4, 99)),
-            ["lib", "link", "zero"]
-        );
+        assert_eq!(names(listed(core, dir, 4, 99)), ["lib", "link", "zero"]);
         assert!(listed(core, dir, 7, 99).is_empty());
         assert!(listed(core, dir, u64::MAX, 99).is_empty());
         assert_eq!(names(listed(core, dir, 0, 1)), ["."]);
         assert_eq!(names(listed(core, dir, 0, 2)), [".", ".."]);
-        assert_eq!(
-            names(listed(core, dir, 0, 4)),
-            [".", "..", "bin", "empty"]
-        );
+        assert_eq!(names(listed(core, dir, 0, 4)), [".", "..", "bin", "empty"]);
         assert_eq!(names(listed(core, dir, 3, 1)), ["empty"]);
         let bin = ino::of(number, 1);
         let mut dots = Vec::new();
@@ -251,10 +245,7 @@ async fn a_listing_after_an_inode_of_an_image_directory_gives_the_children_above
         };
         let dir = root.attr.ino;
         assert_eq!(after(dir, 0, 99), ["bin", "empty", "lib", "link", "zero"]);
-        assert_eq!(
-            after(dir, ino::of(number, 2), 99),
-            ["lib", "link", "zero"]
-        );
+        assert_eq!(after(dir, ino::of(number, 2), 99), ["lib", "link", "zero"]);
         assert_eq!(after(dir, ino::of(number, 4), 99), ["zero"]);
         assert_eq!(after(dir, ino::of(number, 5), 99), Vec::<String>::new());
         assert_eq!(after(dir, u64::MAX, 99), Vec::<String>::new());
@@ -429,9 +420,8 @@ async fn an_image_placement_is_found_at_each_of_its_locations_and_nowhere_else()
         let first = found(core, ino::ROOT, "jobs");
         let second = found(core, ino::ROOT, "jobs2");
         assert_ne!(ino::split(first.attr.ino).0, ino::split(second.attr.ino).0);
-        let read = |id: &str, path: &str| {
-            core.read_tree(&key_of(id, path).unwrap(), &Fetched::default())
-        };
+        let read =
+            |id: &str, path: &str| core.read_tree(&key_of(id, path).unwrap(), &Fetched::default());
         assert!(read(&id, "jobs").is_ok());
         assert!(read(&id, "jobs2").is_ok());
         assert!(matches!(read(&id, "jobs3"), Err(Unread::Gone(_))));

@@ -66,7 +66,14 @@ fn blob_of(rig: &Rig, content_len: usize) -> String {
 /// is packed.
 fn blob_at(rig: &Rig, content_len: usize) -> (String, Option<u64>) {
     let sha = blob_of(rig, content_len);
-    let at = rig.upstream.built.lock().unwrap().offsets.get(&sha).copied();
+    let at = rig
+        .upstream
+        .built
+        .lock()
+        .unwrap()
+        .offsets
+        .get(&sha)
+        .copied();
     (sha, at)
 }
 
@@ -74,7 +81,10 @@ fn blob_at(rig: &Rig, content_len: usize) -> (String, Option<u64>) {
 fn fill_blob(rig: &Rig, sha: &str) {
     let (size, at) = {
         let built = rig.upstream.built.lock().unwrap();
-        (built.blobs[sha].len() as u64, built.offsets.get(sha).copied())
+        (
+            built.blobs[sha].len() as u64,
+            built.offsets.get(sha).copied(),
+        )
     };
     let from = at.map_or_else(|| format!("cas/l/{sha}"), |_| "packs/one".to_owned());
     let blob = Blob {
@@ -654,7 +664,13 @@ fn tell_live_names_the_trees_attached_now() {
     fill_blob(&rig, &a);
     let stale = "cd".repeat(32);
     let open = open_cached(core, ino::of(1, 3), false).unwrap();
-    assert_eq!(rig.node.pin("mount-1", &stale, &[a.clone()]).unwrap().pinned, 1);
+    assert_eq!(
+        rig.node
+            .pin("mount-1", &stale, &[a.clone()])
+            .unwrap()
+            .pinned,
+        1
+    );
     assert_eq!(rig.node.pinned_bytes(), 3006);
     core.tell_live().unwrap();
     assert_eq!(rig.node.pinned_bytes(), 3000);

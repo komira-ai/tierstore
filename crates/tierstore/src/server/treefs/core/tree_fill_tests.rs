@@ -135,11 +135,17 @@ fn a_new_tree_is_filled_by_one_request_and_read_from_the_cache() {
     fills.dedup();
     assert_eq!(fills.len(), 7, "a manifest was asked for twice");
     assert_eq!(
-        counted(&rig, "tierstore_cache_manifest_fill_seconds_count{via=\"tree\"}"),
+        counted(
+            &rig,
+            "tierstore_cache_manifest_fill_seconds_count{via=\"tree\"}"
+        ),
         7
     );
     assert_eq!(
-        counted(&rig, "tierstore_cache_manifest_fill_seconds_count{via=\"fill\"}"),
+        counted(
+            &rig,
+            "tierstore_cache_manifest_fill_seconds_count{via=\"fill\"}"
+        ),
         0
     );
     assert_eq!(read(&rig.core, 1), flattened(&rig, &root));
@@ -176,7 +182,10 @@ fn a_tree_whose_root_the_cache_holds_asks_no_fill_tree() {
     assert_eq!(counted(&rig, "tierstore_fs_tree_fill_rounds_total"), rounds);
     assert_eq!(rig.upstream.asked("fill").len(), fills);
     assert_eq!(
-        counted(&rig, "tierstore_cache_manifest_fill_seconds_count{via=\"tree\"}"),
+        counted(
+            &rig,
+            "tierstore_cache_manifest_fill_seconds_count{via=\"tree\"}"
+        ),
         7
     );
 }
@@ -243,7 +252,10 @@ fn a_fill_tree_that_fails_leaves_the_manifests_to_the_read() {
     assert!(matches!(found, Ok(Looked::Found(_))), "{found:?}");
     assert_eq!(read(&rig.core, 1), flattened(&rig, &root));
     assert!(
-        counted(&rig, "tierstore_cache_manifest_fill_seconds_count{via=\"fill\"}") >= 1,
+        counted(
+            &rig,
+            "tierstore_cache_manifest_fill_seconds_count{via=\"fill\"}"
+        ) >= 1,
         "the read filled nothing itself"
     );
     let [line] = &said(&log)[..] else {
@@ -339,7 +351,10 @@ fn a_tree_list_at_trees_digest_is_attached_from_one_fill() {
     };
     assert_eq!(manifest_fills(&rig), [format!("fill {list}")]);
     assert_eq!(
-        counted(&rig, "tierstore_cache_manifest_fill_seconds_count{via=\"fill\"}"),
+        counted(
+            &rig,
+            "tierstore_cache_manifest_fill_seconds_count{via=\"fill\"}"
+        ),
         0
     );
     let entries = read(&rig.core, 1);

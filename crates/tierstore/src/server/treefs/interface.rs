@@ -120,7 +120,10 @@ impl Service {
         let started = tokio::task::spawn_blocking(move || {
             let mut steps = Steps::new(Arc::clone(&platform.clock));
             let started = runtime.block_on(launch::start((&mine, &reach), &platform, &mut steps));
-            tracing::info!("tierstore fs: the start of the mount took {} ms", steps.total());
+            tracing::info!(
+                "tierstore fs: the start of the mount took {} ms",
+                steps.total()
+            );
             started
         })
         .await

@@ -125,7 +125,8 @@ impl Upstream {
         let built = locked(&self.built);
         let offset = range.map_or(0, |range| range.offset());
         if let Some(digest) = key.strip_prefix("cas/l/") {
-            let manifest = built.manifests.contains_key(digest) || !built.blobs.contains_key(digest);
+            let manifest =
+                built.manifests.contains_key(digest) || !built.blobs.contains_key(digest);
             return match (manifest, range) {
                 (true, None) => Some((Fill::Manifest(digest.to_owned()), format!("fill {digest}"))),
                 (false, Some(range)) if range.offset() == 0 => {

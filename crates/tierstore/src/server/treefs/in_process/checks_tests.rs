@@ -33,7 +33,10 @@ fn a_blob_is_refused_by_the_words_of_each_check() {
             "{sha256} {size} {from} {offset}"
         );
     }
-    assert_eq!(check_blob((SHA, 1), (longest.as_str(), u64::MAX - 1)), Ok(()));
+    assert_eq!(
+        check_blob((SHA, 1), (longest.as_str(), u64::MAX - 1)),
+        Ok(())
+    );
     assert_eq!(Refusal::Overflow.to_string(), "offset and size pass 2^64");
 }
 

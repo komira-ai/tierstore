@@ -122,7 +122,10 @@ fn a_file_with_local_cache_fill_socket_starts_and_says_it_is_ignored() {
         let (settings, said) = loaded(&text, serviced());
         assert_eq!(said, format!("{IGNORED_FILL_SOCKET}\n"), "{path}");
         let settings = settings.into_cache().unwrap();
-        let (got, wanted) = (format!("{:?}", settings.cache), format!("{:?}", plain.cache));
+        let (got, wanted) = (
+            format!("{:?}", settings.cache),
+            format!("{:?}", plain.cache),
+        );
         assert_eq!(got, wanted, "{path}");
         assert_eq!(settings.handoff, plain.handoff, "{path}");
     }

@@ -15,7 +15,7 @@ use crate::server::local_cache::opens::{Opens, Spans};
 use crate::server::local_cache::pack_testing::{Pack, blob_hex, fills, recency};
 use crate::server::local_cache::testing::{Rig, until};
 use crate::server::local_cache::tree_lists::{Totals, TreeLists};
-use crate::server::local_cache::trees::testing::{Bench, fs_at};
+use crate::server::local_cache::trees::testing::{Bench, flat_of, fs_at};
 use crate::server::local_cache::trees::{FlatTree, TreeStore};
 use crate::server::local_cache::{FillError, LocalCache, Mode, Tick};
 use crate::server::treefs::fills::{AskError, PAUSE, Place, PlacedTree, Report, TreeAnswer, Until};
@@ -181,7 +181,7 @@ async fn every_request_is_answered_in_the_words_of_the_cache() {
         .expect("a placement");
     let over = in_process(&bench.rig.cache, Some(&bench.store), LONG);
     let (id, tree) = (created.placement.to_string(), created.tree.to_string());
-    let flat = bench.store.flat(&created.placement).unwrap();
+    let flat = flat_of(&bench.store, &created.placement).unwrap();
     let (sha256, offset, size) = bench.pack.blobs[0].clone();
     let pack = bench.pack.key.clone();
     let called = off_runtime(move || {

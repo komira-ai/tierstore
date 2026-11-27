@@ -218,7 +218,10 @@ pub(in crate::server) fn tree_path(rig: &Rig, tree: &TreeDigest) -> std::path::P
 
 /// The tree of records of the placement `id`, flattened as the mount is given it
 /// ([`TreeStore::mount_tree`]); a placement whose tree is an image is no tree of records.
-pub(in crate::server) fn flat_of(store: &TreeStore, id: &PlacementId) -> Result<FlatTree, FlatError> {
+pub(in crate::server) fn flat_of(
+    store: &TreeStore,
+    id: &PlacementId,
+) -> Result<FlatTree, FlatError> {
     match store.mount_tree(id)? {
         MountTree::Flat(flat) => Ok(flat),
         MountTree::Image { tree, .. } => panic!("the placement is the image {tree}"),
