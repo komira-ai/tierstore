@@ -56,6 +56,13 @@ message Source {
   string run = 2;
   // The source's place in the job: its layers first, then its mounts, counted from 0.
   uint32 index = 3;
+  // The attempt of the run on this agent: 1 the first time the agent is given the job, and
+  // larger each time the agent is given the same job again; the same in every call of one
+  // attempt, retries included. 0 (not given) is an agent that does not count attempts.
+  // Two attempts of one run are two sources: a call of one never touches the other's tree,
+  // so a late Release of an earlier attempt leaves a later attempt's tree in place. A
+  // provider that does not read the field takes the two for one source, as before it.
+  uint64 attempt = 4;
 }
 
 // How the job will use the tree.
@@ -114,6 +121,19 @@ message SweepRequest {
   string agent = 1;
   // The runs whose sources are kept, as Source.run.
   repeated string keep = 2;
+  // Runs whose sources are kept only from an attempt on: a source of the run whose attempt
+  // is given and earlier than every attempt named here for its run is released. A run named
+  // here is kept even if it is not in `keep`; an agent names it in `keep` too, for a provider
+  // that does not read the field. An attempt of 0 here keeps every attempt of its run.
+  repeated KeptAttempt keep_attempts = 3;
+}
+
+// A run kept from an attempt on, in SweepRequest.keep_attempts.
+message KeptAttempt {
+  // The run, as Source.run.
+  string run = 1;
+  // The earliest attempt of the run kept, as Source.attempt.
+  uint64 attempt = 2;
 }
 
 // The answer to Sweep.

@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use tierstore_trees_api::provider::v1::{MountMode, Source};
+use tierstore_trees_api::provider::v1::{KeptAttempt, MountMode, Source};
 use tokio::sync::{Semaphore, watch};
 
 use super::names::{SourceId, check_name, source_of};
@@ -285,12 +285,9 @@ impl Provider {
         let mut stage = {
             let sources = self.lock();
             let Some(held) = sources.get(&id) else {
-                return match self.placement_at(&id) {
-                    Some(_) => Ok(path),
-                    None => Err(ProviderError::Unavailable(
-                        "the source is not prepared here".to_owned(),
-                    )),
-                };
+                return self.placed_path(&id).ok_or_else(|| {
+                    ProviderError::Unavailable("the source is not prepared here".to_owned())
+                });
             };
             self.again_if_failed(&id, held);
             held.stage.subscribe()
@@ -321,15 +318,33 @@ impl Provider {
         }
     }
 
+    /// The directory of the placement of `id` that this process did not prepare: the placement at
+    /// the path of `id`, or, for a source that names its attempt, the one at the path of the same
+    /// source without an attempt, which a provider before attempts placed for it.
+    fn placed_path(&self, id: &SourceId) -> Option<PathBuf> {
+        let unnumbered = id.unnumbered();
+        let placed = std::iter::once(id).chain((id.attempt != 0).then_some(&unnumbered));
+        placed
+            .find(|id| self.placement_at(id).is_some())
+            .map(|id| self.shared.settings.mountpoint.join(id.path()))
+    }
+
     /// `Release`: stops the source's preparation and removes its placement, and forgets the request
-    /// of its run. A source that is not known is a success.
+    /// of its run. A source that is not known is a success. A source that names its attempt is
+    /// that attempt's alone: a later attempt of the run is another source, which this leaves as it
+    /// is. Its release also releases the same source without an attempt, which only a provider
+    /// before attempts, or the agent before it counted them, made: an attempt that is over.
     ///
     /// # Errors
     /// [`ProviderError::Invalid`] for a source that is not well formed;
     /// [`ProviderError::Unavailable`] if the store cannot change its directory now.
     pub(super) fn release(&self, source: Option<Source>) -> Result<(), ProviderError> {
         let id = SourceId::of(source)?;
-        self.release_id(&id).map(drop)
+        self.release_id(&id)?;
+        if id.attempt != 0 {
+            self.release_id(&id.unnumbered())?;
+        }
+        Ok(())
     }
 
     /// Releases `id`: whether there was anything to release.
@@ -370,15 +385,36 @@ impl Provider {
             .map(|located| located.placement)
     }
 
-    /// `Sweep`: releases every source of `agent` whose run is not in `keep`, those this process
-    /// prepared and the placements under the agent's path; how many.
+    /// `Sweep`: releases every source of `agent` that `keep` and `from` do not keep, those this
+    /// process prepared and the placements under the agent's path; how many. A source is kept if
+    /// its run is in `keep` or in `from`, unless it names its attempt and that is earlier than
+    /// every attempt `from` names for its run (an attempt of 0 there keeps every attempt): a later
+    /// attempt than the agent named is kept, and so is a source that names no attempt.
     ///
     /// # Errors
     /// [`ProviderError::Invalid`] for an agent that is not well formed; what a release gives.
-    pub(super) fn sweep(&self, agent: &str, keep: &[String]) -> Result<u32, ProviderError> {
+    pub(super) fn sweep(
+        &self,
+        agent: &str,
+        keep: &[String],
+        from: &[KeptAttempt],
+    ) -> Result<u32, ProviderError> {
         check_name("agent", agent)?;
-        let keep: BTreeSet<&str> = keep.iter().map(String::as_str).collect();
-        let swept = |id: &SourceId| id.agent == agent && !keep.contains(id.run.as_str());
+        // The earliest attempt kept of each run kept: the least `from` names for it, else 0.
+        let mut kept: BTreeMap<&str, u64> = BTreeMap::new();
+        for entry in from {
+            let floor = kept.entry(entry.run.as_str()).or_insert(entry.attempt);
+            *floor = (*floor).min(entry.attempt);
+        }
+        for run in keep {
+            kept.entry(run.as_str()).or_insert(0);
+        }
+        let swept = |id: &SourceId| {
+            id.agent == agent
+                && kept
+                    .get(id.run.as_str())
+                    .is_none_or(|&floor| id.attempt != 0 && id.attempt < floor)
+        };
         let mut gone: BTreeSet<SourceId> = self
             .lock()
             .keys()

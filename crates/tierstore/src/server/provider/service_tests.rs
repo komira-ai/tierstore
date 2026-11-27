@@ -9,15 +9,15 @@ use std::time::Duration;
 
 use tierstore_testkit::dir::TestDir;
 use tierstore_trees_api::provider::v1::{
-    MountRequest, MountResponse, PrepareRequest, PrepareResponse, ReleaseRequest, ReleaseResponse,
-    SweepRequest, SweepResponse,
+    KeptAttempt, MountRequest, MountResponse, PrepareRequest, PrepareResponse, ReleaseRequest,
+    ReleaseResponse, SweepRequest, SweepResponse,
 };
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use tonic::Code;
 
 use super::service::status_of;
-use super::testing::{AGENT, Client, READ_ONLY, Rig, member, source};
+use super::testing::{AGENT, Client, READ_ONLY, Rig, attempt_of, member, source};
 use super::{MAX_REASON_BYTES, Provider, ProviderError, serve};
 use crate::server::local_cache::LocalCache;
 use crate::server::local_cache::Tick;
@@ -57,6 +57,52 @@ impl Served {
         self.halt.notify_one();
         self.task.await.unwrap();
     }
+}
+
+/// Asserts that the attempt of a source and the runs a sweep keeps from an attempt on reach the
+/// provider over the socket: two attempts of one source are prepared and mounted at their own
+/// directories, a late release of the first leaves the second placed, and a sweep that keeps the
+/// run from attempt 3 releases the second.
+#[tokio::test]
+async fn attempts_are_answered_over_the_socket() {
+    let rig = Rig::new("prov-socket-attempt").await;
+    let place = Place::new("prov-socket-attempt");
+    let served = Served::start(&rig.provider, &rig.bench.rig.cache, &place.path);
+    let mut client = Client::connect(&place.path).await;
+    for attempt in [1, 2] {
+        let prepare = PrepareRequest {
+            source: attempt_of("js.1", 0, attempt),
+            r#ref: rig.key.clone(),
+            mode: READ_ONLY,
+            host: "host-1".into(),
+        };
+        let _: PrepareResponse = client.call("Prepare", &prepare).await.unwrap();
+        let mount = MountRequest {
+            source: attempt_of("js.1", 0, attempt),
+        };
+        let mounted: MountResponse = client.call("Mount", &mount).await.unwrap();
+        let expected =
+            Path::new(super::testing::MOUNT).join(Rig::attempt_place_of("js.1", 0, attempt));
+        assert_eq!(mounted.path, expected.to_string_lossy());
+    }
+    let release = ReleaseRequest {
+        source: attempt_of("js.1", 0, 1),
+    };
+    let _: ReleaseResponse = client.call("Release", &release).await.unwrap();
+    let placed = vec![Rig::attempt_place_of("js.1", 0, 2)];
+    assert_eq!(rig.bench.store.mount_paths(), placed);
+    let sweep = SweepRequest {
+        agent: AGENT.into(),
+        keep: vec!["js.1".into()],
+        keep_attempts: vec![KeptAttempt {
+            run: "js.1".into(),
+            attempt: 3,
+        }],
+    };
+    let swept: SweepResponse = client.call("Sweep", &sweep).await.unwrap();
+    assert_eq!(swept.released, 1);
+    assert!(rig.bench.store.mount_paths().is_empty());
+    served.stop().await;
 }
 
 /// Asserts the code of each answer that is not a success, and that a reason over the contract's
@@ -120,6 +166,7 @@ async fn the_four_calls_are_answered_over_the_socket() {
     let sweep = SweepRequest {
         agent: AGENT.into(),
         keep: vec!["js.1".into()],
+        keep_attempts: Vec::new(),
     };
     let swept: SweepResponse = client.call("Sweep", &sweep).await.unwrap();
     assert_eq!(swept.released, 0);
@@ -165,6 +212,7 @@ async fn the_four_calls_are_answered_over_the_socket() {
     let sweep_none = SweepRequest {
         agent: String::new(),
         keep: Vec::new(),
+        keep_attempts: Vec::new(),
     };
     let refused = client
         .call::<SweepResponse>("Sweep", &sweep_none)
@@ -253,6 +301,7 @@ async fn a_read_only_instance_binds_nothing_until_it_takes_the_lock() {
     let sweep = SweepRequest {
         agent: AGENT.into(),
         keep: Vec::new(),
+        keep_attempts: Vec::new(),
     };
     let swept: SweepResponse = client.call("Sweep", &sweep).await.unwrap();
     assert_eq!(swept.released, 0);

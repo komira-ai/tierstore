@@ -30,8 +30,17 @@
 //!   the store refuses) is `FAILED_PRECONDITION` with the reason.
 //! - **`Release(source)`** stops the source's reads and removes its placement; the tree goes when
 //!   nothing else holds it, and its packs stay in the cache to be evicted in their turn.
-//! - **`Sweep(agent, keep)`** releases every source of the agent whose run is not in `keep`, both
-//!   those this process prepared and the placements it finds under the agent's path.
+//! - **`Sweep(agent, keep, keep_attempts)`** releases every source of the agent whose run is not
+//!   kept, both those this process prepared and the placements it finds under the agent's path; a
+//!   run kept from an attempt on also loses its sources of earlier attempts.
+//!
+//! A source may name its attempt (`Source.attempt`, 1 or more: the agent counts the times it was
+//! given the same job). Two attempts of a run are two sources, each at a path of its own (module
+//! `names`), so a late `Release` of an earlier attempt, which the agent retries for a while, never
+//! removes the tree of a later attempt of the same job. A source that names no attempt (an agent
+//! that does not count them) is at the path it always was, and every call of it is as before; a
+//! `Mount` or a `Release` of a source that names its attempt also finds the same source placed
+//! without one, as a provider before attempts placed it.
 //!
 //! The first `Prepare` of a run stamps it in the cache, and a `Release` or a `Sweep` of a source of
 //! it forgets it: the request end of `tierstore_request_to_start_seconds`, whose other end is the
@@ -53,6 +62,8 @@ mod service;
 mod socket;
 mod sources;
 
+#[cfg(test)]
+mod attempts_tests;
 #[cfg(test)]
 mod groups_tests;
 #[cfg(test)]

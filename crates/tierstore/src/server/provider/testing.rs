@@ -47,12 +47,18 @@ pub(super) fn settings() -> Settings {
     }
 }
 
-/// The source `index` of the run `run` of [`AGENT`].
+/// The source `index` of the run `run` of [`AGENT`], naming no attempt.
 pub(in crate::server) fn source(run: &str, index: u32) -> Option<Source> {
+    attempt_of(run, index, 0)
+}
+
+/// The source `index` of the attempt `attempt` of the run `run` of [`AGENT`].
+pub(in crate::server) fn attempt_of(run: &str, index: u32, attempt: u64) -> Option<Source> {
     Some(Source {
         agent: AGENT.to_owned(),
         run: run.to_owned(),
         index,
+        attempt,
     })
 }
 
@@ -182,6 +188,16 @@ impl Rig {
         )
     }
 
+    /// The path under the mount of the source `index` of the attempt `attempt` (1 or more) of
+    /// `run`, as the tree store places it.
+    pub(super) fn attempt_place_of(run: &str, index: u32, attempt: u64) -> String {
+        format!(
+            "mount-provider/{}/{}/a{attempt}/{index}",
+            hex::encode(AGENT),
+            hex::encode(run)
+        )
+    }
+
     /// Whether the cache holds the span of the blob `blob` of the pack.
     pub(super) fn holds(&self, blob: usize) -> bool {
         let (_, offset, size) = &self.bench.pack.blobs[blob];
@@ -194,11 +210,17 @@ impl Rig {
 
     /// Prepares the source `index` of `run` with the pack's list, and mounts it.
     pub(super) async fn mounted(&self, run: &str, index: u32) -> PathBuf {
+        self.mounted_attempt(run, index, 0).await
+    }
+
+    /// Prepares the source `index` of the attempt `attempt` of `run` with the pack's list, and
+    /// mounts it.
+    pub(super) async fn mounted_attempt(&self, run: &str, index: u32, attempt: u64) -> PathBuf {
         self.provider
-            .prepare(source(run, index), &self.key, READ_ONLY)
+            .prepare(attempt_of(run, index, attempt), &self.key, READ_ONLY)
             .expect("prepared");
         self.provider
-            .mount(source(run, index))
+            .mount(attempt_of(run, index, attempt))
             .await
             .expect("mounted")
     }

@@ -113,7 +113,7 @@ async fn with_none_mount_release_and_sweep_behave_as_before() {
     rig.provider.release(source("js.1", 0)).unwrap();
     assert!(store.locate_fs(&Rig::place_of("js.1", 0)).is_none());
     assert_eq!(rig.mounted("js.2", 0).await, Rig::path_of("js.2", 0));
-    assert_eq!(rig.provider.sweep(AGENT, &[]), Ok(1));
+    assert_eq!(rig.provider.sweep(AGENT, &[], &[]), Ok(1));
     assert!(store.locate_fs(&Rig::place_of("js.2", 0)).is_none());
     assert!(store.mount_paths().is_empty());
     assert_eq!((held(&rig), pack_reads(&rig)), ([false; 3], 0));
