@@ -260,6 +260,7 @@ fn a_released_stage_is_never_replaced() {
     for later in [
         Stage::Placed,
         Stage::Failed("x".into()),
+        Stage::Unmade("z".into()),
         Stage::Refused("y".into()),
     ] {
         report(&stage, later);

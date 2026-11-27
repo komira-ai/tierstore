@@ -446,7 +446,8 @@ fn the_fs_refusals_name_the_param() {
 
 /// Asserts that a mount provider that leaves its `mountpoint` out answers under the `fs`
 /// interface's mount, wherever either entry is, and under the default mount when the `fs`
-/// interface leaves its own out too.
+/// interface leaves its own out too; and that in each it is served, by this process's `fs`
+/// interface.
 #[test]
 fn a_provider_mountpoint_left_out_is_the_fs_mountpoint() {
     let node = build_node("", "");
@@ -458,18 +459,32 @@ fn a_provider_mountpoint_left_out_is_the_fs_mountpoint() {
         let text = format!("{}{node}", entries.concat());
         let settings = settings_from_text(&text, run(one_volume)).expect("a build node");
         let flags = settings.into_cache().expect("a build node").provider;
-        assert_eq!(
-            flags.expect("a provider").mountpoint,
-            PathBuf::from("/private/var/tierstore/fs")
-        );
+        let flags = flags.expect("a provider");
+        assert_eq!(flags.mountpoint, PathBuf::from("/private/var/tierstore/fs"));
+        assert!(flags.served);
     }
     let text = format!("{}{}{}{node}", s3(), provider(""), fs(""));
     let settings = settings_from_text(&text, run(one_volume)).expect("a build node");
     let flags = settings.into_cache().expect("a build node").provider;
-    assert_eq!(
-        flags.expect("a provider").mountpoint,
-        PathBuf::from("/run/tierstore/fs")
-    );
+    let flags = flags.expect("a provider");
+    assert_eq!(flags.mountpoint, PathBuf::from("/run/tierstore/fs"));
+    assert!(flags.served);
+}
+
+/// Asserts that a mount provider in a file with no `fs` interface, as a Mac of the two-process
+/// layout has (`mountpoint` given, `local_cache.fill_socket` set), loads with its own mountpoint
+/// and is not served: no process of this release serves that mount. Catches a provider that
+/// answers directories under a mount nothing serves.
+#[test]
+fn a_provider_without_an_fs_interface_is_not_served() {
+    let node = build_node("", "fill_socket = \"/var/lib/tierstore/fill.sock\"\n");
+    let given = provider(", mountpoint = \"/private/var/tierstore/fs\"");
+    let text = format!("{}{given}{node}", s3());
+    let settings = settings_from_text(&text, run(one_volume)).expect("a build node");
+    let flags = settings.into_cache().expect("a build node").provider;
+    let flags = flags.expect("a provider");
+    assert_eq!(flags.mountpoint, PathBuf::from("/private/var/tierstore/fs"));
+    assert!(!flags.served);
 }
 
 /// Asserts that a mount provider that gives a `mountpoint` other than the `fs` interface's is
