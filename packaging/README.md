@@ -444,8 +444,14 @@ it is a hit (a multipart upload is not kept: the first read fills it; see "What 
 below). Create-only
 puts (`If-None-Match: *`), plain puts (no `If-None-Match`), presigned PUTs, multipart uploads (start, part,
 completion, abort) and deletes go to the upstream; the roles of the full, read-only, scoped,
-presigning and GC keys apply as on a storage node, and a put that replaces on a tag (`If-Match`) and a copy
-are still refused. A create-only put makes one HEAD of the key at the upstream before the body is
+presigning and GC keys apply as on a storage node, and a copy is still refused. A put or a
+completion with `If-Match` (the full key's, with no `If-None-Match`) goes to the upstream with its
+`If-Match`, and the upstream compares the ETag and replaces in one step: another ETag is `412
+PreconditionFailed`, a key with no object `404 NoSuchKey` (`NoSuchUpload` for a completion of an
+upload that is not open), and the answer to a put that replaced carries the new `ETag`; of two
+writers that name one ETag, one replaces and the other gets 412. The cache forgets the key before
+and after such a write and keeps no copy of it: the next read fills the object. An upstream of two
+tiers does not replace on a tag and answers it 501 `NotImplemented`, saying why. A create-only put makes one HEAD of the key at the upstream before the body is
 read, and answers 412 at once if the object is there; the upstream's conditional put is the
 arbiter of two writers. A plain put makes no HEAD: it is sent to the upstream as its plain put and
 replaces the object where the upstream does (a proxy on `active-marks`, an S3 bucket; a proxy on the
