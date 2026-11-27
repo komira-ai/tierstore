@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use tokio::runtime::Handle;
 
-use super::InProcess;
+use super::{InProcess, Missed};
 use crate::server::local_cache::attaches::runs::{RunAttach, RunDetach, RunOutcome};
 use crate::server::local_cache::attaches::{Attach, Fetches, Levels, Outcome};
 use crate::server::local_cache::descriptors::Descriptors;
@@ -263,7 +263,7 @@ async fn a_node_with_no_tree_store_is_answered_none_in_process() {
 /// Asserts that a fill asked while the cache is read-only (another process holds the lock of its
 /// directory) waits for the write role and then fills: it has not ended and nothing was filled
 /// while the lock was held, and once the cache takes the lock, the blob is filled and the fill
-/// answered `ok`.
+/// answered `ok`, with the fill no longer watching the mode.
 #[tokio::test]
 async fn a_fill_waits_for_the_write_role_then_fills() {
     let rig = Rig::new("tfs-in-wait");
@@ -291,6 +291,34 @@ async fn a_fill_waits_for_the_write_role_then_fills() {
     assert_eq!(waiting.tick().unwrap(), Tick::Took);
     assert_eq!(filled.await.unwrap(), Ok(()));
     assert_eq!(fills(&waiting), 1);
+    assert_eq!(waiting.mode_watchers(), watchers);
+}
+
+/// Asserts that a request watches the mode of the cache only while it waits for the write role:
+/// its work, run once the cache is read-write, sees no more watchers than there were before the
+/// request, so once a caller has its answer the request is no longer counted as a watcher; and
+/// that a request that got no write role in its wait is no watcher once it is answered either. Catches a request whose task keeps its
+/// receiver of the mode until after it sends the answer.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_request_stops_watching_the_mode_when_its_wait_ends() {
+    let rig = Rig::new("tfs-in-unwatched");
+    assert_eq!(rig.cache.mode(), Mode::ReadWrite);
+    let watchers = rig.cache.mode_watchers();
+    let over = in_process(&rig.cache, None, LONG);
+    let cache = rig.cache.clone();
+    let seen = off_runtime(move || over.call(LONG, async move { cache.mode_watchers() })).await;
+    assert_eq!(seen, Ok(watchers));
+    assert_eq!(rig.cache.mode_watchers(), watchers);
+    let _holder = rig.locked();
+    let waiting = rig.locked();
+    assert_eq!(waiting.mode(), Mode::ReadOnly);
+    let watchers = waiting.mode_watchers();
+    let over = in_process(&waiting, None, Duration::ZERO);
+    assert_eq!(
+        off_runtime(move || over.writer()).await,
+        Err(Missed::ReadOnly)
+    );
+    assert_eq!(waiting.mode_watchers(), watchers);
 }
 
 /// Asserts that every request that waits for the write role fails once `fetch_timeout` has passed
@@ -382,12 +410,13 @@ async fn a_request_still_read_only_after_fetch_timeout_fails_and_starts_nothing(
 
 /// Asserts that a request whose end has passed is not asked, and that one whose end comes before
 /// `fetch_timeout` is answered by that end, while one with no end is answered by `fetch_timeout`:
-/// each fails in the words of a request out of time, and the fills they started go on
-/// and fill once the upstream answers. The clock is paused and moves when every task waits.
+/// each fails in the words of a request out of time, and watches the mode no more once answered,
+/// and the fills they started go on and fill once the upstream answers. The clock is paused and moves when every task waits.
 #[tokio::test(start_paused = true)]
 async fn a_request_ends_by_its_own_end_or_by_fetch_timeout_and_its_fill_goes_on() {
     let bench = Bench::new("tfs-in-ends").await;
     let over = in_process(&bench.rig.cache, Some(&bench.store), LONG);
+    let watchers = bench.rig.cache.mode_watchers();
     let gate = bench.rig.tamper.hold();
     let blobs = bench.pack.blobs.clone();
     let pack = bench.pack.key.clone();
@@ -405,6 +434,7 @@ async fn a_request_ends_by_its_own_end_or_by_fetch_timeout_and_its_fill_goes_on(
     let spent = Err(AskError::Spent.to_string());
     let late = Err(AskError::TimedOut.to_string());
     assert_eq!(words, [spent.clone(), spent.clone(), late, spent]);
+    assert_eq!(bench.rig.cache.mode_watchers(), watchers);
     gate.add_permits(1_000);
     until("the fills that were not waited for end", || {
         fills(&bench.rig.cache) >= 2
