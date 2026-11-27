@@ -1,0 +1,45 @@
+[package]
+name = "tierstore-examples"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "The runner of the examples in examples/: starts tierstore on a free port, runs an example's own S3 client against it, reads /metricz before and after each step, and compares what it found with the example's expected output."
+
+# The runner spawns the `tierstore` binary it is given (`--tierstore`); it does not link the
+# library. Its tests are in crates/tierstore/tests/examples, which have that binary
+# (`CARGO_BIN_EXE_tierstore`).
+
+[dependencies]
+# The command line of `tierstore-example`.
+clap.workspace = true
+# The S3 client the `objects` check lists the bucket with, through tierstore's own front.
+objstore-s3.workspace = true
+# SIGTERM to the tierstore the runner started, so that it drains and exits.
+rustix = { workspace = true, features = ["process"] }
+serde.workspace = true
+# The JSON a client writes (sccache's statistics), read by the `json` check.
+serde_json.workspace = true
+thiserror.workspace = true
+# The runtime of the S3 client's listing.
+tokio = { workspace = true, features = ["rt", "net", "time"] }
+# `example.toml`, and the bucket of the example's `tierstore.toml`.
+toml.workspace = true
+
+[[bin]]
+name = "tierstore-example"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[package.metadata.buildrules]
+# The farm lane's `//:ci` (docs/farm.md) checks the format of, builds and lints this package but does
+# not run its tests: they are in crates/tierstore/tests/examples (they need the `tierstore` binary,
+# and the example's client and compiler, none of which a farm action has), so this package's own
+# targets list no test, which buildrules' test gate refuses.
+
+[package.metadata.buildrules.actions]
+ci = ["fmt", "lint"]

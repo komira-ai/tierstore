@@ -204,6 +204,9 @@ tierstore-fetch.workspace = true
 tierstore-hashpool.workspace = true
 # Scratch directories and key files of the tests of the binary.
 tierstore-testkit.workspace = true
+# The runner of examples/, which tests/examples runs against this crate's binary: the examples
+# need a `tierstore` to start, and only this crate's tests have one (`CARGO_BIN_EXE_tierstore`).
+tierstore-examples.workspace = true
 # A test CA and a leaf with IP subjectAltNames, for the tests of the OCI read front.
 rcgen.workspace = true
 # Sends the requests the S3 client does not: unsigned ones and ones signed by hand.
