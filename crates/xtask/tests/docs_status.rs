@@ -34,6 +34,7 @@ const STATUSES: &[&str] = &[
     "out-of-repo",
     "not-code",
     "not-planned",
+    "parked",
 ];
 
 /// Claims a page's Status line made that main has made false: the page, and words its Status
@@ -422,7 +423,7 @@ fn a_table_row_splits_at_unescaped_bars_only() {
 /// `rows` (each the status of one row).
 fn status_page(summary: &str, rows: &[&str]) -> String {
     let mut text = String::from(
-        "# S\n\n## Summary\n\n| Page | built | partial | unbuilt | superseded | out-of-repo | not-code | not-planned | slice issues |\n|---|---|---|---|---|---|---|---|---|\n",
+        "# S\n\n## Summary\n\n| Page | built | partial | unbuilt | superseded | out-of-repo | not-code | not-planned | parked | slice issues |\n|---|---|---|---|---|---|---|---|---|---|\n",
     );
     text.push_str(summary);
     text.push_str("\n\n## [a.md](a.md)\n\n| Section | Item | Status | Built by | Unbuilt |\n|---|---|---|---|---|\n");
@@ -438,14 +439,14 @@ fn status_page(summary: &str, rows: &[&str]) -> String {
 fn the_status_page_check_names_a_wrong_count_or_an_unknown_status() {
     assert_eq!(
         status_page_findings(&status_page(
-            "| [a.md](a.md) | 1 | 0 | 0 | 0 | 0 | 0 | 2 | 0 |",
-            &["built", "not-planned", "not-planned"]
+            "| [a.md](a.md) | 1 | 0 | 0 | 0 | 0 | 0 | 2 | 1 | 0 |",
+            &["built", "not-planned", "parked", "not-planned"]
         )),
         Vec::<String>::new()
     );
     assert_eq!(
         status_page_findings(&status_page(
-            "| [a.md](a.md) | 2 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |",
+            "| [a.md](a.md) | 2 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |",
             &["built", "unbuilt"]
         )),
         vec![
@@ -455,11 +456,11 @@ fn the_status_page_check_names_a_wrong_count_or_an_unknown_status() {
     );
     assert_eq!(
         status_page_findings(&status_page(
-            "| [a.md](a.md) | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |",
+            "| [a.md](a.md) | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |",
             &["built", "done"]
         )),
         vec![
-            "line 14: status \"done\" of a row of a.md is not one of built, partial, unbuilt, superseded, out-of-repo, not-code, not-planned"
+            "line 14: status \"done\" of a row of a.md is not one of built, partial, unbuilt, superseded, out-of-repo, not-code, not-planned, parked"
                 .to_owned()
         ]
     );
@@ -470,7 +471,7 @@ fn the_status_page_check_names_a_wrong_count_or_an_unknown_status() {
         )),
         vec![
             "line 7: the summary's built cell of a.md is \"one\", not a count".to_owned(),
-            "line 7: the summary row of a.md has 7 cells, not 9".to_owned(),
+            "line 7: the summary row of a.md has 7 cells, not 10".to_owned(),
             "a.md: the summary says 0 built, the tables have 1".to_owned(),
         ]
     );
