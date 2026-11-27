@@ -614,8 +614,9 @@ impl Host for SystemHost<'_> {
     /// `/usr/local/tierstore/etc` (root:_tierstore, 0750) and refused every configuration with
     /// "Permission denied". `sudo` closes every descriptor but the standard three, so a
     /// descriptor cannot be handed on, and the account must reach the binary by its path: the
-    /// config hook's is the installed one, outside every staged package, and an archive release's
-    /// is in a version directory every user may enter; the binary of a release of the installer
+    /// config hook's is the installed one, outside every staged package. An archive release's
+    /// binary is run by its path inside the release, as before, so its check needs every directory
+    /// above it to be searchable by the account. The binary of a release of the installer
     /// package is in a version directory hostkeeper keeps root's alone, and the check runs a copy
     /// of it at [`CHECK_BINARY`] (made as the copy at [`SERVICE_BINARY`] is, from the binary held
     /// to the checks above, and removed once the check has answered; a copy that cannot be made

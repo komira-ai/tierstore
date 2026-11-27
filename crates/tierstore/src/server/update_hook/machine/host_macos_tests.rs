@@ -103,17 +103,22 @@ fn dscl_call() -> Call {
     Call::new(DSCL_PROGRAM, &args, LIMIT)
 }
 
+/// What a stand-in program answers.
+type Answer = Result<Output, RunError>;
+/// What was at a program while a call ran: its bytes and its mode.
+type Seen = Option<(Vec<u8>, u32)>;
+
 /// A runner that answers from a list, keeps every call, notes what was at the program `sudo` was
 /// asked to run (its bytes and mode) while the call ran, and does `during` while each call runs.
 struct Watching<F: Fn(&Call)> {
-    replies: RefCell<VecDeque<Result<Output, RunError>>>,
+    replies: RefCell<VecDeque<Answer>>,
     calls: RefCell<Vec<Call>>,
-    seen: RefCell<Vec<Option<(Vec<u8>, u32)>>>,
+    seen: RefCell<Vec<Seen>>,
     during: F,
 }
 
 impl<F: Fn(&Call)> Watching<F> {
-    fn new(replies: Vec<Result<Output, RunError>>, during: F) -> Watching<F> {
+    fn new(replies: Vec<Answer>, during: F) -> Watching<F> {
         Watching {
             replies: RefCell::new(replies.into()),
             calls: RefCell::new(Vec::new()),
@@ -124,7 +129,7 @@ impl<F: Fn(&Call)> Watching<F> {
 }
 
 impl<F: Fn(&Call)> Runner for Watching<F> {
-    fn run(&self, call: &Call) -> Result<Output, RunError> {
+    fn run(&self, call: &Call) -> Answer {
         self.calls.borrow_mut().push(call.clone());
         let seen = (call.program == SUDO_PROGRAM)
             .then(|| call.args.get(4))
@@ -346,7 +351,7 @@ fn a_root_mac_check_through_a_copy_says_what_it_ran_and_removes_the_copy_on_ever
         sudo_call(&root, &copy).describe(),
         binary.display()
     );
-    let ends: [(Result<Output, RunError>, Result<Option<String>, String>); 3] = [
+    let ends: [(Answer, Result<Option<String>, String>); 3] = [
         (
             exit(2, "", "the file is refused\n"),
             Ok(Some("the file is refused".to_owned())),
@@ -437,8 +442,8 @@ fn a_copy_that_cannot_be_removed_is_an_error_after_the_check() {
     );
 }
 
-/// Asserts that a root hook on a Mac checks with an archive release's own binary, which is in a
-/// version directory every user may enter, and makes no copy.
+/// Asserts that a root hook on a Mac checks an archive release with that release's own binary,
+/// by its path inside the release as before, and makes no copy.
 #[test]
 fn a_root_mac_check_of_an_archive_release_runs_its_own_binary_and_makes_no_copy() {
     let (_guard, root) = scratch("host-mac-archive");

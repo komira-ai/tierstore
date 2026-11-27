@@ -25,9 +25,11 @@
 //! failed (`host_failed`) and wrote nothing.
 
 use std::cell::{Cell, RefCell};
+use std::ffi::OsString;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::process::ExitCode;
 use std::time::Duration;
 
 use tierstore_testkit::dir::TestDir;
@@ -44,8 +46,8 @@ use crate::server::update_hook::system::{
     BOOTOUT_TIMEOUT, GONE_ATTEMPTS, LAUNCHCTL_TIMEOUT, SYSTEMCTL_PROGRAM, SystemConfig, host_for,
 };
 use crate::server::update_hook::{
-    Clock, Done, HANDOFF_EXEC_CAPABILITY, Instances, LAUNCHD_PLIST, LaunchdPorts, Params,
-    PortError, PortKind, Reason, Record, Reply, STATE_DIR, StateDir, Step,
+    Clock, Done, HANDOFF_EXEC_CAPABILITY, Instances, Invocation, LAUNCHD_PLIST, LaunchdPorts,
+    Machine, Params, PortError, PortKind, Reason, Record, Reply, STATE_DIR, StateDir, Step,
 };
 
 /// Where hostkeeper keeps the versions of the service.
@@ -533,7 +535,7 @@ impl Clock for Mac {
 
 /// The params hostkeeper writes for the update to `version`, from `previous` when there is one:
 /// the keys of the manifest the release sends for a Mac, and the updater's.
-fn params(version: &str, previous: Option<&str>) -> Params {
+fn params_text(version: &str, previous: Option<&str>) -> String {
     let mut text = format!(
         "config_file = \"{CONFIG_FILE}\"\nservice_manager = \"launchd\"\nlaunchd_label = \"{LABEL}\"\n"
     );
@@ -547,7 +549,12 @@ fn params(version: &str, previous: Option<&str>) -> Params {
             release(previous)
         ));
     }
-    Params::parse(&text).expect("params")
+    text
+}
+
+/// [`params_text`], parsed.
+fn params(version: &str, previous: Option<&str>) -> Params {
+    Params::parse(&params_text(version, previous)).expect("params")
 }
 
 /// The record the farm Macs hold: the update from 0.3.202 to 0.3.203, in flight, no marker.
@@ -785,4 +792,84 @@ fn the_account_reaches_the_installed_binary_and_not_the_one_in_a_staged_version(
             stderr: said.into_bytes(),
         }
     );
+}
+
+/// Runs the update hook's command line `tierstore update-hook <words>` on `mac`, as hostkeeper
+/// runs it: the params file is read and checked against the arguments, and the step runs on
+/// the Mac's own ports. Returns the exit status, the last line as JSON, and the words for a
+/// person.
+fn hook(mac: &Mac, words: &[&str]) -> (String, serde_json::Value, String) {
+    let args: Vec<OsString> = ["tierstore", "update-hook"]
+        .iter()
+        .chain(words)
+        .map(OsString::from)
+        .collect();
+    let step = |invocation: &Invocation, params: &Params| mac.step(invocation.step, params);
+    let machine = Machine { step: &step };
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let status = crate::server::update_hook::run(&args, &mut out, &mut err, &machine);
+    let out = String::from_utf8(out).expect("UTF-8");
+    let line = serde_json::from_str(out.lines().last().expect("a last line")).expect("JSON");
+    (
+        format!("{status:?}"),
+        line,
+        String::from_utf8(err).expect("UTF-8"),
+    )
+}
+
+/// Asserts that the command hostkeeper runs on a farm Mac, `tierstore update-hook prepare
+/// <release> --params <file>`, with the params file of the package's manifest, exits 0 with
+/// the hand-over prepared in its last line, leaves the job serving 0.3.202 in the same process,
+/// and leaves no copy of the binary behind; and that the same command for a staged package without
+/// its binary exits 1 with `host_failed`, class `environment`, the two paths in its detail, and
+/// the record as it was.
+#[test]
+fn the_update_hook_command_prepares_a_farm_mac_and_refuses_a_package_without_its_binary() {
+    let mac = farm_mac("mac-package-verb");
+    let (pid, _) = mac.serving().expect("the job serves");
+    mac.stage(NEXT);
+    let file = mac.work.join("params.toml");
+    fs::write(&file, params_text(NEXT, Some(CURRENT))).expect("params file");
+    let file = file.to_string_lossy().into_owned();
+    let staged = release(NEXT);
+
+    let (status, line, err) = hook(&mac, &["prepare", &staged, "--params", &file]);
+    assert_eq!(status, format!("{:?}", ExitCode::from(0)));
+    assert_eq!(
+        line["detail"],
+        format!(
+            "prepared {staged} to follow {}: tierstore hands over to the next image of its process in cutover",
+            release(CURRENT)
+        )
+    );
+    assert_eq!(line.get("reason"), None);
+    assert_eq!(err, "");
+    assert_eq!(mac.serving(), Some((pid, CURRENT.to_owned())));
+    assert_eq!(mac.archive_copies(), Vec::<PathBuf>::new());
+
+    let mac = farm_mac("mac-package-verb-missing");
+    mac.stage(NEXT);
+    let dir = mac.at(&staged);
+    set_mode(&dir, 0o755);
+    let binary = dir
+        .join("tree")
+        .join(package_binary().trim_start_matches('/'));
+    fs::remove_file(&binary).expect("remove the binary");
+    set_mode(&dir, 0o700);
+    let file = mac.work.join("params.toml");
+    fs::write(&file, params_text(NEXT, Some(CURRENT))).expect("params file");
+    let file = file.to_string_lossy().into_owned();
+    let (status, line, _) = hook(&mac, &["prepare", &staged, "--params", &file]);
+    assert_eq!(status, format!("{:?}", ExitCode::from(1)));
+    assert_eq!(line["reason"], "host_failed");
+    assert_eq!(line["class"], "environment");
+    assert_eq!(
+        line["detail"],
+        format!(
+            "host: {} is not there, nor {}",
+            dir.join("bin/tierstore").display(),
+            binary.display()
+        )
+    );
+    assert_eq!(mac.record(), stale_record());
 }
