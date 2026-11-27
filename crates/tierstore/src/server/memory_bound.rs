@@ -20,7 +20,7 @@
 //!   exits with the same status at once, and the descriptor store keeps the mount, as on a crash.
 //!
 //! The thread runs only in the binary, once it has its settings: [`install`] in `cli::main`. A
-//! bound of 0 turns it off, and then `/memoryz` says the memory is not watched.
+//! bound of 0 bytes (`"0B"`) turns it off, and then `/memoryz` says the memory is not watched.
 
 use std::fmt::Write as _;
 use std::future::Future;
@@ -423,18 +423,16 @@ pub(super) fn or_reached(
 }
 
 /// `stop`, or the bound of `watch`, whichever comes first; `stop` alone without a watch.
-pub(super) fn or_reached_of(
+pub(super) async fn or_reached_of(
     stop: impl Future<Output = ()> + Send + 'static,
     watch: Option<Arc<MemoryWatch>>,
-) -> impl Future<Output = ()> + Send + 'static {
-    async move {
-        match watch {
-            Some(watch) => tokio::select! {
-                () = stop => {}
-                () = watch.reached() => {}
-            },
-            None => stop.await,
-        }
+) {
+    match watch {
+        Some(watch) => tokio::select! {
+            () = stop => {}
+            () = watch.reached() => {}
+        },
+        None => stop.await,
     }
 }
 

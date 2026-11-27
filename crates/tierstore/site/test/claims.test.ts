@@ -56,8 +56,8 @@ export function code(text: string): string {
   return out.join('\n');
 }
 
-/** The files that export metrics: the OCI front's, the cache's (and its entries by extents', its runs' request to start, its mounts' tree attaches, its mounts' descriptors, its mounts' opens, its mounts' tree lists, its mounts' requests, its mounts' attaches and detaches of runs, and its provider's refused tree lists) and the tiers'. */
-const EXPORTERS = new Set(['server/oci/metrics.rs', 'server/local_cache/metrics.rs', 'server/local_cache/extents/counts.rs', 'server/local_cache/starts.rs', 'server/local_cache/attaches.rs', 'server/local_cache/descriptors.rs', 'server/local_cache/opens.rs', 'server/local_cache/tree_lists.rs', 'server/local_cache/requests.rs', 'server/local_cache/runs.rs', 'server/local_cache/list_refusals.rs', 'metrics.rs', 'server/build_info.rs', 'server/mod.rs', 'server/front_counts.rs']);
+/** The files that export metrics: the OCI front's, the cache's (and its entries by extents', its runs' request to start, its mounts' tree attaches, its mounts' descriptors, its mounts' opens, its mounts' tree lists, its mounts' requests, its mounts' attaches and detaches of runs, and its provider's refused tree lists), the tiers' and the memory bound's. */
+const EXPORTERS = new Set(['server/memory_bound.rs', 'server/oci/metrics.rs', 'server/local_cache/metrics.rs', 'server/local_cache/extents/counts.rs', 'server/local_cache/starts.rs', 'server/local_cache/attaches.rs', 'server/local_cache/descriptors.rs', 'server/local_cache/opens.rs', 'server/local_cache/tree_lists.rs', 'server/local_cache/requests.rs', 'server/local_cache/runs.rs', 'server/local_cache/list_refusals.rs', 'metrics.rs', 'server/build_info.rs', 'server/mod.rs', 'server/front_counts.rs']);
 
 /** What in the source no longer matches the pages. Each problem names the pages to change. */
 export function staleClaims(src: ReadonlyMap<string, string>): string[] {
@@ -72,7 +72,7 @@ export function staleClaims(src: ReadonlyMap<string, string>): string[] {
     if (/\bCachedStore\b/.test(text)) out.push(`${name} uses CachedStore: the binary has a cache now; update docs/operations.md ("A build node"), docs/examples/cache-in-front-of-s3.md and content/index.html`);
   }
   const routes = new Set([...(src.get('server/mod.rs') ?? '').matchAll(/\(true, "(\/[a-z]+)"/g)].map((m) => m[1]));
-  const want = ['/healthz', '/metricz', '/readyz', '/usagez'];
+  const want = ['/healthz', '/memoryz', '/metricz', '/readyz', '/usagez'];
   if ([...routes].sort().join() !== want.sort().join()) {
     out.push(`the probe routes in server/mod.rs are ${[...routes].sort().join(', ')}, not ${want.join(', ')}: update docs/operations.md ("Probes") and content/demo.html`);
   }

@@ -286,7 +286,8 @@ async fn the_stop_ends_at_the_bound_or_at_the_signal() {
     let stop = or_reached_of(std::future::pending(), Some(Arc::clone(&watch)));
     tokio::pin!(stop);
     assert!(futures::poll!(&mut stop).is_pending());
-    assert_eq!(steps(&watch, &[1000]), [Step::Steady]);
+    // Under the mark, and over it: the stop waits for the bound either way.
+    assert_eq!(steps(&watch, &[300, 1000]), [Step::Steady, Step::Degraded]);
     assert!(futures::poll!(&mut stop).is_pending());
     assert_eq!(steps(&watch, &[1024]), [Step::Reached]);
     stop.await;
@@ -488,7 +489,7 @@ fn with_bound(text: &str, value: &str) -> String {
 }
 
 /// Asserts that `server.memory_bound` is 32 GiB when the file leaves it out, the size the file
-/// gives, and 0 (no bound) for `0`, for every shape of node; and that a size that does not read
+/// gives, and 0 (no bound) for `"0B"`, for every shape of node; and that a size that does not read
 /// is refused naming the key.
 #[test]
 fn the_bound_is_the_key_of_the_server_table_in_every_shape() {
@@ -500,7 +501,7 @@ fn the_bound_is_the_key_of_the_server_table_in_every_shape() {
     ] {
         let settings = settings_from_text(text, DEFAULTS).unwrap();
         assert_eq!(bound_of(&settings), DEFAULT_BOUND, "{shape}");
-        for (value, bytes) in [("\"1GiB\"", GIB), ("0", 0)] {
+        for (value, bytes) in [("\"1GiB\"", GIB), ("\"0B\"", 0)] {
             let settings = settings_from_text(&with_bound(text, value), DEFAULTS).unwrap();
             assert_eq!(bound_of(&settings), bytes, "{shape} {value}");
         }
