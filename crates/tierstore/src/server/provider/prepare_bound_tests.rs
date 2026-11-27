@@ -139,7 +139,8 @@ async fn a_version_2_list_over_the_bound_is_placed_with_no_read_queued() {
         settings.max_queued_bytes = 0;
     })
     .await;
-    let key = rig.put_list_v2(&list_of(&rig.bench.pack)).await;
+    // The rig has put the pack's tree, a version 2 list and its sidecar, under its key.
+    let key = rig.key.clone();
     let id = SourceId {
         agent: AGENT.to_owned(),
         run: "js.1".to_owned(),

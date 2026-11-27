@@ -11,7 +11,7 @@
 //! back once it has been read, refused or dropped (a read holds it while it waits for its turn and
 //! while it runs).
 //!
-//! The cache keeps the count, and shows it on `/metricz`: the bytes the queued reads hold
+//! The cache keeps the count, and shows it on `/metricz` (`metrics.rs`): the bytes the queued reads hold
 //! (`tierstore_provider_prefetch_queued_bytes`) and the preparations whose reads were not queued
 //! for want of room (`tierstore_provider_prefetch_skipped_total`).
 
@@ -19,12 +19,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::LocalCache;
-
-/// The gauge of the bytes held.
-const QUEUED_BYTES: &str = "tierstore_provider_prefetch_queued_bytes";
-
-/// The counter of the preparations whose reads were not queued.
-const SKIPPED: &str = "tierstore_provider_prefetch_skipped_total";
 
 /// The room taken by the queued reads of the node, and the preparations refused room.
 #[derive(Debug, Default)]
@@ -62,15 +56,6 @@ impl QueuedReads {
     pub(in crate::server) fn skipped(&self) -> u64 {
         self.skipped.load(Ordering::Relaxed)
     }
-
-    /// The two families of `/metricz`.
-    pub(super) fn render(&self) -> String {
-        let (bytes, skipped) = (self.bytes(), self.skipped());
-        format!(
-            "# TYPE {QUEUED_BYTES} gauge\n{QUEUED_BYTES} {bytes}\n\
-             # TYPE {SKIPPED} counter\n{SKIPPED} {skipped}\n"
-        )
-    }
 }
 
 impl LocalCache {
@@ -102,20 +87,5 @@ mod tests {
         assert!(reads.take(1, u64::MAX));
         assert!(!reads.take(u64::MAX, u64::MAX));
         assert_eq!((reads.bytes(), reads.skipped()), (1, 2));
-    }
-
-    /// Asserts the text of the two families, in full.
-    #[test]
-    fn the_families_are_a_gauge_of_the_bytes_and_a_counter_of_the_refusals() {
-        let reads = QueuedReads::default();
-        assert!(reads.take(4096, 8192));
-        assert!(!reads.take(8192, 8192));
-        assert_eq!(
-            reads.render(),
-            "# TYPE tierstore_provider_prefetch_queued_bytes gauge\n\
-             tierstore_provider_prefetch_queued_bytes 4096\n\
-             # TYPE tierstore_provider_prefetch_skipped_total counter\n\
-             tierstore_provider_prefetch_skipped_total 1\n"
-        );
     }
 }
