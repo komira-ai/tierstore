@@ -740,6 +740,15 @@ a change to the formats stays additive. The tests need no network: only the buil
 previous release's source. When a release is made, move `rev` to its commit, so that the next
 change is held to it; a tag can be moved and a commit cannot, which is why `rev` is the pin.
 
+`tierstore_prev` is `v0.3.17`, which has no tree store. The tree store's directories of the cache
+directory (`trees/` and `placements/`) are held to a second pin, `tierstore_trees_prev`, at
+`v0.3.190`, used by `tests/trees.rs` alone: each release's tree store places a tree of records and
+an image (the way the mount provider does) and the other release's starts over the directory and
+serves them, drops what ended, and removes nothing while the writer holds the lock. Move its `rev`
+to a newer release's commit when a release changes what the tree store writes or reads, and at the
+latest when the release it names runs on no host. A move of either pin changes `Cargo.lock`, so it
+is followed by `buildrules sync` (docs/farm.md).
+
 ## One-time setup for the site (a maintainer)
 
 The site publish job is off until these exist:

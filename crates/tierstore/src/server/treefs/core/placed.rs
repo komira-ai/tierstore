@@ -28,6 +28,7 @@
 //! (`backing.rs`), since the kernel would map the whole pack onto the file, and the core pins nothing for it: the tree store pins the packs of its trees.
 
 use std::fs::File;
+use std::io::ErrorKind;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -47,6 +48,7 @@ use super::loaded::Loaded;
 use super::said::Failing;
 use super::{Core, Errno, Looked, locked};
 use crate::server::local_cache::{FILL_SOCKET_CONCURRENCY, is_list, manifest_path};
+use crate::tree_image_list::ImageFileError;
 
 /// The bytes 16 to 24 of the key a placement's tree at a location is numbered under; the first
 /// sixteen are the placement's id, the last eight the start of the SHA-256 of the location's path.
@@ -314,7 +316,8 @@ impl Core {
         self.fills.report(Report::Fetched(fetched.counts()));
         self.fills.report(Report::Levels(fetched.levels()));
         if list.load(Ordering::Acquire) {
-            let failed = |why: String| Unread::Failed(format!("the tree list {digest}: {why}"));
+            let failed =
+                |why: ImageFileError| Unread::Failed(format!("the tree list {digest}: {why}"));
             return self.list_of(digest, &root, None, failed);
         }
         flattened.map(Tree::new).map_err(|why| {
@@ -335,10 +338,20 @@ impl Core {
     /// directory and checked, its shape, not its digest, which the tree store checked when it
     /// took the image and checks at each start. Room is made under `fs.tree_list_ram_bytes` first,
     /// unless another tree of the mount shows the list already, and a list that does not fit is
-    /// mapped all the same, and counted (`core/lists.rs`).
+    /// mapped all the same, and counted (`core/lists.rs`). An image file that is not there is a
+    /// placement that has ended, `Gone`: the tree's directory goes with the last placement of the
+    /// tree, so a lookup that races the release of its own source finds no file.
     fn image_of(&self, tree: &TreeDigest, path: String) -> Result<Tree, Unread> {
         let file = image_path(&self.settings.cache_path, tree);
-        let failed = |why: String| Unread::Failed(format!("the image of {tree} at {path}: {why}"));
+        let failed = |why: ImageFileError| {
+            let gone = matches!(&why, ImageFileError::Io(io) if io.kind() == ErrorKind::NotFound);
+            let words = format!("the image of {tree} at {path}: {why}");
+            if gone {
+                Unread::Gone(words)
+            } else {
+                Unread::Failed(words)
+            }
+        };
         self.list_of(tree, &file, Some(path.clone()), failed)
     }
 
@@ -351,18 +364,14 @@ impl Core {
         tree: &TreeDigest,
         file: &std::path::Path,
         location: Option<String>,
-        failed: impl Fn(String) -> Unread,
+        failed: impl Fn(ImageFileError) -> Unread,
     ) -> Result<Tree, Unread> {
         // A list another tree of the mount shows already adds nothing: no room is made for it,
         // and it is never mapped past the cap. One the tree store mapped, which no tree of the
         // mount shows yet, is made room for: the mount holds it from now on.
         let need = self.lists.mapped.need(tree, file);
         let fits = (need == 0 && self.shown(tree)) || self.make_room(need);
-        let image = self
-            .lists
-            .mapped
-            .open(tree, file)
-            .map_err(|why| failed(why.to_string()))?;
+        let image = self.lists.mapped.open(tree, file).map_err(failed)?;
         if !fits {
             self.over_cap(tree);
         }
@@ -576,6 +585,10 @@ mod flat_tests;
 #[cfg(test)]
 #[path = "placed_image_tests.rs"]
 mod image_tests;
+
+#[cfg(test)]
+#[path = "placed_release_tests.rs"]
+mod release_tests;
 
 #[cfg(test)]
 #[path = "tree_read_tests.rs"]

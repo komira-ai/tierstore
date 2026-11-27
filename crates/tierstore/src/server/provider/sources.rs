@@ -321,8 +321,11 @@ impl Provider {
         }
     }
 
-    /// `Release`: stops the source's preparation and removes its placement, and forgets the request
-    /// of its run. A source that is not known is a success.
+    /// `Release`: stops the source's preparation and removes its placement at once, ending the
+    /// hold the file system's mount took at a lookup of the source's path
+    /// (`TreeStore::release_now`), and forgets the request of its run. A tree in the mount's
+    /// memory keeps serving; one it has to read again is gone. The tree goes with the placement
+    /// unless another source's placement has the tree. A source that is not known is a success.
     ///
     /// # Errors
     /// [`ProviderError::Invalid`] for a source that is not well formed;
@@ -348,7 +351,7 @@ impl Provider {
             let refused = self
                 .shared
                 .store
-                .release(&placement)
+                .release_now(&placement)
                 .err()
                 .filter(|why| *why != LifeError::UnknownPlacement);
             if let Some(why) = refused {

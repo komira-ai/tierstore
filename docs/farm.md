@@ -28,7 +28,7 @@ The files of the build, all generated or written once by `buildrules`:
 | `.buckconfig` | the cells, buildrules pinned by commit, the execution platform | `buildrules init`, then by hand (the worker passthrough below) |
 | `toolchains/`, `platforms/` | the pinned Rust toolchain and the remote execution platform | `buildrules init` |
 | `BUCK`, `crates/*/BUCK` | `cargo_workspace` and one `cargo_package` per member | `buildrules init` and `buildrules cargo adopt`, once; then by hand (`extra_srcs`, below) |
-| `buildrules.lock.bzl`, `buildrules.bzl`, `third_party/buildrules/` | Cargo's unit graph of every member, every crates.io crate as a unit pinned by SHA-256 and size, and every git dependency (hostkeeper's crates, the nfsserve fork, the previous tierstore) as GitHub's archive of its pinned commit, by SHA-256 and size (`git_archives.tsv`) | `buildrules sync`; never edited by hand |
+| `buildrules.lock.bzl`, `buildrules.bzl`, `third_party/buildrules/` | Cargo's unit graph of every member, every crates.io crate as a unit pinned by SHA-256 and size, and every git dependency (hostkeeper's crates, the nfsserve fork, the two pinned earlier releases of tierstore) as GitHub's archive of its pinned commit, by SHA-256 and size (`git_archives.tsv`) | `buildrules sync`; never edited by hand |
 
 `Cargo.toml`, `Cargo.lock` and `rust-toolchain.toml` stay the source: `//:check` fails every
 target when the generated table no longer matches them, and prints `buildrules sync` as the fix.

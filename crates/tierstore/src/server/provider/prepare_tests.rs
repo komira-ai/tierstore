@@ -167,16 +167,22 @@ async fn a_source_released_before_its_tree_is_placed_gives_the_placement_up() {
 
 /// Asserts that a source released while its files are being read ends its preparation without
 /// error once the reads in flight end, its tree gone with its placement.
+///
+/// The reads are queued as soon as the list is walked, before the tree is placed, so the read can
+/// be at the upstream before the stage is `Placed`: the test waits for each of the two, the stage
+/// first.
 #[tokio::test]
 async fn a_source_released_during_its_reads_ends_with_its_tree_gone() {
     let rig = Rig::new("prov-run-release-reads").await;
     let gate = rig.bench.rig.tamper.hold_key(&rig.bench.pack.key);
-    let (job, seen) = held(&rig, "js.1", &rig.key);
+    let (job, mut seen) = held(&rig, "js.1", &rig.key);
     let released = Arc::clone(&job.released);
     let running = tokio::spawn(run(Arc::clone(&rig.provider.shared), job));
-    // The three files are one range of the list: one read of the pack.
+    let reported = seen.wait_for(|stage| *stage != Stage::Preparing).await;
+    let reported = reported.expect("the preparation reports").clone();
+    assert_eq!(reported, Stage::Placed);
+    // The three files are one range of the list: one read of the pack, held at the upstream.
     until("the read is at the upstream", || pack_reads(&rig) == 1).await;
-    assert_eq!(*seen.borrow(), Stage::Placed);
     released.store(true, std::sync::atomic::Ordering::SeqCst);
     let store = &rig.bench.store;
     let located = store.locate_fs(&Rig::place_of("js.1", 0)).unwrap();
