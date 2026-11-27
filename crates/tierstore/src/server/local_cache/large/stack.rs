@@ -174,6 +174,8 @@ pub(crate) fn start(parts: StackParts) -> Result<Stack, String> {
     let client = client.map_err(|error| format!("the budget of the new cache: {error}"))?;
     let pool = HashPool::start(NonZeroUsize::MIN, timer.clone());
     let pool = pool.map_err(|error| format!("the hash pool of the new cache: {error}"))?;
+    let registry = Metrics::new(VERSION);
+    let cache = registry.node_cache().cache;
     let engine = Arc::new(FetchEngine::new(
         EngineParts {
             store: entries.clone(),
@@ -181,12 +183,12 @@ pub(crate) fn start(parts: StackParts) -> Result<Stack, String> {
             budget: Arc::new(client.clone()),
             verifier: Arc::new(pool),
             timer,
+            // The engine's dirty bytes and writeback stalls count into the node cache's families.
+            cache_metrics: Some(cache.clone()),
         },
         EngineConfig::default(),
         &tokio::runtime::Handle::current(),
     ));
-    let registry = Metrics::new(VERSION);
-    let cache = registry.node_cache().cache;
     let fetch = registry.fetch_engine(&FetchEngineConfig { drives: Vec::new() });
     let exported = Exported {
         registry,

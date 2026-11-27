@@ -3,7 +3,15 @@
 //! The op owns the claim tokens of its cells (the "one slot" of a claim that a hedge and its
 //! original share): whichever attempt first delivers a verifying cell publishes it, and the
 //! other's bytes are dropped, never written. Attempts run as tasks and report to the op on a
-//! bounded channel, so a slow publish slows the receive (4.8's back-pressure).
+//! bounded channel, so a cell waiting on the dirty-byte cap slows the receive (4.8's
+//! back-pressure).
+//!
+//! - **Dirty-byte cap (4.8):** a verified cell waits before its publish while the cells being
+//!   published hold the cap; cells of `demand` ops go first, so a demand cell is never queued
+//!   behind prepare cells. Its publish then runs on the blocking pool while the op takes the next
+//!   cell, and gives its share of the cap back when it returns, published or failed. Only a cell
+//!   whose claim token the op still holds reaches the cap: a hedge's loser never does. The op
+//!   ends only after its publishes have returned.
 //!
 //! - **Stall:** before the first byte, a GET that has not answered for the pre-first-byte timeout
 //!   (restarted when the headers said `x-ts-queue-wait-ms`: a queued drive is not a stall); after
@@ -46,6 +54,7 @@ use crate::baseline::timeout;
 use crate::engine::{ALL_CLASSES, Armed, Claimed, Dispatch, Inner, runs_of};
 use crate::fill::{Fill, Phase, Resolved};
 use crate::plan::{CELL_BYTES, size_class};
+use crate::pool::Slot;
 use crate::route::Routing;
 use crate::settle::bad_expiry;
 use crate::stats::{GetKind, TimerKind};
@@ -89,6 +98,35 @@ struct Op {
     relocations: u32,
     tx: mpsc::Sender<Event>,
     timers: Vec<JoinHandle<()>>,
+    /// Publishes handed to the blocking pool and not yet settled.
+    publishes: Vec<JoinHandle<()>>,
+}
+
+/// What a publish of `cell` (`len` bytes) of `fill` leaves: the cell is no longer the op's, and
+/// is published (`ok`) or fails for its waiters.
+fn published(inner: &Arc<Inner>, fill: &Arc<Fill>, cell: u32, len: u64, ok: bool) {
+    {
+        let mut st = inner.lock();
+        for fs in st.fills.get_mut(&fill.seq).into_iter() {
+            fs.owner.remove(&cell);
+            fs.mismatches.remove(&cell);
+            fs.wants.remove(&cell);
+            fs.unavailable_since = None;
+            // A cell whose publish failed fails for its waiters (EIO); a later wait sees a
+            // claimed cell no op owns and fails too, until the entry settles it.
+            if !ok {
+                fs.fail(cell, cell + 1);
+            }
+        }
+        if ok {
+            st.stats.cells_published += 1;
+            st.stats.bytes_published += len;
+        } else {
+            st.stats.bytes_wasted += len;
+        }
+    }
+    fill.bump();
+    inner.bump();
 }
 
 /// Runs the op of a dispatched item whose cells were `claimed`, under `permit`.
@@ -124,8 +162,12 @@ pub(crate) async fn run(
         relocations: 0,
         tx,
         timers: Vec::new(),
+        publishes: Vec::new(),
     };
     let end = op.start(d.source, kind, permit, rx).await;
+    // Nothing reads the attempts' events any more: they stop now, not after the publishes.
+    op.stop();
+    op.settle().await;
     op.finish(end);
 }
 
@@ -262,8 +304,9 @@ impl Op {
                     cell,
                     bytes,
                     verdict,
+                    slot,
                 } => {
-                    self.cell(&source, cell, bytes, verdict).await;
+                    self.cell(&source, cell, bytes, verdict, slot).await;
                     None
                 }
                 Event::Ended {
@@ -284,44 +327,61 @@ impl Op {
         End::Done
     }
 
-    async fn cell(&mut self, source: &Source, cell: u32, bytes: Bytes, verdict: Option<Verdict>) {
+    async fn cell(
+        &mut self,
+        source: &Source,
+        cell: u32,
+        bytes: Bytes,
+        verdict: Option<Verdict>,
+        slot: Slot,
+    ) {
         let len = bytes.len() as u64;
-        let Some(token) = self.tokens.remove(&cell) else {
+        let token = self.tokens.remove(&cell);
+        let token = match (token, verdict) {
+            (Some(token), Some(Verdict::Mismatch)) => {
+                if self.mismatch(cell, token, source) {
+                    self.refetch(cell, source);
+                }
+                None
+            }
+            (token, _) => token,
+        };
+        let Some(token) = token else {
             self.inner.with_stats(|s| s.bytes_wasted += len);
+            self.inner.pool.recycle(bytes);
             return;
         };
-        if verdict == Some(Verdict::Mismatch) {
-            if self.mismatch(cell, token, source) {
-                self.refetch(cell, source);
-            }
-            self.inner.with_stats(|s| s.bytes_wasted += len);
-            return;
+        let t0 = self.inner.now();
+        let (room, waited) = self.inner.dirty.take(self.class, len).await;
+        let stalled_ms = self.inner.now() - t0;
+        let metrics = self.inner.parts.cache_metrics.iter();
+        for m in metrics.filter(|_| waited) {
+            m.writeback_stall_seconds.observe_ms((), stalled_ms);
         }
         let entry = self.entry.clone();
-        let published = tokio::task::spawn_blocking(move || entry.publish(token, &bytes)).await;
-        let ok = matches!(published, Ok(Ok(())));
-        {
-            let mut st = self.inner.lock();
-            for fs in st.fills.get_mut(&self.fill.seq).into_iter() {
-                fs.owner.remove(&cell);
-                fs.mismatches.remove(&cell);
-                fs.wants.remove(&cell);
-                fs.unavailable_since = None;
-                // A cell whose publish failed fails for its waiters (EIO); a later wait sees a
-                // claimed cell no op owns and fails too, until the entry settles it.
-                if !ok {
-                    fs.fail(cell, cell + 1);
-                }
-            }
-            if ok {
-                st.stats.cells_published += 1;
-                st.stats.bytes_published += len;
-            } else {
-                st.stats.bytes_wasted += len;
-            }
+        let inner = self.inner.clone();
+        let publish = tokio::task::spawn_blocking(move || {
+            let ok = entry.publish(token, &bytes).is_ok();
+            // The cap's share comes back as soon as the publish returns, published or not.
+            drop(room);
+            inner.pool.recycle(bytes);
+            drop(slot);
+            ok
+        });
+        let inner = self.inner.clone();
+        let fill = self.fill.clone();
+        self.publishes.push(self.inner.rt.spawn(async move {
+            let ok = matches!(publish.await, Ok(true));
+            published(&inner, &fill, cell, len, ok);
+        }));
+    }
+
+    /// Waits for the publishes this op handed over.
+    async fn settle(&mut self) {
+        for p in std::mem::take(&mut self.publishes) {
+            // A publish task is never aborted.
+            let _ = p.await;
         }
-        self.fill.bump();
-        self.inner.bump();
     }
 
     /// A verification failure of `cell` from `source`: reported, counted, and the token kept
@@ -623,13 +683,17 @@ impl Op {
         self.launch(cells, source, GetKind::Hedge, Class::Demand, None, true);
     }
 
-    fn finish(mut self, end: End) {
+    /// Aborts the running attempts and the timers.
+    fn stop(&self) {
         for r in self.running.values() {
             r.task.abort();
         }
         for t in &self.timers {
             t.abort();
         }
+    }
+
+    fn finish(mut self, end: End) {
         let hedges = self.running.values().filter(|r| r.hedge).count();
         let tokens = std::mem::take(&mut self.tokens);
         let left: Vec<u32> = tokens.keys().copied().collect();

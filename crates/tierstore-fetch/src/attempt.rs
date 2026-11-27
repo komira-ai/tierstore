@@ -1,11 +1,18 @@
-//! One attempt of an op (4.6): the GETs of a run of claimed cells from one source, cut into
-//! cells as the bytes arrive and verified per cell, with the pre-first-byte and stall timeouts of
-//! the injected clock. An attempt reports to its op on the op's channel; it never publishes.
+//! One attempt of an op (4.6): the GETs of a run of claimed cells from one source, received
+//! into the pool's cell buffers (4.8) as the bytes arrive and verified per cell, with the
+//! pre-first-byte and stall timeouts of the injected clock. An attempt reports to its op on the
+//! op's channel; it never publishes.
+//!
+//! An attempt takes a buffer before it reads a cell's first bytes and hands each full cell to its
+//! op before it takes the next buffer, so it never waits for a buffer while it holds a full cell.
+//! The wait for a buffer is local: it moves the pre-first-byte and stall deadlines on by its
+//! length (a drive is not stalled because the node is out of buffers), and is left out of the
+//! first-byte and network times the controller is told (4.3: local time is excluded).
 
 use std::future::Future;
 use std::sync::Arc;
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use futures::StreamExt;
 use futures::future::Either;
 use tierstore_fetch_api::budget::{Observation, Outcome, Permit};
@@ -19,6 +26,7 @@ use crate::baseline::timeout;
 use crate::engine::{Armed, Inner, runs_of};
 use crate::fill::Fill;
 use crate::plan::{CELL_BYTES, size_class};
+use crate::pool::{CellBuf, Slot};
 use crate::stats::{GetKind, TimerKind};
 
 /// Events an op waits for.
@@ -29,6 +37,8 @@ pub(crate) enum Event {
         cell: u32,
         bytes: Bytes,
         verdict: Option<Verdict>,
+        /// The pool slot of the cell's buffer, held until its bytes are dropped.
+        slot: Slot,
     },
     Ended {
         attempt: u32,
@@ -213,10 +223,21 @@ impl Attempt {
             Some(_) => inner.now() + first_byte,
             None => t0 + first_byte,
         };
-        let mut cells = Cells::new(&fill, run, range);
+        let mut cells = Cells::new(&fill, run);
         let mut first_at = None;
+        // Time spent waiting for buffers, in all and before the first byte.
+        let mut local = 0;
+        let mut local_before_first = 0;
         let mut body = response.body;
         loop {
+            // The buffer of the next cell, before its bytes are read.
+            if cells.buf.is_none() & !cells.complete() {
+                let asked = inner.now();
+                cells.buf = Some(inner.pool.take(self.class).await);
+                let waited = inner.now() - asked;
+                local += waited;
+                deadline += waited;
+            }
             let kind = match first_at {
                 None => TimerKind::FirstByte,
                 Some(_) => TimerKind::Stall,
@@ -241,7 +262,8 @@ impl Attempt {
             let now = inner.now();
             if first_at.is_none() {
                 first_at = Some(now);
-                let ms = now - t0;
+                local_before_first = local;
+                let ms = (now - t0).saturating_sub(local);
                 self.observe(
                     Some(u32::try_from(ms).unwrap_or(u32::MAX)),
                     signals,
@@ -253,18 +275,39 @@ impl Attempt {
             }
             let len = chunk.len() as u64;
             inner.with_stats(|s| s.bytes_fetched += len);
-            let Some(done) = cells.push(chunk) else {
-                // A body longer than its part: nothing of it is used.
-                inner.with_stats(|s| s.bytes_wasted += len);
+            if len > cells.left() {
+                // A body longer than its part: nothing of this chunk is used.
+                let buffered = cells.buffered();
+                inner.with_stats(|s| s.bytes_wasted += len + buffered);
                 return Err(self.fail(FailKind::Transport));
-            };
-            for (cell, bytes) in done {
-                let (verdict, bytes) = verify(&inner, &fill, cell, bytes).await;
+            }
+            let mut chunk = chunk;
+            while !chunk.is_empty() {
+                // A chunk that runs into the next cell takes its buffer after the last cell is
+                // handed over.
+                let mut buf = match cells.buf.take() {
+                    Some(b) => b,
+                    None => {
+                        let asked = inner.now();
+                        let b = inner.pool.take(self.class).await;
+                        local += inner.now() - asked;
+                        b
+                    }
+                };
+                let take = (cells.len - buf.buf.len()).min(chunk.len());
+                buf.buf.extend_from_slice(&chunk.split_to(take));
+                if buf.buf.len() < cells.len {
+                    cells.buf = Some(buf);
+                    continue;
+                }
+                let cell = cells.advance();
+                let (verdict, bytes) = verify(&inner, &fill, cell, buf.buf.freeze()).await;
                 let event = Event::Cell {
                     source: self.source.clone(),
                     cell,
                     bytes,
                     verdict,
+                    slot: buf.slot,
                 };
                 let _ = self.tx.send(event).await;
             }
@@ -275,7 +318,8 @@ impl Attempt {
             inner.with_stats(|s| s.bytes_wasted += buffered);
             return Err(self.fail(FailKind::Transport));
         }
-        let elapsed = inner.now() - first_at.unwrap_or(t0);
+        let elapsed =
+            (inner.now() - first_at.unwrap_or(t0)).saturating_sub(local - local_before_first);
         let ms_per_mib = elapsed.saturating_mul(CELL_BYTES) / range.len.max(1);
         inner.parts.budget.observe(Observation::Network {
             node: Some(self.source.device.node()),
@@ -350,25 +394,33 @@ async fn verify(
     (Some(verdict), bytes)
 }
 
-/// Cuts a part's bytes into its cells.
+/// Where a part's bytes are in its cells.
 struct Cells {
+    /// The cell the next bytes belong to.
     next: u32,
     end: u32,
+    /// The length of cell `next`.
     len: usize,
-    buf: BytesMut,
+    /// Bytes from the start of cell `next` to the end of the part's last cell.
+    left: u64,
+    /// The buffer of cell `next`, once its first bytes are on the way.
+    buf: Option<CellBuf>,
     fill_size: u64,
 }
 
 impl Cells {
-    fn new(fill: &Fill, run: CellRun, range: ByteRange) -> Self {
+    fn new(fill: &Fill, run: CellRun) -> Self {
+        let (start, _) = fill.cell_range(run.first);
+        let (last, last_len) = fill.cell_range(run.first + run.count - 1);
         let mut c = Self {
             next: run.first,
             end: run.first + run.count,
             len: 0,
-            buf: BytesMut::new(),
+            left: last + last_len - start,
+            buf: None,
             fill_size: fill.spec.size,
         };
-        c.len = c.cell_len(range.offset);
+        c.len = c.cell_len(start);
         c
     }
 
@@ -377,29 +429,18 @@ impl Cells {
         (CELL_BYTES.min(self.fill_size.saturating_sub(offset))) as usize
     }
 
-    /// Takes `chunk`; the cells it completed, or `None` when it runs past the part.
-    fn push(&mut self, mut chunk: Bytes) -> Option<Vec<(u32, Bytes)>> {
-        let mut out = Vec::new();
-        while !chunk.is_empty() {
-            if self.next >= self.end {
-                return None;
-            }
-            let need = self.len - self.buf.len();
-            let cell = if self.buf.is_empty() && chunk.len() >= need {
-                chunk.split_to(need)
-            } else {
-                let take = need.min(chunk.len());
-                self.buf.extend_from_slice(&chunk.split_to(take));
-                if self.buf.len() < self.len {
-                    continue;
-                }
-                self.buf.split().freeze()
-            };
-            out.push((self.next, cell));
-            self.next += 1;
-            self.len = self.cell_len(u64::from(self.next) * CELL_BYTES);
-        }
-        Some(out)
+    /// Cell `next` is full: the cell, and the next one is current.
+    fn advance(&mut self) -> u32 {
+        let cell = self.next;
+        self.left -= self.len as u64;
+        self.next += 1;
+        self.len = self.cell_len(u64::from(self.next) * CELL_BYTES);
+        cell
+    }
+
+    /// The bytes the part can still take.
+    fn left(&self) -> u64 {
+        self.left - self.buffered()
     }
 
     fn complete(&self) -> bool {
@@ -407,6 +448,6 @@ impl Cells {
     }
 
     fn buffered(&self) -> u64 {
-        self.buf.len() as u64
+        self.buf.as_ref().map_or(0, |b| b.buf.len() as u64)
     }
 }

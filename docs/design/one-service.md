@@ -1,7 +1,16 @@
 # tierstore as one service: one process, one unit, one configuration file
 
 Status: **approved by the owner on 2026-11-24, with the privilege design simplified to what is here (the process holds
-`CAP_SYS_ADMIN` for its life). No code changes come with this document; the build plan of section 6 builds it.** It reverses decision C5 of
+`CAP_SYS_ADMIN` for its life). Release M (phase 1, P1 to P7 of section 6) is built on Linux and macOS: the `fs` interface
+(komira-ai/tierstore#448, komira-ai/tierstore#450), the core's calls into the cache (komira-ai/tierstore#445), the start of the one process (komira-ai/tierstore#454), the one hand-over's
+wire format (komira-ai/tierstore#452), the macOS hand-over to the next image (komira-ai/tierstore#456, komira-ai/tierstore#462, komira-ai/tierstore#463), the unit and plists (komira-ai/tierstore#446), and the update hook and
+the switch (komira-ai/tierstore#458). The Linux start now also takes the cache lock with the sockets, and its verify waits for read-write
+(komira-ai/tierstore#571). Not built: the Linux start does not yet take the mount, the control socket and the sockets in one
+conversation (`take_service`, `Offer::with_mount` and `treefs::handover::offered` have no caller outside tests; the start takes
+the mount by `take-fs 1`), and the successor still scans the cache at `written` before it binds the mount-provider socket
+(komira-ai/tierstore#479, komira-ai/tierstore#522). Phase 2 (P9, release M+1, section 5) is not built: `tierstore fs`, the fill
+socket and the `Fills` trait, `fs.toml` and the `tierstore-fs` units still ship (komira-ai/tierstore#523, komira-ai/tierstore#524).
+P8 is in the deployment's repository.** It reverses decision C5 of
 [virtual-build-fs.md](virtual-build-fs.md) (section 13.1, "a second process on Linux build nodes holding `CAP_SYS_ADMIN`,
 with no network") on the owner's instruction: tierstore is one service, one process and one configuration file, and the
 file system is an `[[interface]]` of type `fs` inside it, as section 4 of [pluggable-interfaces.md](pluggable-interfaces.md)
@@ -469,8 +478,8 @@ Where each step comes from:
 
 ### 3.2 The cache lock
 
-Today the cache lock is an `flock(2)` on `<cache>/.lock` (`server/lock.rs`). The successor of a hand-over does not get it:
-it serves read-only until the old process exits and the kernel frees the lock, and then takes it at the next tick of
+Today the cache lock is an `flock(2)` on `<cache>/.lock` (`server/lock.rs`). Before komira-ai/tierstore#571 the successor of a hand-over did not get it:
+it served read-only until the old process exited and the kernel freed the lock, and then took it at the next tick of
 `local_cache.lock_interval` (`local_cache/hold.rs`). Meanwhile the old process kept answering the fill socket, so the file
 system's fills went on through the old process's whole drain.
 
