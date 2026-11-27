@@ -197,6 +197,7 @@ impl LargeRig {
             ),
             // No test moves the engine's clock: no timer of the engine fires.
             timer: Arc::new(ManualTimer::new(clock)),
+            cache_metrics: None,
         };
         let engine = Arc::new(FetchEngine::new(
             parts,
