@@ -687,6 +687,7 @@ impl LocalCache {
         text.push_str(&short_objects(inner.upstream.short_objects()));
         text.push_str(&inner.extents.counters.render(entries, filled));
         text.push_str(&inner.starts.render());
+        text.push_str(&inner.queued_reads.render());
         text
     }
 }

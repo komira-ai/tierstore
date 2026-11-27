@@ -39,6 +39,7 @@ pub(super) fn settings() -> Settings {
         mount_wait: long,
         ttl: long,
         max_list_bytes: crate::MAX_TREE_LIST_BYTES,
+        max_queued_bytes: super::sources::PREFETCH_QUEUE_BYTES,
     }
 }
 
