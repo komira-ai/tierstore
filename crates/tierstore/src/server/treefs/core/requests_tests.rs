@@ -71,8 +71,8 @@ fn a_request_never_answered_is_not_counted() {
 /// Asserts that the report is sent only when a request was answered since the report before: a
 /// core that answered none sends none; one request, and the report carries it; no request
 /// since, and nothing more is sent; one more, and the next report carries both, the totals since
-/// the process started. Each look sends `opens` too, in order on the same thread, so once its
-/// `opens` is there a `requests` it sent would be.
+/// the process started. Each look sends `treelists` after `requests`, in order on the same thread,
+/// so once its `treelists` is there a `requests` it sent is too.
 #[test]
 fn the_report_is_sent_only_when_a_request_was_answered_since_the_last() {
     let rig = Rig::new("tfs-requests-report", sample());
@@ -80,7 +80,7 @@ fn the_report_is_sent_only_when_a_request_was_answered_since_the_last() {
     let told = || rig.upstream.asked("requests");
     let looked = |looks: usize| {
         core.look_around();
-        until(|| rig.upstream.asked("opens").len() == looks);
+        until(|| rig.upstream.asked("treelists").len() == looks);
     };
     looked(1);
     assert_eq!(told(), Vec::<String>::new());

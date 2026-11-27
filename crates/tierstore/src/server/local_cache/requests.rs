@@ -136,12 +136,10 @@ impl Requests {
             return None;
         }
         let numbers: Vec<u64> = numbers.split(' ').map(number).collect::<Option<_>>()?;
-        let [process, cells @ ..] = numbers.as_slice() else {
-            return None;
-        };
-        if cells.len() != KINDS.len() * (1 + BUCKETS) {
+        if numbers.len() != 1 + KINDS.len() * (1 + BUCKETS) {
             return None;
         }
+        let (process, cells) = (numbers[0], &numbers[1..]);
         let mut spans = [Spans::default(); KINDS.len()];
         // Each chunk is the milliseconds and then the buckets: `1 + BUCKETS` numbers.
         for (spans, cells) in spans.iter_mut().zip(cells.chunks_exact(1 + BUCKETS)) {
@@ -152,7 +150,7 @@ impl Requests {
         }
         Some(Self {
             mount: mount.to_owned(),
-            process: *process,
+            process,
             spans,
         })
     }

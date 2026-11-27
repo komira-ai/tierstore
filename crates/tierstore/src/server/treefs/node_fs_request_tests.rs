@@ -128,14 +128,15 @@ fn the_stop_of_the_readers_tells_the_node_of_the_requests() {
     let wire = Wire::new("nodefs-requests-drain");
     assert_eq!(wire.ask(op::GETATTR, node(TOOL), &[0; 16]).error, 0);
     let told = || wire.rig.upstream.asked("requests");
-    let opens = || wire.rig.upstream.asked("opens");
+    let lists = || wire.rig.upstream.asked("treelists");
     wire.fs.drain();
-    until(|| told().len() == 1 && opens().len() == 1);
+    until(|| told().len() == 1 && lists().len() == 1);
     let sent = Requests::parse(told()[0].strip_prefix("requests ").unwrap()).unwrap();
     assert_eq!(sent, wire.rig.core.requests_report());
     assert_eq!(counts(&wire), of(&[RequestKind::Getattr]));
     wire.fs.drain();
-    // The reports go in order: once the second `opens` is there, a second `requests` would be.
-    until(|| opens().len() == 2);
+    // The reports go in order, `treelists` after `requests`: once the second `treelists` is
+    // there, a second `requests` would be too.
+    until(|| lists().len() == 2);
     assert_eq!(told().len(), 1);
 }
