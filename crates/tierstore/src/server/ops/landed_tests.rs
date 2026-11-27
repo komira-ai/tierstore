@@ -26,6 +26,9 @@ use crate::{Backend, Error, FaultyBackend, MemoryBackend, Op, S3Backend, TestClo
 const SCOPED: (&str, &str) = ("scoped-a", "scoped-secret-0123456789");
 const PRESIGN: &str = "pack-presign";
 
+/// A put a test sends: the key, the headers and the body.
+type Put<'a> = (&'a str, &'a [(&'a str, &'a str)], &'a [u8]);
+
 /// A server over `backend` with the full key alone.
 fn server_over(backend: Arc<dyn Backend>) -> (Arc<Server>, ServerConfig) {
     let clock = Arc::new(TestClock::new());
@@ -312,7 +315,7 @@ async fn a_put_through_a_cache_that_writes_through_answers_the_upstreams_etag() 
     let large = pattern(17 << 20);
     let small = pattern(3 << 10);
     let create: &[(&str, &str)] = &[("if-none-match", "*")];
-    let puts: [(&str, &[(&str, &str)], &[u8]); 4] = [
+    let puts: [Put<'_>; 4] = [
         ("cas/b/small", create, &small),
         ("cas/b/large", &[], &large),
         ("logs/small", &[], &small),

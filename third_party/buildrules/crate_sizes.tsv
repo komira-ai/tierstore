@@ -52,6 +52,8 @@ bytes-utils 0.1.4 20703
 byteview 0.10.2 21900
 cc 1.6.0 116280
 cfg-if 1.0.5 9578
+chacha20 0.10.2 38197
+chrono 0.4.45 240866
 clap 4.6.7 65831
 clap_builder 4.6.7 171709
 clap_derive 4.6.7 33942
@@ -110,6 +112,7 @@ generator 0.8.12 57981
 generic-array 0.14.7 15950
 getrandom 0.2.17 40780
 getrandom 0.3.4 50932
+getrandom 0.4.3 52437
 h2 0.4.20 180331
 hashbrown 0.14.5 141498
 hashbrown 0.15.5 140908
@@ -126,11 +129,13 @@ http-body 1.1.0 7887
 http-body-util 0.1.5 18574
 httparse 1.10.1 45190
 httpdate 1.0.3 10639
+humantime 2.4.0 23251
 hybrid-array 0.4.15 36801
 hyper 1.12.0 172269
 hyper-rustls 0.27.10 23240
 hyper-timeout 0.5.2 19222
 hyper-util 0.1.21 126820
+iana-time-zone 0.1.65 34079
 icu_collections 2.3.0 87970
 icu_locale_core 2.3.0 80250
 icu_normalizer 2.3.0 530595
@@ -186,10 +191,12 @@ num-integer 0.1.47 23502
 num-iter 0.1.46 10763
 num-rational 0.4.2 28159
 num-traits 0.2.19 51631
+object_store 0.14.2 310684
 oid-registry 0.8.1 16668
 once_cell 1.21.4 35010
 openssl-probe 0.2.1 9155
 outref 0.5.2 5621
+parking_lot 0.12.5 46735
 parking_lot_core 0.9.12 34110
 pem 4.0.0 18770
 percent-encoding 2.3.2 11583
@@ -211,10 +218,13 @@ prost-reflect 0.16.5 116826
 prost-types 0.14.6 50256
 protox 0.10.0 43266
 protox-parse 0.10.0 43394
+quick-xml 0.41.0 231661
 quick_cache 0.6.24 63960
 quote 1.0.47 31622
+rand 0.10.4 107579
 rand 0.9.5 100216
 rand_chacha 0.9.0 18258
+rand_core 0.10.1 22833
 rand_core 0.9.5 24129
 rcgen 0.14.10 65329
 redb 4.6.0 448194
@@ -249,6 +259,7 @@ serde_core 1.0.229 63100
 serde_derive 1.0.229 59864
 serde_json 1.0.151 156556
 serde_spanned 1.1.2 11124
+serde_urlencoded 0.7.1 12822
 sfa 1.0.0 15686
 sha1 0.10.7 14582
 sha2 0.10.9 29271
