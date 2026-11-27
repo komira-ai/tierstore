@@ -480,7 +480,7 @@ A downstream action's input tree is then entries into the upstream actions' outp
 - **Local cache.** Records live in `local_cache.path/trees/` and placements in `placements/`; packs are cache entries (a new `extents-v1` directory for partial ones, 6.3); pins use the existing pin table, per pack; fills use the single flight table; the budget, marks and `pin_limit` apply. Nothing new is accounted for outside the cache's budget except the records, which are small (inferred: about 50 bytes a file entry), counted into it.
 - **Docs to change in the PRs that build it (P10, T19)**: `tree-manifest.md` (says "no process of tierstore reads or writes a manifest yet", already stale given the fs process; and gains a pointer to the record), a new `trees.md`, `configuration.md` (`[trees]`), `clients.md` (the endpoint, placements), `keys.md` (the grants), `metrics.md`, `operations.md` (lifetime, restart), `docs/stored-formats.md` (the record), `prefetch-api.md` (hydrate superseded: deprecated for one release, then removed), `virtual-build-fs.md` (the fs resolves through the tree store; no passthrough for a pack member), and the glossary of tierstore-design.md.
 
-## 15. Tasks, one pull request each, smallest first (P7; none started)
+## 15. Tasks, one pull request each, smallest first (P7; tasks 1, 2, 4 and 5 are built, 3 partly; the create call and its prefetch are not planned; 6 and 7 are not in this repository; see the Status line)
 
 | # | Where | Task |
 |---|---|---|
