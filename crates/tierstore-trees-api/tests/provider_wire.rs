@@ -101,11 +101,11 @@ const RELEASE_ATTEMPT: &[u8] = &[
     0x20, 0x03, // attempt
 ];
 
-/// Asserts the attempt on the wire both ways: a source that names one is the golden bytes, field 4
-/// a varint; a source that names none (attempt 0) writes no byte for it, so an agent that counts no
-/// attempts sends exactly what it sent before the field; the bytes of such an agent decode as
-/// attempt 0; and the bytes with the attempt decode, field 4 skipped, as the source without it, as a
-/// provider that does not know the field reads them.
+/// Asserts the attempt on the wire both ways: a source that names one is the golden bytes, the
+/// source's bytes before the field followed by field 4 as a varint (what a provider that does not
+/// know the field skips, as `a_prepare_is_the_golden_bytes_both_ways` shows of an unknown field); a
+/// source that names none (attempt 0) writes no byte for it, so an agent that counts no attempts
+/// sends exactly what it sent before the field; and the bytes of such an agent decode as attempt 0.
 #[test]
 fn a_sources_attempt_is_field_4_and_absent_when_0() {
     let source = |attempt| Source {

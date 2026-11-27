@@ -38,6 +38,7 @@ async fn prepared(rig: &Rig, run_name: &str, key: &str) -> Stage {
         agent: AGENT.to_owned(),
         run: run_name.to_owned(),
         index: 0,
+        attempt: 0,
     };
     let (job, seen) = rig.provider.hold(id, key);
     run(Arc::clone(&rig.provider.shared), job).await;

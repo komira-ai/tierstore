@@ -28,6 +28,7 @@ fn job(run: &str, key: &str, released: bool) -> (Job, watch::Receiver<Stage>) {
             agent: AGENT.to_owned(),
             run: run.to_owned(),
             index: 0,
+            attempt: 0,
         },
         key: key.to_owned(),
         digest: tree_list_digest(key).expect("a list key"),
@@ -43,6 +44,7 @@ fn held(rig: &Rig, run: &str, key: &str) -> (Job, watch::Receiver<Stage>) {
         agent: AGENT.to_owned(),
         run: run.to_owned(),
         index: 0,
+        attempt: 0,
     };
     rig.provider.hold(id, key)
 }
