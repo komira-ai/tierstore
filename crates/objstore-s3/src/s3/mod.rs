@@ -32,6 +32,12 @@
 //! the digest an object was written with back (`checksum.rs`):
 //! [`S3Store::put_stream_new_sha256`] and [`S3Store::head_sha256`].
 //!
+//! Every single PUT names itself with a token of its own, and one that got no answer from the
+//! store (its body or its transport failed) is followed by one look at the key, which deletes an
+//! object of the wrong length that the PUT made, and only that one (`cut_put.rs`,
+//! [`S3Store::cut_puts`]). A streamed write can send digests of its body for the store to check
+//! ([`S3Store::put_stream_new_checked`], [`S3Store::put_stream_replacing_checked`]).
+//!
 //! A copy within the bucket is the store's own (`copy.rs`): [`S3Store::copy_object`] and
 //! [`S3Store::upload_part_copy`], with the source's conditions sent for the store to test.
 
@@ -39,6 +45,7 @@ mod bound;
 mod checksum;
 mod copy;
 mod credentials;
+mod cut_put;
 mod endpoint;
 #[cfg(feature = "testkit")]
 pub mod fake;
@@ -56,12 +63,13 @@ mod xml;
 pub use checksum::StoredSha256;
 pub use copy::{CopyAnswer, CopyConditions, CopySource};
 pub use credentials::{AwsEnv, CredentialSource, Credentials, CredentialsError};
+pub use cut_put::CutPuts;
 pub use endpoint::Addressing;
 pub use multipart::{
     MAX_PART_BYTES, MAX_PARTS, MIN_PART_BYTES, PART_BYTES, SINGLE_PUT_MAX, part_size, part_size_of,
 };
 pub use parts::{OpenUpload, PartsPage, StoredPart, UploadsPage};
-pub use streamed::{ObjectBody, ObjectRead};
+pub use streamed::{ObjectBody, ObjectRead, PutChecksums};
 pub use tagged::{ObjectHead, PutAnswer, StampedObject, StampedPage};
 pub use tuning::{READ_RETRIES, S3Tuning};
 
@@ -245,6 +253,8 @@ struct Conn {
     request_timeout: Duration,
     min_body_rate: Option<NonZeroU64>,
     tuning: S3Tuning,
+    /// What the looks after PUTs that got no answer did (`cut_put.rs`).
+    cut: cut_put::CutCounts,
 }
 
 impl fmt::Debug for S3Store {
@@ -351,6 +361,7 @@ impl S3Store {
             request_timeout: config.request_timeout,
             min_body_rate: config.min_body_rate,
             tuning,
+            cut: cut_put::CutCounts::default(),
         };
         Ok(Self {
             conn: Arc::new(conn),

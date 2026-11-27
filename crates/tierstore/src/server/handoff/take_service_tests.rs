@@ -11,8 +11,8 @@ use std::time::Duration;
 use tokio::net::UnixListener;
 
 use crate::server::handoff::testing::{
-    ask, connect, fake_mount, handoff, identity, listening, scratch, settle, socket, texts, told,
-    within,
+    ask, connect, fake_mount, fake_mount_at, handoff, identity, listening, scratch, settle, socket,
+    texts, told, within,
 };
 use crate::server::handoff::{Front, HandoffError, Offer, wire};
 use crate::server::local_cache::Mode;
@@ -20,7 +20,7 @@ use crate::server::local_cache::testing::Rig;
 use crate::server::lock::try_take;
 
 use super::super::mount::{MountWant, Prepare};
-use super::super::offer::{HOLDS_MOUNT, NO_MOUNT};
+use super::super::offer::{HOLDS_MOUNT, MOUNT_BUSY, NO_MOUNT};
 use super::{Ask, Inherited, Knobs, Request, Want, take, take_as, take_service};
 
 /// The wait of the offer's `ready` step and of the mount's quiesce: only a hung test reaches it.
@@ -430,9 +430,11 @@ async fn an_instance_without_a_mount_refuses_the_mount_line_and_is_asked_again_w
 }
 
 /// Asserts that an instance that holds the mount refuses, by name, a taker that does not ask for
-/// it, with or without the `ready` step, and was told nothing of the hand-over: the mount is not
-/// quiesced, and the instance goes on. It would catch a mount left with an instance that is about
-/// to end, under the rollback of the design's section 4.2.
+/// it and would leave the mount with it: one that asks `take 1` alone at its request, and one that
+/// asks for the `ready` step at that `ready`, with `refused` in place of `bye`. The mount is never
+/// quiesced or given up, the instance makes its control socket again and goes on, and the next
+/// taker is answered. It would catch a mount left with an instance that is about to end, under the
+/// rollback of the design's section 4.2.
 #[tokio::test]
 async fn an_instance_with_the_mount_refuses_a_taker_that_does_not_ask_for_it() {
     let (dir, path) = scratch();
@@ -445,19 +447,82 @@ async fn an_instance_with_the_mount_refuses_a_taker_that_does_not_ask_for_it() {
             .with_mount(mount)
             .serve(),
     );
-    for request in [&["take 1"][..], &["take 1", "ready"]] {
-        let refused = ask(&connect(&path).await, request).await;
-        assert_eq!(texts(&refused.lines), ["refused", HOLDS_MOUNT]);
-    }
+    let refused = ask(&connect(&path).await, &["take 1"]).await;
+    assert_eq!(texts(&refused.lines), ["refused", HOLDS_MOUNT]);
     let addrs = [addr];
-    let refused = take(&handoff(path), &s3(&addrs)).await.err().unwrap();
+    let refused = take(&handoff(path.clone()), &s3(&addrs))
+        .await
+        .err()
+        .unwrap();
     assert_eq!(
         refused.to_string(),
         format!("hand-off: the running instance refused: {HOLDS_MOUNT}")
     );
+    let taker = connect(&path).await;
+    let offer = ask(&taker, &["take 1", "ready"]).await;
+    assert_eq!(texts(&offer.lines), ["offer", &format!("s3 {addr}")]);
+    assert_eq!(texts(&ask(&taker, &["ack"]).await.lines), ["done"]);
+    let answer = ask(&taker, &["ready"]).await;
+    assert_eq!(texts(&answer.lines), ["refused", HOLDS_MOUNT]);
     assert!(told(&steps).is_empty());
+    // It goes on, and makes its control socket again for the next taker.
+    let again = ask(&connect(&path).await, &["take 1"]).await;
+    assert_eq!(texts(&again.lines), ["refused", HOLDS_MOUNT]);
     settle().await;
     assert!(!serving.is_finished());
+    serving.abort();
+}
+
+/// Asserts that a taker that does not ask for the mount gets the sockets once the mount was given
+/// up on the instance's other conversation (`take-fs 1`, which shares the claim): a taker of the
+/// previous release asks for the sockets with the `ready` step, takes the mount on `take-fs 1` and
+/// only then says `ready`, and is answered `bye`; a request for the mount then is refused as by an
+/// instance that holds none, and while a taker of `take-fs 1` is at the mount, as busy. It would
+/// catch a rollback to the previous release that the one process refuses, or a mount offered
+/// twice.
+#[tokio::test]
+async fn a_taker_without_the_mount_line_gets_the_sockets_once_take_fs_took_the_mount() {
+    let (dir, path) = scratch();
+    let (mount, steps, _kernel) = fake_mount(dir.path());
+    let claim = Arc::clone(&mount.claim);
+    let (listener, addr) = listening();
+    let serving = tokio::spawn(
+        Offer::bind(&path, vec![socket(Front::S3, &listener)])
+            .unwrap()
+            .with_ready_wait(WAIT)
+            .with_mount(mount)
+            .serve(),
+    );
+    // A taker of `take-fs 1` is at the mount.
+    assert_eq!(claim.claim(), super::super::Holding::Here);
+    let busy = ask(&connect(&path).await, &["take 1", "ready", "mount"]).await;
+    assert_eq!(texts(&busy.lines), ["refused", MOUNT_BUSY]);
+    let taker = connect(&path).await;
+    let offer = ask(&taker, &["take 1", "ready"]).await;
+    assert_eq!(texts(&offer.lines), ["offer", &format!("s3 {addr}")]);
+    assert_eq!(texts(&ask(&taker, &["ack"]).await.lines), ["done"]);
+    // It took the mount there, and says `ready` here.
+    claim.give_up();
+    let answer = ask(&taker, &["ready"]).await;
+    assert_eq!(texts(&answer.lines), ["bye"]);
+    within("the end of the offer", serving).await.unwrap();
+    assert!(told(&steps).is_empty());
+
+    let other = dir.path().join("other.sock");
+    let (mount, steps, _kernel) = fake_mount_at(dir.path(), "again");
+    mount.claim.give_up();
+    let serving = tokio::spawn(
+        Offer::bind(&other, vec![socket(Front::S3, &listener)])
+            .unwrap()
+            .with_ready_wait(WAIT)
+            .with_mount(mount)
+            .serve(),
+    );
+    let gone = ask(&connect(&other).await, &["take 1", "ready", "mount"]).await;
+    assert_eq!(texts(&gone.lines), ["refused", NO_MOUNT]);
+    let plain = ask(&connect(&other).await, &["take 1"]).await;
+    assert_eq!(texts(&plain.lines), ["offer", &format!("s3 {addr}")]);
+    assert!(told(&steps).is_empty());
     serving.abort();
 }
 
@@ -676,4 +741,39 @@ async fn an_instance_that_never_says_done_is_given_up_after_both_waits() {
         .unwrap();
     assert!(matches!(error, HandoffError::Timeout(ref at) if *at == path));
     hangs.abort();
+}
+
+/// Asserts that an offer without the mount is not accepted as one with it
+/// (`Offered::accept_with_mount`): no `ack` is said, the connection ends, which the running
+/// instance takes for a `nak`, and it answers the next taker. It would catch a start that acks an
+/// offer of the sockets alone as the one hand-over, and is then left with no mount to serve.
+#[tokio::test]
+async fn an_offer_without_the_mount_is_not_accepted_as_one_with_it() {
+    let (_dir, path) = scratch();
+    let (listener, addr) = listening();
+    let serving = tokio::spawn(
+        Offer::bind(&path, vec![socket(Front::S3, &listener)])
+            .unwrap()
+            .with_ready_wait(WAIT)
+            .serve(),
+    );
+    let addrs = [addr];
+    let sockets_alone = Ask {
+        mount: None,
+        lock: None,
+        leaves_another_lock: false,
+    };
+    let offered = super::offered_with(&handoff(path.clone()), &s3(&addrs), sockets_alone).await;
+    let offered = offered.unwrap().expect("an instance answers");
+    assert!(!offered.has_mount());
+    let refused = offered.accept_with_mount().await.err().unwrap();
+    assert_eq!(
+        refused.to_string(),
+        "hand-off: the running instance sent an offer without the mount it was asked for"
+    );
+    settle().await;
+    assert!(!serving.is_finished());
+    let again = ask(&connect(&path).await, &["take 1", "ready"]).await;
+    assert_eq!(texts(&again.lines), ["offer", &format!("s3 {addr}")]);
+    serving.abort();
 }

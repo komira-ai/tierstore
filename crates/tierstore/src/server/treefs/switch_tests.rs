@@ -157,14 +157,23 @@ async fn a_switch_whose_offers_do_not_both_match_naks_both_and_changes_nothing()
 }
 
 /// An old `tierstore` that offers one S3 socket at `control` and goes away at the `ack`, as one that
-/// dies there would: the new process's `done` never comes. It is asked for the `ready` step, which
-/// the start of a node with an `fs` interface asks for with the cache lock. Returns the address it
-/// offers.
+/// dies there would: the new process's `done` never comes. It is asked for the mount first, which
+/// it refuses as an instance that holds none does, and then for the `ready` step, which the start
+/// of a node with an `fs` interface asks for with the cache lock. Returns the address it offers.
 async fn dies_at_ack(control: PathBuf) -> std::net::SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let socket = UnixListener::bind(&control).unwrap();
     drop(tokio::spawn(async move {
+        let (stream, _) = socket.accept().await.unwrap();
+        let request = wire::recv(&stream).await.unwrap();
+        assert_eq!(request.lines, ["take 1", "ready", "mount"]);
+        let refused = [
+            "refused".to_owned(),
+            "this instance holds no mount".to_owned(),
+        ];
+        wire::send(&stream, &refused, &[]).await.unwrap();
+        drop(stream);
         let (stream, _) = socket.accept().await.unwrap();
         let request = wire::recv(&stream).await.unwrap();
         assert_eq!(request.lines, ["take 1", "ready"]);
@@ -396,6 +405,7 @@ async fn abandoning_a_start_with_no_mount_does_nothing() {
     let taking = Taking {
         manager: Manager::new(None),
         mount: None,
+        ready: None,
     };
     within("leaving no mount ends", taking.abandon()).await;
 }

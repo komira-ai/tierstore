@@ -198,6 +198,7 @@ mod memory;
 mod metrics;
 #[cfg(test)]
 mod metrics_names_tests;
+mod put_digests;
 mod put_sha256;
 #[cfg(test)]
 mod put_sha256_tests;
@@ -272,6 +273,7 @@ pub use marks_evict::{CopyRecord, CopyRecords, EvictConfig, EvictReport, Evicted
 pub use marks_leader::LeaderLease;
 pub use marks_sweep::{StraySweep, SweepConfig, SweepReport, SweepTime};
 pub use memory::{MemoryBackend, TestClock};
+pub use put_digests::{BodyDigests, PutKind, ShortObjects};
 pub use put_sha256::PutOutcome;
 pub use reconciler::ReconcilerConfig;
 #[cfg(feature = "s3")]

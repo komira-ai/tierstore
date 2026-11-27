@@ -5,7 +5,9 @@ use bytes::{Bytes, BytesMut};
 use futures::StreamExt;
 use futures::stream::BoxStream;
 
-use crate::{Error, PutClaim, PutOutcome, StoreCopy, TreeDigest};
+use crate::{
+    BodyDigests, Error, PutClaim, PutKind, PutOutcome, ShortObjects, StoreCopy, TreeDigest,
+};
 
 /// The body of a part of a multipart upload, as the chunks it arrives in, so that a part of any
 /// size is stored without being held in memory whole.
@@ -497,6 +499,39 @@ pub trait Backend: Send + Sync {
         _claim: &PutClaim,
     ) -> Result<Option<PutAnswer>, Error> {
         self.put_stream(key, len, body).await.map(|()| None)
+    }
+
+    /// [`Backend::put_stream_answered`] (for [`PutKind::Creates`], and with `hot_only` for
+    /// [`PutKind::CreatesHotOnly`]) or [`Backend::put_stream_replacing`] (for
+    /// [`PutKind::Replaces`]) of a body whose request named `digests` of it (see [`BodyDigests`]).
+    /// A backend whose store checks a body against its digests sends them with the write, so that
+    /// the store refuses a body that is not them, one cut short included: the S3 backend does, and
+    /// the local cache passes them to its upstream. The provided implementation ignores them, so a
+    /// wrapper of another backend that does not override it does not pass them on.
+    ///
+    /// # Errors
+    /// As the call it stands for, and the store's refusal of a body that is not `digests`.
+    async fn put_stream_digested(
+        &self,
+        key: &str,
+        len: Option<u64>,
+        body: PartBody<'_>,
+        kind: PutKind<'_>,
+        digests: BodyDigests,
+    ) -> Result<Option<PutAnswer>, Error> {
+        let _ = digests;
+        match kind {
+            PutKind::Creates => self.put_stream_answered(key, len, body, false).await,
+            PutKind::CreatesHotOnly => self.put_stream_answered(key, len, body, true).await,
+            PutKind::Replaces(claim) => self.put_stream_replacing(key, len, body, claim).await,
+        }
+    }
+
+    /// What the backend did about the objects its store kept of its puts that got no answer (see
+    /// [`ShortObjects`]). The provided implementation is none: a backend whose store keeps
+    /// nothing of a put that failed has nothing to do.
+    fn short_objects(&self) -> ShortObjects {
+        ShortObjects::default()
     }
 
     /// [`Backend::put_tagged`] for a body that arrives as chunks (`len` is the number of bytes it

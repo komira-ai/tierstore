@@ -8,12 +8,20 @@
 //! does not know; an instance that holds the mount never offers to a taker that did not ask for it
 //! (`mount`, the third line of the request), so the mount is never left with an instance that is
 //! about to end.
+//!
+//! An instance of the one process offers its mount on two conversations: this one, and `take-fs 1`
+//! on the runtime directory's socket (`treefs/handover.rs`), which a taker of the previous release
+//! and the `tierstore fs` of the two-process layout ask (`docs/design/one-service.md` section 4.2).
+//! The two share a [`Claim`], so that one taker at a time takes the mount and, once it is given up
+//! on either, neither offers it again.
 
 use std::io;
 use std::os::fd::{BorrowedFd, OwnedFd};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
+
+use tokio::sync::Notify;
 
 /// A step of the instance that holds the mount, which may block.
 pub(crate) type Step = Arc<dyn Fn() + Send + Sync>;
@@ -38,6 +46,76 @@ pub(crate) struct Mount {
     /// At `ready`: the mount is the successor's for good. The instance removes its descriptor
     /// store's entry and leaves the control socket's path, and never reads the device again.
     pub(crate) give_up: Step,
+    /// How long the quiesce from `ack` to `done` and the taker's `ready` after `done` may last
+    /// (the `fs` interface's `params.handoff_wait`): a reader may hold a request that waits for a
+    /// fill, and the successor makes its state of the mount between `done` and `ready`.
+    pub(crate) wait: Duration,
+    /// Which conversation has the mount, shared with the instance's `take-fs 1` offer.
+    pub(crate) claim: Arc<Claim>,
+}
+
+/// Where the mount of an instance is, as the conversations that offer it see it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Holding {
+    /// The instance holds it, and no taker is at it.
+    #[default]
+    Here,
+    /// A taker of one of the conversations is at it: it is offered, or quiesced for that taker.
+    Taking,
+    /// It was given up: a successor has it for good.
+    Gone,
+}
+
+/// Which of the conversations that offer an instance's mount has it: one taker at a time takes it,
+/// and once it is given up on one of them, neither offers it again.
+#[derive(Debug, Default)]
+pub(crate) struct Claim {
+    holding: Mutex<Holding>,
+    gone: Notify,
+}
+
+impl Claim {
+    /// Where the mount is now.
+    pub(crate) fn holding(&self) -> Holding {
+        *self.holding.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Claims the mount for one taker: where it was, and it is [`Holding::Taking`] now only if it
+    /// was [`Holding::Here`].
+    pub(crate) fn claim(&self) -> Holding {
+        let mut holding = self.holding.lock().unwrap_or_else(PoisonError::into_inner);
+        let was = *holding;
+        if was == Holding::Here {
+            *holding = Holding::Taking;
+        }
+        was
+    }
+
+    /// The taker that claimed the mount did not take it: the instance holds it again.
+    pub(crate) fn release(&self) {
+        let mut holding = self.holding.lock().unwrap_or_else(PoisonError::into_inner);
+        if *holding == Holding::Taking {
+            *holding = Holding::Here;
+        }
+    }
+
+    /// The mount was given up: a successor has it for good.
+    pub(crate) fn give_up(&self) {
+        *self.holding.lock().unwrap_or_else(PoisonError::into_inner) = Holding::Gone;
+        self.gone.notify_waiters();
+    }
+
+    /// Waits until the mount is given up, on either conversation.
+    pub(crate) async fn given_up(&self) {
+        loop {
+            // Made before the look, so that a give-up between the two is not missed.
+            let told = self.gone.notified();
+            if self.holding() == Holding::Gone {
+                return;
+            }
+            told.await;
+        }
+    }
 }
 
 /// The lines of an offer of the mount at `mountpoint` and of the control socket at `control`.
@@ -78,13 +156,6 @@ pub(crate) struct MountWant<'a> {
 }
 
 /// The mount taken from a running instance.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the start of the one process serves the mount it took (one-service.md section 6, P3)"
-    )
-)]
 pub(crate) struct TakenMount {
     /// The `/dev/fuse` descriptor. The taker reads it only after the running instance's `bye`.
     pub(crate) device: OwnedFd,

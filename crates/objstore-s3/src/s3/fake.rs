@@ -28,12 +28,15 @@
 //!
 //! A PUT, and the parts of an upload begun with `x-amz-checksum-algorithm: SHA256`, are checked
 //! against the `x-amz-checksum-sha256` they carry, the checksum is kept, and a HEAD gives it when
-//! asked; `x-amz-meta-*` headers are kept with the object (`fake/checksums.rs`). A test can make
-//! the service ignore checksums ([`FakeS3::ignore_checksums`]).
+//! asked; a PUT that carries `Content-MD5` is checked against it; `x-amz-meta-*` headers are kept
+//! with the object (`fake/checksums.rs`). A test can make the service ignore checksums
+//! ([`FakeS3::ignore_checksums`]).
 //!
 //! A request whose body ends before its `Content-Length` (the client went away) reaches nothing,
 //! unless a test makes the service keep the bytes that came of a PUT cut short, as SeaweedFS 4.54
-//! can ([`FakeS3::keep_cut_bodies`], `fake/cut.rs`).
+//! can ([`FakeS3::keep_cut_bodies`], `fake/cut.rs`). A test can hold every HEAD until it lets
+//! them go ([`FakeS3::hold_heads`], `fake/held.rs`), so that the service has taken such a PUT
+//! before it answers the HEAD a client sends after it.
 //!
 //! A PUT that carries `x-amz-copy-source` is CopyObject, or UploadPartCopy with an upload id and a
 //! part number, with S3's four source conditions (`fake/copy.rs`).
@@ -70,6 +73,7 @@ mod copy;
 mod cut;
 mod dates;
 mod escape;
+mod held;
 mod kept;
 mod tls;
 mod uploads;
@@ -248,6 +252,8 @@ struct State {
     keep_cut: bool,
     /// How many requests had a body cut short ([`FakeS3::cut_requests`]).
     cut: u64,
+    /// How many requests the service has read the head of ([`FakeS3::requests_begun`]).
+    begun: u64,
     /// How many HEADs, and how many DELETEs of a whole object, the service has taken.
     heads: u32,
     deletes: u32,
@@ -255,6 +261,9 @@ struct State {
     hold_abort: bool,
     /// AbortMultipartUpload requests held and not yet dropped.
     held_aborts: usize,
+    /// HEADs wait unanswered until a test lets them go, after this many more are let through
+    /// ([`FakeS3::hold_heads`]); none: no HEAD is held.
+    hold_heads: Option<u32>,
 }
 
 /// An S3 service on loopback (module docs). It serves until the runtime it was
@@ -492,6 +501,8 @@ async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
         let head_end = head_end?;
         let head = String::from_utf8_lossy(&buf[..head_end]).into_owned();
         let mut request = parse_head(&head, front)?;
+        state.lock().unwrap_or_else(PoisonError::into_inner).begun += 1;
+        changed.notify_waiters();
         let len: usize = request
             .headers
             .get("content-length")
@@ -508,22 +519,11 @@ async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
         let rest = buf.split_off(head_end + len);
         request.body = buf.split_off(head_end);
         buf = rest;
-        let held = {
-            let mut state = state.lock().unwrap_or_else(PoisonError::into_inner);
-            let abort = request.method == "DELETE" && request.query.contains_key("uploadId");
-            let held = abort && std::mem::take(&mut state.hold_abort);
-            state.held_aborts += usize::from(held);
-            held
-        };
-        if held {
-            changed.notify_waiters();
-            // Until the caller closes the connection; then the request is lost.
-            let _ = tokio::io::copy(&mut sock, &mut tokio::io::sink()).await;
-            let mut state = state.lock().unwrap_or_else(PoisonError::into_inner);
-            state.held_aborts -= 1;
-            drop(state);
-            changed.notify_waiters();
+        if held::abort_dropped(&mut sock, &state, &changed, &request).await {
             return None;
+        }
+        if request.method == "HEAD" {
+            held::heads_let_go(&state, &changed).await;
         }
         let answer = {
             let mut state = state.lock().unwrap_or_else(PoisonError::into_inner);
