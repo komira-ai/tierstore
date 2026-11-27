@@ -52,20 +52,25 @@ async fn part(backend: &dyn Backend, id: &str, number: u32, text: &'static str) 
     sent.await.unwrap()
 }
 
-/// The request lines of a multipart upload `id` of [`KEY`] in bucket `tier-test`, as the
-/// service logs them.
+// The request lines of the calls of a multipart upload of [`KEY`] in bucket `tier-test`, as the
+// service logs them.
+
+/// The creation of an upload.
 fn create_line() -> String {
     "POST /tier-test/k?uploads=".to_owned()
 }
 
+/// Part `number` of the upload `id`.
 fn part_line(id: &str, number: u32) -> String {
     format!("PUT /tier-test/k?partNumber={number}&uploadId={id}")
 }
 
+/// The completion of the upload `id`.
 fn complete_line(id: &str) -> String {
     format!("POST /tier-test/k?uploadId={id}")
 }
 
+/// The abort of the upload `id`.
 fn abort_line(id: &str) -> String {
     format!("DELETE /tier-test/k?uploadId={id}")
 }
