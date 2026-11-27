@@ -479,6 +479,7 @@ impl Rig {
             budget: Arc::new(budget),
             verifier,
             timer,
+            cache_metrics: None,
         };
         Ok(Self {
             engine: FetchEngine::new(parts, knobs.engine.clone(), rt),

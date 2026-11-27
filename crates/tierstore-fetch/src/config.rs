@@ -1,4 +1,4 @@
-//! The engine's constants (4.4 to 4.6). Every value is the design's starting value; T0-F and
+//! The engine's constants (4.4 to 4.6, 4.8). Every value is the design's starting value; T0-F and
 //! T10b replace them with measured ones. The same values serve both deployment profiles of
 //! section 21: what differs between NOW and LATER (two or three hot replicas, `4+2` or `4+4`)
 //! reaches the engine as data, in the locations the upstream answers, never as configuration.
@@ -63,9 +63,61 @@ pub struct EngineConfig {
     pub acquire_slots: usize,
     /// The seed of the backoff jitter.
     pub jitter_seed: u64,
+    /// The pool of 1 MiB cell buffers parts are received into, in bytes: the most memory the
+    /// cells in flight hold at once, from their first byte until their publish returns (4.8:
+    /// `ceiling + 32 MiB`, [`buffer_bytes_for`]). The pool has at least one buffer.
+    pub buffer_bytes: u64,
+    /// The dirty-byte cap: cells handed to the entry's publish and not yet returned hold at most
+    /// this many bytes; a cell waits before its publish while the cap is reached (4.8:
+    /// `min(256 MiB, 2 x node ceiling)`, [`dirty_cap_for`]). A cell is always let in when nothing
+    /// is being published, so a cap below one cell publishes one cell at a time.
+    pub dirty_cap_bytes: u64,
 }
 
 const MIB: u64 = 1 << 20;
+
+/// The node ceiling the defaults are made for, in bytes: the client ceiling of the table of 4.3
+/// (6 parts) at the steady part size of the largest packs (64 MiB, 4.4), so the defaults are a
+/// dirty cap of 256 MiB and a pool of 416 MiB. The ceiling is the design's starting value (T0-S
+/// replaces it with the measured knee); a host that knows its own ceiling sets the bounds with
+/// [`EngineConfig::with_ceiling`]. The cap's formula is the one the farm's cache-device arm kept
+/// (`docs/measurements/2026-11-t0.md`, arm B: writeback at about 130 MB/s, so 256 MiB is about
+/// 2 s of writeback).
+pub const DEFAULT_CEILING_BYTES: u64 = 6 * 64 * MIB;
+
+/// The headroom of the cell buffer pool above the node ceiling (4.8: 32 MiB).
+pub const BUFFER_HEADROOM_BYTES: u64 = 32 * MIB;
+
+/// The largest dirty-byte cap, whatever the ceiling (4.8: 256 MiB).
+pub const DIRTY_CAP_MAX_BYTES: u64 = 256 * MIB;
+
+/// The cell buffer pool of a node ceiling of `ceiling` bytes: `ceiling + 32 MiB` (4.8).
+#[must_use]
+pub const fn buffer_bytes_for(ceiling: u64) -> u64 {
+    ceiling.saturating_add(BUFFER_HEADROOM_BYTES)
+}
+
+/// The dirty-byte cap of a node ceiling of `ceiling` bytes: `min(256 MiB, 2 x ceiling)` (4.8).
+#[must_use]
+pub const fn dirty_cap_for(ceiling: u64) -> u64 {
+    let twice = ceiling.saturating_mul(2);
+    if twice < DIRTY_CAP_MAX_BYTES {
+        twice
+    } else {
+        DIRTY_CAP_MAX_BYTES
+    }
+}
+
+impl EngineConfig {
+    /// This configuration with the cell buffer pool and the dirty-byte cap of a node ceiling of
+    /// `ceiling` bytes (4.8).
+    #[must_use]
+    pub const fn with_ceiling(mut self, ceiling: u64) -> Self {
+        self.buffer_bytes = buffer_bytes_for(ceiling);
+        self.dirty_cap_bytes = dirty_cap_for(ceiling);
+        self
+    }
+}
 
 impl Default for EngineConfig {
     fn default() -> Self {
@@ -96,6 +148,8 @@ impl Default for EngineConfig {
             evicting_poll_ms: 50,
             acquire_slots: 8,
             jitter_seed: 0x9e37_79b9_7f4a_7c15,
+            buffer_bytes: buffer_bytes_for(DEFAULT_CEILING_BYTES),
+            dirty_cap_bytes: dirty_cap_for(DEFAULT_CEILING_BYTES),
         }
     }
 }

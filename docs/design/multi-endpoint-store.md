@@ -1,6 +1,6 @@
 # One store, several endpoints: the S3 client sends each request to the next endpoint in turn
 
-Status: **built in the pull request that adds `endpoints` (tierstore#229); failover on a failed connect added in section 8.** This document replaces the first version of #228, which also planned a random mode, failover, down marks and metrics; none of that is decided (section 7). Terms in bold are those of [tierstore-design.md](tierstore-design.md) and [put-without-lock.md](put-without-lock.md).
+Status: **built: the round robin over `endpoints` (komira-ai/tierstore#229) and failover on a failed connect, section 8 (komira-ai/tierstore#232). TLS to an endpoint is built too (komira-ai/tierstore#465).** Down marks, a random mode, least-in-flight choice and metrics per endpoint are not built and not decided (section 7). This document replaces the first version (komira-ai/tierstore#228), which also planned a random mode, failover, down marks and metrics; only failover was later decided and built. Terms in bold are those of [tierstore-design.md](tierstore-design.md) and [put-without-lock.md](put-without-lock.md).
 
 ## 1. The problem
 

@@ -128,7 +128,7 @@ fn a_detach_holds_no_lock_but_its_trees_while_its_unpin_is_in_flight() {
         t.rig.upstream.wait_for_verb("unpin", 1);
         nothing_waits(&t);
         t.rig.upstream.permit_verb("unpin", 1);
-        assert_eq!(detach.join().unwrap().unwrap().len(), 0);
+        assert_eq!(detach.join().unwrap().unwrap().failures.len(), 0);
     });
     let unpins = t.rig.upstream.asked("unpin");
     assert_eq!(unpins.len(), 1);

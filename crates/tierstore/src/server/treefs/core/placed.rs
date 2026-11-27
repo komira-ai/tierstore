@@ -284,7 +284,7 @@ impl Core {
             }
             read_manifest(path).map(Some)
         };
-        let fetch = |wanted: &TreeDigest, level: usize| -> Result<Vec<u8>, String> {
+        let fetch_one = |wanted: &TreeDigest, level: usize| -> Result<Vec<u8>, String> {
             let hex = wanted.to_string();
             let path = manifest_path(&self.settings.cache_path, &hex);
             if let Ok(bytes) = read(&path, level) {
@@ -303,7 +303,17 @@ impl Core {
             fetched.filled(level, ms, had.is_ok());
             had?.ok_or_else(|| LIST.to_owned())
         };
+        // Each fetch marks its end, for the split of an attach of a run (`core/runs.rs`).
+        let fetch = |wanted: &TreeDigest, level: usize| {
+            let got = fetch_one(wanted, level);
+            fetched.fetched_at(self.now());
+            got
+        };
         let flattened = flatten_in_waves(digest, MANIFESTS_AT_ONCE, fetch);
+        #[cfg(test)]
+        if let Some(hook) = super::locked(&self.hooks.flattened).as_ref() {
+            hook(self);
+        }
         self.fills.report(Report::Fetched(fetched.counts()));
         self.fills.report(Report::Levels(fetched.levels()));
         if list.load(Ordering::Acquire) {
