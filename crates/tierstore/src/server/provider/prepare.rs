@@ -119,7 +119,7 @@ pub(super) async fn run(shared: Arc<Shared>, job: Job) {
             Ok(_) => report(&job.stage, Stage::Placed),
             Err(stage) => {
                 refused.store(true, Ordering::SeqCst);
-                if let Stage::Refused(why) | Stage::Failed(why) = stage {
+                if let Stage::Refused(why) | Stage::Failed(why) | Stage::Unmade(why) = stage {
                     tracing::warn!(
                         "tierstore: mount provider: {} of {} not prepared: {why}",
                         job.id.path(),
@@ -226,7 +226,7 @@ async fn place(shared: &Shared, job: &Job, reads: UnboundedSender<Queued>) -> Re
         });
     let (created, files, unqueued) = made
         .await
-        .map_err(|why| Stage::Failed(format!("the tree was not made: {why}")))??;
+        .map_err(|why| Stage::Unmade(format!("the tree was not made: {why}")))??;
     match shared.owner(&job.id, &job.released) {
         Owner::Ours => {
             if from_list {
@@ -376,14 +376,14 @@ fn image_v2(
     Ok((image, staged, unqueued))
 }
 
-/// The stage a refusal of the tree store leaves a source at: a tree this node cannot make now is a
-/// failure, any other is a refusal of the ref.
+/// The stage a refusal of the tree store leaves a source at: a tree this node cannot make now is
+/// unmade, any other is a refusal of the ref.
 fn stage_of(why: CreateError) -> Stage {
     match why {
         CreateError::Disabled
         | CreateError::ReadOnly
         | CreateError::TooMany(_)
-        | CreateError::Io(_) => Stage::Failed(format!("the tree was not made: {why}")),
+        | CreateError::Io(_) => Stage::Unmade(format!("the tree was not made: {why}")),
         _ => Stage::Refused(format!("the tree is refused: {why}")),
     }
 }
