@@ -119,7 +119,7 @@ impl S3Upstream {
             return Ok(etag);
         }
         let object = object_key(key)?;
-        let head = self.backend.store().head(&object).await;
+        let head = self.backend.store.head(&object).await;
         let head = head.map_err(|error| failed(key, &error))?;
         let now = generation_of(&head.etag);
         if now != generation {
@@ -138,7 +138,7 @@ impl S3Upstream {
 impl Upstream for S3Upstream {
     async fn locate(&self, key: &PackKey) -> Result<Located, UpstreamError> {
         let object = object_key(key)?;
-        let head = match self.backend.store().head(&object).await {
+        let head = match self.backend.store.head(&object).await {
             Ok(head) => head,
             Err(ObjectStoreError::NotFound(_)) => return Ok(Located::DefinitiveMiss),
             Err(error) => return Err(failed(key, &error)),
@@ -160,7 +160,7 @@ impl Upstream for S3Upstream {
             .ok_or_else(|| transport(&req.key, format!("no bytes in the range {:?}", req.range)))?;
         let read = self
             .backend
-            .store()
+            .store
             .get_stream_if_match(&object, range, &etag);
         let read = read.await.map_err(|error| failed(&req.key, &error))?;
         // The tag of the answer is the one the bytes are of; a store that sent no tag is taken to

@@ -39,6 +39,8 @@
 //!   of an object (a suffix) and a range the store answers 416 to are a HEAD and then a ranged
 //!   GET, as the size is needed to say what they cover. An answer without a `Content-Length`, a
 //!   `Last-Modified` or an `ETag` is an [`Error::Other`].
+//! - `copy_in_store` is the store's CopyObject (no condition on the key, as a plain PUT) or
+//!   UploadPartCopy, with the source's conditions as `x-amz-copy-source-if-*` (`s3/copy.rs`).
 //! - `head` is a HEAD: `Content-Length`, `ETag` (the content tag, without its quotes, as the
 //!   other backends give it and the S3 front, which quotes it, expects) and `Last-Modified`.
 //! - `get_tagged` is one GET, whole or ranged, and the content tag is the `ETag` (without its
@@ -156,10 +158,11 @@ use tokio::sync::mpsc;
 use crate::backend::open_by_head;
 use crate::{
     Backend, BodyDigests, ByteRange, Error, Listed, Meta, OpenUpload, Opened, PartBody, PutAnswer,
-    PutClaim, PutKind, PutOutcome, ReadBody, ShortObjects, Span, TreeDigest, UploadedPart,
-    UploadsAfter, Window,
+    PutClaim, PutKind, PutOutcome, ReadBody, ShortObjects, Span, StoreCopy, TreeDigest,
+    UploadedPart, UploadsAfter, Window,
 };
 
+mod copy;
 mod digested;
 mod sha256;
 
@@ -183,7 +186,8 @@ const INVALID_PART_CODES: [&str; 3] = ["InvalidPart", "InvalidPartOrder", "Entit
 /// One bucket of an S3-compatible store, as a [`Backend`].
 #[derive(Debug)]
 pub struct S3Backend {
-    store: S3Store,
+    /// The bucket's client; the fetch engine's upstream reads through it with `If-Match`.
+    pub(crate) store: S3Store,
     /// Whether `delete_if_match` sends `If-Match` with the DELETE; otherwise it reads the tag
     /// first. Set from the tier's `conditional_delete` setting; off unless set.
     conditional_delete: bool,
@@ -247,12 +251,6 @@ impl S3Backend {
     #[cfg(test)]
     pub(crate) fn chunks_waiting(&self) -> usize {
         self.chunks_waiting
-    }
-
-    /// The bucket's client, for the reads of the fetch engine's upstream, which carry `If-Match`.
-    #[cfg(feature = "server")]
-    pub(crate) fn store(&self) -> &S3Store {
-        &self.store
     }
 
     /// This backend with `delete_if_match` sent as a DELETE with `If-Match` (`true`), or as a read
@@ -803,6 +801,12 @@ impl Backend for S3Backend {
             meta,
             body: body.boxed(),
         })
+    }
+
+    /// The store's CopyObject or UploadPartCopy, for a copy of at most `server.s3_single_put_max`
+    /// bytes (`s3/copy.rs`).
+    async fn copy_in_store(&self, copy: &StoreCopy<'_>) -> Result<Option<PutAnswer>, Error> {
+        copy::copy(self, copy).await
     }
 
     async fn head(&self, key: &str) -> Result<Meta, Error> {

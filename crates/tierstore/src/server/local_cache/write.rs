@@ -37,6 +37,14 @@
 //! - **Delete** ([`delete_through`](Inner::delete_through)): the entry is dropped, then the
 //!   upstream deletes. A fill that is running for the key does not keep the object it read (see
 //!   [`forget`](Inner::forget)).
+//! - **A copy the upstream makes** ([`copy_through`](Inner::copy_through)): passed to the
+//!   upstream's own copy ([`copy_in_store`](crate::Backend::copy_in_store)), so no byte of it
+//!   passes through the node. A copy of an object forgets the key it writes before the copy and
+//!   again when the upstream has answered, as a delete does, and keeps no copy of it: the node
+//!   never held the bytes, and the first read fills the object as any miss (under a
+//!   `cache = true` policy). A copy into a part is the upstream's alone, as a part is. A copy the
+//!   upstream does not make comes back to the front, which reads the source and puts the bytes
+//!   (a plain or a create-only put, above).
 //! - **A put that replaces on a tag** (`put_if_match`) is not done, as on every front.
 //!
 //! The keys under `_journal/` and `_tiering/` belong to a storage node and are refused with
@@ -50,7 +58,7 @@ use futures::StreamExt as _;
 use futures::stream;
 
 use crate::journal::is_reserved;
-use crate::{Error, PartBody};
+use crate::{CopyTarget, Error, PartBody, PutAnswer, StoreCopy};
 
 use super::calls::counting;
 use super::keep::Sent;
@@ -94,6 +102,26 @@ impl Inner {
         // object that is still there is read in again by the next miss.
         self.forget(key);
         deleted
+    }
+
+    /// A copy the upstream makes of its own object (module docs). The source is refused as the
+    /// key is, when it is one a storage node keeps for itself.
+    pub(super) async fn copy_through(
+        &self,
+        copy: &StoreCopy<'_>,
+    ) -> Result<Option<PutAnswer>, Error> {
+        self.writable(copy.key)?;
+        if is_reserved(copy.source) {
+            return Err(Error::Reserved(copy.source.to_owned()));
+        }
+        if let CopyTarget::Part { .. } = copy.target {
+            return self.upstream.copy_in_store(copy).await;
+        }
+        self.forget(copy.key);
+        let copied = self.upstream.copy_in_store(copy).await;
+        // Also on an error: a timeout, or a 5xx after the commit, may have replaced the object.
+        self.forget(copy.key);
+        copied
     }
 
     /// Starts a multipart upload of `key` at the upstream.

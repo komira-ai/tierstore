@@ -39,6 +39,9 @@
 //! them go ([`FakeS3::hold_heads`], `fake/held.rs`), so that the service has taken such a PUT
 //! before it answers the HEAD a client sends after it.
 //!
+//! A PUT that carries `x-amz-copy-source` is CopyObject, or UploadPartCopy with an upload id and a
+//! part number, with S3's four source conditions (`fake/copy.rs`).
+//!
 //! It keeps what a test asks about: the uploads begun and not yet completed or aborted
 //! ([`FakeS3::incomplete_uploads`]), how many single PUTs and parts it took and the
 //! largest request body ([`FakeS3::stats`]). A test can fail any step of an upload,
@@ -67,6 +70,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::Notify;
 
 mod checksums;
+mod copy;
 mod cut;
 mod dates;
 mod escape;
@@ -125,6 +129,12 @@ pub enum Failure {
     /// The `n`th DELETE of a whole object from now on answers 500 (`Delete(1)` is the next
     /// one); the object stays.
     Delete(u32),
+    /// The next CopyObject answers 200 with an `<Error>` body, as S3 does when a copy fails after
+    /// its answer started; nothing is written.
+    CopyLate,
+    /// The next copy, of an object or of a part, answers 501 `NotImplemented`, as a store that
+    /// does not copy does.
+    CopyUnsupported,
 }
 
 impl State {
@@ -620,6 +630,10 @@ fn handle(state: &mut State, request: &Request) -> Vec<u8> {
         && !signed_with(request, id, secret)
     {
         return error("403 Forbidden", "SignatureDoesNotMatch");
+    }
+    if let ("PUT", Some(source)) = (method, request.headers.get("x-amz-copy-source")) {
+        let upload = q("uploadId").zip(q("partNumber"));
+        return copy::copy(state, &key, source, upload, request);
     }
     match (method, q("uploads"), q("uploadId"), q("partNumber")) {
         ("POST", Some(_), None, None) => {
