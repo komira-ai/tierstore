@@ -11,8 +11,10 @@ use tokio::sync::Notify;
 
 use super::InProcess;
 use crate::server::fill_socket;
+use crate::server::local_cache::attaches::runs::{RunAttach, RunDetach, RunOutcome};
 use crate::server::local_cache::attaches::{Attach, Fetches, Levels, Outcome};
 use crate::server::local_cache::descriptors::Descriptors;
+use crate::server::local_cache::opens::requests::{RequestKind, Requests};
 use crate::server::local_cache::opens::{Opens, Spans};
 use crate::server::local_cache::pack_testing::{Pack, blob_hex, fills, recency};
 use crate::server::local_cache::testing::{Rig, until};
@@ -465,8 +467,8 @@ fn reported(cache: &LocalCache) -> Vec<String> {
 
 /// Asserts that each report made in process is in the cache's metrics when the call returns,
 /// with no thread or queue between: the metrics after `started`, `attached`, `fetched`, `levels`,
-/// `descriptors`, `opens` and `treelists` are those of a cache told the same by its own calls, and
-/// differ from a cache told nothing.
+/// `descriptors`, `opens`, `treelists`, `requests`, `run-attached` and `run-detached` are those of
+/// a cache told the same by its own calls, and differ from a cache told nothing.
 #[tokio::test]
 async fn the_reports_reach_the_cache_without_a_queue() {
     const RUN: &str = "mount-provider/6167656e74/6a732e31";
@@ -518,6 +520,23 @@ async fn the_reports_reach_the_cache_without_a_queue() {
             over_cap: 3,
         },
     };
+    let mut asked = [Spans::default(); 8];
+    asked[RequestKind::Readdir.index()].ms = 12;
+    asked[RequestKind::Readdir.index()].buckets[4] = 1;
+    let requests = Requests {
+        mount: MOUNT.to_owned(),
+        process: 4242,
+        spans: asked,
+    };
+    let run_attach = RunAttach {
+        outcome: RunOutcome::Ok,
+        ms: 35,
+        parts: [25, 7, 3],
+    };
+    let run_detach = RunDetach {
+        outcome: RunOutcome::Failed,
+        ms: 4,
+    };
     let over = in_process(&told.cache, None, LONG);
     let started = format!("{RUN}/0");
     over.report(Report::Started(started.clone()));
@@ -527,6 +546,9 @@ async fn the_reports_reach_the_cache_without_a_queue() {
     over.report(Report::Descriptors(descriptors.clone()));
     over.report(Report::Opens(Box::new(opens.clone())));
     over.report(Report::TreeLists(lists.clone()));
+    over.report(Report::Requests(Box::new(requests.clone())));
+    over.report(Report::RunAttached(run_attach));
+    over.report(Report::RunDetached(run_detach));
     let after = reported(&told.cache);
     let _ = direct.cache.run_started(&started);
     direct.cache.tree_attached(attach);
@@ -535,6 +557,9 @@ async fn the_reports_reach_the_cache_without_a_queue() {
     direct.cache.descriptors_reported(descriptors);
     direct.cache.opens_reported(opens);
     direct.cache.tree_lists_reported(lists);
+    direct.cache.requests_reported(requests);
+    direct.cache.run_attached(run_attach);
+    direct.cache.run_detached(run_detach);
     assert_eq!(after, reported(&direct.cache));
     assert_ne!(after, before);
     assert_eq!(told.cache.run_started(&started), None);
