@@ -535,9 +535,21 @@ pub trait MountProvider {
     /// and links with their targets, never followed.
     ///
     /// # Errors
-    /// The directory or a path below it cannot be read, or is of another kind, or the tree is
-    /// larger than a tree of the check is: what was wrong, without the bytes of any file.
-    fn read_tree(&self, dir: &Path) -> Result<BTreeMap<String, TreeNode>, String>;
+    /// [`ReadFault::Unread`] when the directory or a path below it could not be read, or the read
+    /// did not end within its bound; [`ReadFault::NotTheTree`] when what is there is no tree of
+    /// the check (a path of no kind of a tree, a name that is not UTF-8, more paths or a larger
+    /// file than a tree of the check has). Neither has the bytes of any file.
+    fn read_tree(&self, dir: &Path) -> Result<BTreeMap<String, TreeNode>, ReadFault>;
+}
+
+/// Why a read of a tree through the mount gave no tree.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ReadFault {
+    /// The system could not read a path, or the read did not end within its bound: the mount
+    /// may be slow to fill it, as it is under load. What the system said.
+    Unread(String),
+    /// What the read found is no tree of the check. What is wrong.
+    NotTheTree(String),
 }
 
 /// Everything a step of the systemd arm may touch.

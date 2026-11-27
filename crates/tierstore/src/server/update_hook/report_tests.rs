@@ -68,6 +68,7 @@ fn the_tokens_are_the_ones_the_contract_documents() {
             "mode_unsupported",
             "provider_refused",
             "mounted_tree_wrong",
+            "provider_busy",
         ]
     );
 }
@@ -92,6 +93,7 @@ fn the_class_follows_the_reason() {
         StateIo,
         HostFailed,
         ModeUnsupported,
+        ProviderBusy,
     ];
     let release = [
         OutOfOrder,

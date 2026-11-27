@@ -33,7 +33,7 @@ use tierstore_trees_api::provider::v1::{
 use tokio::net::UnixStream;
 use tonic::{Code, Status};
 
-use super::super::ports::{MountProvider, ProviderCode, ProviderFault, TreeNode};
+use super::super::ports::{MountProvider, ProviderCode, ProviderFault, ReadFault, TreeNode};
 use super::host::under;
 use crate::server::provider::check::{AGENT, RUN};
 
@@ -225,22 +225,22 @@ impl MountProvider for ProviderSocket {
         Ok(())
     }
 
-    fn read_tree(&self, dir: &Path) -> Result<BTreeMap<String, TreeNode>, String> {
+    fn read_tree(&self, dir: &Path) -> Result<BTreeMap<String, TreeNode>, ReadFault> {
         let at = under(&self.root, dir);
         let (sender, read) = mpsc::channel();
         // The thread is left to the end of the process if the mount never answers it.
         std::thread::spawn(move || sender.send(walk(&at)));
         read.recv_timeout(self.times.read).unwrap_or_else(|_| {
-            Err(format!(
+            Err(ReadFault::Unread(format!(
                 "the read did not end within {} ms",
                 self.times.read.as_millis()
-            ))
+            )))
         })
     }
 }
 
 /// Every path below `root`, by its path from `root` with `/` between names.
-fn walk(root: &Path) -> Result<BTreeMap<String, TreeNode>, String> {
+fn walk(root: &Path) -> Result<BTreeMap<String, TreeNode>, ReadFault> {
     let mut nodes = BTreeMap::new();
     // Each directory to list: its path from `root`, what a failure calls it, and where it is.
     let mut dirs = vec![(
@@ -255,14 +255,14 @@ fn walk(root: &Path) -> Result<BTreeMap<String, TreeNode>, String> {
             let file_name = entry.file_name();
             let leaf = file_name
                 .to_str()
-                .ok_or_else(|| format!("{name:?} holds a name that is not UTF-8"))?;
+                .ok_or_else(|| not_the_tree(format!("{name:?} holds a name that is not UTF-8")))?;
             let path = if name.is_empty() {
                 leaf.to_owned()
             } else {
                 format!("{name}/{leaf}")
             };
             if nodes.len() == MAX_PATHS {
-                return Err(format!("more than {MAX_PATHS} paths"));
+                return Err(not_the_tree(format!("more than {MAX_PATHS} paths")));
             }
             let kind = entry
                 .file_type()
@@ -273,15 +273,16 @@ fn walk(root: &Path) -> Result<BTreeMap<String, TreeNode>, String> {
             } else if kind.is_symlink() {
                 let target =
                     fs::read_link(entry.path()).map_err(|error| shown(&path, "read", &error))?;
-                let target = target
-                    .into_os_string()
-                    .into_string()
-                    .map_err(|_| format!("{path} links to a target that is not UTF-8"))?;
+                let target = target.into_os_string().into_string().map_err(|_| {
+                    not_the_tree(format!("{path} links to a target that is not UTF-8"))
+                })?;
                 TreeNode::Link(target)
             } else if kind.is_file() {
                 TreeNode::File(read_file(&path, &entry.path())?)
             } else {
-                return Err(format!("{path} is neither a file, a directory nor a link"));
+                return Err(not_the_tree(format!(
+                    "{path} is neither a file, a directory nor a link"
+                )));
             };
             nodes.insert(path, node);
         }
@@ -290,19 +291,26 @@ fn walk(root: &Path) -> Result<BTreeMap<String, TreeNode>, String> {
 }
 
 /// The bytes of the file `at`, named `path`, up to [`MAX_FILE_BYTES`].
-fn read_file(path: &str, at: &Path) -> Result<Vec<u8>, String> {
+fn read_file(path: &str, at: &Path) -> Result<Vec<u8>, ReadFault> {
     let file = fs::File::open(at).map_err(|error| shown(path, "opened", &error))?;
     let mut bytes = Vec::new();
     file.take(MAX_FILE_BYTES + 1)
         .read_to_end(&mut bytes)
         .map_err(|error| shown(path, "read", &error))?;
     if bytes.len() as u64 > MAX_FILE_BYTES {
-        return Err(format!("{path} is larger than {MAX_FILE_BYTES} bytes"));
+        return Err(not_the_tree(format!(
+            "{path} is larger than {MAX_FILE_BYTES} bytes"
+        )));
     }
     Ok(bytes)
 }
 
 /// `path` could not be `done`, with the system's words.
-fn shown(path: &str, done: &str, error: &std::io::Error) -> String {
-    format!("{path} could not be {done}: {error}")
+fn shown(path: &str, done: &str, error: &std::io::Error) -> ReadFault {
+    ReadFault::Unread(format!("{path} could not be {done}: {error}"))
+}
+
+/// What the read found is no tree of the check: `why`.
+fn not_the_tree(why: String) -> ReadFault {
+    ReadFault::NotTheTree(why)
 }

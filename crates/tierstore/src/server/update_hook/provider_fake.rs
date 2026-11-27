@@ -7,7 +7,7 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use super::ports::{MountProvider, ProviderCode, ProviderFault, TreeNode};
+use super::ports::{MountProvider, ProviderCode, ProviderFault, ReadFault, TreeNode};
 use crate::server::provider::NOT_PREPARED_HERE;
 use crate::server::provider::check::TREES;
 
@@ -30,7 +30,7 @@ struct State {
     /// What a call of a source is answered with instead, by `<call> <index>`.
     faults: BTreeMap<String, ProviderFault>,
     /// What a read of a source's tree finds instead of its tree, by index.
-    reads: BTreeMap<u32, Result<BTreeMap<String, TreeNode>, String>>,
+    reads: BTreeMap<u32, Result<BTreeMap<String, TreeNode>, ReadFault>>,
     /// The directory a `Mount` of a source answers instead of its own, by index.
     dirs: BTreeMap<u32, PathBuf>,
     /// Whether a release leaves the placement.
@@ -58,7 +58,7 @@ impl FakeProvider {
     }
 
     /// A read of the tree of `index` finds `read` instead.
-    pub(crate) fn read_as(&self, index: u32, read: Result<BTreeMap<String, TreeNode>, String>) {
+    pub(crate) fn read_as(&self, index: u32, read: Result<BTreeMap<String, TreeNode>, ReadFault>) {
         self.state.borrow_mut().reads.insert(index, read);
     }
 
@@ -135,23 +135,25 @@ impl MountProvider for FakeProvider {
         Ok(())
     }
 
-    fn read_tree(&self, dir: &Path) -> Result<BTreeMap<String, TreeNode>, String> {
+    fn read_tree(&self, dir: &Path) -> Result<BTreeMap<String, TreeNode>, ReadFault> {
         let mut state = self.state.borrow_mut();
         state.calls.push(format!("read {}", dir.display()));
         let index = (0..2)
             .find(|index| *dir == Self::dir_of(*index))
-            .ok_or_else(|| format!("{} is no source's directory", dir.display()))?;
+            .ok_or_else(|| {
+                ReadFault::NotTheTree(format!("{} is no source's directory", dir.display()))
+            })?;
         if let Some(read) = state.reads.get(&index) {
             return read.clone();
         }
         let reference = state
             .placed
             .get(&index)
-            .ok_or_else(|| format!("{} is not placed", dir.display()))?;
+            .ok_or_else(|| ReadFault::Unread(format!("{} is not placed", dir.display())))?;
         let tree = TREES
             .iter()
             .find(|tree| tree.key() == *reference)
-            .ok_or_else(|| format!("{reference} is no tree of the check"))?;
+            .ok_or_else(|| ReadFault::NotTheTree(format!("{reference} is no tree of the check")))?;
         Ok(tree.nodes())
     }
 }

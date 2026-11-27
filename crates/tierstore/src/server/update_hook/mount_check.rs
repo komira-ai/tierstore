@@ -16,12 +16,17 @@
 //!
 //! What fails the check, and so `verify`, with the provider's reason: a refusal of any call
 //! (`FAILED_PRECONDITION`, `INVALID_ARGUMENT` or any status but `UNAVAILABLE`,
-//! [`Reason::ProviderRefused`]), and a tree read back wrong, a directory outside the mount, or a
-//! placement that outlives its release ([`Reason::MountedTreeWrong`]). Both are the release's: the
-//! node's jobs would fail the same way. What defers it ([`Reason::NotReady`], hostkeeper asks
-//! again and ends the deferrals itself at `verify_deadline_secs`): a provider that does not answer
-//! (its socket not bound yet: the new instance binds it once it holds the cache's lock) or answers
-//! `UNAVAILABLE` (a tree not placed within the call's wait). A check that fails or defers after
+//! [`Reason::ProviderRefused`]), and a tree read back wrong or no tree of the check, a directory
+//! outside the mount, or a placement that outlives its release ([`Reason::MountedTreeWrong`]). Both are the release's: the
+//! node's jobs would fail the same way. What defers it (hostkeeper asks again and ends the
+//! deferrals itself at `verify_deadline_secs`) is what load or a start explains:
+//! [`Reason::ProviderBusy`], of the environment, for a provider that answers `UNAVAILABLE` (it has
+//! no room or no turn now: `trees.max_sources`, `trees.max_placements` or
+//! `trees.prepare_concurrency` at its bound, or a tree not placed within the `Mount`'s wait), and
+//! [`Reason::NotReady`] for a provider that does not answer (its socket not bound yet: the new
+//! instance binds it once it holds the cache's lock) or a read through the mount that fails or
+//! does not end within its bound (a slow fill).
+//! A check that fails or defers after
 //! its first `Prepare` asks for the release of both sources before it ends (each asked even when
 //! the other's is not answered), so that it leaves no placement the provider can release; a
 //! placement it cannot is released by the next check's first step, or at `trees.ttl_max`; the trees' objects are the release's own
@@ -34,7 +39,7 @@ use std::collections::BTreeMap;
 use std::path::{Component, PathBuf};
 
 use super::params::Params;
-use super::ports::{Host, MountProvider, ProviderCode, ProviderFault, TreeNode};
+use super::ports::{Host, MountProvider, ProviderCode, ProviderFault, ReadFault, TreeNode};
 use super::report::{Done, Reason};
 use super::shape::{ProviderShape, provider_interface};
 use crate::server::provider::NOT_PREPARED_HERE;
@@ -67,7 +72,7 @@ pub(super) fn on_node(
 ///
 /// # Errors
 /// The check failed, or is deferred by `retry_secs`.
-pub(super) fn check(
+pub(in crate::server) fn check(
     provider: &dyn MountProvider,
     shape: &ProviderShape,
     retry_secs: u64,
@@ -137,12 +142,23 @@ impl Asked<'_> {
             dirs.push(self.below_mount(&tree, dir)?);
         }
         for (tree, dir) in TREES.iter().zip(&dirs) {
-            let read = self.provider.read_tree(dir).map_err(|why| {
-                wrong(format!(
-                    "the tree {} at {} cannot be read: {why}",
+            let read = self.provider.read_tree(dir).map_err(|fault| match fault {
+                // The mount fills a file as it is opened, and a node under load fills slowly: a
+                // read that does not end, or fails, is asked again, until hostkeeper's deadline.
+                ReadFault::Unread(why) => Done::deferred(
+                    Reason::NotReady,
+                    format!(
+                        "the tree {} at {} could not be read yet: {why}",
+                        tree.form,
+                        dir.display()
+                    ),
+                    self.retry_secs,
+                ),
+                ReadFault::NotTheTree(why) => wrong(format!(
+                    "the tree {} at {} is not the tree prepared: {why}",
                     tree.form,
                     dir.display()
-                ))
+                )),
             })?;
             if let Some(difference) = differs(&tree.nodes(), &read) {
                 return Err(wrong(format!(
@@ -208,7 +224,7 @@ impl Asked<'_> {
                 code: ProviderCode::Unavailable,
                 reason,
             } => Done::deferred(
-                Reason::NotReady,
+                Reason::ProviderBusy,
                 format!(
                     "the mount provider at {socket} answered {call} of the tree {} with \
                      UNAVAILABLE: {reason}",

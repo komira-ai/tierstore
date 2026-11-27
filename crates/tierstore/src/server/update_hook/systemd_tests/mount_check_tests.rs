@@ -72,7 +72,7 @@ fn verify_defers_while_the_provider_is_unavailable_and_asks_it_only_as_the_write
     let p = params(NEW, Some(OLD));
     fake.provider
         .answer("Mount", 0, ProviderCode::Unavailable, "not ready");
-    assert_deferred(&fake.run(Verify, &p), Reason::NotReady, 5);
+    assert_deferred(&fake.run(Verify, &p), Reason::ProviderBusy, 5);
     assert!(!fake.record().has(Marker::Verified));
 
     let fake = cut_over();

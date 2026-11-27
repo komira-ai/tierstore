@@ -121,11 +121,17 @@ pub enum Reason {
     /// through the mount (a file missing or of other bytes, a path of another kind or not in the
     /// tree, a directory outside the mount), or its placement outlived its release.
     MountedTreeWrong,
+    /// `verify`: the node's mount provider answered a call of the mount check `UNAVAILABLE` (exit
+    /// 75): it is there, and has no room or no turn now (its placements, its sources or its
+    /// preparations are at their bound, or a tree was not placed within the call's wait). The
+    /// host, not the release: a deferral that lasts past `verify_deadline_secs` is the
+    /// environment's failure.
+    ProviderBusy,
 }
 
 impl Reason {
     /// Every reason.
-    pub const ALL: [Reason; 24] = [
+    pub const ALL: [Reason; 25] = [
         Reason::BadArgs,
         Reason::BadParams,
         Reason::Locked,
@@ -150,6 +156,7 @@ impl Reason {
         Reason::ModeUnsupported,
         Reason::ProviderRefused,
         Reason::MountedTreeWrong,
+        Reason::ProviderBusy,
     ];
 
     /// The token in the JSON.
@@ -180,6 +187,7 @@ impl Reason {
             Reason::ModeUnsupported => "mode_unsupported",
             Reason::ProviderRefused => "provider_refused",
             Reason::MountedTreeWrong => "mounted_tree_wrong",
+            Reason::ProviderBusy => "provider_busy",
         }
     }
 
@@ -200,7 +208,8 @@ impl Reason {
             | Reason::UnitFailed
             | Reason::StateIo
             | Reason::HostFailed
-            | Reason::ModeUnsupported => Class::Environment,
+            | Reason::ModeUnsupported
+            | Reason::ProviderBusy => Class::Environment,
             Reason::OutOfOrder
             | Reason::NotVerified
             | Reason::Committed

@@ -82,11 +82,11 @@ pub(super) const PROVIDER_INTERFACE: &str = "mount-provider";
 /// Where a file's `mount-provider` interface is served: its socket, and the mount of
 /// `tierstore fs` its trees are placed under.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct ProviderShape {
+pub(in crate::server) struct ProviderShape {
     /// `params.socket`.
-    pub(super) socket: PathBuf,
+    pub(in crate::server) socket: PathBuf,
     /// `params.mountpoint`, or the loader's default.
-    pub(super) mountpoint: PathBuf,
+    pub(in crate::server) mountpoint: PathBuf,
 }
 
 /// The `mount-provider` interface of the file whose text is `text`: `None` for a file with none

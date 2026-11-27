@@ -74,8 +74,8 @@ pub use params::{
 };
 pub use ports::{
     Clock, Control, Exe, Family, FileId, Host, Instance, Instances, Launchd, LaunchdPorts, Lock,
-    Markers, MountProvider, PortError, PortKind, Processes, ProviderCode, ProviderFault, Reply,
-    StateDir, SystemdPorts, TreeNode, UnitState, Units,
+    Markers, MountProvider, PortError, PortKind, Processes, ProviderCode, ProviderFault, ReadFault,
+    Reply, StateDir, SystemdPorts, TreeNode, UnitState, Units,
 };
 pub use probe::{Build, CacheMode, build_of, readiness};
 pub use record::{

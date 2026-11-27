@@ -147,6 +147,21 @@ impl Rig {
         }
     }
 
+    /// The same, over a tree store of `config`, with a `Mount` that waits at most `mount_wait` for
+    /// its tree and the reads of every preparation queued up to `max_queued_bytes`.
+    pub(in crate::server) async fn bounded(
+        name: &str,
+        config: TreesConfig,
+        mount_wait: Duration,
+        max_queued_bytes: u64,
+    ) -> Self {
+        Self::with(name, config, |settings| {
+            settings.mount_wait = mount_wait;
+            settings.max_queued_bytes = max_queued_bytes;
+        })
+        .await
+    }
+
     /// Puts the version 1 bytes of `list` in the upstream under its key, and no sidecar (none is
     /// made of a version 1 list); the key.
     pub(super) async fn put_list(&self, list: &TreeList) -> String {
@@ -209,8 +224,15 @@ impl Rig {
             .is_some()
     }
 
+    /// Prepares the source `index` of `run` with the pack's list, and does not wait for it.
+    pub(in crate::server) fn prepared(&self, run: &str, index: u32) {
+        self.provider
+            .prepare(source(run, index), &self.key, READ_ONLY)
+            .expect("prepared");
+    }
+
     /// Prepares the source `index` of `run` with the pack's list, and mounts it.
-    pub(super) async fn mounted(&self, run: &str, index: u32) -> PathBuf {
+    pub(in crate::server) async fn mounted(&self, run: &str, index: u32) -> PathBuf {
         self.mounted_attempt(run, index, 0).await
     }
 
@@ -263,7 +285,7 @@ async fn put_tree(bench: &Bench, v2: &[u8]) -> String {
 }
 
 /// The key of the L2 sidecar of the tree list `key`: `cas/l2/` and the same id.
-pub(super) fn sidecar_key_of(key: &str) -> String {
+pub(in crate::server) fn sidecar_key_of(key: &str) -> String {
     let digest = tree_list_digest(key).expect("a tree list key");
     sidecar_key(digest.as_bytes())
 }

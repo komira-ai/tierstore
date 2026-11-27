@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use super::mount_check::{check, on_node};
 use super::params::Params;
-use super::ports::{ProviderCode, ProviderFault, TreeNode};
+use super::ports::{ProviderCode, ProviderFault, ReadFault, TreeNode};
 use super::provider_fake::{FAKE_MOUNT, FAKE_SOCKET, FakeProvider, PROVIDER_ENTRY};
 use super::report::{Done, Outcome, Reason};
 use super::shape::ProviderShape;
@@ -192,7 +192,7 @@ fn silence_and_unavailable_defer_the_check() {
     let (outcome, why, retry, detail) = failed(check(&provider, &shape(), 9));
     assert_eq!(
         (outcome, why, retry),
-        (Outcome::Deferred, Some(Reason::NotReady), Some(9))
+        (Outcome::Deferred, Some(Reason::ProviderBusy), Some(9))
     );
     assert_eq!(
         detail,
@@ -211,7 +211,7 @@ fn silence_and_unavailable_defer_the_check() {
 }
 
 /// What a read of a tree finds.
-type Read = Result<BTreeMap<String, TreeNode>, String>;
+type Read = Result<BTreeMap<String, TreeNode>, ReadFault>;
 
 /// The tree with its sidecar, changed by `change`.
 fn changed(change: impl FnOnce(&mut BTreeMap<String, TreeNode>)) -> BTreeMap<String, TreeNode> {
@@ -274,8 +274,8 @@ fn a_tree_read_back_wrong_fails_the_check_by_its_first_difference() {
             "is not the tree prepared: zz is not in the tree".to_owned(),
         ),
         (
-            Err("data/one could not be read: Input/output error".to_owned()),
-            "cannot be read: data/one could not be read: Input/output error".to_owned(),
+            Err(ReadFault::NotTheTree("more than 64 paths".to_owned())),
+            "is not the tree prepared: more than 64 paths".to_owned(),
         ),
     ];
     for (read, said) in cases {
@@ -291,6 +291,35 @@ fn a_tree_read_back_wrong_fails_the_check_by_its_first_difference() {
             format!("the tree with its L2 sidecar at {} {said}", dir.display())
         );
         assert!(!detail.contains("secret"));
+        assert!(provider.placed().is_empty());
+    }
+}
+
+/// Asserts that a read through the mount that fails or does not end in its bound (the mount fills
+/// a file as it is opened, slowly on a node under load) defers the check with `not_ready`, its
+/// detail naming the tree, its directory and what the system said, and releases both sources.
+/// Catches a check that fails, and so rolls back, an update of a node whose mount is only slow.
+#[test]
+fn a_read_that_fails_or_does_not_end_defers_the_check() {
+    let dir = FakeProvider::dir_of(1);
+    for why in [
+        "data/one could not be read: Input/output error",
+        "the read did not end within 30000 ms",
+    ] {
+        let provider = FakeProvider::default();
+        provider.read_as(1, Err(ReadFault::Unread(why.to_owned())));
+        let (outcome, reason, retry, detail) = failed(checked(&provider));
+        assert_eq!(
+            (outcome, reason, retry),
+            (Outcome::Deferred, Some(Reason::NotReady), Some(5))
+        );
+        assert_eq!(
+            detail,
+            format!(
+                "the tree without an L2 sidecar at {} could not be read yet: {why}",
+                dir.display()
+            )
+        );
         assert!(provider.placed().is_empty());
     }
 }
@@ -372,7 +401,7 @@ fn a_placement_that_outlives_its_release_fails_the_check() {
         (
             unavailable,
             Outcome::Deferred,
-            Reason::NotReady,
+            Reason::ProviderBusy,
             format!(
                 "the mount provider at {socket} answered Mount of the tree with its L2 sidecar \
                  with UNAVAILABLE: not ready"
@@ -464,7 +493,7 @@ impl super::ports::MountProvider for FirstReleaseFailsAfterPrepare<'_> {
         self.inner.release(socket, index)
     }
 
-    fn read_tree(&self, dir: &std::path::Path) -> Result<BTreeMap<String, TreeNode>, String> {
+    fn read_tree(&self, dir: &std::path::Path) -> Result<BTreeMap<String, TreeNode>, ReadFault> {
         self.inner.read_tree(dir)
     }
 }
@@ -503,7 +532,7 @@ impl super::ports::MountProvider for GoneFault<'_> {
         self.inner.release(socket, index)
     }
 
-    fn read_tree(&self, dir: &std::path::Path) -> Result<BTreeMap<String, TreeNode>, String> {
+    fn read_tree(&self, dir: &std::path::Path) -> Result<BTreeMap<String, TreeNode>, ReadFault> {
         self.inner.read_tree(dir)
     }
 }
@@ -558,7 +587,7 @@ impl super::ports::MountProvider for LastReleaseRefused<'_> {
         self.inner.release(socket, index)
     }
 
-    fn read_tree(&self, dir: &std::path::Path) -> Result<BTreeMap<String, TreeNode>, String> {
+    fn read_tree(&self, dir: &std::path::Path) -> Result<BTreeMap<String, TreeNode>, ReadFault> {
         self.inner.read_tree(dir)
     }
 }

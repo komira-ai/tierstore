@@ -6,6 +6,7 @@ use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use bytes::Bytes;
 use tierstore_testkit::dir::TestDir;
@@ -14,12 +15,12 @@ use tokio::sync::Notify;
 use tonic::Code;
 
 use super::super::mount_check::check;
-use super::super::ports::{MountProvider, ProviderCode, ProviderFault, TreeNode};
-use super::super::report::{Done, Outcome, Reason};
+use super::super::ports::{MountProvider, ProviderCode, ProviderFault, ReadFault, TreeNode};
+use super::super::report::{Class, Done, Outcome, Reason};
 use super::super::shape::ProviderShape;
 use super::provider::{MAX_FILE_BYTES, MAX_PATHS, ProviderSocket, ProviderTimes};
 use super::provider::{code_of, framed, unframed};
-use crate::server::local_cache::trees::TreeStore;
+use crate::server::local_cache::trees::{TreeStore, TreesConfig};
 use crate::server::provider::check::{TREES, WITH_SIDECAR, WITHOUT_SIDECAR, pack, pack_key};
 use crate::server::provider::testing::Rig;
 use crate::server::provider::{NOT_PREPARED_HERE, serve};
@@ -40,7 +41,11 @@ impl Served {
     /// pack, both lists and the one sidecar, the list of the tree without a sidecar left out when
     /// `refuse_plain`, so that the provider refuses that tree.
     async fn start(name: &str, refuse_plain: bool) -> Self {
-        let rig = Rig::new(name).await;
+        Self::over(Rig::new(name).await, name, refuse_plain).await
+    }
+
+    /// [`Served::start`] over `rig`.
+    async fn over(rig: Rig, name: &str, refuse_plain: bool) -> Self {
         let up = &rig.bench.rig;
         up.put(&pack_key(), &pack()).await;
         up.put(&WITH_SIDECAR.key(), WITH_SIDECAR.list).await;
@@ -100,18 +105,26 @@ impl MountProvider for ThroughStore {
         self.socket.release(socket, index)
     }
 
-    fn read_tree(&self, dir: &Path) -> Result<BTreeMap<String, TreeNode>, String> {
-        let place = dir.strip_prefix(MOUNT).map_err(|_| "outside".to_owned())?;
-        let located = self
-            .store
-            .locate_fs(&place.to_string_lossy())
-            .ok_or_else(|| format!("nothing is placed at {place:?}"))?;
-        let tree = TREES
-            .iter()
-            .find(|tree| tree.key() == format!("cas/l/{}", located.tree))
-            .ok_or_else(|| "another tree is placed".to_owned())?;
-        Ok(tree.nodes())
+    fn read_tree(&self, dir: &Path) -> Result<BTreeMap<String, TreeNode>, ReadFault> {
+        through_store(&self.store, dir)
     }
+}
+
+/// The tree the store has placed at `dir`, below [`MOUNT`]: the tree of the check whose id the
+/// placement names.
+fn through_store(store: &TreeStore, dir: &Path) -> Result<BTreeMap<String, TreeNode>, ReadFault> {
+    let not = |why: String| ReadFault::NotTheTree(why);
+    let place = dir
+        .strip_prefix(MOUNT)
+        .map_err(|_| not("outside".to_owned()))?;
+    let located = store
+        .locate_fs(&place.to_string_lossy())
+        .ok_or_else(|| not(format!("nothing is placed at {place:?}")))?;
+    let tree = TREES
+        .iter()
+        .find(|tree| tree.key() == format!("cas/l/{}", located.tree))
+        .ok_or_else(|| not("another tree is placed".to_owned()))?;
+    Ok(tree.nodes())
 }
 
 /// The mount check of `served` with the real client.
@@ -293,7 +306,7 @@ fn an_answer_is_one_frame_of_its_message() {
 }
 
 /// The read of the tree at `dir` with the real client.
-fn read(dir: &Path) -> Result<BTreeMap<String, TreeNode>, String> {
+fn read(dir: &Path) -> Result<BTreeMap<String, TreeNode>, ReadFault> {
     ProviderSocket::new(PathBuf::from("/"), ProviderTimes::default()).read_tree(dir)
 }
 
@@ -335,8 +348,8 @@ fn a_tree_that_is_no_tree_of_the_check_is_refused_by_name() {
     let missing = dir.path().join("missing");
     let refused = read(&missing).unwrap_err();
     assert!(
-        refused.starts_with("the directory could not be listed: "),
-        "{refused}"
+        matches!(&refused, ReadFault::Unread(why) if why.starts_with("the directory could not be listed: ")),
+        "{refused:?}"
     );
 
     let large = dir.path().join("large");
@@ -344,7 +357,9 @@ fn a_tree_that_is_no_tree_of_the_check_is_refused_by_name() {
     std::fs::write(large.join("big"), vec![0u8; MAX_FILE_BYTES as usize + 1]).unwrap();
     assert_eq!(
         read(&large),
-        Err(format!("big is larger than {MAX_FILE_BYTES} bytes"))
+        Err(ReadFault::NotTheTree(format!(
+            "big is larger than {MAX_FILE_BYTES} bytes"
+        )))
     );
 
     let many = dir.path().join("many");
@@ -352,7 +367,12 @@ fn a_tree_that_is_no_tree_of_the_check_is_refused_by_name() {
     for n in 0..=MAX_PATHS {
         std::fs::write(many.join(format!("f{n}")), b"").unwrap();
     }
-    assert_eq!(read(&many), Err(format!("more than {MAX_PATHS} paths")));
+    assert_eq!(
+        read(&many),
+        Err(ReadFault::NotTheTree(format!(
+            "more than {MAX_PATHS} paths"
+        )))
+    );
 
     let odd = dir.path().join("odd");
     std::fs::create_dir_all(&odd).unwrap();
@@ -360,7 +380,9 @@ fn a_tree_that_is_no_tree_of_the_check_is_refused_by_name() {
     std::fs::write(odd.join(name), b"").unwrap();
     assert_eq!(
         read(&odd),
-        Err("\"\" holds a name that is not UTF-8".to_owned())
+        Err(ReadFault::NotTheTree(
+            "\"\" holds a name that is not UTF-8".to_owned()
+        ))
     );
 
     let link = dir.path().join("link");
@@ -368,7 +390,9 @@ fn a_tree_that_is_no_tree_of_the_check_is_refused_by_name() {
     std::os::unix::fs::symlink(name, link.join("l")).unwrap();
     assert_eq!(
         read(&link),
-        Err("l links to a target that is not UTF-8".to_owned())
+        Err(ReadFault::NotTheTree(
+            "l links to a target that is not UTF-8".to_owned()
+        ))
     );
 
     let special = dir.path().join("special");
@@ -376,7 +400,9 @@ fn a_tree_that_is_no_tree_of_the_check_is_refused_by_name() {
     let _listener = UnixListener::bind(special.join("s")).unwrap();
     assert_eq!(
         read(&special),
-        Err("s is neither a file, a directory nor a link".to_owned())
+        Err(ReadFault::NotTheTree(
+            "s is neither a file, a directory nor a link".to_owned()
+        ))
     );
 }
 
@@ -469,4 +495,154 @@ async fn an_answer_with_no_grpc_status_is_silence() {
             "Release: an answer with no grpc-status (HTTP 200 OK)".to_owned()
         ))
     );
+}
+
+/// The reads every preparation may queue together, as the provider's default.
+const QUEUE: u64 = 256 << 20;
+
+/// The check's failure or deferral against `served`: its outcome, reason, class and detail.
+async fn deferred(served: &Served) -> (Outcome, Option<Reason>, Class, String) {
+    let done = checked(served).await.expect_err("the check does not pass");
+    let detail = done.report.detail.clone().unwrap_or_default();
+    (done.outcome, done.report.reason, done.report.class, detail)
+}
+
+/// Asserts that on a node whose placements are at `trees.max_placements` (a job's tree holds the
+/// one place), the check is not failed: the provider takes the check's `Prepare`, cannot make the
+/// tree, and answers its `Mount` `UNAVAILABLE` with `the tree was not made: too many placements`,
+/// so the check defers with `provider_busy`, of the environment's class, and leaves the job's
+/// placement alone and none of its own. Catches an update failed, and rolled back on every node
+/// at once, because the node was full when `verify` ran.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_node_at_its_placement_limit_defers_the_check() {
+    let config = TreesConfig {
+        max_placements: 1,
+        ..TreesConfig::default()
+    };
+    let rig = Rig::bounded(
+        "hook-load-placements",
+        config,
+        Duration::from_secs(3600),
+        QUEUE,
+    )
+    .await;
+    let _ = rig.mounted("js.job", 0).await;
+    let served = Served::over(rig, "hook-load-placements", false).await;
+    let (outcome, reason, class, detail) = deferred(&served).await;
+    assert_eq!(
+        (outcome, reason, class),
+        (
+            Outcome::Deferred,
+            Some(Reason::ProviderBusy),
+            Class::Environment
+        )
+    );
+    assert!(
+        detail
+            .contains("with UNAVAILABLE: the tree was not made: too many placements: 1 are alive"),
+        "{detail}"
+    );
+    assert_eq!(served.rig.bench.store.sizes().0, 1);
+}
+
+/// Asserts that on a node whose provider holds `trees.max_sources` sources (one, a job's), the
+/// check's `Prepare` is answered `UNAVAILABLE` with `the node holds 1 sources
+/// (trees.max_sources): release one, or retry`, and the check defers with `provider_busy` and
+/// leaves the job's source and placement alone. Catches an update failed for a burst of jobs.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_node_at_its_sources_bound_defers_the_check() {
+    let config = TreesConfig {
+        max_sources: 1,
+        ..TreesConfig::default()
+    };
+    let rig = Rig::bounded(
+        "hook-load-sources",
+        config,
+        Duration::from_secs(3600),
+        QUEUE,
+    )
+    .await;
+    let _ = rig.mounted("js.job", 0).await;
+    let served = Served::over(rig, "hook-load-sources", false).await;
+    let (outcome, reason, class, detail) = deferred(&served).await;
+    assert_eq!(
+        (outcome, reason, class),
+        (
+            Outcome::Deferred,
+            Some(Reason::ProviderBusy),
+            Class::Environment
+        )
+    );
+    assert!(
+        detail.ends_with(
+            "answered Prepare of the tree with its L2 sidecar with UNAVAILABLE: the node holds 1 \
+             sources (trees.max_sources): release one, or retry"
+        ),
+        "{detail}"
+    );
+    assert_eq!(served.rig.bench.store.sizes().0, 1);
+}
+
+/// Asserts that on a node whose preparations are all taken (`trees.prepare_concurrency` of one,
+/// held by a job's preparation whose list read the store does not answer), the check's `Prepare`
+/// is taken and waits for a turn, its `Mount` is answered `UNAVAILABLE` `not ready` once the
+/// provider's wait for the tree has passed, and the check defers with `provider_busy`, leaving no
+/// placement. The job's read never ends while the check runs, so the answer does not depend on how
+/// long the wait is. Catches an update failed while the node's preparations are busy.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_node_whose_preparations_are_all_taken_defers_the_check() {
+    use crate::server::provider::testing::sidecar_key_of;
+
+    let config = TreesConfig {
+        prepare_concurrency: 1,
+        ..TreesConfig::default()
+    };
+    let rig = Rig::bounded("hook-load-turns", config, Duration::from_millis(200), QUEUE).await;
+    let gate = rig
+        .bench
+        .rig
+        .tamper
+        .hold_key_after_read(&sidecar_key_of(&rig.key));
+    rig.prepared("js.job", 0);
+    let tamper = Arc::clone(&rig.bench.rig.tamper);
+    crate::server::local_cache::testing::until("the job's read is held", || tamper.parked() > 0)
+        .await;
+    let served = Served::over(rig, "hook-load-turns", false).await;
+    let (outcome, reason, class, detail) = deferred(&served).await;
+    assert_eq!(
+        (outcome, reason, class),
+        (
+            Outcome::Deferred,
+            Some(Reason::ProviderBusy),
+            Class::Environment
+        )
+    );
+    assert!(
+        detail.ends_with(
+            "answered Mount of the tree with its L2 sidecar with UNAVAILABLE: not ready"
+        ),
+        "{detail}"
+    );
+    assert_eq!(served.rig.bench.store.sizes().0, 0);
+    gate.add_permits(1);
+}
+
+/// Asserts that on a node whose read-ahead queue has no room (its bound is 0 bytes here, as a
+/// queue already full of other sources' reads leaves none), the check's trees are placed without
+/// their reads queued, as with `trees.prepare_prefetch = "none"`, and the check passes: a full
+/// queue is no refusal at all, and the files are read as the mount opens them. Catches a check
+/// that fails, or waits, on a node whose read-ahead is busy.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_node_whose_read_ahead_queue_is_full_passes_the_check() {
+    let rig = Rig::bounded(
+        "hook-load-queue",
+        TreesConfig::default(),
+        Duration::from_secs(3600),
+        0,
+    )
+    .await;
+    let served = Served::over(rig, "hook-load-queue", false).await;
+    let said = checked(&served).await.expect("the check passes");
+    assert!(said.starts_with("the mount provider at "), "{said}");
+    assert_eq!(served.rig.bench.store.sizes().0, 0);
 }
