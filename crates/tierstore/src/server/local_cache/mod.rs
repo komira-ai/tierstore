@@ -147,6 +147,7 @@ mod metrics;
 pub(super) mod opens;
 mod pin_set;
 mod pins;
+mod queued_reads;
 mod revalidate;
 mod scrub;
 mod selfcheck;
@@ -225,6 +226,8 @@ mod start_tests;
 #[cfg(test)]
 mod stream_tests;
 #[cfg(test)]
+mod swap_tests;
+#[cfg(test)]
 pub(in crate::server) mod testing;
 #[cfg(test)]
 mod tiered_tests;
@@ -270,6 +273,7 @@ use index::Index;
 use keep::Sent;
 use layout::{Name, name_of};
 use metrics::{add, bump};
+pub(super) use queued_reads::QueuedReads;
 use revalidate::Verdict;
 pub(super) use source::{Blob, FillError};
 pub(super) use source::{TreeFilled, blob_path, is_list, manifest_path};
@@ -506,6 +510,8 @@ pub(super) struct Inner {
     before_insert: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
     /// The runs between request and start, and what the mounts report for `/metricz`.
     starts: starts::Starts,
+    /// The room of the reads the mount provider queues (`queued_reads`).
+    queued_reads: Arc<queued_reads::QueuedReads>,
     /// Whether a pass of the eviction is running.
     evicting: AtomicBool,
     /// Whether this cache may write to its directory, and the lock that says so.
@@ -634,6 +640,7 @@ impl LocalCache {
             #[cfg(test)]
             before_insert: Mutex::new(None),
             starts: starts::Starts::default(),
+            queued_reads: Arc::default(),
             evicting: AtomicBool::new(false),
             hold: Hold::new(standing),
             large: std::sync::OnceLock::new(),
@@ -685,24 +692,6 @@ impl Inner {
     /// What the cache says of the object, if it holds it.
     fn kept(&self, name: &Name) -> Option<Meta> {
         locked(&self.index).get(&name.hex).map(index::Entry::meta)
-    }
-
-    /// Whether the object the index holds is the one on the disk. A read-only cache's index is
-    /// its scan, and the holder may have put the object again since, so the sidecar is read; a
-    /// read-write cache, and a key named by its content, need no check.
-    async fn unchanged(&self, name: &Name, meta: &Meta) -> bool {
-        if self.read_write() || name.content.is_some() {
-            return true;
-        }
-        let believed = stream::Believed {
-            size: meta.size,
-            tag: meta.tag.clone(),
-        };
-        let (root, hex) = (self.config.path.clone(), name.hex.clone());
-        let reading = tokio::task::spawn_blocking(move || {
-            stream::same_version_on_disk(&root, &hex, &believed)
-        });
-        reading.await.unwrap_or(false)
     }
 }
 
@@ -799,6 +788,18 @@ impl Backend for LocalCache {
         Err(Error::Unsupported(READ_ONLY.to_owned()))
     }
 
+    /// `If-Match`: sent to the upstream's own call, which compares and replaces; the cache
+    /// forgets the key (see `swap_through`, in `write`).
+    async fn put_stream_if_match(
+        &self,
+        key: &str,
+        len: Option<u64>,
+        body: PartBody<'_>,
+        etag: &str,
+    ) -> Result<String, Error> {
+        self.inner.swap_through(key, len, body, etag).await
+    }
+
     async fn delete(&self, key: &str) -> Result<(), Error> {
         self.inner.delete_through(key).await
     }
@@ -835,6 +836,17 @@ impl Backend for LocalCache {
         parts: &[(u32, String)],
     ) -> Result<String, Error> {
         self.inner.complete_through(key, id, parts).await
+    }
+
+    /// As `put_stream_if_match`, for a completion (see `complete_swap_through`, in `write`).
+    async fn complete_upload_if_match(
+        &self,
+        key: &str,
+        id: &str,
+        parts: &[(u32, String)],
+        etag: &str,
+    ) -> Result<String, Error> {
+        self.inner.complete_swap_through(key, id, parts, etag).await
     }
 
     async fn abort_upload(&self, key: &str, id: &str) -> Result<(), Error> {

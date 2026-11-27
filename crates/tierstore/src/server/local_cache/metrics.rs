@@ -199,6 +199,8 @@ const FILL_SOCKET_RUNNING: &str = "tierstore_cache_fill_socket_running";
 const UPSTREAM_READS_IN_FLIGHT: &str = "tierstore_cache_upstream_reads_in_flight";
 const FILL_SOCKET_BUSY: &str = "tierstore_cache_fill_socket_busy_total";
 const UPSTREAM_SHORT_OBJECTS: &str = "tierstore_cache_upstream_short_objects_total";
+const PREFETCH_QUEUED_BYTES: &str = "tierstore_provider_prefetch_queued_bytes";
+const PREFETCH_SKIPPED: &str = "tierstore_provider_prefetch_skipped_total";
 
 /// The families of one sample, with their kinds, in the order `/metricz` shows them.
 pub(super) const PLAIN: [(&str, &str); 30] = [
@@ -513,8 +515,19 @@ impl LocalCache {
         text.push_str(&short_objects(inner.upstream.short_objects()));
         text.push_str(&inner.extents.counters.render(entries, filled));
         text.push_str(&inner.starts.render());
+        let queued = &inner.queued_reads;
+        text.push_str(&queued_reads(queued.bytes(), queued.skipped()));
         text
     }
+}
+
+/// The two families of the reads the mount provider's preparations queue (`queued_reads`): the
+/// bytes they hold now, a gauge, and the preparations refused room, a counter.
+pub(super) fn queued_reads(bytes: u64, skipped: u64) -> String {
+    format!(
+        "# TYPE {PREFETCH_QUEUED_BYTES} {GAUGE}\n{PREFETCH_QUEUED_BYTES} {bytes}\n\
+         # TYPE {PREFETCH_SKIPPED} {COUNTER}\n{PREFETCH_SKIPPED} {skipped}\n"
+    )
 }
 
 /// The family of what the upstream did about the objects its store kept of its puts that got no
