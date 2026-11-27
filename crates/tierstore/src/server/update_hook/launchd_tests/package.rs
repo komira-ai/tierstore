@@ -91,15 +91,11 @@ struct Image {
     capabilities: Vec<String>,
 }
 
-/// The image of the stand-in binary `text`, or `None` for anything else.
+/// The image of the stand-in binary `text`, or `None` for one that names no version.
 fn image_of(text: &str) -> Option<Image> {
-    let mut lines = text.lines();
-    if lines.next()? != "tierstore stand-in" {
-        return None;
-    }
     let mut version = None;
     let mut capabilities = Vec::new();
-    for line in lines {
+    for line in text.lines() {
         match line.split_once(' ') {
             Some(("version", v)) => version = Some(v.to_owned()),
             Some(("capabilities", words)) => {
@@ -375,9 +371,9 @@ impl Mac {
     /// execute `path` (a path under the root): every directory from the root down lets others
     /// search it, and the file lets others execute it.
     fn account_reaches(&self, path: &Path) -> bool {
-        let Ok(below) = path.strip_prefix(&self.root) else {
-            return false;
-        };
+        let below = path
+            .strip_prefix(&self.root)
+            .expect("a path under the root");
         let mut at = self.root.clone();
         for part in below.components() {
             if mode_of(&at) & 0o001 == 0 {
@@ -385,34 +381,33 @@ impl Mac {
             }
             at.push(part);
         }
-        fs::symlink_metadata(&at)
-            .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o001 != 0)
+        fs::symlink_metadata(&at).is_ok_and(|meta| meta.permissions().mode() & 0o001 != 0)
     }
 
     /// What `program` (absolute on the Mac) runs when launchd starts it as `_tierstore`.
     fn image_for(&self, program: &str) -> Option<Image> {
         let at = self.at(program);
-        if !self.account_reaches(&at) {
-            return None;
-        }
-        image_of(&fs::read_to_string(at).ok()?)
+        let text = fs::read_to_string(&at)
+            .ok()
+            .filter(|_| self.account_reaches(&at))?;
+        image_of(&text)
     }
 
     fn launchctl(&self, args: &[&str]) -> Answer {
         let target = format!("system/{}", macos_pkg::LABEL);
         let loaded = self.job.borrow().is_some();
         match args {
-            ["print", t] if *t == target => {
+            ["print", label] => {
+                assert_eq!(*label, target);
                 if loaded {
                     exit(0, "state = running\n", "")
                 } else {
                     exit(113, "", "Could not find service")
                 }
             }
-            ["bootstrap", "system", plist] if *plist == LAUNCHD_PLIST => {
-                if loaded {
-                    return exit(5, "", "Bootstrap failed: 5: Input/output error");
-                }
+            ["bootstrap", "system", plist] => {
+                assert_eq!(*plist, LAUNCHD_PLIST);
+                assert!(!loaded, "the hook bootstraps a job that is loaded");
                 let text = fs::read_to_string(self.at(plist)).expect("the plist is installed");
                 let program = plist_program(&text).expect("a program");
                 let pid = self.next_pid.get();
@@ -425,24 +420,27 @@ impl Mac {
                 });
                 exit(0, "", "")
             }
-            ["bootout", t] if *t == target => {
+            ["bootout", label] => {
+                assert_eq!(*label, target);
                 *self.job.borrow_mut() = None;
                 exit(0, "", "")
             }
             // The process executes its program again, under the same pid: the file now at the
             // plist's path.
-            ["kill", "SIGUSR2", t] if *t == target => {
-                let program = match self.job.borrow().as_ref() {
-                    Some(job) => job.program.clone(),
-                    None => return exit(3, "", "kill: No such process"),
-                };
+            ["kill", "SIGUSR2", label] => {
+                assert_eq!(*label, target);
+                let program = self
+                    .job
+                    .borrow()
+                    .as_ref()
+                    .expect("a loaded job")
+                    .program
+                    .clone();
                 let image = self.image_for(&program);
-                if let Some(job) = self.job.borrow_mut().as_mut() {
-                    job.image = image;
-                }
+                self.job.borrow_mut().as_mut().expect("a loaded job").image = image;
                 exit(0, "", "")
             }
-            _ => panic!("launchctl {args:?} is not a call of this hook"),
+            other => panic!("launchctl {other:?} is not a call of this hook"),
         }
     }
 
@@ -450,21 +448,10 @@ impl Mac {
     /// `_tierstore`, which `sudo` refuses to execute when the account cannot reach it.
     fn sudo(&self, args: &[&str]) -> Answer {
         let uid = format!("#{ACCOUNT_UID}");
-        let [
-            "-n",
-            "-u",
-            user,
-            "--",
-            program,
-            "--config",
-            config,
-            "--check-config",
-        ] = args
-        else {
-            panic!("sudo {args:?} is not a check of this hook");
-        };
-        assert_eq!(*user, uid);
-        let program = Path::new(program);
+        assert_eq!(args.len(), 8, "sudo {args:?}");
+        assert_eq!(args[..4], ["-n", "-u", uid.as_str(), "--"]);
+        assert_eq!([args[5], args[7]], ["--config", "--check-config"]);
+        let program = Path::new(args[4]);
         if !self.account_reaches(program) {
             return exit(
                 1,
@@ -475,25 +462,26 @@ impl Mac {
                 ),
             );
         }
-        let runs = fs::read_to_string(program).ok().and_then(|t| image_of(&t));
-        match (runs, Path::new(config).is_file()) {
-            (None, _) => exit(126, "", "cannot execute binary file"),
-            (Some(_), true) => exit(0, "", ""),
-            (Some(_), false) => exit(2, "", "no such file"),
-        }
+        let text = fs::read_to_string(program).expect("the program is there");
+        assert!(
+            image_of(&text).is_some(),
+            "{} is a binary",
+            program.display()
+        );
+        assert!(Path::new(args[6]).is_file(), "the node's file is there");
+        exit(0, "", "")
     }
 
     /// What `mount` lists: the root, and the mount of the node's `fs` interface while the job's
     /// process serves.
     fn mounts(&self) -> String {
-        let mut listing =
-            "/dev/disk3s1s1 on / (apfs, sealed, local, read-only, journaled)\n".to_owned();
-        if self.serving().is_some() {
-            listing.push_str(&format!(
-                "localhost:/ on {MOUNT} (nfs, nodev, nosuid, mounted by _tierstore)\n"
-            ));
-        }
-        listing
+        let served = self
+            .serving()
+            .map(|_| {
+                format!("localhost:/ on {MOUNT} (nfs, nodev, nosuid, mounted by _tierstore)\n")
+            })
+            .unwrap_or_default();
+        format!("/dev/disk3s1s1 on / (apfs, sealed, local, read-only, journaled)\n{served}")
     }
 
     /// A program the hook runs as itself (root): a release's binary, asked its capabilities.
@@ -530,9 +518,10 @@ impl Runner for Mac {
 
 impl Instances for Mac {
     fn get(&self, port: u16, path: &str) -> Result<Reply, PortError> {
-        let Some((_, version)) = self.serving().filter(|_| port == 9300) else {
-            return Err(PortError::failed(PortKind::Instances, "connection refused"));
-        };
+        let (_, version) = self
+            .serving()
+            .filter(|_| port == 9300)
+            .ok_or_else(|| PortError::failed(PortKind::Instances, "connection refused"))?;
         let body = match path {
             "/readyz" => "ready read-write".to_owned(),
             "/metricz" => gauge(&version, COMMIT, None),
@@ -645,12 +634,15 @@ fn updates_by_hand_over(mac: &Mac) {
     let record = mac.record();
     assert!(!record.updating, "{record:?}");
     assert!(record.committed(), "{record:?}");
-    assert!(
-        mac.launchctl_verbs()
-            .iter()
-            .all(|verb| verb == "print" || verb == "kill"),
-        "{:?}",
-        mac.launchctl_verbs()
+    let changed: Vec<String> = mac
+        .launchctl_verbs()
+        .into_iter()
+        .filter(|verb| verb != "print")
+        .collect();
+    assert_eq!(
+        changed,
+        ["kill"],
+        "one SIGUSR2, and no bootout or bootstrap"
     );
     assert_eq!(mac.archive_copies(), Vec::<PathBuf>::new());
 }
@@ -679,14 +671,14 @@ fn a_farm_mac_with_a_failed_attempt_staged_updates_the_same_way() {
     assert_eq!(mac.record(), stale_record());
     updates_by_hand_over(&mac);
     let failed = mac.at(&release(FAILED)).to_string_lossy().into_owned();
+    let calls = mac.calls.borrow();
+    let words: Vec<&String> = calls
+        .iter()
+        .flat_map(|call| std::iter::once(&call.program).chain(&call.args))
+        .collect();
     assert!(
-        mac.calls
-            .borrow()
-            .iter()
-            .all(|call| !call.program.starts_with(&failed)
-                && call.args.iter().all(|arg| !arg.starts_with(&failed))),
-        "{:?}",
-        mac.calls.borrow()
+        words.iter().all(|word| !word.starts_with(&failed)),
+        "{words:?}"
     );
 }
 
@@ -759,4 +751,60 @@ fn a_staged_package_without_its_binary_is_refused_by_name_with_nothing_stopped()
     assert_eq!(mac.serving(), Some((pid, CURRENT.to_owned())));
     assert!(mac.launchctl_verbs().iter().all(|v| v == "print"));
     assert_eq!(mac.record(), stale_record());
+}
+
+/// Asserts that `uninstall` of a Mac of the installer package boots the job out, leaves the
+/// package's files to hostkeeper (the binary and the plist stay where `installer` put them), puts
+/// nothing under the archive package's copy directory, and leaves the record at rest.
+#[test]
+fn uninstall_boots_the_job_out_and_leaves_the_package_to_hostkeeper() {
+    let mac = farm_mac("mac-package-uninstall");
+    assert_ok(&mac.step(Step::Uninstall, &params(CURRENT, None)));
+    assert_eq!(mac.serving(), None);
+    assert!(mac.job.borrow().is_none());
+    assert!(mac.at(macos_pkg::BINARY_PATH).is_file());
+    assert!(mac.at(LAUNCHD_PLIST).is_file());
+    assert_eq!(mac.archive_copies(), Vec::<PathBuf>::new());
+    assert_eq!(mac.record(), Record::idle(None));
+}
+
+/// Asserts that the stand-ins hold `_tierstore` to what it may reach as a Mac does: the binary
+/// inside a staged version directory (0700, hostkeeper's) is out of its reach, so `sudo` refuses
+/// to execute it, exit 1 and "Permission denied", and the binary `installer` put in place is
+/// within it. The update tests rest on this: a check that runs the staged binary fails there.
+#[test]
+fn the_account_reaches_the_installed_binary_and_not_the_one_in_a_staged_version() {
+    let mac = farm_mac("mac-package-reach");
+    let staged = mac
+        .at(&release(CURRENT))
+        .join("tree")
+        .join(macos_pkg::BINARY_PATH.trim_start_matches('/'));
+    assert!(staged.is_file());
+    assert!(!mac.account_reaches(&staged));
+    assert!(mac.account_reaches(&mac.at(macos_pkg::BINARY_PATH)));
+    let program = staged.to_string_lossy().into_owned();
+    let config = mac
+        .at(macos_pkg::CONFIG_FILE)
+        .to_string_lossy()
+        .into_owned();
+    let args = [
+        "-n",
+        "-u",
+        "#299",
+        "--",
+        program.as_str(),
+        "--config",
+        config.as_str(),
+        "--check-config",
+    ];
+    let refused = mac.sudo(&args).expect("sudo ends");
+    let said = format!("sudo: unable to execute {program}: Permission denied\n");
+    assert_eq!(
+        refused,
+        Output {
+            code: Some(1),
+            stdout: Vec::new(),
+            stderr: said.into_bytes(),
+        }
+    );
 }
