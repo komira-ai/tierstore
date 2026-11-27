@@ -30,7 +30,7 @@ MANIFEST_SHA256 = {
     "crates/tierstore-model/Cargo.toml": "efdb6bd786f5d5c5976256c7eed65700aafc2a58b334083a48f6d841779ad9c7",
     "crates/tierstore-mount-client/Cargo.toml": "c1ea0bf0c710f85ac606c7cea15f4747b474b9a6207b73fa55f3fb49a1247dc5",
     "crates/tierstore-mount-server/Cargo.toml": "2ad5e1e1b55eea640c4975ec0e0f8b37f0275b7677d9d558d8cc41f5aa84661e",
-    "crates/tierstore-plan/Cargo.toml": "c1cc75c678b2351a0feea0b761e214c0972dc5ba65d040166dbd76c30aec905c",
+    "crates/tierstore-plan/Cargo.toml": "f8efc2bba8b6bc448d525ef5d7389af53ee6a18789d9d525648485facc87621a",
     "crates/tierstore-store-api/Cargo.toml": "d188e26ffcd4ab55f2d4375eeceebf0a42b1845968fe04e6dcdf738ce39123cd",
     "crates/tierstore-testkit/Cargo.toml": "2c053e92698f7d164e9e8d4b79b0cc410a0c1f57d4755f2b9a32245d249d2301",
     "crates/tierstore-tree/Cargo.toml": "39fc0c1be597d7a56e98dcc08bc554283553e33365f8fcab2e1b56be4050cf37",
