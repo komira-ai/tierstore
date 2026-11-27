@@ -71,11 +71,20 @@ impl Node {
         }
     }
 
+    /// A whole put of `body` under `key`, with the headers `extra`; the `Content-Length` an S3
+    /// upstream needs is added.
+    async fn put_with(&self, key: &str, extra: &[(&str, &str)], body: &[u8]) -> Reply {
+        let uri = format!("/{BUCKET}/{key}");
+        let len = body.len().to_string();
+        let mut headers = vec![("content-length", len.as_str())];
+        headers.extend_from_slice(extra);
+        let request = sign(&self.config, "PUT", &uri, &headers, body);
+        reply(self.server.handle(request).await).await
+    }
+
     /// A whole put of `body` under `key`.
     async fn put(&self, key: &str, body: &[u8]) -> Reply {
-        let uri = format!("/{BUCKET}/{key}");
-        let request = sign(&self.config, "PUT", &uri, &[], body);
-        reply(self.server.handle(request).await).await
+        self.put_with(key, &[], body).await
     }
 
     /// A put of `key` with the headers `extra` (its `Content-Length` of ten bytes among them)
@@ -271,13 +280,11 @@ async fn the_digests_of_a_put_go_to_the_upstream() {
     assert_eq!(node.object_len("cas/b/named"), None);
     assert_eq!(node.short_objects(), [0, 0, 0]);
 
-    let uri = format!("/{BUCKET}/cas/b/named");
     let named = [
         ("content-md5", md5.as_str()),
         ("x-amz-checksum-sha256", sum.as_str()),
     ];
-    let request = sign(&node.config, "PUT", &uri, &named, TEN);
-    let made = reply(node.server.handle(request).await).await;
+    let made = node.put_with("cas/b/named", &named, TEN).await;
     assert_eq!(made.status, StatusCode::OK, "{}", made.body);
     let store = node.s3.store(Capabilities::default());
     let held = store
