@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use tokio::sync::Notify;
 
-use super::hold::Trace;
+use super::hold::{Trace, remove_if_there};
 use super::testing::{Rig, wait_advancing};
 use super::{Mode, Tick};
 
@@ -260,4 +260,22 @@ async fn a_call_before_read_write_that_panics_leaves_the_take_done() {
     assert_eq!(waiting.tick().unwrap(), Tick::Lost);
     assert_eq!(waiting.tick().unwrap(), Tick::Took);
     assert_eq!(calls.load(Ordering::SeqCst), 2);
+}
+
+/// Asserts what the take of the lock does with the files of an object a read-only cache saw
+/// deleted: a file that is there is removed, one that is not there already is no error, and one
+/// that cannot be removed (a directory in its place) is the error the system gave, with the
+/// directory left.
+#[test]
+fn a_file_is_removed_a_missing_one_is_no_error_and_one_that_cannot_be_is() {
+    let dir = tierstore_testkit::dir::TestDir::under(std::env::temp_dir(), "tscache-remove-there");
+    let file = dir.path().join("data");
+    std::fs::write(&file, b"bytes").unwrap();
+    remove_if_there(&file).unwrap();
+    assert!(!file.exists());
+    remove_if_there(&file).unwrap();
+    let directory = dir.path().join("in-place");
+    std::fs::create_dir(&directory).unwrap();
+    assert!(remove_if_there(&directory).is_err());
+    assert!(directory.is_dir());
 }
