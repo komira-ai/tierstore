@@ -97,8 +97,9 @@ Rules the one file adds, each a refusal by name at load (and so by `--check-conf
 - A second `fs` interface is refused.
 - The `mount-provider` interface's `mountpoint` param may be left out; it is then the `fs` interface's `mountpoint`. When both
   are given they must be equal. (Today they are two files that agree by hand: `provider/config.rs`, "the mount of `tierstore
-  fs` on the node (its `fs.mountpoint`)".) A `mount-provider` interface in a file without an `fs` interface keeps today's
-  meaning and default, so a file of today still loads.
+  fs` on the node (its `fs.mountpoint`)".) A `mount-provider` interface in a file without an `fs` interface kept today's
+  meaning and default in release M, so a file of today still loaded; since `tierstore fs` no longer serves (0.3.196) nothing
+  serves that mount, and the load refuses such a file, naming the provider's entry.
 - `params.put.stage_dir` must be on the file system of `local_cache.path` (today: of `fs.cache_path`).
 - `params.runtime_dir` must not be inside `local_cache.path`, and the control socket must differ from `server.handoff_socket`
   and the mount-provider socket, as the sockets of one file are compared today (`check_provider_socket`).

@@ -20,7 +20,8 @@ use crate::server::treefs::{Database, Found};
 pub(in crate::server) const LINUX: &str =
     include_str!("../../tests/live_configs/linux-build-node.toml");
 /// The Mac build node's file (the HostGroup mac-build), with its `fs` interface.
-pub(in crate::server) const MAC: &str = include_str!("../../tests/live_configs/mac-build-node.toml");
+pub(in crate::server) const MAC: &str =
+    include_str!("../../tests/live_configs/mac-build-node.toml");
 /// The Mac build node's `fs.toml`, which no process serves from: the config hook reads its
 /// `[fs] mountpoint` at the switch to one process.
 pub(in crate::server) const MAC_FS: &str = include_str!("../../tests/live_configs/mac-fs.toml");
@@ -36,7 +37,10 @@ pub(in crate::server) const MAC_MOUNT: &str = "/private/var/tierstore/fs";
 
 /// The key files each file names, below its scratch directory once rebased.
 pub(in crate::server) const LINUX_KEYS: [&str; 3] =
-    ["etc/access.key", "etc/mac-build-upstream-1.key", "etc/kbf-cold.key"];
+    ["etc/access.key", "etc/mac-build-upstream-1.key", SCOPED_KEY];
+/// The Linux file's scoped key (`server.scoped_key_files`): JSON with its prefixes, where the
+/// others are a key id and a secret on two lines.
+const SCOPED_KEY: &str = "etc/kbf-cold.key";
 /// The key files of the Mac's file.
 pub(in crate::server) const MAC_KEYS: [&str; 2] = ["etc/access.key", "etc/daemons.key"];
 
@@ -77,7 +81,12 @@ pub(in crate::server) fn linux_on(dir: &Path) -> String {
         &format!("tree_list_ram_bytes = 2147483648\nruntime_dir = \"{at}/run\"\n"),
         1,
     );
-    let text = swap(&text, "\"/var/lib/tierstore-cache/", &format!("\"{at}/cache/"), 2);
+    let text = swap(
+        &text,
+        "\"/var/lib/tierstore-cache/",
+        &format!("\"{at}/cache/"),
+        2,
+    );
     let text = swap(&text, "\"/etc/tierstore/", &format!("\"{at}/etc/"), 4);
     let text = swap(
         &text,
@@ -116,7 +125,12 @@ fn mac_file_on(text: &str, dir: &Path, mounts: usize) -> String {
         "listen = \"127.0.0.1:0\"",
         mounts - 1,
     );
-    let text = swap(&text, &format!("\"{MAC_MOUNT}\""), &format!("\"{at}/mnt\""), mounts);
+    let text = swap(
+        &text,
+        &format!("\"{MAC_MOUNT}\""),
+        &format!("\"{at}/mnt\""),
+        mounts,
+    );
     let text = swap(
         &text,
         "\"/var/lib/hostkeeper/facts.json\"",
@@ -141,8 +155,8 @@ fn assert_rebased(text: &str, dir: &Path) {
 }
 
 /// Writes in `dir` what the rebased file reads at its load: the key files `keys` (mode 0600, a key
-/// id and a secret of more than the 16 bytes a key needs, each its own) and hostkeeper's facts
-/// file.
+/// id and a secret of more than the 16 bytes a key needs, each its own; the scoped key as JSON that
+/// may read `cas/`) and hostkeeper's facts file.
 ///
 /// # Panics
 /// When a file cannot be written.
@@ -151,7 +165,14 @@ pub(in crate::server) fn write_keys(dir: &Path, keys: &[&str]) {
     std::fs::create_dir_all(dir.join("etc")).unwrap();
     for (n, key) in keys.iter().enumerate() {
         let path = dir.join(key);
-        std::fs::write(&path, format!("AKIDLIVE{n}\nlive-fixture-secret-{n:04}\n")).unwrap();
+        let text = if *key == SCOPED_KEY {
+            format!(
+                "{{\"access_key_id\": \"AKIDLIVE{n}\", \"secret_access_key\": \"live-fixture-secret-{n:04}\", \"read_prefixes\": [\"cas/\"], \"write_prefixes\": [], \"delete_prefixes\": []}}\n"
+            )
+        } else {
+            format!("AKIDLIVE{n}\nlive-fixture-secret-{n:04}\n")
+        };
+        std::fs::write(&path, text).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
     }
     std::fs::write(
@@ -173,9 +194,7 @@ pub(in crate::server) const HOST: Host = Host {
 /// The id of an account of the farm's files: the test's own group or user.
 fn names(database: Database, name: &str) -> Found {
     Ok(match (database, name) {
-        (Database::Group, "tierstore" | "_tierstore") => {
-            Some(rustix::process::getegid().as_raw())
-        }
+        (Database::Group, "tierstore" | "_tierstore") => Some(rustix::process::getegid().as_raw()),
         (Database::User, "_tierstore" | "jsjob") => Some(rustix::process::geteuid().as_raw()),
         _ => None,
     })
@@ -188,3 +207,7 @@ fn read(path: &Path) -> io::Result<String> {
         _ => Err(io::Error::from(io::ErrorKind::NotFound)),
     }
 }
+
+#[cfg(test)]
+#[path = "live_configs_tests.rs"]
+mod tests;

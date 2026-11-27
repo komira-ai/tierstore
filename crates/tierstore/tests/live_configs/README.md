@@ -13,8 +13,9 @@ own, which this one cannot read; each file here is a copy of one of them, made b
 | `mac-build-node-before-switch.toml` | `tierstore.toml` of the Mac build nodes before their switch to one process: the mount provider and no `fs` interface, the mount once served by `tierstore fs` |
 
 `sources.sha256` holds the SHA-256 of each farm file a copy was made from, in the form of
-`sha256sum`. The farm's side compares it with its committed files, so that a change there is copied
-here; the file before the switch is kept as it was.
+`sha256sum`, so that a copy names the version of the farm's file it stands for. A change of a farm
+file is copied here by the same rules, with its new line; the file before the switch is kept as it
+was. Nothing in this repository can read the farm's files, so nothing here compares the two.
 
 ## How a copy is made
 

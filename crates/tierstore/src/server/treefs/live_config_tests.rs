@@ -40,13 +40,6 @@ const DISK: u64 = 1 << 40;
 /// on a host whose accounts are the test's own.
 fn settings_on(dir: &Path) -> CacheSettings {
     write_keys(dir, &LINUX_KEYS);
-    // A scoped key file is JSON, not the two lines of the others.
-    let scoped = dir.join("etc/kbf-cold.key");
-    std::fs::write(
-        &scoped,
-        "{\"access_key_id\": \"AKIDSCOPED\", \"secret_access_key\": \"live-scoped-secret-0000\", \"read_prefixes\": [\"cas/\"], \"write_prefixes\": [], \"delete_prefixes\": []}\n",
-    )
-    .unwrap();
     // The service manager makes the state directory of the unit before the process starts.
     std::fs::create_dir_all(dir.join("state")).unwrap();
     let per_run = PerRun {

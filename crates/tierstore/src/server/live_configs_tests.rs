@@ -7,12 +7,12 @@ use std::path::{Path, PathBuf};
 
 use tierstore_testkit::dir::TestDir;
 
-use super::config::{PerRun, settings_from_text};
-use super::config_cache::CacheSettings;
-use super::config_interface::NO_FS;
-use super::config_testing::DEFAULTS;
-use super::live_configs::{self, HOST};
-use super::update_hook::launchd::fs::mountpoint_of;
+use crate::server::config::{PerRun, settings_from_text};
+use crate::server::config_cache::CacheSettings;
+use crate::server::config_interface::NO_FS;
+use crate::server::config_testing::DEFAULTS;
+use crate::server::live_configs::{self, HOST};
+use crate::server::update_hook::launchd::fs::mountpoint_of;
 
 /// The knobs of a run on the farm's accounts.
 const RUN: PerRun = PerRun {

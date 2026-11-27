@@ -3,9 +3,10 @@
 # crates/tierstore/docs/configuration.md says what every key does.
 #
 # The file service serves the trees of the node's tierstore (tierstore.toml) read-only over NFSv3 on
-# loopback and mounts the export itself at `mountpoint`. It holds no secret and no key file. Three
-# keys repeat what tierstore.toml says, so that the two files agree: `fill_socket`, `cache_path` and
-# `mountpoint`; a packaging test holds them to it.
+# loopback and mounts the export itself at `mountpoint`. It holds no secret and no key file. Its keys
+# repeat what tierstore.toml says, so that the two files agree: `cache_path` is its local_cache.path,
+# and `mountpoint`, `runtime_dir`, `client_group`, `owner` and `nfs.listen` are the params of its fs
+# interface; a packaging test holds them to it.
 
 [fs]
 # The group of the file service's control socket; the process must be a member of it. The job runs
@@ -16,7 +17,7 @@ client_group = "_tierstore"
 # own account. Names, because the numeric id of _tierstore differs from Mac to Mac.
 owner = "_tierstore:_tierstore"
 
-# tierstore.toml's local_cache.fill_socket: the file service reads every file of a tree through it.
+# Read and ignored since 0.3.196: no fill socket is served, and tierstore.toml names none.
 fill_socket = "/usr/local/tierstore/run/fill.sock"
 
 # tierstore.toml's local_cache.path: the node's cache directory.
