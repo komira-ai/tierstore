@@ -527,7 +527,7 @@ sum(increase(tierstore_l2_sidecar_missing_total[1h])) - sum(increase(tierstore_l
 ### Build node: the mount provider's answers UNAVAILABLE
 
 The job agent asks the mount provider again after each `UNAVAILABLE` until its
-`--mount-provider-wait` has passed (120 s by default), and then fails the start
+--mount-provider-wait has passed (120 s by default), and then fails the start
 `input-unavailable` with the last reason it was given. The family counts every such answer of
 the provider once, under its reason, so a node's own `/metricz` says why its starts wait or fail
 on the provider's side without a look at the jobs
