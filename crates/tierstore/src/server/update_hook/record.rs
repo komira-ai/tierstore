@@ -32,20 +32,17 @@
 //! - `mode` (systemd only, while an update is in flight): `handover` (the new instance takes the
 //!   listening sockets of the old) or `restart` (the old one is stopped first: a gap).
 //!
-//! - `fs_live` (systemd only): the instance of `tierstore-fs@.service` that serves the mount when
-//!   no update is in flight; while one is, the one that served before it. Absent on a node that
-//!   has none and never had one.
-//! - `fs_next` (systemd only, while an update is in flight that hands the fs process over): the
-//!   instance of `tierstore-fs@.service` `cutover` starts. Absent when the update leaves the fs
-//!   process on its release, and on a node with none.
-//! - `fs_switch` (optional, written only when true): the configuration update in flight, or the
-//!   last one when it is committed, is the switch of a node from two processes to one
-//!   (`config-hook`): the new file has an `fs` interface, the file that served had none, and a
-//!   `tierstore-fs` instance ran. On systemd `fs_live` names that instance while the update is in
-//!   flight (a rollback starts it again), and is absent once it is committed; on a Mac there is
-//!   no instance, and the key says the fs job was booted out and disabled. The key is set
-//!   only with an update in flight or committed, and never with `fs_next`. A hook that does not
-//!   know it ignores it.
+//! - `fs_live`, `fs_next` and `fs_switch` are read and never written by this hook: they are the
+//!   keys of the earlier two-process layout, which an earlier release wrote and this one still
+//!   decodes (and holds to their rules), so that the record of a node that has not left that
+//!   layout is understood. `fs_live` (systemd only) is the instance of `tierstore-fs@.service`
+//!   that served the mount; `prepare` refuses a node whose record names one. `fs_next` (while an
+//!   update was in flight that handed the fs process over) is the instance `cutover` started;
+//!   `prepare` and `rollback` refuse a record of an update in flight that names one. `fs_switch`
+//!   (written only when true) says the update in flight, or the last one when it is committed,
+//!   was the switch of a node from two processes to one; `prepare` and `rollback` refuse a
+//!   record of an update in flight that says it. `cleanup` writes a record at rest with no
+//!   `fs_live` and no `fs_next`. A hook that does not know the keys ignores them.
 //! - `reload` (optional, written only when set; the config hook's record): the configuration
 //!   update in flight, or the last one when it is committed, is applied in place by the instance
 //!   that serves, `live`, and starts no other: the staged file differs from the one that served
@@ -274,15 +271,15 @@ pub struct Record {
     /// systemd: how the update in flight takes over.
     #[serde(default)]
     pub mode: Option<Mode>,
-    /// systemd: the `tierstore-fs` instance that serves the mount at rest, or that served it
-    /// before the update in flight.
+    /// systemd, read and never written (see the module docs): the `tierstore-fs` instance that
+    /// served the mount at rest, or before the update in flight.
     #[serde(default)]
     pub fs_live: Option<Instance>,
-    /// systemd: the `tierstore-fs` instance the update in flight starts.
+    /// systemd, read and never written: the `tierstore-fs` instance the update in flight started.
     #[serde(default)]
     pub fs_next: Option<Instance>,
-    /// The update in flight, or the last committed one, is the switch to one process: see the
-    /// key `fs_switch` above.
+    /// Read and never written: the update in flight, or the last committed one, was the switch to
+    /// one process: see the key `fs_switch` above.
     #[serde(default)]
     pub fs_switch: bool,
     /// The update in flight, or the last committed one, is applied in place: see the key

@@ -1,7 +1,7 @@
 //! The one hand-over of a node of the one-process layout (`docs/design/one-service.md` sections
 //! 3.1 to 3.3): the running instance offers its sockets, its mount, its control socket and its
 //! cache lock on `server.handoff_socket` in one conversation, and a start of the same file takes
-//! them all there, with no `take-fs 1`. Over the rig of `interface_tests.rs`.
+//! them all there. Over the rig of `interface_tests.rs`.
 //!
 //! The running instance's drain is held by a HEAD of its S3 front that waits at its upstream (a
 //! request that writes nothing to the cache), and its cache writes by a GET whose fill waits there:
@@ -31,11 +31,9 @@ use crate::server::cli::Addresses;
 use crate::server::config::{PerRun, settings_from_text};
 use crate::server::config_cache::CacheSettings;
 use crate::server::handoff::testing::{ask, identity, texts, within};
-use crate::server::handoff::{Ask, Handoff, Want, offered_with};
 use crate::server::local_cache::testing::until;
 use crate::server::lock::try_take;
 use crate::server::treefs::fakedev::{self, FakeDevice};
-use crate::server::treefs::handover::{self, Paths};
 use crate::server::treefs::testing::FakeManager;
 use crate::{Backend, ByteRange, Error as StoreError, Listed, MemoryBackend, Meta};
 
@@ -340,17 +338,11 @@ async fn a_running_one_process_instance_offers_sockets_mount_control_and_lock_on
 /// the lock in the one hand-over and is the cache's writer at the old process's `written`, not at
 /// its exit: while the old process still fills an object (a cache write in flight) the successor
 /// serves the mount read-only; once that fill ends it is read-write, with the old process still
-/// draining. The old process's `take-fs 1` socket is never asked. Catches a successor that takes
-/// the mount on `take-fs 1` beside the one hand-over, or writes the cache before the old one's
-/// last write has ended, or only after the old one has exited.
+/// draining. Catches a successor that writes the cache before the old one's last write has ended,
+/// or only after the old one has exited.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_successor_of_one_process_is_writer_at_written_not_at_the_old_exit() {
     let old = Old::start("tsfs-svc-written").await;
-    let fs = old.old_fs();
-    // Whatever asks `take-fs 1` from here connects to the test, not to the old process.
-    std::fs::remove_file(&fs.handoff_socket).unwrap();
-    let take_fs = std::os::unix::net::UnixListener::bind(&fs.handoff_socket).unwrap();
-    take_fs.set_nonblocking(true).unwrap();
     old.upstream.gets.armed.store(true, Ordering::SeqCst);
     let at = old.to_old.at;
     let filling = tokio::spawn(async move {
@@ -387,12 +379,6 @@ async fn a_successor_of_one_process_is_writer_at_written_not_at_the_old_exit() {
     old.still_draining();
     let (status, _) = probe(to_new.at, "/healthz").await;
     assert_eq!(status, 200);
-    let asked = take_fs.accept().map(drop).map_err(|why| why.kind());
-    assert_eq!(
-        asked,
-        Err(std::io::ErrorKind::WouldBlock),
-        "take-fs 1 was asked"
-    );
     let kept = old.let_go(false).await;
     drop(to_new);
     stop(new).await.unwrap();
@@ -458,61 +444,6 @@ async fn a_taker_that_naks_or_vanishes_before_ready_leaves_the_old_serving_with_
     drop((again, offer));
     old.still_draining();
     let _kept = old.let_go(true).await;
-}
-
-/// Asserts (B8) a start of the previous release against an instance of this one that holds the
-/// mount: as that release's start does, it asks for the sockets with the `ready` step and the lock
-/// (`take 1`, `ready`), holds the offer, takes the mount on `take-fs 1` in the runtime directory,
-/// accepts the sockets' offer, says `ready` on `take-fs 1` and then on the sockets: it gets the
-/// mount, the sockets and the lock, and `written`. Catches a rollback to the previous release that
-/// the one process refuses, or that leaves the mount with an instance about to end.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_previous_release_start_takes_the_mount_on_take_fs_and_the_sockets_with_the_lock() {
-    let old = Old::start("tsfs-svc-previous").await;
-    let fs = old.old_fs();
-    let lock = old.lock();
-    let handoff = Handoff {
-        socket: old.control.clone(),
-        wait: Duration::from_secs(30),
-    };
-    let s3 = old.bound.s3_all.clone();
-    let oci = old.bound.oci_all.clone();
-    let want = Want {
-        s3: &s3,
-        oci: &oci,
-        nfs: &[],
-    };
-    let ask_sockets = Ask {
-        mount: None,
-        lock: Some(&lock),
-        leaves_another_lock: true,
-    };
-    let offered = offered_with(&handoff, &want, ask_sockets).await.unwrap();
-    let offered = offered.expect("the old answers");
-    assert!(!offered.has_mount());
-    let paths = Paths {
-        socket: &fs.handoff_socket,
-        mountpoint: &fs.mountpoint,
-        control: &fs.control_socket,
-        wait: Duration::from_secs(30),
-        device: |_| Ok(()),
-    };
-    let taken = handover::take(&paths, Box::new(|_| Ok(()))).await.unwrap();
-    let taken = taken.expect("the old offers the mount on take-fs 1");
-    let mut sockets = within("done", offered.accept()).await.unwrap();
-    within("bye of take-fs 1", taken.notice.ready())
-        .await
-        .unwrap();
-    told(&old.manager, &["READY=1", "FDSTOREREMOVE=1\nFDNAME=fuse"]);
-    let ready = sockets.ready.take().expect("the ready step");
-    let predecessor = within("bye", ready.send_keeping()).await.unwrap();
-    assert!(sockets.lock.is_some(), "the lock was handed over");
-    let wrote = within("written", predecessor.written()).await;
-    assert_eq!(wrote, crate::server::handoff::Wrote::Written);
-    assert_eq!(identity(taken.device.as_fd()), identity(old.stored.as_fd()));
-    old.still_draining();
-    let _kept = old.let_go(false).await;
-    drop((sockets, taken, predecessor));
 }
 
 impl Old {
@@ -603,7 +534,7 @@ async fn start_failing(
 
 /// Asserts that a start whose predecessor in the one hand-over ends the connection after its
 /// `ready` without a `bye` (it gave up first, and serves on) fails before it serves anything: it
-/// never reads the device, binds no hand-over socket of the mount, and tells its manager nothing
+/// never reads the device, and tells its manager nothing
 /// past the descriptor it stored before `ack`, which its restart adopts or takes again. Catches a
 /// start that serves the mount beside an instance that still serves it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -624,7 +555,6 @@ async fn a_start_whose_predecessor_says_no_bye_fails_and_leaves_the_mount_to_its
         Some(vec!["ready".to_owned()])
     );
     assert_unanswered(&kernel, 1);
-    assert!(!fs.handoff_socket.exists());
     told(&manager, &["FDSTORE=1\nFDNAME=fuse", "BARRIER=1"]);
 }
 
@@ -720,6 +650,5 @@ async fn a_start_whose_predecessor_dies_after_ack_fails_with_the_mount_in_its_st
     assert!(error.starts_with("hand-off: "), "{error}");
     assert_eq!(within("the old goes", old).await.unwrap(), None);
     assert_unanswered(&kernel, 1);
-    assert!(!fs.handoff_socket.exists());
     told(&manager, &["FDSTORE=1\nFDNAME=fuse", "BARRIER=1"]);
 }

@@ -16,7 +16,6 @@ mod host;
 mod instances;
 mod launchd;
 mod markers;
-mod processes;
 mod runner;
 mod service_binary;
 mod state;
@@ -38,7 +37,6 @@ pub use launchd::{
     kill_args, print_args,
 };
 pub use markers::MarkerFiles;
-pub use processes::ProcFiles;
 pub use runner::{Call, Output, RunError, Runner, SystemRunner};
 pub use state::{CONFIG_STATE_FILE, LOCK_FILE, STATE_FILE, StateFiles};
 pub use units::{GuardUnit, SystemdUnits};
@@ -85,8 +83,6 @@ mod instances_tests;
 mod launchd_tests;
 #[cfg(test)]
 mod markers_tests;
-#[cfg(test)]
-mod processes_tests;
 #[cfg(test)]
 mod runner_tests;
 #[cfg(test)]

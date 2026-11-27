@@ -174,19 +174,6 @@ pub(super) fn prepare(
     let [live] = running.as_slice() else {
         return Ok(None);
     };
-    // The fs process of the old layout is left alone; the record names the instance that runs,
-    // as the arm's does (a release update may have handed it over since the record was written).
-    let mut fs_running = Vec::new();
-    for instance in Instance::ALL {
-        if ports.fs_units.state(instance)?.running() {
-            fs_running.push(instance);
-        }
-    }
-    let fs_live = match fs_running.as_slice() {
-        [one] => Some(*one),
-        [] => record.as_ref().and_then(|record| record.fs_live),
-        _ => return Ok(None),
-    };
     let detail = format!(
         "prepared in place: {} applies {}; no other instance starts",
         unit_name(*live),
@@ -196,7 +183,6 @@ pub(super) fn prepare(
         updating: true,
         to: Some(params.staged_release.clone()),
         version: Some(build.to_owned()),
-        fs_live,
         reload: Some(reload),
         ..Record::idle(Some(*live))
     };
@@ -542,9 +528,7 @@ fn rollback(opened: &Opened, act: &Act<'_>) -> Result<Done, Done> {
         }
         back = format!(" on fs.tree_list_ram_bytes {}", cap.from);
     }
-    let mut idle = Record::idle(Some(live));
-    idle.fs_live = record.fs_live;
-    act.ports.state.save(&idle.encode())?;
+    act.ports.state.save(&Record::idle(Some(live)).encode())?;
     if act.first {
         return Err(super::steps::no_previous(Some(live)));
     }

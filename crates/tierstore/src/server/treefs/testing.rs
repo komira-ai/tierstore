@@ -270,7 +270,6 @@ impl Rig {
             cache_path: self.cache.clone(),
             fetch_timeout: Duration::from_secs(5),
             threads: 4,
-            handoff_socket: self.dir.path().join("handoff.sock"),
             handoff_wait: Duration::from_secs(30),
             recover_wait: Duration::from_secs(30),
             reattach_concurrency: 4,

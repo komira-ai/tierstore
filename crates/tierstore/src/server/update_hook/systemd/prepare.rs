@@ -3,6 +3,7 @@
 
 use std::path::Path;
 
+use super::super::old_layout;
 use super::super::params::{CONFIG_FILE_KEY, Params};
 use super::super::ports::Instance;
 use super::super::record::{Mode, Record};
@@ -13,7 +14,7 @@ use super::super::{
     HANDOFF_SOCKET_KEY, HANDOFF_STATE_DIR_CAPABILITY, HOT_STORE_TABLE, LOCAL_CACHE_TABLE,
 };
 use super::cleanup::{drain_note, finish};
-use super::{Ctx, fs, unit_name};
+use super::{Ctx, unit_name};
 
 /// How long hostkeeper waits before it asks again when both instances run.
 const BOTH_RUNNING_RETRY_SECS: u64 = 30;
@@ -52,6 +53,9 @@ pub(super) fn prepare(
             "an update is past its cutover: finish or roll it back first",
         ));
     }
+    // Before anything is saved or asked of a release: a node that still runs the two-process
+    // layout is not updated by this release.
+    old_layout::refuse(c.ports, record)?;
     let update = params.previous.as_ref();
     // A node with a local cache hands over only between releases whose cache shapes do, and a
     // node whose file leaves the socket out only between releases that default it.
@@ -78,8 +82,6 @@ pub(super) fn prepare(
     // The staged binary is asked on a first install too: it proves `bin/tierstore` is there and
     // runs.
     let staged = c.ports.host.capabilities(&params.staged_release)?;
-    // What the previous release lists, when the mode asked it: the fs process asks it otherwise.
-    let mut before = None;
     let mode = match update {
         None => None,
         Some(_) if restart => {
@@ -124,7 +126,6 @@ pub(super) fn prepare(
             } else {
                 Mode::Restart
             };
-            before = Some(list);
             Some(mode)
         }
     };
@@ -142,8 +143,6 @@ pub(super) fn prepare(
     // with nothing started since finds the same instances.
     let live = serving(c, update.is_some(), record)?;
     let next = live.map_or(Instance::A, Instance::other);
-    // The fs process, on a node that has one: its own mode, whatever the store's is.
-    let fs = fs::plan(c, update, record, &staged, before)?;
     let mut fresh = Record::idle(live);
     fresh.updating = true;
     fresh.from = update.map(|previous| previous.release.clone());
@@ -151,17 +150,13 @@ pub(super) fn prepare(
     fresh.version = Some(params.target_version.clone());
     fresh.next = Some(next);
     fresh.mode = mode;
-    fresh.fs_live = fs.live;
-    fresh.fs_next = fs.next;
-    fresh.fs_switch = fs.switch;
     c.save(&fresh)?;
     Ok(Done::ok(format!(
-        "{done_note}prepared {}: {}, serving {}, next {}{}",
+        "{done_note}prepared {}: {}, serving {}, next {}",
         params.target_version,
         mode.map_or("first install", Mode::as_str),
         live.map_or_else(|| "none".to_owned(), unit_name),
         unit_name(next),
-        fs.note,
     )))
 }
 

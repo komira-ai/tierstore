@@ -19,9 +19,9 @@
 //!   the listening sockets of the live one over the hand-over socket (`server.handoff_socket`),
 //!   and the live one drains and exits on its own. Each instance starts only when its marker file
 //!   ([`MARKER_DIR`]) is there, so at boot only the recorded one does.
-//!   On a node with a `tierstore fs` process, the second template `tierstore-fs@.service` (the
-//!   instances `a` and `b`, the markers `run-fs-a` and `run-fs-b`) is handed over in the same steps
-//!   between releases that both list [`HANDOFF_FS_CAPABILITY`], and left alone otherwise.
+//!   The hook has no step for the second template of the earlier layout, `tierstore-fs@.service`
+//!   (the instances `a` and `b`, the markers `run-fs-a` and `run-fs-b`): it only looks at it, and
+//!   `prepare` refuses a node that still runs it ([`Reason::ModeUnsupported`]; `old_layout.rs`).
 //! - **launchd** ([`launchd`]): one job, the label in `launchd_label`. An update between releases
 //!   that both list [`HANDOFF_EXEC_CAPABILITY`] is a hand-over: the job's process is sent
 //!   `SIGUSR2` and executes the next image of its program, keeping its sockets and its mount.
@@ -48,6 +48,7 @@ pub mod config_hook;
 mod launchd;
 mod look;
 pub mod machine;
+mod old_layout;
 mod params;
 mod plain;
 mod ports;
@@ -72,8 +73,8 @@ pub use params::{
     TARGET_VERSION_KEY,
 };
 pub use ports::{
-    Clock, Control, Exe, Family, FileId, Host, Instance, Instances, Launchd, LaunchdPorts, Lock,
-    Markers, PortError, PortKind, Processes, Reply, StateDir, SystemdPorts, UnitState, Units,
+    Clock, Control, Family, Host, Instance, Instances, Launchd, LaunchdPorts, Lock, Markers,
+    PortError, PortKind, Reply, StateDir, SystemdPorts, UnitState, Units,
 };
 pub use probe::{Build, CacheMode, build_of, readiness};
 pub use record::{
@@ -144,10 +145,6 @@ pub const CACHE_HANDOFF_CAPABILITY: &str = crate::server::build_info::HANDOFF_CA
 /// configuration leaves the key out.
 pub const HANDOFF_STATE_DIR_CAPABILITY: &str =
     crate::server::build_info::HANDOFF_STATE_DIR_CAPABILITY;
-/// The capability of a release whose `tierstore fs` takes the mount from a running instance of
-/// the other letter and offers it on `fs.handoff_socket`. Both releases need it for the hook to
-/// hand the fs process over.
-pub const HANDOFF_FS_CAPABILITY: &str = crate::server::build_info::HANDOFF_FS_CAPABILITY;
 /// The capability of a release whose build node with an `fs` interface hands its mount over with
 /// its sockets, and takes them from the processes that run. Both releases need it for an update of
 /// a node whose file has an `fs` interface on Linux; without it `prepare` refuses the update

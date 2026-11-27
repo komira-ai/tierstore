@@ -361,19 +361,29 @@ fn the_machine_of_the_verb_refuses_an_unknown_service_manager() {
     );
 }
 
-/// Asserts that the systemd arm of a hook on this machine reaches the units of `tierstore-fs`
-/// through `systemctl` (`uninstall` looks at both instances, with `show`, and stops neither of
-/// them, as both are inactive) and the markers of `run-fs-<letter>` in the markers' directory.
-/// Catches a hook whose fs ports were left out of its wiring.
+/// Asserts that the systemd arm of a hook on this machine looks at the units of `tierstore-fs`
+/// through `systemctl show` and at the markers of `run-fs-<letter>` in the markers' directory: a
+/// `prepare` on a host with the marker `run-fs-b` and both units inactive is refused with
+/// `mode_unsupported`, naming the marker, with no `systemctl` call that starts or stops anything
+/// and the marker left where it was. Catches a hook whose fs ports were left out of its wiring,
+/// and one that changes what it only looks at.
 #[test]
-fn the_systemd_arm_is_wired_to_the_fs_units_and_markers() {
+fn the_systemd_arm_is_wired_to_the_fs_units_and_markers_for_looking_only() {
     let host = new_host("system-fs-wiring");
     let markers = host.root.join("var/lib/tierstore");
     fs::create_dir_all(&markers).unwrap();
     fs::write(markers.join("run-fs-b"), "").unwrap();
     let runner = ByProgram::default();
-    let done = run(&host, &runner, Step::Uninstall, &params(""));
-    assert_eq!(done.outcome, Outcome::Success, "{done:?}");
+    let done = run(&host, &runner, Step::Prepare, &params(""));
+    assert_eq!(done.outcome, Outcome::Failure, "{done:?}");
+    assert_eq!(done.report.reason, Some(Reason::ModeUnsupported));
+    assert_eq!(
+        done.report.detail.as_deref(),
+        Some(
+            "this node still runs the two-process layout (the marker run-fs-b is present): \
+             switch this node to the fs interface with release M first"
+        )
+    );
     let calls = runner.calls();
     for unit in ["tierstore-fs@a.service", "tierstore-fs@b.service"] {
         assert!(
@@ -387,13 +397,10 @@ fn the_systemd_arm_is_wired_to_the_fs_units_and_markers() {
     assert!(
         calls
             .iter()
-            .all(|call| call.args.first().map(String::as_str) != Some("stop")
-                || call.args.last().is_some_and(|unit| !unit.contains("-fs@")))
+            .all(|call| call.args.first().map(String::as_str) == Some("show")),
+        "{calls:?}"
     );
-    assert!(
-        !markers.join("run-fs-b").exists(),
-        "the fs marker is removed"
-    );
+    assert!(markers.join("run-fs-b").exists(), "the fs marker stays");
 }
 
 /// The `ExitTimeOut` of the launchd job at `path` from the repository's root.

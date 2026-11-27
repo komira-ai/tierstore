@@ -48,12 +48,6 @@ pub const RELEASE_VERSION: &str = concat!(
 /// a state directory. `prepare` needs both releases to list it when the node's configuration
 /// leaves the key out: the running release would otherwise have no control socket to take from.
 ///
-/// [`HANDOFF_FS_CAPABILITY`] says `tierstore fs` hands its mount over to a successor and takes
-/// one over (`server::treefs`), keeping the mount's descriptor in the service manager's store. It
-/// is about the unit `tierstore-fs@.service`, not the S3 unit: the hook that updates that unit
-/// hands it over only when both releases list it, and leaves it running on its release when either
-/// does not (a restart of the process can fail jobs on a kernel without `FUSE_HAS_RESEND`).
-///
 /// [`HANDOFF_SERVICE_CAPABILITY`], in the builds for Linux only, says a build node whose file has
 /// an `fs` interface hands its mount over to a successor with its sockets, and takes them from the
 /// processes that run (`docs/design/one-service.md` sections 3.1 and 4.2). The hook hands such a
@@ -68,7 +62,6 @@ pub const CAPABILITIES: &[&str] = &[
     HANDOFF_SOCKET_CAPABILITY,
     HANDOFF_CACHE_CAPABILITY,
     HANDOFF_STATE_DIR_CAPABILITY,
-    HANDOFF_FS_CAPABILITY,
     #[cfg(target_os = "linux")]
     HANDOFF_SERVICE_CAPABILITY,
     #[cfg(target_vendor = "apple")]
@@ -93,26 +86,18 @@ pub const HANDOFF_CACHE_CAPABILITY: &str = "handoff-cache-v1";
 /// before.
 pub const HANDOFF_STATE_DIR_CAPABILITY: &str = "handoff-state-dir-v1";
 
-/// `handoff-fs-v1`: `tierstore fs` started with a running instance answering on
-/// `fs.handoff_socket` takes the mount from it (the `/dev/fuse` descriptor and the control
-/// socket, in the conversation `take-fs 1`), serves it from the recorded `INIT` outcome, and
-/// offers it in its turn; it keeps the descriptor in the service manager's store, and serves again
-/// the descriptor the manager kept for it after a crash or a restart.
-pub const HANDOFF_FS_CAPABILITY: &str = "handoff-fs-v1";
-
 /// `handoff-service-v1` (Linux builds only): a build node whose file has an `fs` interface serves
 /// the mount itself and hands it over with its sockets. Its start takes the mount, the sockets and
-/// the cache lock from the processes that run, of either layout: it asks the instance on
-/// `server.handoff_socket` for all of them in one conversation (`take 1`, `ready`, `mount`), and
-/// from an instance that holds the mount takes them there; one that holds none (the S3 process of
-/// the two-process layout) is asked for its sockets and lock alone, and the mount is taken from the
-/// instance on `handoff.sock` in the runtime directory (`take-fs 1`), both offers checked before
-/// either is accepted, the mount's first. While it holds the mount it offers it on both, to a
-/// successor of either layout or release, one taker at a time; a successor that takes it with the
-/// sockets ends the process, which drains S3 and OCI, as one that takes the sockets after a
-/// `take-fs 1` does. Its file system calls its cache in the process: it binds no fill socket. The
-/// hook updates a node whose file has an `fs` interface only
-/// between releases that both list it.
+/// the cache lock from the instance that runs: it asks the instance on `server.handoff_socket` for
+/// all of them in one conversation (`take 1`, `ready`, `mount`), and from an instance that holds
+/// the mount takes them there; one that holds none is asked for its sockets and lock alone, and
+/// the mount is adopted from the service manager's store or made afresh, the sockets accepted once
+/// it is. While it holds the mount it offers it in that conversation, to one taker at a time; a
+/// successor that takes it with the sockets ends the process, which drains S3 and OCI. Its file
+/// system calls its cache in the process: it binds no fill socket, and it neither offers nor asks
+/// the `take-fs 1` of the two-process layout (the capability `handoff-fs-v1`, no longer listed).
+/// The hook updates a node whose file has an `fs` interface only between releases that both list
+/// it.
 pub const HANDOFF_SERVICE_CAPABILITY: &str = "handoff-service-v1";
 
 /// `handoff-exec-v1` (macOS builds only): a build node sent SIGUSR2 hands over to the next image of

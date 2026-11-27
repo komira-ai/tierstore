@@ -10,16 +10,14 @@
 //! | `fs.nfs.mount_retry` | the pause between two tries | `500ms` |
 //! | `fs.nfs.fd_cache_shards` | shards of the cache of open cache files | `64` |
 //! | `fs.nfs.fd_cache_per_shard` | open cache files kept in one shard | `64` |
-//! | `fs.nfs.handoff_socket` | the control socket on which a running instance hands its listening socket to the next one (a file in a directory only the user of the process may write); none: no hand-off, an update is a restart | none |
-//! | `fs.nfs.handoff_wait` | how long a new instance waits for the running one's `done` | `10s` |
-//! | `fs.nfs.handoff_ready_wait` | how long the running instance gives the new one after `done` to say `ready` (it covers the new one's whole start) before it serves on | `120s` |
 //! | `fs.nfs.drain_wait` | how long an instance that handed over waits for the clients to close their connections before it ends | `10s` |
 //! | `fs.nfs.jukebox_after` | how long a read waits for a fill before the client is told to ask again | `5s` |
 //! | `fs.nfs.dead_timeout` | how long the mount may be unresponsive before the kernel marks it dead and every call on it fails (`deadtimeout` of `mount_nfs`); more than `fs.fetch_timeout`, so that a fill the server still waits for never ends the mount | `fs.fetch_timeout` and `30s` |
 //! | `fs.nfs.unmount_wait` | the most time each command of the mount and the unmount (`mount_nfs`, `umount`, `diskutil`, `mount`, `id`) and the process's own `unmount(2)` may take; at most `25s`, so that the four steps of an unmount fit in the `ExitTimeOut` of the package's job | `20s` |
 //!
-//! A key an earlier release read and this one does not is in [`REMOVED`]: a file that still sets it
-//! loads, whatever its value, and the start says once that it is ignored and why.
+//! The hand-off keys an earlier release read (`handoff_socket`, `handoff_wait`,
+//! `handoff_ready_wait`) are not keys of this table: the NFS front hands its socket over with the
+//! process (`SIGUSR2`), as `run.rs` says.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
@@ -27,11 +25,8 @@ use std::time::Duration;
 use serde::Deserialize;
 
 use crate::server::config::{ConfigError, invalid, within};
-use crate::server::config_handoff::MOST_SOCKET_PATH;
 use crate::server::config_tuning::{HOUR, MS};
 use crate::server::config_units::Dur;
-use crate::server::handoff::Handoff;
-use crate::server::lock::check_lock_path;
 
 /// The address the protocols are served on when the file leaves out `fs.nfs.listen`.
 const DEFAULT_LISTEN: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12_049);
@@ -50,14 +45,6 @@ const DEFAULT_PER_SHARD: u32 = 64;
 
 /// The wait for a fill when the file leaves out `fs.nfs.jukebox_after`.
 const DEFAULT_JUKEBOX_AFTER: Duration = Duration::from_secs(5);
-
-/// The wait of a new instance for the running one when the file leaves out `fs.nfs.handoff_wait`.
-const DEFAULT_HANDOFF_WAIT: Duration = Duration::from_secs(10);
-
-/// The wait of the running instance for the successor's `ready` when the file leaves out
-/// `fs.nfs.handoff_ready_wait`: it covers the successor's whole start, which makes the
-/// attachments again (about two minutes cold).
-const DEFAULT_READY_WAIT: Duration = Duration::from_secs(120);
 
 /// The wait for the clients when the file leaves out `fs.nfs.drain_wait`.
 const DEFAULT_DRAIN_WAIT: Duration = Duration::from_secs(10);
@@ -80,22 +67,6 @@ pub(super) const MOST_UNMOUNT_WAIT: Duration = Duration::from_secs(25);
 /// The longest a name of a user may be.
 const MOST_USER_NAME: usize = 64;
 
-/// The keys of `[fs.nfs]` that an earlier release read and this one does not, each with why: a
-/// file written for that release starts with them, and each is said.
-const REMOVED: [(&str, &str); 1] = [(
-    "allowed_uids",
-    "removed after tierstore 0.3.166: the file service answers every local user, as the S3 front \
-     answers every client that holds a key",
-)];
-
-/// The warning for the key `key` of `[fs.nfs]` that this release does not read.
-pub(in crate::server) fn ignored(key: &str) -> String {
-    match REMOVED.iter().find(|(removed, _)| *removed == key) {
-        Some((_, why)) => format!("tierstore fs: fs.nfs.{key} is ignored: {why}"),
-        None => format!("tierstore fs: fs.nfs.{key} is not a key of this release; ignored"),
-    }
-}
-
 /// `[fs.nfs]`, and `params.nfs` of an `fs` interface.
 #[derive(Clone, Debug, Deserialize)]
 pub(in crate::server) struct NfsTable {
@@ -107,9 +78,6 @@ pub(in crate::server) struct NfsTable {
     fd_cache_shards: Option<u32>,
     fd_cache_per_shard: Option<u32>,
     jukebox_after: Option<Dur>,
-    handoff_socket: Option<std::path::PathBuf>,
-    handoff_wait: Option<Dur>,
-    handoff_ready_wait: Option<Dur>,
     drain_wait: Option<Dur>,
     dead_timeout: Option<Dur>,
     unmount_wait: Option<Dur>,
@@ -129,10 +97,6 @@ pub(in crate::server) struct NfsSettings {
     pub fd_cache_shards: usize,
     pub fd_cache_per_shard: usize,
     pub jukebox_after: Duration,
-    /// The hand-off of the listening socket to a successor, if the file names a control socket.
-    pub handoff: Option<Handoff>,
-    /// How long a running instance waits for its successor's `ready` after `done`.
-    pub ready_wait: Duration,
     /// How long an instance that handed over waits for the clients to close their connections.
     pub drain_wait: Duration,
     /// How long the mount may be unresponsive before the kernel marks it dead: the mount option
@@ -153,8 +117,6 @@ impl Default for NfsSettings {
             fd_cache_shards: DEFAULT_SHARDS as usize,
             fd_cache_per_shard: DEFAULT_PER_SHARD as usize,
             jukebox_after: DEFAULT_JUKEBOX_AFTER,
-            handoff: None,
-            ready_wait: DEFAULT_READY_WAIT,
             drain_wait: DEFAULT_DRAIN_WAIT,
             dead_timeout: dead_timeout_after(super::super::config::DEFAULT_FETCH_TIMEOUT),
             unmount_wait: DEFAULT_UNMOUNT_WAIT,
@@ -250,55 +212,6 @@ fn span(
     Ok(value)
 }
 
-/// The hand-off the table asks for: a control socket that is an absolute path of a file that fits a
-/// Unix socket's address, and how long a new instance waits for the running one.
-fn handoff_of(
-    place: &str,
-    socket: Option<std::path::PathBuf>,
-    wait: Option<Dur>,
-    ready_wait: Option<Dur>,
-) -> Result<Option<Handoff>, ConfigError> {
-    let key = format!("{place}.handoff_socket");
-    let Some(socket) = socket else {
-        for (name, given) in [("handoff_wait", wait), ("handoff_ready_wait", ready_wait)] {
-            if given.is_some() {
-                return Err(invalid(
-                    &format!("{place}.{name}"),
-                    format!("is a wait of the hand-off of {key}, which is not given"),
-                ));
-            }
-        }
-        return Ok(None);
-    };
-    check_lock_path(&socket).map_err(|why| invalid(&key, format!("{socket:?} {why}")))?;
-    let length = socket.as_os_str().len();
-    if length > MOST_SOCKET_PATH {
-        let why = format!(
-            "{socket:?} is {length} bytes; the path of a Unix socket is at most {MOST_SOCKET_PATH}"
-        );
-        return Err(invalid(&key, why));
-    }
-    let wait = span(
-        (place, "handoff_wait"),
-        wait,
-        DEFAULT_HANDOFF_WAIT,
-        (MS, HOUR),
-    )?;
-    Ok(Some(Handoff { socket, wait }))
-}
-
-impl NfsTable {
-    /// The keys of the hand-off of the NFS front's own listening socket that the table gives, by
-    /// name.
-    pub(in crate::server) fn handoff_keys(&self) -> [(&'static str, bool); 3] {
-        [
-            ("handoff_socket", self.handoff_socket.is_some()),
-            ("handoff_wait", self.handoff_wait.is_some()),
-            ("handoff_ready_wait", self.handoff_ready_wait.is_some()),
-        ]
-    }
-}
-
 impl NfsSettings {
     /// The settings of `table`, or the defaults where the file has none; `fs` is where the keys
     /// of the file system are (`fs`, or the params of an `fs` interface), the table's being its
@@ -365,18 +278,6 @@ impl NfsSettings {
                 table.jukebox_after,
                 DEFAULT_JUKEBOX_AFTER,
                 (MS, Duration::from_secs(600)),
-            )?,
-            handoff: handoff_of(
-                place,
-                table.handoff_socket,
-                table.handoff_wait,
-                table.handoff_ready_wait,
-            )?,
-            ready_wait: span(
-                (place, "handoff_ready_wait"),
-                table.handoff_ready_wait,
-                DEFAULT_READY_WAIT,
-                (MS, HOUR),
             )?,
             drain_wait: span(
                 (place, "drain_wait"),

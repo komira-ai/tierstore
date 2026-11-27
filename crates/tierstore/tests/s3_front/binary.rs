@@ -290,19 +290,18 @@ fn capabilities_prints_the_names_one_to_a_line_and_exits_0() {
 }
 
 /// Asserts that `--capabilities` prints exactly `handover-v1`, `handoff-socket-v1`,
-/// `handoff-cache-v1`, `handoff-state-dir-v1`, `handoff-fs-v1` and then, on Linux,
+/// `handoff-cache-v1`, `handoff-state-dir-v1` and then, on Linux,
 /// `handoff-service-v1` (a build node with an `fs` interface hands its mount over with its
 /// sockets) or, on macOS, `handoff-exec-v1` (a build node hands over to its next image on SIGUSR2),
 /// each with a newline, exits 0 and says nothing on stderr. The hook reads these words to hand a
 /// node over instead of restarting it: the store, a node with `[local_cache]`, a node that leaves
-/// the socket out, the second unit, a node with a mount. Catches a word left out (an update that
+/// the socket out, a node with a mount. Catches a word left out (an update that
 /// restarts or is refused), a misspelt word, and a word nothing here promises.
 #[test]
 fn capabilities_lists_the_hand_over_words() {
     let (code, out, err) = run(&["--capabilities".to_owned()]);
     let mut words =
-        "handover-v1\nhandoff-socket-v1\nhandoff-cache-v1\nhandoff-state-dir-v1\nhandoff-fs-v1\n"
-            .to_owned();
+        "handover-v1\nhandoff-socket-v1\nhandoff-cache-v1\nhandoff-state-dir-v1\n".to_owned();
     words += [("handoff-service-v1\n", cfg!(target_os = "linux"))]
         .into_iter()
         .chain([("handoff-exec-v1\n", cfg!(target_vendor = "apple"))])

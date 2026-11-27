@@ -390,7 +390,8 @@ fn a_binary_whose_path_cannot_be_read_fails_the_step() {
 
 /// Asserts that the config hook's `prepare` of an update on a systemd node looks at the units of
 /// both templates through `systemctl show`, `tierstore-fs@a` and `tierstore-fs@b` as well as the
-/// store's, since its steps are those of an update of the release. Catches a config hook wired to
+/// store's, since its steps are those of an update of the release, and the refusal of a node that
+/// still runs the earlier layout looks at the second template. Catches a config hook wired to
 /// ports with no fs units.
 #[test]
 fn a_config_update_looks_at_the_fs_units_too() {

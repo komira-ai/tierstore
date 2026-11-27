@@ -41,8 +41,10 @@
 # directories /run/tierstore-fs and /run/tierstore, kept across restarts; and the file system's
 # restart values, 2 s and a start limit of 5 in 60 s, after which the unit is left failed.
 # RestrictNamespaces=yes stays: it is a system-call filter, not a namespace, and the process makes
-# no namespace. The process says nothing to the service manager when it serves, so the unit is
-# Type=simple. tierstore-fs@.service, the unit of `tierstore fs`, leaves out the same options.
+# no namespace. The unit is Type=simple: a start is done when the process runs, and the
+# READY=1 the process sends where a service manager listens is not waited for. There is no second
+# unit: `tierstore fs` is not a process, and the earlier layout's tierstore-fs@.service is
+# refused by `tierstore update-hook` (crates/tierstore/docs/update-hook.md "The second unit").
 #
 # The drain is the defaults of `server.drain_lb_wait` (10 s) and `server.drain_deadline` (15 m),
 # which TimeoutStopSec= is above; the unit passes no flag for it.
@@ -85,7 +87,7 @@ TimeoutStopSec=960
 Restart=on-failure
 RestartSec=2
 RestartPreventExitStatus=2 3
-# The same value as tierstore-fs@.service: this process serves the node's cache and the fill socket for the mount, whose jobs keep files of it open as long as they run.
+# This process serves the node's cache and the mount, whose jobs keep files of it open as long as they run.
 LimitNOFILE=1048576
 UMask=0077
 NoNewPrivileges=yes

@@ -11,13 +11,8 @@ pub(crate) const DEFAULTS: PerRun = PerRun {
     host: crate::server::config::Host::SYSTEM,
 };
 
-/// Loads the text of a whole file as the process that reads it does: `tierstore fs` has a file of
-/// its own, with an `[fs]` table, and the group `builders` that the examples name.
+/// Loads the text of a whole file as the process that reads it does.
 pub(crate) fn loads(body: &str, per_run: PerRun) -> Result<(), String> {
-    if body.contains("[fs]") {
-        let loaded = super::treefs::from_text(body, &super::treefs::builders);
-        return loaded.map(drop).map_err(|why| why.to_string());
-    }
     settings_from_text(body, per_run)
         .map(drop)
         .map_err(|why| why.to_string())

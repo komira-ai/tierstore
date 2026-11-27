@@ -112,6 +112,12 @@ pub enum Reason {
     /// mount point, the control socket or the runtime directory): a restart would drop the mount
     /// under running jobs. The params' `mode = "restart"` overrides it, for an operator who has
     /// drained the node's jobs.
+    ///
+    /// Also `prepare` of a node that still runs the two-process layout (a `tierstore-fs@` unit
+    /// running, a `run-fs-*` marker, or a record that names an fs instance), and of a config
+    /// update that would be the switch to one process: this release has no step for the second
+    /// unit, and the node is first switched to the `fs` interface by the release that does that.
+    /// Nothing is recorded, started or stopped.
     ModeUnsupported,
 }
 

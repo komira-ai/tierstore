@@ -5,14 +5,18 @@ Status: **approved by the owner on 2026-11-24, with the privilege design simplif
 (komira-ai/tierstore#448, komira-ai/tierstore#450), the core's calls into the cache (komira-ai/tierstore#445), the start of the one process (komira-ai/tierstore#454), the one hand-over's
 wire format (komira-ai/tierstore#452), the macOS hand-over to the next image (komira-ai/tierstore#456, komira-ai/tierstore#462, komira-ai/tierstore#463), the unit and plists (komira-ai/tierstore#446), and the update hook and
 the switch (komira-ai/tierstore#458). The Linux start now also takes the cache lock with the sockets, and its verify waits for read-write
-(komira-ai/tierstore#571). Not built: the Linux start does not yet take the mount, the control socket and the sockets in one
-conversation (`take_service`, `Offer::with_mount` and `treefs::handover::offered` have no caller outside tests; the start takes
-the mount by `take-fs 1`), and the successor still scans the cache at `written` before it binds the mount-provider socket
-(komira-ai/tierstore#479, komira-ai/tierstore#522). Phase 2 (P9, release M+1, section 5) is built in part: the fill socket and the `Fills` trait
-are gone (the core calls the node's cache in the process alone), `local_cache.fill_socket` is
-read and ignored with a line on stderr, and `tierstore fs` serving exits 2 (komira-ai/tierstore#523).
-Not built: `tierstore attachments`, and `fs.toml`, the `tierstore-fs` units and the hook's second
-arm still ship (komira-ai/tierstore#524).
+(komira-ai/tierstore#571). The Linux start takes the mount, the control socket, the sockets and the lock in one
+conversation (`take 1`, `ready`, `mount`: `cache_cli_mount.rs`) or adopts the descriptor of its unit's store or mounts
+afresh; it never asks `take-fs 1`. Not built: the successor still scans the cache at `written` before it binds the
+mount-provider socket (komira-ai/tierstore#479, komira-ai/tierstore#522). Phase 2 (P9, release M+1, section 5) is built
+on Linux (komira-ai/tierstore#523 and komira-ai/tierstore#524): the fill socket and the `Fills` trait are gone (the core
+calls the node's cache in the process alone), `local_cache.fill_socket` is read and ignored with a line on stderr,
+`tierstore fs` exits 2, `tierstore attachments --config <file>` lists the attachments, the `[fs]` loader, the `take-fs 1` offer and taker, `handoff-fs-v1`, `fs.nfs.handoff_*`, the unit
+`tierstore-fs@.service` and the systemd arm's second unit are deleted, and `prepare` refuses a node that still runs the
+second unit. Not built, and owned by komira-ai/tierstore#624: the macOS update path (the launchd arm's boot-out of the
+`tierstore-fs` job, the `tierstore-fs.plist` of hostkeeper and of the installer package, the param `fs_launchd_label`
+and its constants, `packaging/macos/fs.toml`, the `FS_*` entries of the installer package, and the Mac sections of the
+operator pages).
 P8 is in the deployment's repository.** It reverses decision C5 of
 [virtual-build-fs.md](virtual-build-fs.md) (section 13.1, "a second process on Linux build nodes holding `CAP_SYS_ADMIN`,
 with no network") on the owner's instruction: tierstore is one service, one process and one configuration file, and the
@@ -681,7 +685,8 @@ can see. The only code that can do that is code that speaks both sides. So:
 - **The window** of a group is a configuration change, run by M's code on both sides of it (4.2, 4.3).
 - **Release M+1** (phase 2) deletes the old layout (section 5). It is merged after both groups have switched. Its `prepare`
   refuses, by name, an update of a node that still runs a `tierstore-fs` unit or job (`fs_live` in the record, a
-  `run-fs-*` marker, or a loaded `tierstore-fs` job): "switch this node to the fs interface with release M first". So a node
+  `run-fs-*` marker, a unit of `tierstore-fs@` that is active, activating or deactivating, or, on a Mac, a loaded
+  `tierstore-fs` job: the Mac half is #624): "switch this node to the fs interface with release M first". So a node
   that missed its window fails loudly instead of losing its mount.
 
 ### 4.2 `all-in-one` (Linux), node by node
@@ -768,26 +773,36 @@ postinstall removes a `tierstore-fs.plist` left by an earlier package.
 
 ## 5. What it deletes (release M+1)
 
-- **The verb `tierstore fs`** (`server/verbs/fs.rs`, `server/treefs/launch.rs`'s own start, the `[fs]` loader of
+Built on Linux by komira-ai/tierstore#523 (the fill socket) and komira-ai/tierstore#524 (the rest); each item says what
+went where. The items marked #624 are the macOS update path, owned by komira-ai/tierstore#624, and are not built.
+
+- **The verb `tierstore fs`** (built: `server/verbs/fs.rs` keeps only the exit-2 line and the `--help` pointer; the `[fs]`
+  loader, `File`, `from_text`, `load` of `server/treefs/config.rs` are gone and `of_interface` does all the work; the
+  start of `server/treefs/launch.rs` no longer asks a running instance for the mount; `tierstore attachments` is
+  `server/verbs/attachments.rs`) (`server/verbs/fs.rs`, `server/treefs/launch.rs`'s own start, the `[fs]` loader of
   `server/treefs/config.rs`). `tierstore fs` then exits 2 with "`tierstore fs` is no longer a process of its own: the file
   system is the `[[interface]]` of type `fs` of the node's file", so a unit left behind fails loudly and its
   `RestartPreventExitStatus=2` stops it from looping. `tierstore fs attachments` becomes `tierstore attachments --config
   <file>`, which reads the control socket from the `fs` interface (decision 8).
-- **`fs.toml`**: the packaging example `packaging/macos/fs.toml`, the copies in each group's configuration package.
-- **The units and jobs**: `packaging/hostkeeper/units/tierstore-fs@.service`, `packaging/hostkeeper/units/tierstore-fs.plist`,
+- **`fs.toml`** (#624; nothing on Linux reads it any more): the packaging example `packaging/macos/fs.toml`, the copies in each group's configuration package.
+- **The units and jobs** (`tierstore-fs@.service` deleted; the plists and the installer package's entries are #624): `packaging/hostkeeper/units/tierstore-fs@.service`, `packaging/hostkeeper/units/tierstore-fs.plist`,
   `packaging/macos-pkg/tierstore-fs.plist`, the installer package's `FS_*` entries (`crates/xtask/src/release/macos_pkg.rs`).
 - **The fill socket** (built by komira-ai/tierstore#523): `server/fill_socket/mod.rs` and `request.rs` (listener, sessions, parser, refusals) and their tests,
   `server/treefs/fill_client.rs` and its tests, the socket parts of `server/config_fill.rs`, `Fronts.fill_socket` and the
   task that serves it. Kept, moved beside the provider listener that uses them: `bind_socket`, `SocketFile`, `pause_if`;
   kept beside the put ingest: `put::chunks`. `local_cache.fill_socket` is read and ignored with a line on stderr (B8: a file
   of today still starts).
-- **The second hand-over**: the `take-fs 1` offer and taker (`server/treefs/handover.rs`), the capability `handoff-fs-v1`,
+- **The second hand-over** (built: `server/treefs/handover.rs` keeps the device checks and the one hand-over's mount offer; `fs.nfs.handoff_*` are refused as unknown fields; `Offer::with_hold`, `take_with_ready` and `Ready::send` are `cfg(test)` only): the `take-fs 1` offer and taker (`server/treefs/handover.rs`), the capability `handoff-fs-v1`,
   and `fs.nfs.handoff_*` (the NFS front's `take 1` with `ready` is replaced by 3.4).
-- **The hook's second arm**: `update_hook/systemd/fs.rs`, `update_hook/launchd/fs.rs`, `FsPolicy`, `Family::Fs`, the fs
+- **The hook's second arm** (built for systemd: `systemd/fs.rs`, `systemd/fs_exe.rs`, `machine/processes.rs`, `FsPolicy`,
+  `FS_START_TIMEOUT`, `HANDOFF_FS_CAPABILITY` and the writes of `fs_live`, `fs_next`, `fs_switch` are gone;
+  `Family::Fs` and the fs units and markers ports stay, for looking only, so that `prepare` can refuse a node that
+  still runs the second unit; `update_hook/old_layout.rs` holds the refusal; `launchd/fs.rs`, `FS_LAUNCHD_PLIST`,
+  `FS_CONFIG_FILE`, `fs_launchd_label` and the macOS arm are #624): `update_hook/systemd/fs.rs`, `update_hook/launchd/fs.rs`, `FsPolicy`, `Family::Fs`, the fs
   units and markers ports, `FS_LAUNCHD_PLIST`, `FS_CONFIG_FILE`, `FS_START_TIMEOUT`, the param `fs_launchd_label` (a params
   file that still has it is read as today, where an unknown key is ignored), and the fs details of the reasons. Decoding of
   `fs_live` and `fs_next` stays (3.6).
-- **Docs**: the operator pages' sections on `tierstore fs`, `fs.toml`, the fill socket and the second unit
+- **Docs** (built for Linux and the shared text; the Mac sections are #624): the operator pages' sections on `tierstore fs`, `fs.toml`, the fill socket and the second unit
   (`crates/tierstore/docs/configuration.md`, `operations.md`, `update-hook.md`, `metrics.md`), `packaging/README.md` and
   `packaging/macos/README.md`, `docs/ci-and-release.md`'s plist list, and the glossary rows of `docs/design/tierstore-design.md`
   ("`tierstore fs`", "Fill socket"), each in the pull request that changes the code it describes (P10).
@@ -813,7 +828,7 @@ a phase can be written in parallel; "needs" says which must merge first.
 | P6 | Packaging: the unit of 1.4 (the template and its package copy), the plists, the postinstall, the manifest's comments and bounds | the files | none | `the_unit_sets_no_option_that_makes_a_mount_namespace` (every option of 2.3 and its path options, with a negative case: a copy with `ProtectSystem` added fails, T15), `the_unit_grants_cap_sys_admin_and_no_other` (these two replace `the_fs_template_differs_from_the_s3_template_as_the_design_lists`, whose fs template goes in P9), `the_package_template_is_the_archive_template_but_for_the_binary` (exists), `the_plist_waits_210_seconds_on_exit`, `the_binary_accepts_the_units_command_line_and_the_example_file` |
 | P7 | The hook: the gating of 3.6 for both systems, the macOS hand-over arm, the switch and its rollback of 4.2 and 4.3 in the config hook | `update_hook` ports (exist) | P4, P5 capability words | `an_update_without_handoff_service_v1_in_both_is_refused_for_a_node_with_a_mount`, `mode_restart_overrides_the_refusal`, `a_config_update_that_moves_the_mount_point_is_refused`, `the_switch_checks_both_offers_before_either_ack_and_clears_the_fs_markers`, `a_switch_whose_offers_do_not_both_match_naks_both_and_changes_nothing`, `a_switch_whose_new_process_dies_after_ack_is_started_again_and_takes_or_adopts`, `the_switch_rolls_back_mount_first_then_sockets`, `the_one_process_instance_binds_the_fill_socket_while_it_is_the_writer_in_m`, `a_mac_switch_boots_out_and_disables_the_fs_job_before_the_main_job_starts`, `a_mac_update_with_handoff_exec_v1_sends_sigusr2_and_waits_for_the_target`, `a_mac_update_without_it_is_refused` |
 | P8 | The deployment's files and steps (sections 1.3, 4.2 step 5, 4.3), in the deployment's own repository | the configuration packages | M released | the deployment's own checks of its files |
-| P9 | Phase 2, M+1: the deletions of section 5 | | both windows done | `the_fs_verb_exits_2_and_names_the_interface`, `a_file_with_local_cache_fill_socket_starts_and_says_it_is_ignored`, `a_record_with_fs_live_still_decodes` (the stored-format fixture), `prepare_refuses_a_node_that_still_runs_tierstore_fs`, `attachments_reads_the_control_socket_from_the_fs_interface`; P2's trait is removed (R9). The fill-socket part of this phase (the fill socket, `local_cache.fill_socket` read and ignored, `tierstore fs` serving exits 2) is built by komira-ai/tierstore#523; the rest is not built |
+| P9 | Phase 2, M+1: the deletions of section 5 | | both windows done | `the_fs_verb_exits_2_and_names_the_interface`, `a_file_with_local_cache_fill_socket_starts_and_says_it_is_ignored`, `a_record_with_fs_live_still_decodes` (the stored-format fixture), `prepare_refuses_a_node_that_still_runs_tierstore_fs`, `attachments_reads_the_control_socket_from_the_fs_interface`; P2's trait is removed (R9). The fill-socket part of this phase is built by komira-ai/tierstore#523; the rest is built on Linux by komira-ai/tierstore#524, except what section 5 marks #624 (the macOS update path), which is not built |
 
 The design documents follow the code: each pull request rewrites the sections of virtual-build-fs.md (5, 6.3, 6.5, 7, 8,
 12) and tierstore-handover.md (section 0) that describe what it changes.
@@ -833,7 +848,10 @@ The design documents follow the code: each pull request rewrites the sections of
 7. **Two releases**: M carries both layouts so that M's code is on both sides of every switch and its rollback; M+1 deletes
    (4.1).
 8. **`tierstore attachments --config <file>`** replaces `tierstore fs attachments`: the operator's look at the attachments
-   stays, under the one process.
+   stays, under the one process. Built (komira-ai/tierstore#524, `server/verbs/attachments.rs`): it loads the node's file
+   as the node does, takes the control socket of its `fs` interface, asks `attachments` on it and prints `<tree> <run>`
+   lines; a file with no `fs` interface is exit 2, and a socket that does not answer is exit 1. `tierstore fs`, with any
+   arguments, exits 2 with the line of section 5; `--help` alone exits 0 and names the new verb.
 9. **The `fs` params refuse unknown keys**, as every interface's params do, where `[fs]` warned: a new table has no old
    files to keep loading.
 10. **`owner` from subordinate ids** (1.2): without it the one file is per node on Linux.

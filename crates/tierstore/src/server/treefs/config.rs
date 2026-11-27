@@ -1,47 +1,40 @@
-//! The settings of the file system: the params of the `fs` interface of a build node's file, and
-//! the `[fs]` table of a file `tierstore fs --check-config` checks (a file of the two-process
-//! layout, which this release reads and serves nothing of).
+//! The settings of the file system: the params of the `fs` interface of a build node's file, which
+//! `config_fs.rs` reads and which [`FsSettings::of_interface`] checks and completes.
 //!
-//! | key | meaning | default |
+//! | param | meaning | default |
 //! |---|---|---|
-//! | `fs.mountpoint` | where the one FUSE mount is made | `/run/tierstore/fs` |
-//! | `fs.runtime_dir` | the state that outlives the process | `/run/tierstore-fs` |
-//! | `fs.control_socket` | the socket clients attach on | `<runtime_dir>/control.sock` |
-//! | `fs.client_group` | the group (a name of this system, or a number) that may use that socket | needed |
-//! | `fs.owner` | `user:group` every entry of every tree reports, each side a name of this system or a number | needed |
-//! | `fs.fill_socket` | read and ignored: no process serves a fill socket any more | |
-//! | `fs.cache_path` | the node's `local_cache.path` | needed |
-//! | `fs.fetch_timeout` | how long a fill, or the write role of the node's cache, is waited for | `60s` |
-//! | `fs.threads` | threads that serve the kernel's requests, and as many that make the opens that wait on a fill (`fetches.rs`), at most 252 | `16` |
-//! | `[fs.nfs]` | the settings of the NFS frontend (macOS), see `nfs/config.rs` | its defaults |
-//! | `fs.handoff_socket` | the socket a new instance asks the running one for the mount on (`handoff-fs-v1`) | `<runtime_dir>/handoff.sock` |
-//! | `fs.handoff_wait` | how long the hand-over of the mount may last, from the connect to the end | `120s` |
-//! | `fs.reattach_concurrency` | how many trees a start reads the manifests of at once when it makes the attachments again, before it serves (1 reads them one after the other) | `16` |
-//! | `fs.recover_wait` | after a restart on a kernel without resend: how long the connection may show requests no one answers before it is aborted | `30s` |
-//! | `fs.tree_idle_secs` | how long, in seconds, a tree a lookup attached stays attached with no request naming it | `900` |
-//! | `fs.tree_list_ram_bytes` | the most bytes of version 2 tree lists the mount keeps mapped before it releases those no run attaches and no request reads (`core/lists.rs`); at least a page, 4096 | `536870912` (512 MiB) |
-//! | `[fs.put]` | the put directory, `<mountpoint>/put/`, see `put/config.rs` | not served |
+//! | `mountpoint` | where the one FUSE mount is made | `/run/tierstore/fs` |
+//! | `runtime_dir` | the state that outlives the process | `/run/tierstore-fs` |
+//! | `control_socket` | the socket clients attach on | `<runtime_dir>/control.sock` |
+//! | `client_group` | the group (a name of this system, or a number) that may use that socket | needed |
+//! | `owner` | `user:group` every entry of every tree reports, each side a name of this system or a number | needed |
+//! | `fetch_timeout` | how long a fill, or the write role of the node's cache, is waited for | `60s` |
+//! | `threads` | threads that serve the kernel's requests, and as many that make the opens that wait on a fill (`fetches.rs`), at most 252 | `16` |
+//! | `nfs` | the settings of the NFS frontend (macOS), see `nfs/config.rs` | its defaults |
+//! | `handoff_wait` | how long the hand-over of the mount may last, from the connect to the end | `120s` |
+//! | `reattach_concurrency` | how many trees a start reads the manifests of at once when it makes the attachments again, before it serves (1 reads them one after the other) | `16` |
+//! | `recover_wait` | after a restart on a kernel without resend: how long the connection may show requests no one answers before it is aborted | `30s` |
+//! | `tree_idle_secs` | how long, in seconds, a tree a lookup attached stays attached with no request naming it | `900` |
+//! | `tree_list_ram_bytes` | the most bytes of version 2 tree lists the mount keeps mapped before it releases those no run attaches and no request reads (`core/lists.rs`); at least a page, 4096 | `536870912` (512 MiB) |
+//! | `put` | the put directory, `<mountpoint>/put/`, see `put/config.rs` | not served |
 //!
-//! `fs.passthrough` and `fs.max_backing_ids` were removed with passthrough, after tierstore 0.3.121:
-//! a file that has them starts, and each is said in a warning and ignored (`REMOVED`).
+//! The cache directory is `local_cache.path` of the node's file.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use serde::Deserialize;
 
 use crate::server::config::{ConfigError, invalid, require, within};
 use crate::server::config_handoff::MOST_SOCKET_PATH;
-use crate::server::config_syntax::syntax;
 use crate::server::config_tuning::{HOUR, MS};
 use crate::server::config_units::Dur;
-use crate::server::config_unknown::fields_of;
 
-use super::groups::{self, Database, Found};
-use super::nfs::config::{NfsSettings, NfsTable, ignored as nfs_ignored};
+use super::groups::{Database, Found};
+use super::nfs::config::{NfsSettings, NfsTable};
 use super::put::config::{self as put_config, PutConfig, PutTable};
 
-/// The lookup of a group or user name: [`groups::system`], or a test's table.
+/// The lookup of a group or user name: [`super::groups::system`], or a test's table.
 pub(in crate::server) type Lookup<'a> = &'a dyn Fn(Database, &str) -> Found;
 
 /// The lookup of a system whose one name is `builders`, id 2001, as a group and as a user: the
@@ -49,6 +42,24 @@ pub(in crate::server) type Lookup<'a> = &'a dyn Fn(Database, &str) -> Found;
 #[cfg(test)]
 pub(in crate::server) fn builders(_database: Database, name: &str) -> Found {
     Ok((name == "builders").then_some(2001))
+}
+
+/// The place the params of [`from_params`] are at.
+#[cfg(test)]
+pub(in crate::server) const TEST_PLACE: &str = "interface[1].params";
+
+/// The settings of the params `text` (the keys of the `[interface.params]` of an `fs` interface,
+/// its sub-tables after them) of a node whose cache directory is `/var/cache/tierstore`, checked
+/// as an interface's are, at [`TEST_PLACE`]: the tests' way to the interface's settings with a
+/// lookup of their own.
+#[cfg(test)]
+pub(in crate::server) fn from_params(
+    text: &str,
+    lookup: Lookup<'_>,
+) -> Result<FsSettings, ConfigError> {
+    let table: FsTable = toml::from_str(text).expect("params of the types of the table");
+    let cache = PathBuf::from("/var/cache/tierstore");
+    FsSettings::of_interface(TEST_PLACE, table, cache, lookup)
 }
 
 /// The mount point when the file leaves out `fs.mountpoint`.
@@ -73,11 +84,7 @@ const DEFAULT_THREADS: u32 = 16;
 /// message carries, less one).
 const MOST_THREADS: u32 = 252;
 
-/// The name of the hand-over socket in the runtime directory when the file leaves out
-/// `fs.handoff_socket`.
-const DEFAULT_HANDOFF_SOCKET: &str = "handoff.sock";
-
-/// How long a hand-over of the mount may last when the file leaves out `fs.handoff_wait`.
+/// How long a hand-over of the mount may last when the file leaves out `handoff_wait`.
 const DEFAULT_HANDOFF_WAIT: Duration = Duration::from_secs(120);
 
 /// How long a restarted instance watches for requests no one answers when the file leaves out
@@ -105,35 +112,8 @@ pub(in crate::server) const DEFAULT_TREE_LIST_RAM_BYTES: u64 = 512 << 20;
 /// control socket holds a value it sets to the same bound (`control.rs`).
 pub(super) const LEAST_TREE_LIST_RAM_BYTES: u64 = 4096;
 
-/// The keys of `[fs]` that an earlier release read and this one does not, each with why: a file
-/// written for that release starts with them, and each is said.
-const REMOVED: [(&str, &str); 2] = [
-    (
-        "passthrough",
-        "removed after tierstore 0.3.121, with passthrough: every open is a cached open",
-    ),
-    (
-        "max_backing_ids",
-        "removed after tierstore 0.3.121, with passthrough: no backing id is registered",
-    ),
-];
-
-/// The warning for the key `key` of `[fs]` that this release does not read.
-fn ignored(key: &str) -> String {
-    match REMOVED.iter().find(|(removed, _)| *removed == key) {
-        Some((_, why)) => format!("tierstore fs: fs.{key} is ignored: {why}"),
-        None => format!("tierstore fs: fs.{key} is not a key of this release and is ignored"),
-    }
-}
-
-/// The file: only its `[fs]` table is read.
-#[derive(Debug, Deserialize)]
-struct File {
-    fs: FsTable,
-}
-
-/// `[fs]`, and the params of an `fs` interface (which leave out `fill_socket`, `cache_path` and
-/// `handoff_socket`: see `config_fs.rs`).
+/// The params of an `fs` interface (`config_fs.rs` refuses `fill_socket`, `cache_path` and
+/// `handoff_socket` by name).
 #[derive(Debug, Default, Deserialize)]
 pub(in crate::server) struct FsTable {
     pub(in crate::server) mountpoint: Option<PathBuf>,
@@ -141,12 +121,9 @@ pub(in crate::server) struct FsTable {
     pub(in crate::server) control_socket: Option<PathBuf>,
     pub(in crate::server) client_group: Option<String>,
     pub(in crate::server) owner: Option<String>,
-    pub(in crate::server) fill_socket: Option<PathBuf>,
-    pub(in crate::server) cache_path: Option<PathBuf>,
     pub(in crate::server) fetch_timeout: Option<Dur>,
     pub(in crate::server) threads: Option<u32>,
     pub(in crate::server) nfs: Option<NfsTable>,
-    pub(in crate::server) handoff_socket: Option<PathBuf>,
     pub(in crate::server) handoff_wait: Option<Dur>,
     pub(in crate::server) recover_wait: Option<Dur>,
     pub(in crate::server) reattach_concurrency: Option<u32>,
@@ -155,8 +132,7 @@ pub(in crate::server) struct FsTable {
     pub(in crate::server) put: Option<PutTable>,
 }
 
-/// What the file system runs with: `tierstore fs`, from its `[fs]` table, or the `fs` interface
-/// of a build node's file.
+/// What the file system runs with: the `fs` interface of a build node's file.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::server) struct FsSettings {
     pub mountpoint: PathBuf,
@@ -166,13 +142,10 @@ pub(in crate::server) struct FsSettings {
     pub client_group: u32,
     /// The user and group id every entry reports.
     pub owner: (u32, u32),
-    /// The node's cache directory: `fs.cache_path`, or `local_cache.path` of an `fs` interface's
-    /// file.
+    /// The node's cache directory: `local_cache.path` of the `fs` interface's file.
     pub cache_path: PathBuf,
     pub fetch_timeout: Duration,
     pub threads: usize,
-    /// The socket a new instance asks the running one for the mount on.
-    pub handoff_socket: PathBuf,
     /// How long a hand-over of the mount may last.
     pub handoff_wait: Duration,
     /// How long a restarted instance on a kernel without resend watches for requests no one
@@ -267,46 +240,18 @@ fn not_two_parts(key: &str, text: &str) -> ConfigError {
 }
 
 impl FsSettings {
-    /// The settings of `table`, the `[fs]` table of the file of `tierstore fs`; `lookup` looks a
-    /// group or user name up.
-    ///
-    /// # Errors
-    /// A [`ConfigError`] that names the key: one needed and left out, a path that is not
-    /// absolute, an owner or a group that is not one, a value out of its range.
-    pub(super) fn of(mut table: FsTable, lookup: Lookup<'_>) -> Result<Self, ConfigError> {
-        // `fs.fill_socket` is read and ignored: no process serves a fill socket any more.
-        let (cache_path, _fill_socket) = (table.cache_path.take(), table.fill_socket.take());
-        let node = move || {
-            let cache_path = require("fs", "cache_path", cache_path)?;
-            absolute("fs.cache_path", cache_path)
-        };
-        Self::made("fs", table, node, lookup)
-    }
-
     /// The settings of `table`, the params at `place` (`interface[2].params`) of an `fs`
     /// interface of a build node whose cache directory is `cache_path`; `lookup` looks a group or
     /// user name up. The table has no `fill_socket`, `cache_path` or `handoff_socket` (the
-    /// interface refuses them as params), so the hand-over socket is `handoff.sock` in the runtime
-    /// directory.
+    /// interface refuses them as params).
     ///
     /// # Errors
-    /// Those of [`FsSettings::of`] but the keys the node gives, each naming the param.
+    /// A [`ConfigError`] that names the param: one needed and left out, a path that is not
+    /// absolute, an owner or a group that is not one, a value out of its range.
     pub(in crate::server) fn of_interface(
         place: &str,
         table: FsTable,
         cache_path: PathBuf,
-        lookup: Lookup<'_>,
-    ) -> Result<Self, ConfigError> {
-        Self::made(place, table, || Ok(cache_path), lookup)
-    }
-
-    /// The settings of `table`, whose keys are named under `place` (`fs`, or the params of an
-    /// interface), with what `node` gives, which is asked where the `[fs]` table's own keys of
-    /// the node are checked, after the owner.
-    fn made(
-        place: &str,
-        table: FsTable,
-        node: impl FnOnce() -> Result<PathBuf, ConfigError>,
         lookup: Lookup<'_>,
     ) -> Result<Self, ConfigError> {
         let key = |name: &str| format!("{place}.{name}");
@@ -319,20 +264,12 @@ impl FsSettings {
         let control_socket = table
             .control_socket
             .unwrap_or_else(|| runtime_dir.join(DEFAULT_CONTROL_SOCKET));
-        let handoff_socket = table
-            .handoff_socket
-            .unwrap_or_else(|| runtime_dir.join(DEFAULT_HANDOFF_SOCKET));
-        for (name, socket) in [
-            ("control_socket", &control_socket),
-            ("handoff_socket", &handoff_socket),
-        ] {
-            let length = socket.as_os_str().len();
-            if length > MOST_SOCKET_PATH {
-                let why = format!(
-                    "is {length} bytes; the path of a Unix socket is at most {MOST_SOCKET_PATH}"
-                );
-                return Err(invalid(&key(name), why));
-            }
+        let length = control_socket.as_os_str().len();
+        if length > MOST_SOCKET_PATH {
+            let why = format!(
+                "is {length} bytes; the path of a Unix socket is at most {MOST_SOCKET_PATH}"
+            );
+            return Err(invalid(&key("control_socket"), why));
         }
         let handoff_wait = bounded(
             &key("handoff_wait"),
@@ -388,7 +325,6 @@ impl FsSettings {
         let control_socket = absolute(&key("control_socket"), control_socket)?;
         let client_group = id_of(&key("client_group"), Database::Group, &group, lookup)?;
         let owner = owner_of(&key("owner"), &owner, lookup)?;
-        let cache_path = node()?;
         Ok(Self {
             mountpoint,
             runtime_dir,
@@ -398,7 +334,6 @@ impl FsSettings {
             cache_path,
             fetch_timeout: timeout,
             threads: threads as usize,
-            handoff_socket: absolute(&key("handoff_socket"), handoff_socket)?,
             handoff_wait,
             recover_wait,
             reattach_concurrency: reattach_concurrency as usize,
@@ -409,71 +344,6 @@ impl FsSettings {
             put: put_config::of(&key("put"), table.put)?,
         })
     }
-}
-
-/// The settings in the text of a file, and a warning for each key of the table that this release
-/// does not know (a key a later release added is not a fault: the node starts without it).
-///
-/// # Errors
-/// [`ConfigError::Syntax`] for a file that is not TOML or has no `[fs]` table or a value of the
-/// wrong type, and those of [`FsSettings::of`].
-pub(in crate::server) fn from_text(
-    text: &str,
-    lookup: Lookup<'_>,
-) -> Result<FsSettings, ConfigError> {
-    let file: File = toml::from_str(text).map_err(|error| syntax(text, &error))?;
-    let whole = text.parse::<toml::Table>().unwrap_or_default();
-    let known = fields_of::<FsTable>();
-    let table = whole.get("fs").and_then(toml::Value::as_table);
-    for key in table.into_iter().flat_map(|table| table.keys()) {
-        if !known.contains(&key.as_str()) {
-            tracing::warn!("{}", ignored(key));
-        }
-    }
-    let nfs_known = fields_of::<NfsTable>();
-    let nfs = table
-        .and_then(|table| table.get("nfs"))
-        .and_then(toml::Value::as_table);
-    for key in nfs.into_iter().flat_map(|table| table.keys()) {
-        if !nfs_known.contains(&key.as_str()) {
-            tracing::warn!("{}", nfs_ignored(key));
-        }
-    }
-    let put_known = fields_of::<PutTable>();
-    let put = table
-        .and_then(|table| table.get("put"))
-        .and_then(toml::Value::as_table);
-    for key in put.into_iter().flat_map(|table| table.keys()) {
-        if !put_known.contains(&key.as_str()) {
-            tracing::warn!("tierstore fs: fs.put.{key} is not a key of this release; ignored");
-        }
-    }
-    FsSettings::of(file.fs, lookup)
-}
-
-/// The settings of the file at `path`.
-///
-/// # Errors
-/// [`ConfigError::Read`] for a file that cannot be read, and those of [`from_text`]. A group given
-/// by name (`fs.client_group`, and each side of `fs.owner`) is looked up through the system
-/// ([`groups::system`]); one given by number needs no lookup.
-pub(in crate::server) fn load(path: &Path) -> Result<FsSettings, ConfigError> {
-    load_with(path, &groups::system)
-}
-
-/// [`load`] with `lookup` as the lookup of group and user names.
-///
-/// # Errors
-/// Those of [`load`].
-pub(in crate::server) fn load_with(
-    path: &Path,
-    lookup: Lookup<'_>,
-) -> Result<FsSettings, ConfigError> {
-    let text = std::fs::read_to_string(path).map_err(|source| ConfigError::Read {
-        path: path.to_owned(),
-        source,
-    })?;
-    from_text(&text, lookup)
 }
 
 #[cfg(test)]

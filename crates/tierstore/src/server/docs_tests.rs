@@ -210,7 +210,7 @@ struct Code {
     cache_keys: BTreeSet<String>,
     /// The keys of `[[policy]]`, which a page may name.
     policy_keys: BTreeSet<String>,
-    /// The keys of `[fs]`, the file of `tierstore fs`, which have no flag: every page names each.
+    /// The params of an `fs` interface (`fs.<key>`), which have no flag: every page names each.
     fs_keys: BTreeSet<String>,
     /// The non-test source of the crate with its comments and the backslashes of its escapes out.
     source: String,

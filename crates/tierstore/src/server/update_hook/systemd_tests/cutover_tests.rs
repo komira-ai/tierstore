@@ -595,17 +595,17 @@ fn update_hook_cleanup_on_the_command_line_commits_past_the_draining_503() {
     assert!(!fake.record().committed());
 }
 
-/// Asserts the fs hand-over of `cutover` through the verb hostkeeper runs, `update-hook cutover
-/// --params`, over the cache lock as the server holds it: with the old store draining 13 s and the
-/// new one taking the lock 28 s after it exits (node 02's times), the one run exits 0 with a
-/// reversible report and no reason, `tierstore-fs@b` is started only once the store is read-write,
-/// and the record says `swapped`; with a store that stays read-only through the wait it exits 75
-/// with `draining`, retry after 10 seconds, no fs unit touched and no `swapped`. Catches a cutover
-/// that exits 75 on the first read-only answer, which hostkeeper rolls back and never runs again.
+/// Asserts that `cutover` through the verb hostkeeper runs, `update-hook cutover --params`, over
+/// the cache lock as the server holds it (the old store draining 13 s and the new one taking the
+/// lock 28 s after it exits: node 02's times) exits 0 with a reversible report and no reason as
+/// soon as the new store serves the release, read-only as it then is, and records `swapped`: it
+/// waits for the build and not for the lock, which `verify` defers on. Catches a cutover that waits
+/// for the cache lock, which a node whose old store drains for minutes would run into the step's
+/// bound with.
 #[test]
-fn update_hook_cutover_on_the_command_line_waits_for_the_cache_lock_before_the_fs_take() {
+fn update_hook_cutover_on_the_command_line_does_not_wait_for_the_cache_lock() {
     let p = params(NEW, Some(OLD));
-    let fake = SystemdFake::fs_installed();
+    let fake = SystemdFake::installed();
     fake.drive(&p, &[Prepare]);
     fake.set_drain_looks(13);
     fake.hold_cache_lock(28);
@@ -615,29 +615,10 @@ fn update_hook_cutover_on_the_command_line_waits_for_the_cache_lock_before_the_f
     assert_eq!(line["reversible"], true);
     assert_eq!(
         line["detail"],
-        format!(
-            "tierstore@b serves {} (hand-over); tierstore-fs@b holds the mount; the store took \
-             the cache lock after 39 s",
-            version_of(NEW)
-        )
+        format!("tierstore@b serves {} (hand-over)", version_of(NEW))
     );
-    assert!(!fake.fs_started_over_read_only());
-    assert_eq!(
-        fake.fs_actions(),
-        ["fs_markers.set b", "fs_units.start b", "fs_markers.clear a"]
-    );
-    assert!(fake.record().has(Marker::Swapped));
-
-    let fake = SystemdFake::fs_installed();
-    fake.drive(&p, &[Prepare]);
-    fake.set_read_only(true);
-    let (code, line) = on_the_command_line(&fake, "cutover", "tierstore-hook-cutover-read-only");
-    assert_eq!(format!("{code:?}"), format!("{:?}", ExitCode::from(75)));
-    assert_eq!(line["reason"], "draining");
-    assert_eq!(line["retry_after_secs"], 10);
-    assert_eq!(line["reversible"], true);
     assert!(fake.fs_actions().is_empty(), "{:?}", fake.fs_actions());
-    assert!(!fake.record().has(Marker::Swapped));
+    assert!(fake.record().has(Marker::Swapped));
 }
 
 /// Asserts that a hand-over whose new instance opens its cache for 65 looks (as a build node's

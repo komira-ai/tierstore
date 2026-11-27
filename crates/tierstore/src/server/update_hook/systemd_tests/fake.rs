@@ -141,7 +141,7 @@ pub struct Snapshot {
     pub units: Vec<(Instance, UnitState, Option<PathBuf>)>,
     pub markers: Vec<Instance>,
     /// The units and markers of `tierstore-fs`.
-    pub fs_units: Vec<(Instance, UnitState, Option<PathBuf>)>,
+    pub fs_units: Vec<(Instance, UnitState)>,
     pub fs_markers: Vec<Instance>,
     /// The release whose binary is at [`SERVICE_BINARY`].
     pub installed: Option<PathBuf>,
@@ -149,7 +149,6 @@ pub struct Snapshot {
 
 #[path = "fake_fs.rs"]
 mod fake_fs;
-pub use fake_fs::{FsTake, file_of, fs_marker_path, fs_pid, fs_unit_condition, fs_unit_program};
 
 #[derive(Clone)]
 struct Unit {
@@ -203,7 +202,7 @@ struct World {
     /// A hand-over under way: the new instance, the old one, and the looks left before the new
     /// one takes the sockets.
     taking: Option<(Instance, Instance, u32)>,
-    /// The second unit, `tierstore-fs`: see [`fake_fs`].
+    /// The second unit of the earlier layout, `tierstore-fs`, only looked at: see [`fake_fs`].
     fs: fake_fs::FsWorld,
 }
 
@@ -402,7 +401,7 @@ impl World {
 /// The world, and every port over it.
 pub struct SystemdFake {
     w: Rc<RefCell<World>>,
-    /// The ports of the second unit, over the same world.
+    /// The ports of the second unit, over the same world, for the looks at it.
     fs: fake_fs::FsPorts,
 }
 
@@ -476,7 +475,6 @@ impl SystemdFake {
             markers: self,
             fs_units: &self.fs,
             fs_markers: &self.fs,
-            fs_processes: &self.fs,
             instances: self,
             host: self,
             clock: self,
@@ -657,7 +655,6 @@ impl SystemdFake {
         for instance in Instance::ALL {
             w.start_unit(instance);
         }
-        w.reboot_fs();
     }
 
     /// The state of `instance`, without a look that counts.

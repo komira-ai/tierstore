@@ -1,39 +1,37 @@
-//! The `[fs.nfs]` table: defaults, every key, every refusal, and that a file without it loads.
+//! The `nfs` params of an `fs` interface: defaults, every key, every refusal, and that params
+//! without it load.
 
-use std::io::Write;
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use tracing::Level;
-use tracing::subscriber::with_default;
-
-use crate::server::build_info::stderr_log::LineLog;
-use crate::server::treefs::config::{builders, from_text};
+use crate::server::treefs::config::{TEST_PLACE, builders, from_params};
 
 use super::NfsSettings;
 
-/// The keys every file needs.
-const NEEDED: &str = "client_group = \"77\"\nowner = \"1000:1001\"\n\
-    cache_path = \"/var/cache/tierstore\"\n";
+/// The keys every `fs` interface needs.
+const NEEDED: &str = "client_group = \"77\"\nowner = \"1000:1001\"\n";
+
+/// The name of the key `name` of the `nfs` params, as a refusal says it.
+fn key(name: &str) -> String {
+    format!("{TEST_PLACE}.nfs.{name}")
+}
 
 fn with(nfs: &str) -> String {
-    format!("[fs]\n{NEEDED}\n[fs.nfs]\n{nfs}")
+    format!("{NEEDED}\n[nfs]\n{nfs}")
 }
 
 fn refused(nfs: &str) -> String {
-    from_text(&with(nfs), &builders).unwrap_err().to_string()
+    from_params(&with(nfs), &builders).unwrap_err().to_string()
 }
 
-/// Asserts that a file without `[fs.nfs]` loads (B8: a file written before the table existed), with
-/// the defaults, and that an empty table gives the same.
+/// Asserts that params without `nfs` load with the defaults, and that an empty table gives the
+/// same.
 #[test]
-fn a_config_without_the_nfs_table_still_loads() {
-    let text = format!("[fs]\n{NEEDED}");
-    let settings = from_text(&text, &builders).unwrap();
+fn params_without_the_nfs_table_still_load() {
+    let settings = from_params(NEEDED, &builders).unwrap();
     assert_eq!(settings.nfs, NfsSettings::default());
     assert_eq!(
-        from_text(&with(""), &builders).unwrap().nfs,
+        from_params(&with(""), &builders).unwrap().nfs,
         NfsSettings::default()
     );
 }
@@ -59,7 +57,7 @@ fn every_nfs_key_is_taken_when_it_is_set() {
          mount_wait = \"2m\"\nmount_retry = \"1s\"\nfd_cache_shards = 8\nfd_cache_per_shard = 9\n\
          jukebox_after = \"750ms\"\n",
     );
-    let nfs = from_text(&text, &builders).unwrap().nfs;
+    let nfs = from_params(&text, &builders).unwrap().nfs;
     assert_eq!(nfs.listen, "127.0.0.2:9999".parse::<SocketAddr>().unwrap());
     assert!(!nfs.mount);
     assert_eq!(nfs.mount_user.as_deref(), Some("build.user-1"));
@@ -76,29 +74,29 @@ fn every_nfs_key_is_taken_when_it_is_set() {
 #[test]
 fn each_nfs_key_rejects_out_of_range_values_by_name() {
     let cases = [
-        ("fd_cache_shards = 0", "fs.nfs.fd_cache_shards"),
-        ("fd_cache_shards = 4097", "fs.nfs.fd_cache_shards"),
-        ("fd_cache_per_shard = 0", "fs.nfs.fd_cache_per_shard"),
-        ("fd_cache_per_shard = 65537", "fs.nfs.fd_cache_per_shard"),
-        ("mount_wait = \"0s\"", "fs.nfs.mount_wait"),
-        ("mount_wait = \"2h\"", "fs.nfs.mount_wait"),
-        ("mount_retry = \"0ms\"", "fs.nfs.mount_retry"),
-        ("mount_retry = \"2m\"", "fs.nfs.mount_retry"),
-        ("jukebox_after = \"0ms\"", "fs.nfs.jukebox_after"),
-        ("jukebox_after = \"11m\"", "fs.nfs.jukebox_after"),
-        ("mount_user = \"\"", "fs.nfs.mount_user"),
-        ("mount_user = \"-o\"", "fs.nfs.mount_user"),
-        ("mount_user = \"a b\"", "fs.nfs.mount_user"),
-        ("mount_user = \"a/b\"", "fs.nfs.mount_user"),
+        ("fd_cache_shards = 0", "fd_cache_shards"),
+        ("fd_cache_shards = 4097", "fd_cache_shards"),
+        ("fd_cache_per_shard = 0", "fd_cache_per_shard"),
+        ("fd_cache_per_shard = 65537", "fd_cache_per_shard"),
+        ("mount_wait = \"0s\"", "mount_wait"),
+        ("mount_wait = \"2h\"", "mount_wait"),
+        ("mount_retry = \"0ms\"", "mount_retry"),
+        ("mount_retry = \"2m\"", "mount_retry"),
+        ("jukebox_after = \"0ms\"", "jukebox_after"),
+        ("jukebox_after = \"11m\"", "jukebox_after"),
+        ("mount_user = \"\"", "mount_user"),
+        ("mount_user = \"-o\"", "mount_user"),
+        ("mount_user = \"a b\"", "mount_user"),
+        ("mount_user = \"a/b\"", "mount_user"),
         (
             &format!("mount_user = \"{}\"", "u".repeat(65)),
-            "fs.nfs.mount_user",
+            "mount_user",
         ),
-        ("listen = \"not an address\"", "fs.nfs.listen"),
+        ("listen = \"not an address\"", "listen"),
     ];
-    for (line, key) in cases {
+    for (line, name) in cases {
         let why = refused(line);
-        assert!(why.contains(key), "{line}: {why}");
+        assert!(why.contains(&key(name)), "{line}: {why}");
     }
 }
 
@@ -115,136 +113,28 @@ fn nfs_listen_must_be_loopback() {
     ] {
         let why = refused(&format!("listen = \"{address}\""));
         assert!(
-            why.contains("fs.nfs.listen") && why.contains("loopback"),
+            why.contains(&key("listen")) && why.contains("loopback"),
             "{address}: {why}"
         );
     }
-    let nfs = from_text(&with("listen = \"127.0.0.1:0\""), &builders)
+    let nfs = from_params(&with("listen = \"127.0.0.1:0\""), &builders)
         .unwrap()
         .nfs;
     assert_eq!(nfs.listen.port(), 0);
 }
 
-/// A writer whose bytes the test reads back: the operator's stderr.
-#[derive(Clone, Default)]
-struct Stderr(Arc<Mutex<Vec<u8>>>);
-
-impl Write for Stderr {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(bytes);
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-/// Asserts that a key this release does not know, in the table or beside it, is ignored with one
-/// warning that names it and the file loads, as the other keys of `[fs]` are (B8: a release does
-/// not refuse the file of the next).
+/// Asserts the drain wait: 10 s by default, a value in range taken, and one of 0 or above an hour
+/// refused by name.
 #[test]
-fn an_unknown_nfs_key_is_ignored_and_the_file_loads() {
-    let stderr = Stderr::default();
-    let text = with("futuristic = 3\nmount_wait = \"3s\"\n");
-    let nfs = with_default(LineLog::new(stderr.clone(), Level::WARN), || {
-        from_text(&text, &builders).unwrap().nfs
-    });
-    assert_eq!(nfs.mount_wait, Duration::from_secs(3));
-    let said = String::from_utf8(stderr.0.lock().unwrap().clone()).unwrap();
-    assert_eq!(
-        said,
-        "tierstore fs: fs.nfs.futuristic is not a key of this release; ignored\n"
-    );
-}
-
-/// Asserts that a file that still sets `fs.nfs.allowed_uids`, the key of the releases up to
-/// 0.3.166, loads whatever its value (a list, the empty list that release refused, a value of
-/// another type) to the settings the file has without it, and that the start says so in one line,
-/// exact, that names the key and why it is ignored. Catches a release that refuses, or that stops,
-/// on a file written for the release before it.
-#[test]
-fn a_file_that_still_sets_allowed_uids_loads_with_one_warning() {
-    let plain = from_text(&with("mount_wait = \"3s\"\n"), &builders)
+fn the_drain_wait_is_taken_in_its_range() {
+    assert_eq!(NfsSettings::default().drain_wait, Duration::from_secs(10));
+    let set = from_params(&with("drain_wait = \"2s\"\n"), &builders)
         .unwrap()
         .nfs;
-    for value in ["[501]", "[501, 502, 0]", "[]", "\"501\"", "true"] {
-        let stderr = Stderr::default();
-        let text = with(&format!("allowed_uids = {value}\nmount_wait = \"3s\"\n"));
-        let nfs = with_default(LineLog::new(stderr.clone(), Level::WARN), || {
-            from_text(&text, &builders).unwrap().nfs
-        });
-        assert_eq!(nfs, plain, "{value}");
-        let said = String::from_utf8(stderr.0.lock().unwrap().clone()).unwrap();
-        assert_eq!(
-            said,
-            "tierstore fs: fs.nfs.allowed_uids is ignored: removed after tierstore 0.3.166: the \
-             file service answers every local user, as the S3 front answers every client that \
-             holds a key\n",
-            "{value}"
-        );
-    }
-}
-
-/// Asserts the keys of the hand-off: none by default (an update is a restart), a control socket
-/// that is an absolute path of a file that fits a Unix socket's address, a wait that is a time in
-/// range and needs the socket, and a drain wait in range.
-#[test]
-fn the_handoff_keys_are_taken_and_each_refusal_names_its_key() {
-    let defaults = NfsSettings::default();
-    assert_eq!(defaults.handoff, None);
-    assert_eq!(defaults.drain_wait, Duration::from_secs(10));
-    let set = from_text(
-        &with("handoff_socket = \"/var/run/tierstore/fs-handoff.sock\"\nhandoff_wait = \"3s\"\ndrain_wait = \"2s\"\n"),
-        &builders,
-    )
-    .unwrap()
-    .nfs;
-    let handoff = set.handoff.unwrap();
-    assert_eq!(
-        handoff.socket,
-        std::path::Path::new("/var/run/tierstore/fs-handoff.sock")
-    );
-    assert_eq!(handoff.wait, Duration::from_secs(3));
     assert_eq!(set.drain_wait, Duration::from_secs(2));
-    let waits = from_text(&with("handoff_socket = \"/run/x.sock\""), &builders)
-        .unwrap()
-        .nfs;
-    assert_eq!(waits.ready_wait, Duration::from_secs(120));
-    assert_eq!(waits.handoff.unwrap().wait, Duration::from_secs(10));
-    let ready = from_text(
-        &with("handoff_socket = \"/run/x.sock\"\nhandoff_ready_wait = \"7s\""),
-        &builders,
-    )
-    .unwrap()
-    .nfs;
-    assert_eq!(ready.ready_wait, Duration::from_secs(7));
-    let long = format!("handoff_socket = \"/{}\"", "x".repeat(120));
-    for (text, key) in [
-        ("handoff_wait = \"3s\"".to_owned(), "fs.nfs.handoff_wait"),
-        (
-            "handoff_ready_wait = \"3s\"".to_owned(),
-            "fs.nfs.handoff_ready_wait",
-        ),
-        (
-            "handoff_socket = \"/run/x\"\nhandoff_ready_wait = \"0s\"".to_owned(),
-            "fs.nfs.handoff_ready_wait",
-        ),
-        (
-            "handoff_socket = \"run/x.sock\"".to_owned(),
-            "fs.nfs.handoff_socket",
-        ),
-        ("handoff_socket = \"/\"".to_owned(), "fs.nfs.handoff_socket"),
-        (long, "fs.nfs.handoff_socket"),
-        (
-            "handoff_socket = \"/run/x\"\nhandoff_wait = \"0s\"".to_owned(),
-            "fs.nfs.handoff_wait",
-        ),
-        ("drain_wait = \"0s\"".to_owned(), "fs.nfs.drain_wait"),
-        ("drain_wait = \"2h\"".to_owned(), "fs.nfs.drain_wait"),
-    ] {
-        let why = refused(&text);
-        assert!(why.contains(key), "{text}: {why}");
+    for line in ["drain_wait = \"0s\"", "drain_wait = \"2h\""] {
+        let why = refused(line);
+        assert!(why.contains(&key("drain_wait")), "{line}: {why}");
     }
 }
 
@@ -257,12 +147,12 @@ fn the_handoff_keys_are_taken_and_each_refusal_names_its_key() {
 fn the_dead_timeout_is_more_than_the_fetch_timeout() {
     assert_eq!(NfsSettings::default().dead_timeout, Duration::from_secs(90));
     let fetch = |fetch: &str, nfs: &str| {
-        let text = format!("[fs]\n{NEEDED}fetch_timeout = \"{fetch}\"\n\n[fs.nfs]\n{nfs}");
-        from_text(&text, &builders).map(|settings| settings.nfs.dead_timeout)
+        let text = format!("{NEEDED}fetch_timeout = \"{fetch}\"\n\n[nfs]\n{nfs}");
+        from_params(&text, &builders).map(|settings| settings.nfs.dead_timeout)
     };
-    let without_table = format!("[fs]\n{NEEDED}fetch_timeout = \"2m\"\n");
+    let without_table = format!("{NEEDED}fetch_timeout = \"2m\"\n");
     assert_eq!(
-        from_text(&without_table, &builders)
+        from_params(&without_table, &builders)
             .unwrap()
             .nfs
             .dead_timeout,
@@ -278,20 +168,26 @@ fn the_dead_timeout_is_more_than_the_fetch_timeout() {
         fetch("60s", "dead_timeout = \"60s\"")
             .unwrap_err()
             .to_string(),
-        "fs.nfs.dead_timeout: 60000ms is not more than fs.fetch_timeout (60000ms): a fill that \
-         the server still waits for would end the mount"
+        format!(
+            "{}: 60000ms is not more than {TEST_PLACE}.fetch_timeout (60000ms): a fill that the \
+             server still waits for would end the mount",
+            key("dead_timeout")
+        )
     );
     assert!(
         fetch("2m", "dead_timeout = \"90s\"")
             .unwrap_err()
             .to_string()
-            .starts_with("fs.nfs.dead_timeout: 90000ms is not more than fs.fetch_timeout"),
+            .starts_with(&format!(
+                "{}: 90000ms is not more than {TEST_PLACE}.fetch_timeout",
+                key("dead_timeout")
+            )),
     );
     assert_eq!(
         fetch("60s", "dead_timeout = \"3h\"")
             .unwrap_err()
             .to_string(),
-        "fs.nfs.dead_timeout: 10800000ms is more than 7200000ms"
+        format!("{}: 10800000ms is more than 7200000ms", key("dead_timeout"))
     );
 }
 
@@ -301,12 +197,15 @@ fn the_dead_timeout_is_more_than_the_fetch_timeout() {
 #[test]
 fn the_unmount_wait_is_taken_in_its_range() {
     assert_eq!(NfsSettings::default().unmount_wait, Duration::from_secs(20));
-    let nfs = from_text(&with("unmount_wait = \"5s\""), &builders)
+    let nfs = from_params(&with("unmount_wait = \"5s\""), &builders)
         .unwrap()
         .nfs;
     assert_eq!(nfs.unmount_wait, Duration::from_secs(5));
     for line in ["unmount_wait = \"500ms\"", "unmount_wait = \"26s\""] {
         let why = refused(line);
-        assert!(why.starts_with("fs.nfs.unmount_wait: "), "{line}: {why}");
+        assert!(
+            why.starts_with(&format!("{}: ", key("unmount_wait"))),
+            "{line}: {why}"
+        );
     }
 }

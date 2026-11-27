@@ -9,11 +9,10 @@
 //! (`mount`, the third line of the request), so the mount is never left with an instance that is
 //! about to end.
 //!
-//! An instance of the one process offers its mount on two conversations: this one, and `take-fs 1`
-//! on the runtime directory's socket (`treefs/handover.rs`), which a taker of the previous release
-//! and the `tierstore fs` of the two-process layout ask (`docs/design/one-service.md` section 4.2).
-//! The two share a [`Claim`], so that one taker at a time takes the mount and, once it is given up
-//! on either, neither offers it again.
+//! An instance of the one process offers its mount on this conversation alone (the `take-fs 1` of
+//! the two-process layout, which it once offered on the runtime directory's socket, is gone). A
+//! [`Claim`] says which taker has the mount, so that one taker at a time takes it and, once it is
+//! given up, it is not offered again.
 
 use std::io;
 use std::os::fd::{BorrowedFd, OwnedFd};
@@ -50,24 +49,24 @@ pub(crate) struct Mount {
     /// (the `fs` interface's `params.handoff_wait`): a reader may hold a request that waits for a
     /// fill, and the successor makes its state of the mount between `done` and `ready`.
     pub(crate) wait: Duration,
-    /// Which conversation has the mount, shared with the instance's `take-fs 1` offer.
+    /// Which taker has the mount: the instance's `serve` waits on it for the give-up.
     pub(crate) claim: Arc<Claim>,
 }
 
-/// Where the mount of an instance is, as the conversations that offer it see it.
+/// Where the mount of an instance is, as the conversation that offers it sees it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum Holding {
     /// The instance holds it, and no taker is at it.
     #[default]
     Here,
-    /// A taker of one of the conversations is at it: it is offered, or quiesced for that taker.
+    /// A taker is at it: it is offered, or quiesced for that taker.
     Taking,
     /// It was given up: a successor has it for good.
     Gone,
 }
 
-/// Which of the conversations that offer an instance's mount has it: one taker at a time takes it,
-/// and once it is given up on one of them, neither offers it again.
+/// Which taker has an instance's mount: one at a time takes it, and once it is given up it is not
+/// offered again.
 #[derive(Debug, Default)]
 pub(crate) struct Claim {
     holding: Mutex<Holding>,
@@ -105,7 +104,7 @@ impl Claim {
         self.gone.notify_waiters();
     }
 
-    /// Waits until the mount is given up, on either conversation.
+    /// Waits until the mount is given up.
     pub(crate) async fn given_up(&self) {
         loop {
             // Made before the look, so that a give-up between the two is not missed.

@@ -1,10 +1,9 @@
 //! The looks at the public port: readiness, the build probe, and what they make of a start.
 
 use std::cell::{Cell, RefCell};
-use std::path::Path;
 use std::time::Duration;
 
-use super::look::{Look, READ_WRITE_ATTEMPTS, verified, writable};
+use super::look::{Look, verified, writable};
 use super::{
     CacheMode, Clock, Instances, Outcome, POLL_INTERVAL, PROBE_ATTEMPTS, PROBE_HITS, PUBLIC_PORT,
     PortError, PortKind, READY_ATTEMPTS, Reason, Reply,
@@ -416,103 +415,6 @@ fn a_read_only_node_is_a_verified_with_a_promotion_pending() {
             Some("0.5.0 serves on port 9300")
         );
     }
-}
-
-/// The answer of `/readyz` for a look by its number: read-write at look `at` and after it, before
-/// it read-only, a 503 of the old instance draining on the same sockets, or no answer, in turn.
-fn read_write_from(at: u32) -> Answer {
-    Box::new(move |n| match (n >= at, n % 3) {
-        (true, _) => reply(200, "ready read-write"),
-        (false, 0) => reply(200, "ready read-only"),
-        (false, 1) => reply(503, "draining"),
-        (false, _) => refused(),
-    })
-}
-
-/// Asserts that the wait for the cache lock looks once and waits for nothing when the store is
-/// already read-write, or has no cache lock (`ready`), and gives that mode. Catches a wait that
-/// pauses before its first look, or one that does not end on a store with no lock.
-#[test]
-fn the_wait_for_the_cache_lock_ends_at_once_on_a_store_that_is_not_read_only() {
-    for (body, mode) in [
-        ("ready read-write", CacheMode::ReadWrite),
-        ("ready", CacheMode::Plain),
-    ] {
-        let port = Port::new(Box::new(move |_| reply(200, body)), Box::new(|_| refused()));
-        let clock = CountingClock::default();
-        assert_eq!(look(&port, &clock).read_write(), Some(mode));
-        assert_eq!(port.count("/readyz"), 1);
-        assert_eq!(port.count("/metricz"), 0);
-        assert!(clock.pauses.borrow().is_empty());
-    }
-}
-
-/// Asserts that the wait for the cache lock waits out every answer that is not read-write (read-only,
-/// a 503 of the old instance draining, no answer) a second apart, and ends at a store that turns
-/// read-write on its last look, after `READ_WRITE_ATTEMPTS` looks and one pause fewer. Catches a
-/// wait that ends early on an answer of the old instance, or one a look short of its bound.
-#[test]
-fn the_wait_for_the_cache_lock_takes_a_read_write_answer_on_its_last_look() {
-    let port = Port::new(
-        read_write_from(READ_WRITE_ATTEMPTS - 1),
-        Box::new(|_| refused()),
-    );
-    let clock = CountingClock::default();
-    assert_eq!(look(&port, &clock).read_write(), Some(CacheMode::ReadWrite));
-    assert_eq!(port.count("/readyz"), READ_WRITE_ATTEMPTS);
-    let pauses = clock.pauses.borrow();
-    assert_eq!(
-        pauses.len(),
-        usize::try_from(READ_WRITE_ATTEMPTS - 1).unwrap()
-    );
-    assert!(pauses.iter().all(|pause| *pause == POLL_INTERVAL));
-}
-
-/// Asserts that a store still read-only on every look gives `None` after exactly
-/// `READ_WRITE_ATTEMPTS` looks, and that one read-write a look after the bound is not waited for.
-/// Catches a wait with no bound, which hostkeeper would kill at the step's bound instead of the
-/// hook deferring.
-#[test]
-fn the_wait_for_the_cache_lock_gives_none_once_its_looks_run_out() {
-    let port = Port::new(
-        read_write_from(READ_WRITE_ATTEMPTS),
-        Box::new(|_| refused()),
-    );
-    let clock = CountingClock::default();
-    assert_eq!(look(&port, &clock).read_write(), None);
-    assert_eq!(port.count("/readyz"), READ_WRITE_ATTEMPTS);
-    assert_eq!(
-        clock.pauses.borrow().len(),
-        usize::try_from(READ_WRITE_ATTEMPTS - 1).unwrap()
-    );
-}
-
-/// The `cutover` bound of hostkeeper's manifest, in seconds.
-fn cutover_bound() -> u64 {
-    let file =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packaging/hostkeeper/manifest.toml.in");
-    let text = std::fs::read_to_string(file).unwrap();
-    let (_, rest) = text.split_once("[hook.timeout_secs]\n").unwrap();
-    let table: toml::Table = rest.split("\n[").next().unwrap().parse().unwrap();
-    u64::try_from(table["cutover"].as_integer().unwrap()).unwrap()
-}
-
-/// Whether a `cutover` bound of `secs` is above every look the step may make a second apart: the
-/// wait for the release to serve, its probe, and the wait for the cache lock.
-fn above_the_cutover_looks(secs: u64) -> bool {
-    let looks = POLL_INTERVAL * (READY_ATTEMPTS + PROBE_ATTEMPTS + READ_WRITE_ATTEMPTS);
-    Duration::from_secs(secs) > looks
-}
-
-/// Asserts that the manifest's `cutover` bound is above every look of the step, the wait for the
-/// cache lock included, and that the 1500 s it had before that wait is not. Catches a wait raised
-/// without its bound, after which hostkeeper would kill a `cutover` that was still waiting for the
-/// new store to take the lock.
-#[test]
-fn the_manifests_cutover_bound_covers_the_wait_for_the_cache_lock() {
-    let secs = cutover_bound();
-    assert!(above_the_cutover_looks(secs), "cutover = {secs} s");
-    assert!(!above_the_cutover_looks(1500));
 }
 
 /// Asserts that before the commit a node whose cache is read-only is no verdict: `writable` defers

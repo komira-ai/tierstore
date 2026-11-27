@@ -1,21 +1,20 @@
 //! The start of a build node whose file has an `fs` interface, on Linux: the mount and the S3 and
 //! OCI sockets of a running instance, got before any socket of a front is bound
-//! (`docs/design/one-service.md` sections 2.3, 3.1 and 4.2), and the mount offered in its turn.
+//! (`docs/design/one-service.md` sections 2.3 and 3.1), and the mount offered in its turn.
 //!
 //! The running instance on `server.handoff_socket` is asked `take 1`, `ready`, `mount`, with the
-//! cache lock. An instance of the one process that holds the mount offers it there with its
-//! sockets and its lock, and the start takes all of it in that one conversation
-//! ([`take_mount_and_sockets`]): the device is put in the store before `ack`, the runtime state is
-//! read again after `done`, `ready` is said once the mount is made ready to serve, the device is
-//! read after the `bye`, and the cache takes the write role at that instance's `written`. Nothing
-//! is asked on `take-fs 1`.
+//! cache lock. An instance that holds the mount offers it there with its sockets and its lock, and
+//! the start takes all of it in that one conversation ([`take_mount_and_sockets`]): the device is
+//! put in the store before `ack`, the runtime state is read again after `done`, `ready` is said
+//! once the mount is made ready to serve, the device is read after the `bye`, and the cache takes
+//! the write role at that instance's `written`. Nothing is asked on `take-fs 1`, which no release
+//! after this one answers.
 //!
-//! An instance that holds no mount refuses the line and is asked for its sockets and lock alone:
-//! the S3 process of the two-process layout, or a process of this layout whose mount a `take-fs 1`
-//! took. Then the mount comes from the instance that answers `take-fs 1` in the runtime directory,
-//! in the order of the switch (section 4.2, [`switch`]): both offers are checked before either is
-//! accepted, and the mount's is accepted first. Where nothing answers on `server.handoff_socket`,
-//! the mount is taken on `take-fs 1`, adopted or made, and the sockets are bound.
+//! An instance that holds no mount refuses the line and is asked for its sockets and lock alone.
+//! Then the mount is adopted from the descriptor the service manager kept, or made afresh
+//! ([`switch`]): the mount first, then the sockets are accepted, and a start that cannot accept
+//! them leaves the mount to the manager's store. Where nothing answers on `server.handoff_socket`,
+//! or the file names none, the mount is adopted or made, and the sockets are bound.
 
 use std::net::SocketAddr;
 use std::path::Path;
@@ -37,7 +36,7 @@ pub(super) struct Own<'a> {
 
 /// The mount of the `fs` interface of `service`, and the sockets of the running instance on
 /// `handoff` (none when the file has no `fs` interface, or no hand-off), as the module says: in
-/// one conversation from an instance that holds the mount, else in the order of the switch. The
+/// one conversation from an instance that holds the mount, else adopted or made. The
 /// sockets come back taken, or taken with `ready` said ([`Got::Said`]), for [`bind_fronts`]
 /// (`cli_serve.rs`); none where no instance answers on `handoff`.
 ///
@@ -55,7 +54,7 @@ pub(super) async fn take_mount_and_sockets(
 ) -> Result<(Served, Option<Got>), Error> {
     let (handoff, mounted) = match (handoff, service.mounted()) {
         (Some(handoff), Ok(mounted)) => (handoff, mounted),
-        // No hand-off: the mount is taken on `take-fs 1`, adopted or made, and the sockets bound.
+        // No hand-off: the mount is adopted or made, and the sockets bound.
         (None, Ok(mounted)) => return switch(mounted.service(), stores, None).await,
         // No `fs` interface: no mount, and the sockets are got as any node's.
         (_, Err(service)) => return switch(*service, stores, None).await,
@@ -92,14 +91,11 @@ async fn take_handed(
     Ok((served, Some(Got::Said(Box::new(sockets), predecessor))))
 }
 
-/// The mount of the `fs` interface of `service`, and the sockets `asked` offers, in the order of
-/// the switch from two processes to one (`docs/design/one-service.md` section 4.2): both offers
-/// are checked before either is accepted, and the mount's is accepted first. `asked` was checked
-/// when it was asked for; the mount's offer is checked as it is taken, and a mount that is not
-/// taken (refused, mismatched, not answered) refuses `asked` too, so both running instances serve
-/// on as they were. The sockets are accepted once the mount's instance has said `done` and before
-/// it is told `ready`: sockets that cannot be accepted leave the mount to that instance, which
-/// serves it again. Only then is it told `ready`, and the mount read.
+/// The mount of the `fs` interface of `service`, adopted from the service manager's store or made
+/// afresh, and the sockets `asked` offers, from an instance that holds no mount: the mount is got
+/// first, and `asked` is accepted once it is, so that a mount that cannot be got refuses `asked`
+/// too and the running instance serves on as it was. Sockets that cannot be accepted leave the
+/// mount to the manager's store (`Taking::abandon`).
 ///
 /// # Errors
 /// As [`take_mount_and_sockets`].

@@ -11,8 +11,8 @@ use std::time::Duration;
 use tokio::net::UnixListener;
 
 use crate::server::handoff::testing::{
-    ask, connect, fake_mount, fake_mount_at, handoff, identity, listening, scratch, settle, socket,
-    texts, told, within,
+    ask, connect, fake_mount, handoff, identity, listening, scratch, settle, socket, texts, told,
+    within,
 };
 use crate::server::handoff::{Front, HandoffError, Offer, wire};
 use crate::server::local_cache::Mode;
@@ -473,19 +473,17 @@ async fn an_instance_with_the_mount_refuses_a_taker_that_does_not_ask_for_it() {
     serving.abort();
 }
 
-/// Asserts that a taker that does not ask for the mount gets the sockets once the mount was given
-/// up on the instance's other conversation (`take-fs 1`, which shares the claim): a taker of the
-/// previous release asks for the sockets with the `ready` step, takes the mount on `take-fs 1` and
-/// only then says `ready`, and is answered `bye`; a request for the mount then is refused as by an
-/// instance that holds none, and while a taker of `take-fs 1` is at the mount, as busy. It would
-/// catch a rollback to the previous release that the one process refuses, or a mount offered
-/// twice.
+/// Asserts what a request is told of the mount by the claim: while a taker is at the mount, a
+/// request for it is refused as busy; once it is given up, a request for it is refused as by an
+/// instance that holds none, and a taker that does not ask for it is still refused as by an
+/// instance that holds the mount, so that no taker leaves with the sockets of an instance that
+/// serves on. It would catch a mount offered twice, or after it was given up.
 #[tokio::test]
-async fn a_taker_without_the_mount_line_gets_the_sockets_once_take_fs_took_the_mount() {
+async fn a_request_for_the_mount_is_refused_by_the_claim_while_taken_and_once_given_up() {
     let (dir, path) = scratch();
     let (mount, steps, _kernel) = fake_mount(dir.path());
     let claim = Arc::clone(&mount.claim);
-    let (listener, addr) = listening();
+    let (listener, _addr) = listening();
     let serving = tokio::spawn(
         Offer::bind(&path, vec![socket(Front::S3, &listener)])
             .unwrap()
@@ -493,35 +491,15 @@ async fn a_taker_without_the_mount_line_gets_the_sockets_once_take_fs_took_the_m
             .with_mount(mount)
             .serve(),
     );
-    // A taker of `take-fs 1` is at the mount.
+    // A taker is at the mount.
     assert_eq!(claim.claim(), super::super::Holding::Here);
     let busy = ask(&connect(&path).await, &["take 1", "ready", "mount"]).await;
     assert_eq!(texts(&busy.lines), ["refused", MOUNT_BUSY]);
-    let taker = connect(&path).await;
-    let offer = ask(&taker, &["take 1", "ready"]).await;
-    assert_eq!(texts(&offer.lines), ["offer", &format!("s3 {addr}")]);
-    assert_eq!(texts(&ask(&taker, &["ack"]).await.lines), ["done"]);
-    // It took the mount there, and says `ready` here.
     claim.give_up();
-    let answer = ask(&taker, &["ready"]).await;
-    assert_eq!(texts(&answer.lines), ["bye"]);
-    within("the end of the offer", serving).await.unwrap();
-    assert!(told(&steps).is_empty());
-
-    let other = dir.path().join("other.sock");
-    let (mount, steps, _kernel) = fake_mount_at(dir.path(), "again");
-    mount.claim.give_up();
-    let serving = tokio::spawn(
-        Offer::bind(&other, vec![socket(Front::S3, &listener)])
-            .unwrap()
-            .with_ready_wait(WAIT)
-            .with_mount(mount)
-            .serve(),
-    );
-    let gone = ask(&connect(&other).await, &["take 1", "ready", "mount"]).await;
+    let gone = ask(&connect(&path).await, &["take 1", "ready", "mount"]).await;
     assert_eq!(texts(&gone.lines), ["refused", NO_MOUNT]);
-    let plain = ask(&connect(&other).await, &["take 1"]).await;
-    assert_eq!(texts(&plain.lines), ["offer", &format!("s3 {addr}")]);
+    let plain = ask(&connect(&path).await, &["take 1"]).await;
+    assert_eq!(texts(&plain.lines), ["refused", HOLDS_MOUNT]);
     assert!(told(&steps).is_empty());
     serving.abort();
 }

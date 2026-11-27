@@ -711,7 +711,8 @@ params = { socket = "/var/lib/tierstore/provider.sock", mountpoint = "/run/tiers
 
 `mountpoint` is the node's file system mount, under which the provider places each job's tree:
 the `fs` interface's `params.mountpoint` in the same file. Since 0.3.196 `tierstore fs` is no longer
-a process of its own, so a file with no `fs` interface has no process serving the mount, and the
+a process of its own (it exits 2 and names the interface; the unit that ran it is gone), so a file
+with no `fs` interface has no process serving the mount, and the
 provider answers every `Prepare` and `Mount` `UNAVAILABLE` there. jobscheduler's agent on the node takes the socket and the provider's directory as a
 read-only mount root, in flags of its own:
 
@@ -728,28 +729,28 @@ its answers means to a job, is in `crates/tierstore/docs/operations.md`, "The mo
 
 ### A unit that needs the mount
 
-The mount at `/run/tierstore/fs` is held by one of two instances, `tierstore-fs@a` or
-`tierstore-fs@b`, and every update that hands the fs process over moves it to the other letter. A
-unit that needs the mount (jobscheduler's agent on a build node, say) names both letters, in a
-drop-in of its own:
+The mount at `/run/tierstore/fs` is made by the one process, which is `tierstore@a` or
+`tierstore@b`, and every update moves it to the other letter. A unit that needs the mount
+(jobscheduler's agent on a build node, say) names both letters, in a drop-in of its own:
 
 ```ini
 [Unit]
-Wants=tierstore-fs@a.service tierstore-fs@b.service
-After=tierstore-fs@a.service tierstore-fs@b.service
+Wants=tierstore@a.service tierstore@b.service
+After=tierstore@a.service tierstore@b.service
 ```
 
 This is right for either letter, at boot and after any number of updates, with nothing to edit:
-each instance starts only when its marker (`/var/lib/tierstore/run-fs-<letter>`) is there, and
-only the letter that holds the mount has one, so the `Wants=` starts that one and the other is
-skipped (a start whose condition fails is not a failure, and it fails nothing that wants it). The
-unit is `Type=notify` and says `READY=1` only once it has made or taken the mount, so `After=`
-orders the unit after the mount is there. A unit that names one letter is right only until the
-next hand-over: after it, its `Wants=` starts nothing and its `After=` orders it after nothing.
+each instance starts only when its marker (`/var/lib/tierstore/run-<letter>`) is there, and only
+the letter the update hook's record names has one, so the `Wants=` starts that one and the other
+is skipped (a start whose condition fails is not a failure, and it fails nothing that wants it).
+The unit is `Type=simple`, so `After=` orders the unit after the process has started, not after
+it has made the mount; a unit that must see the mount waits for it. A unit that names one letter
+is right only until the next update: after it, its `Wants=` starts nothing and its `After=` orders
+it after nothing.
 
 Use `Wants=`, not `Requires=` or `BindsTo=`: after a hand-over the old instance ends by itself, and
 a unit bound to it would be stopped with it. Do not name the mount point instead
-(`RequiresMountsFor=/run/tierstore/fs`): the fs process makes the mount itself, through
+(`RequiresMountsFor=/run/tierstore/fs`): the process makes the mount itself, through
 `/dev/fuse`, so systemd knows `run-tierstore-fs.mount` only while the mount exists, and at boot
 there is no such unit to order after. The package ships no target of its own for the same reason
 the two letters are enough: a target would only collect the same two `Wants=`.

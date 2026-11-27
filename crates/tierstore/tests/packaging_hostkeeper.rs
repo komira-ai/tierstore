@@ -441,26 +441,19 @@ fn launchd_waits_for_the_drain() {
     assert!(exit >= drain, "{exit:?} is less than {drain:?}");
 }
 
-/// The systemd template of `tierstore fs`.
-const FS_TEMPLATE: &str = "tierstore-fs@.service";
-
-/// The check of the marker of the unit of `tierstore fs`, the one command of it that runs as root.
-const FS_MARKER_CHECK: &str = "ExecCondition=+/usr/bin/test -e /var/lib/tierstore/run-fs-%i\n";
-
 /// Every systemd unit that makes or will make the node's FUSE mount: the template of hostkeeper's
-/// package, the template of the deb and rpm packages, and the unit of `tierstore fs`.
-fn mounting_units() -> [(&'static str, String); 3] {
+/// package and the template of the deb and rpm packages.
+fn mounting_units() -> [(&'static str, String); 2] {
     [
         (TEMPLATE, read(TEMPLATE)),
         ("packaging/tierstore@.service", package_template()),
-        (FS_TEMPLATE, read(FS_TEMPLATE)),
     ]
 }
 
 /// Asserts that no unit that makes the mount sets an option that gives the service a mount
 /// namespace of its own (docs/design/one-service.md section 2.2: the table's options and the path
 /// options), with any value: the template of hostkeeper's package, the template of the deb and rpm
-/// packages and the unit of `tierstore fs` set none. And that the check finds each of them: a copy
+/// packages set none. And that the check finds each of them: a copy
 /// of the template with `ProtectSystem=strict` added fails it, as does a copy with any other of
 /// the options. It would catch an option put back in the template, with which the mount the
 /// process makes stays in the service's own namespace and the job runtime and the next instance
@@ -496,28 +489,11 @@ fn the_unit_sets_no_option_that_makes_a_mount_namespace() {
 /// privileges (`+`, `!`, `!!`, alone or after other prefixes), but not a `+` in an argument. It
 /// would catch a capability added to the template beyond the one the mount needs, and the
 /// capability dropped, with which the process cannot mount.
-///
-/// The unit of `tierstore fs` has one command that runs with raised privileges: the check of its
-/// marker, `test -e` as root, so that the marker is seen whoever owns `/var/lib/tierstore` (the
-/// unit's own comment). It grants the process nothing; that one line, once, is left out of the
-/// judgement, and any other raised command in the unit still fails it.
 #[test]
 fn the_unit_grants_cap_sys_admin_and_no_other() {
     for (name, unit) in mounting_units() {
-        let judged = if name == FS_TEMPLATE {
-            assert_eq!(unit.matches(FS_MARKER_CHECK).count(), 1, "{name}");
-            unit.replace(FS_MARKER_CHECK, "")
-        } else {
-            unit
-        };
-        assert_eq!(grants_cap_sys_admin_alone(&judged), Ok(()), "{name}");
+        assert_eq!(grants_cap_sys_admin_alone(&unit), Ok(()), "{name}");
     }
-    let fs = read(FS_TEMPLATE).replace(FS_MARKER_CHECK, "");
-    assert_eq!(
-        grants_cap_sys_admin_alone(&with_service_line(&fs, "ExecStartPre=+/usr/bin/true")),
-        Err("ExecStartPre=+/usr/bin/true runs with raised privileges".to_owned()),
-        "another raised command of the fs unit"
-    );
     let template = read(TEMPLATE);
     let bounding = "CapabilityBoundingSet=CAP_SYS_ADMIN\n";
     let ambient = "AmbientCapabilities=CAP_SYS_ADMIN\n";
@@ -576,82 +552,54 @@ fn the_unit_grants_cap_sys_admin_and_no_other() {
     assert_eq!(grants_cap_sys_admin_alone(&argument), Ok(()));
 }
 
-/// Asserts that the template has what the unit of `tierstore fs` gives its process to make and
-/// keep the mount, with the same values (docs/design/one-service.md section 1.4): the device and
-/// the system calls of the mount, the descriptor store that keeps it across a restart, the start
-/// limit and restart wait that let a mount without a server fail fast, the runtime directories of
-/// the file system's state and of the mount point's parent, and the account, privilege, memory,
-/// umask and file limits the two units already shared. It would catch the template and the unit
-/// of `tierstore fs` drifting apart on what the mount needs, so that one process of the template
-/// cannot do what the unit of `tierstore fs` does.
+/// Asserts that the template has what the process needs to make and keep the node's FUSE mount
+/// (docs/design/one-service.md section 1.4), each with its value: the device and the system calls
+/// of the mount, the descriptor store that keeps it across a restart, the start limit and restart
+/// wait that let a mount without a server fail fast, the runtime directories of the file system's
+/// state and of the mount point's parent, and the account, privilege, memory, umask and file
+/// limits. It would catch one of them dropped or changed, with which the one process cannot make
+/// the mount or loses it at a restart.
 #[test]
-fn the_template_has_what_the_fs_unit_gives_the_mount() {
-    let (template, fs) = (read(TEMPLATE), read(FS_TEMPLATE));
-    for key in [
-        "DeviceAllow",
-        "CapabilityBoundingSet",
-        "AmbientCapabilities",
-        "SystemCallFilter",
-        "FileDescriptorStoreMax",
-        "FileDescriptorStorePreserve",
-        "StartLimitIntervalSec",
-        "StartLimitBurst",
-        "RestartSec",
-        "RuntimeDirectory",
-        "RuntimeDirectoryPreserve",
-        "User",
-        "NoNewPrivileges",
-        "MemoryDenyWriteExecute",
-        "UMask",
-        "Restart",
-        "RestartPreventExitStatus",
-        "KillSignal",
-        "SystemCallArchitectures",
-        "LockPersonality",
-        "RestrictRealtime",
-        "LimitNOFILE",
+fn the_template_has_what_the_one_process_needs_to_make_and_keep_the_mount() {
+    let template = read(TEMPLATE);
+    for (key, want) in [
+        ("DeviceAllow", "/dev/fuse rw"),
+        ("CapabilityBoundingSet", "CAP_SYS_ADMIN"),
+        ("AmbientCapabilities", "CAP_SYS_ADMIN"),
+        (
+            "SystemCallFilter",
+            "@system-service @mount pidfd_open pidfd_getfd",
+        ),
+        ("FileDescriptorStoreMax", "1"),
+        ("FileDescriptorStorePreserve", "restart"),
+        ("StartLimitIntervalSec", "60"),
+        ("StartLimitBurst", "5"),
+        ("RestartSec", "2"),
+        ("RuntimeDirectory", "tierstore-fs tierstore"),
+        ("RuntimeDirectoryPreserve", "yes"),
+        ("User", "tierstore"),
+        ("NoNewPrivileges", "yes"),
+        ("MemoryDenyWriteExecute", "yes"),
+        ("UMask", "0077"),
+        ("Restart", "on-failure"),
+        ("RestartPreventExitStatus", "2 3"),
+        ("KillSignal", "SIGTERM"),
+        ("SystemCallArchitectures", "native"),
+        ("LockPersonality", "yes"),
+        ("RestrictRealtime", "yes"),
+        ("LimitNOFILE", "1048576"),
     ] {
-        assert_eq!(value(&template, key), value(&fs, key), "{key}");
+        assert_eq!(value(&template, key), want, "{key}");
     }
-    assert_eq!(
-        value(&template, "RuntimeDirectory"),
-        "tierstore-fs tierstore"
-    );
-    assert_eq!(value(&template, "FileDescriptorStoreMax"), "1");
 }
 
-/// Asserts what the unit of `tierstore fs` has that the template has not: it is `Type=notify`
-/// (the process says `READY=1` once it serves the mount, so a unit ordered after it finds the
-/// mount there), with a start timeout above the 120 s default of `fs.handoff_wait` (a start that
-/// takes the mount over must not be cut by the unit's timeout), and its process has no network
-/// (`AF_UNIX` alone), where the template's serves S3.
-#[test]
-fn the_fs_template_is_a_notify_unit_on_unix_sockets_alone() {
-    let (template, fs) = (read(TEMPLATE), read(FS_TEMPLATE));
-    assert_eq!(value(&fs, "Type"), "notify");
-    assert_eq!(value(&fs, "NotifyAccess"), "main");
-    // The default of `fs.handoff_wait` is 120 s (`DEFAULT_HANDOFF_WAIT` in the crate, not public
-    // to this test).
-    let start_secs: u64 = value(&fs, "TimeoutStartSec")
-        .parse()
-        .expect("TimeoutStartSec is whole seconds");
-    assert!(
-        start_secs > 120,
-        "TimeoutStartSec is above the default fs.handoff_wait"
-    );
-    assert_eq!(value(&fs, "RestrictAddressFamilies"), "AF_UNIX");
-    assert_ne!(value(&template, "RestrictAddressFamilies"), "AF_UNIX");
-}
-
-/// Asserts that the units of `tierstore fs` and of the store process set `LimitNOFILE` to exactly
-/// 1048576, and that the launchd jobs of both set the soft and the hard `NumberOfFiles` to the
-/// same. It would catch any one of the four files going back to a smaller limit, with which a
+/// Asserts that the unit of the one process sets `LimitNOFILE` to exactly 1048576, and that the
+/// launchd jobs of the store process and of `tierstore fs` set the soft and the hard `NumberOfFiles` to the
+/// same. It would catch any one of the three files going back to a smaller limit, with which a
 /// build's open files run the process out of descriptors and every open after them fails.
 #[test]
 fn every_unit_and_job_allows_1048576_open_files() {
-    for file in ["tierstore@.service", "tierstore-fs@.service"] {
-        assert_eq!(value(&read(file), "LimitNOFILE"), "1048576", "{file}");
-    }
+    assert_eq!(value(&read(TEMPLATE), "LimitNOFILE"), "1048576");
     for file in ["tierstore.plist", "tierstore-fs.plist"] {
         let job = plist_of(file);
         for limits in ["SoftResourceLimits", "HardResourceLimits"] {
@@ -667,69 +615,9 @@ fn every_unit_and_job_allows_1048576_open_files() {
     }
 }
 
-/// Asserts that the unit of `tierstore fs` runs the `fs` verb of the installed binary with
-/// a `--config`, starts only under a marker of its own after the S3 instances, and is enabled at
-/// boot; and that the verb, which serves nothing now, exits 2 with the line that names the `fs`
-/// interface, so a unit left behind fails loudly and its `RestartPreventExitStatus=2` stops it.
-#[test]
-fn the_fs_template_runs_the_fs_verb_of_the_installed_binary() {
-    let unit = read(FS_TEMPLATE);
-    let words = exec_start(&unit);
-    assert_eq!(words[0], SERVICE_BINARY);
-    assert_eq!(words[1..], ["fs", "--config", "/etc/tierstore/fs.toml"]);
-    assert_eq!(
-        value(&unit, "ConditionPathExists"),
-        "/var/lib/tierstore/run-fs-%i"
-    );
-    assert_eq!(
-        value(&unit, "After"),
-        "tierstore@a.service tierstore@b.service"
-    );
-    assert_eq!(value(&unit, "WantedBy"), "multi-user.target");
-    let scratch = tierstore_testkit::dir::TestDir::under(std::env::temp_dir(), "tfs-unit");
-    let missing = scratch.path().join("fs.toml");
-    let out = std::process::Command::new(env!("CARGO_BIN_EXE_tierstore"))
-        .args(["fs", "--config"])
-        .arg(&missing)
-        .output()
-        .expect("the binary runs");
-    assert_eq!(out.status.code(), Some(2));
-    assert_eq!(String::from_utf8_lossy(&out.stderr), NOT_A_PROCESS);
-}
-
 /// What the `fs` verb says before it exits 2: the file system is the node's `fs` interface.
 const NOT_A_PROCESS: &str = "tierstore fs is no longer a process of its own: the file system is \
      the [[interface]] with type = \"fs\" of the node's file\n";
-
-/// Asserts that the unit of `tierstore fs` looks at its marker at every start, its automatic
-/// restarts included: one `ExecCondition=` that tests, as root (`+`, as systemd tests the
-/// condition), for exactly the file of `ConditionPathExists=`, beside `Restart=on-failure`.
-/// systemd does not evaluate the conditions of `[Unit]` again for a restart of `Restart=`, so
-/// without it a taker whose take failed is started again after the update hook removed its
-/// marker, again and again, and the rollback, which waits for it to end, never ends. It would catch the line left out, and one that tests another file.
-#[test]
-fn the_fs_template_looks_at_its_marker_at_every_restart() {
-    let unit = read(FS_TEMPLATE);
-    let marker = value(&unit, "ConditionPathExists");
-    assert_eq!(
-        value(&unit, "ExecCondition"),
-        format!("+/usr/bin/test -e {marker}")
-    );
-    assert_eq!(value(&unit, "Restart"), "on-failure");
-}
-
-/// Asserts that the marker of the unit of `tierstore fs` is not one of the markers the update hook
-/// writes for the S3 instances, so the hook cannot start or retire a mount it does not know.
-#[test]
-fn the_fs_marker_is_not_a_marker_of_the_s3_instances() {
-    let unit = read(FS_TEMPLATE);
-    let marker = value(&unit, "ConditionPathExists");
-    for instance in [Instance::A, Instance::B] {
-        let theirs = marker_path(instance);
-        let ours = marker.replace("%i", instance.letter());
-        assert_ne!(Path::new(&ours), theirs.as_path());
-    }
-}
 
 /// Asserts the launchd job of `tierstore fs`: its label is its file's name, it runs the `fs` verb of
 /// the installed binary with a `--config` (the verb, which serves nothing now, exits 2 with the
@@ -948,12 +836,10 @@ fn the_manifests_cutover_and_rollback_cover_both_bootouts_and_the_looks() {
 /// the binary through the release link `current`, which its account cannot reach.
 #[test]
 fn no_unit_or_job_runs_a_program_inside_the_package_directories() {
-    for file in [TEMPLATE, FS_TEMPLATE] {
-        let unit = read(file);
-        assert_eq!(exec_start(&unit)[0], SERVICE_BINARY, "{file}");
-        assert_eq!(value(&unit, "User"), "tierstore", "{file}");
-        assert!(!unit.contains(PACKAGES), "{file}");
-    }
+    let unit = read(TEMPLATE);
+    assert_eq!(exec_start(&unit)[0], SERVICE_BINARY);
+    assert_eq!(value(&unit, "User"), "tierstore");
+    assert!(!unit.contains(PACKAGES));
     for file in ["tierstore.plist", "tierstore-fs.plist"] {
         let job = plist_of(file);
         let Some(Plist::Array(words)) = job.get("ProgramArguments") else {

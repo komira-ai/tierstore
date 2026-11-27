@@ -594,59 +594,35 @@ fn the_fs_file_repeats_the_nodes_fill_socket_cache_and_mountpoint() {
     }
 }
 
-/// Asserts that the binary accepts the job's command line and the shipped `fs.toml`: the file, with
-/// its two account names replaced by the numbers of the user and group of this process (a unit test
-/// has no `_tierstore` to look up) and its three directories by directories of a scratch
-/// directory, is checked by `tierstore fs --config <file> --check-config`, which exits 0 and says
-/// nothing. It would catch a key or a value of the file the binary refuses, which would leave the
-/// job restarting for ever.
+/// Asserts what the binary does with the job's command line since `tierstore fs` stopped being a
+/// process of its own: whatever follows `fs` (the shipped `fs.toml`, `--check-config` or nothing
+/// the binary could check), it exits 2 and says on stderr that the file system is the `fs`
+/// interface of the node's file. A Mac whose job is still loaded gets that line in its log, not a
+/// second process.
 #[test]
-fn the_binary_accepts_the_fs_plists_command_line_and_file() {
-    let scratch = TestDir::under(std::env::temp_dir(), "packaging-macos-fs-check");
-    let mut text = read("fs.toml");
-    let (uid, gid) = (
-        rustix::process::geteuid().as_raw(),
-        rustix::process::getegid().as_raw(),
-    );
-    for (shipped, own) in [
-        (
-            "owner = \"_tierstore:_tierstore\"",
-            format!("owner = \"{uid}:{gid}\""),
-        ),
-        (
-            "client_group = \"_tierstore\"",
-            format!("client_group = \"{gid}\""),
-        ),
-    ] {
-        assert!(text.contains(shipped), "{shipped}");
-        text = text.replace(shipped, &own);
-    }
-    for (shipped, name) in [
-        ("/usr/local/tierstore/cache", "cache"),
-        ("/private/var/tierstore/fs", "mount"),
-        ("/usr/local/tierstore/run/fs", "runtime"),
-    ] {
-        let own = scratch.path().join(name);
-        std::fs::create_dir(&own).unwrap();
-        assert!(text.contains(shipped), "{shipped}");
-        text = text.replace(shipped, &own.display().to_string());
-    }
-    let file = scratch.path().join("fs.toml");
-    std::fs::write(&file, text).unwrap();
+fn the_fs_plists_command_line_exits_2_and_names_the_interface() {
     let mut words = words(&fs_plist("macos-pkg"));
     assert_eq!(words[1..], FS_WORDS);
-    words[3] = file.display().to_string();
-    words.push("--check-config".to_owned());
-    let out = Command::new(env!("CARGO_BIN_EXE_tierstore"))
-        .args(&words[1..])
-        .output()
-        .expect("the binary runs");
-    assert_eq!(
-        (
-            out.status.code(),
-            String::from_utf8_lossy(&out.stdout).into_owned(),
-            String::from_utf8_lossy(&out.stderr).into_owned()
-        ),
-        (Some(0), String::new(), String::new())
-    );
+    for extra in [None, Some("--check-config")] {
+        if let Some(extra) = extra {
+            words.push(extra.to_owned());
+        }
+        let out = Command::new(env!("CARGO_BIN_EXE_tierstore"))
+            .args(&words[1..])
+            .output()
+            .expect("the binary runs");
+        assert_eq!(
+            (
+                out.status.code(),
+                String::from_utf8_lossy(&out.stdout).into_owned(),
+                String::from_utf8_lossy(&out.stderr).into_owned()
+            ),
+            (Some(2), String::new(), NOT_A_PROCESS.to_owned()),
+            "{words:?}"
+        );
+    }
 }
+
+/// What `tierstore fs` says before it exits 2.
+const NOT_A_PROCESS: &str = "tierstore fs is no longer a process of its own: the file system is \
+                             the [[interface]] with type = \"fs\" of the node's file\n";

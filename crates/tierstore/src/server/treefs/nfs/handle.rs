@@ -19,7 +19,7 @@
 //! hold: a release before this one answers `NFS3ERR_BADHANDLE` to the sixty-four bytes, so a
 //! process of it must never take over a mount this release served. On a Mac an update (and so a
 //! rollback) unmounts before it starts the other release, whose mount has a new epoch, and no Mac
-//! hands its socket over (`fs.nfs.handoff_socket`); a hand-over back to a release before this one
+//! hands its socket over; a hand-over back to a release before this one
 //! is the one way to meet it. [`SPREAD`] and [`mix`] are part of the handle: a change to either
 //! makes every handle a client holds a bad one.
 

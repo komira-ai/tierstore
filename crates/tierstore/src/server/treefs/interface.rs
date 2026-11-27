@@ -5,44 +5,32 @@
 //! its NFS front (`nfs/interface.rs`).
 //!
 //! The start (`cache_cli.rs`, `cache_cli_mount.rs`) opens the cache and the tree store and then gets
-//! the mount, before it binds or takes a socket of a front, in the order of `tierstore fs`
-//! (`launch.rs`):
+//! the mount, before it binds or takes a socket of a front, in this order (`launch.rs`):
 //!
-//! 1. **Take** it, with the sockets and the cache lock, from a running instance of this layout in
-//!    one conversation on `server.handoff_socket` (`take 1`, `ready`, `mount`; the one hand-over of
+//! 1. **Take** it, with the sockets and the cache lock, from a running instance in one
+//!    conversation on `server.handoff_socket` (`take 1`, `ready`, `mount`; the one hand-over of
 //!    `docs/design/one-service.md` section 3.1, [`Mounted`]):
 //!    the device is put in the store before `ack`, read only after the instance's `bye`, and the
-//!    cache takes the write role at its `written`. An instance that holds no mount (the S3 process
-//!    of the two-process layout, or one of this layout whose mount a `take-fs 1` took) answers
-//!    `refused`, and is asked for its sockets and lock alone; the mount is then taken from the
-//!    instance that answers `take-fs 1` on `handoff.sock` in the runtime directory (`handover.rs`):
-//!    the `tierstore fs` process of the two-process layout ([`Service::take`]). In that switch from
-//!    two processes to one, the start checks the sockets' offer, holds it unanswered while it takes
-//!    the mount, and accepts it once the mount's instance has said `done` and before that one is
-//!    told `ready` (section 4.2): both offers are checked before either is accepted, a mount that
-//!    is not taken refuses the sockets' offer, and sockets that cannot be taken leave the mount to
-//!    its instance ([`Taking::abandon`]).
+//!    cache takes the write role at its `written`. An instance that holds no mount answers
+//!    `refused`, and is asked for its sockets and lock alone; the mount is then adopted or made
+//!    ([`Service::take`]), and the sockets are accepted once it is. Nothing is asked on `take-fs 1`,
+//!    which no release after this one answers. Sockets that cannot be accepted leave the mount to
+//!    the service manager's store ([`Taking::abandon`]).
 //! 2. Else **adopt** the descriptor the service manager kept under the name `fuse`.
 //! 3. Else **mount afresh**: a mount of this file system that the kernel's table of mounts shows
 //!    at the mount point has no server, and is aborted and detached, with no look at the mount
 //!    point.
 //!
-//! A running instance that accepts on the socket and does not answer fails the start after
-//! `params.handoff_wait`, before anything is detached or mounted. The mount is served, and the
-//! instance it was taken from told `ready`, before the start binds a socket of a front; the start
-//! then binds `handoff.sock` itself, and the service manager is told `READY=1` once the fronts serve
-//! too.
+//! The mount is served, and the instance it was taken from told `ready`, before the start binds a
+//! socket of a front, and the service manager is told `READY=1` once the fronts serve too.
 //!
-//! While it serves, the process offers its mount on both conversations: in the one hand-over on
-//! `server.handoff_socket` ([`Served::offered`]), and on `take-fs 1` on `handoff.sock`, which a
-//! start of the previous release and the `tierstore fs` of the two-process layout (a rollback of
-//! the switch) ask. The two share a claim (`handoff/mount.rs`), so that one taker at a time takes
-//! the mount; once it is given up on either, the process serves S3 and OCI alone until a successor
-//! takes their sockets.
+//! While it serves, the process offers its mount in the one hand-over on `server.handoff_socket`
+//! ([`Served::offered`]); once it is given up there, the process serves S3 and OCI alone until a
+//! successor takes their sockets.
 //!
-//! A start that fails once the mount is served (the hand-over socket, or a socket of a front, cannot
-//! be bound or taken) stops reading the connection and leaves the mount where it is, for the next
-//! start: it never unmounts it, since the instance it was taken from may serve it again.
+//! A start that fails once the mount is served (a socket of a front cannot be bound or taken) stops
+//! reading the connection and leaves the mount where it is, for the next start: it never unmounts
+//! it, since the instance it was taken from may serve it again.
 //!
 //! A stop drains the fronts first and serves the mount throughout, since a fill a job waits for may
 //! need the upstream; then the readers stop and the mount is left to the service manager's store
@@ -65,7 +53,7 @@ use crate::server::local_cache::trees::TreeStore;
 
 use super::config::FsSettings;
 use super::fills::Calls;
-use super::handover::{self, HandoverError, Offer};
+use super::handover::{self, HandoverError};
 use super::launch::{self, End, Platform, Started, ended, hang, leave_to_kernel};
 use super::run::{Prepared, Running};
 use super::sd::Manager;
@@ -114,14 +102,12 @@ impl Service {
         }
     }
 
-    /// Gets the mount of the `fs` interface, if the file has one: taken, adopted or made (see the
-    /// module), with a core that calls `cache` and `trees`; [`Taking::serve`] then serves it. A
-    /// mount that was taken is not read yet: the instance it was taken from has said `done` and not
-    /// yet `bye`, so a start that goes no further leaves it serving again ([`Taking::abandon`]).
+    /// Gets the mount of the `fs` interface, if the file has one: adopted or made (see the module),
+    /// with a core that calls `cache` and `trees`; [`Taking::serve`] then serves it. The mount of a
+    /// running instance is taken in the one hand-over instead ([`Mounted::take_handed`]).
     ///
     /// # Errors
-    /// [`StartError`]: why the mount is not got; nothing was detached or mounted when a running
-    /// instance refused, did not keep to the protocol or did not answer in time.
+    /// [`StartError`]: why the mount is not got.
     pub(in crate::server) async fn take(
         self,
         (cache, trees): (LocalCache, Option<TreeStore>),
@@ -187,7 +173,7 @@ impl Mounted {
         }
     }
 
-    /// The service again, for a start that gets the mount otherwise ([`Service::take`]).
+    /// The service again, for a start that adopts or makes the mount ([`Service::take`]).
     pub(in crate::server) fn service(self) -> Service {
         Service {
             fs: Some(self.settings),
@@ -236,7 +222,6 @@ impl Mounted {
                 settings,
                 Started {
                     running: Arc::new(running),
-                    notice: None,
                     hung: None,
                 },
             )),
@@ -245,7 +230,7 @@ impl Mounted {
     }
 }
 
-/// A mount got and not yet read where it was taken ([`Service::take`], [`Mounted::take_handed`]).
+/// A mount got, and not yet read where it was taken ([`Service::take`], [`Mounted::take_handed`]).
 pub(in crate::server) struct Taking {
     manager: Manager,
     mount: Option<(FsSettings, Started)>,
@@ -255,14 +240,13 @@ pub(in crate::server) struct Taking {
 
 impl Taking {
     /// Serves the mount [`Service::take`] or [`Mounted::take_handed`] got: a mount that was taken
-    /// is read once the instance it came from has said `bye`, and the hand-over socket of the mount
-    /// is bound. Taken in the one hand-over, the `ready` said there is this one, and the connection
-    /// after its `bye` is the caller's ([`Served::predecessor`]): the cache takes the write role at
-    /// that instance's `written`.
+    /// is read once the instance it came from has said `bye`. Taken in the one hand-over, the
+    /// `ready` said there is this one, and the connection after its `bye` is the caller's
+    /// ([`Served::predecessor`]): the cache takes the write role at that instance's `written`.
     ///
     /// # Errors
-    /// The instance the mount was taken from gave up first and serves on, or the hand-over socket
-    /// cannot be bound: the mount is left where it is ([`abandon`]).
+    /// The instance the mount was taken from gave up first and serves on: the mount is left where
+    /// it is ([`abandon`]).
     pub(in crate::server) async fn serve(self) -> Result<Served, StartError> {
         let Self {
             manager,
@@ -280,64 +264,35 @@ impl Taking {
                 predecessor: None,
             });
         };
-        let Started {
-            running,
-            notice,
-            hung,
-        } = started;
-        // A mount taken over is read only once the instance it came from has said `bye`, or
-        // ended (a release before the step): it reads the device no more.
+        let Started { running, hung } = started;
+        // A mount taken over is read only once the instance it came from has said `bye`; one
+        // adopted or made has no instance to tell, and its readers run.
         let mut predecessor = None;
-        let said = match (&notice, ready) {
-            (Some(notice), _) => Some(notice.ready().await.map_err(StartError::from)),
-            (None, Some(ready)) => Some(
-                ready
-                    .send_keeping()
-                    .await
-                    .map(|after| predecessor = Some(after))
-                    .map_err(StartError::from),
-            ),
-            // Adopted or mounted afresh: no instance is told, and the readers run.
-            (None, None) => None,
-        };
-        let told = match said {
+        let told = match ready {
             None => Ok(()),
-            Some(Ok(())) => running
-                .start_reading()
-                .map_err(super::start::io("reading the connection taken over")),
-            Some(Err(why)) => {
-                // That instance gave up first and serves on, on its control socket's file.
-                running.give_up();
-                Err(why)
-            }
+            Some(ready) => match ready.send_keeping().await {
+                Ok(after) => {
+                    predecessor = Some(after);
+                    running
+                        .start_reading()
+                        .map_err(super::start::io("reading the connection taken over"))
+                }
+                Err(why) => {
+                    // That instance gave up first and serves on, on its control socket's file.
+                    running.give_up();
+                    Err(StartError::from(why))
+                }
+            },
         };
-        let offer = told.and_then(|()| {
-            Offer::bind(
-                &settings.handoff_socket,
-                &settings.mountpoint,
-                &settings.control_socket,
-                settings.handoff_wait,
-            )
-            .map(|offer| {
-                offer
-                    .with_manager(manager.clone())
-                    .with_claim(Arc::clone(&claim))
-            })
-            .map_err(StartError::from)
-        });
-        let offer = match offer {
-            Ok(offer) => offer,
-            Err(why) => {
-                abandon(running).await;
-                return Err(why);
-            }
-        };
+        if let Err(why) = told {
+            abandon(running).await;
+            return Err(why);
+        }
         Ok(Served {
             manager,
             mount: Some(Mount {
                 settings,
                 running,
-                offer,
                 hung,
             }),
             claim,
@@ -346,20 +301,12 @@ impl Taking {
         })
     }
 
-    /// Leaves the mount as [`abandon`] does, without a `ready` to the instance it was taken from,
-    /// which then serves it again: what a start does when it cannot go on before `ready` (the
-    /// sockets of the other process of a switch could not be taken).
+    /// Leaves the mount as [`abandon`] does: what a start does when it cannot go on before the
+    /// start of the fronts (the sockets of the instance that holds none could not be taken).
     pub(in crate::server) async fn abandon(self) {
         let Self { mount, ready, .. } = self;
         if let Some((_, started)) = mount {
-            let Started {
-                running, notice, ..
-            } = started;
-            // The control socket's file is that instance's: it serves on it again.
-            running.give_up();
-            // The connection to it ends last: until then it holds the mount quiesced.
-            abandon(running).await;
-            drop(notice);
+            abandon(started.running).await;
         }
         drop(ready);
     }
@@ -384,8 +331,6 @@ async fn abandon(running: Arc<Running>) {
 struct Mount {
     settings: FsSettings,
     running: Arc<Running>,
-    /// The answer to a successor that asks for the mount (`take-fs 1`).
-    offer: Offer,
     /// Receives when the watch of a restart has aborted the connection.
     hung: Option<tokio::sync::oneshot::Receiver<()>>,
 }
@@ -395,7 +340,7 @@ struct Mount {
 pub(in crate::server) struct Served {
     manager: Manager,
     mount: Option<Mount>,
-    /// Which of the two conversations that offer the mount has it.
+    /// Whether the one hand-over has given the mount up.
     claim: Arc<Claim>,
     /// Told when a resume of the one hand-over cannot serve the mount again.
     stuck: Arc<Stuck>,
@@ -405,7 +350,7 @@ pub(in crate::server) struct Served {
 }
 
 /// What a resume of the one hand-over that cannot serve the mount again tells [`Served::serve`],
-/// which then stops the process as a `take-fs 1` that cannot serve again does.
+/// which then stops the process.
 #[derive(Default)]
 struct Stuck {
     why: Mutex<Option<std::io::Error>>,
@@ -444,13 +389,13 @@ impl Served {
     /// The connection to the instance the mount was taken from in the one hand-over, after its
     /// `bye`: the cache takes the write role with the lock it handed over at that instance's
     /// `written` (`handoff::follow`), and the connection is held until this process ends. None for
-    /// a mount taken on `take-fs 1`, adopted or made, and once taken.
+    /// a mount adopted or made, and once taken.
     pub(in crate::server) fn predecessor(&mut self) -> Option<Predecessor> {
         self.predecessor.take()
     }
 
     /// The mount as the one hand-over offers it on `server.handoff_socket` (`Offer::with_mount`),
-    /// sharing the claim of the `take-fs 1` offer [`Served::serve`] answers; none without a mount.
+    /// sharing the claim [`Served::serve`] waits on; none without a mount.
     pub(in crate::server) fn offered(&self) -> Option<handoff::Mount> {
         let mount = self.mount.as_ref()?;
         let stuck = Arc::clone(&self.stuck);
@@ -469,15 +414,13 @@ impl Served {
     /// holder, unlocks it.
     pub(in crate::server) async fn abandon(self) {
         if let Some(mount) = self.mount {
-            drop(mount.offer);
             abandon(mount.running).await;
         }
         drop(self.predecessor);
     }
 
     /// Serves the mount until `drained` is notified, when the fronts have drained, and then leaves
-    /// it (section 3.5); meanwhile answers a successor that asks for it on `take-fs 1`, and ends as
-    /// handed over once a successor has it, on that conversation or on the one hand-over
+    /// it (section 3.5), and ends as handed over once a successor has it in the one hand-over
     /// ([`Served::offered`]). `failed` is notified when the mount cannot be served on, so that the
     /// fronts stop as at a signal. Returns at once without a mount.
     ///
@@ -500,13 +443,7 @@ impl Served {
         // A connection the caller did not take is held while the mount is served: its end tells
         // the instance the mount came from that this one is gone.
         let _held = predecessor;
-        let Some(Mount {
-            running,
-            offer,
-            hung,
-            ..
-        }) = mount
-        else {
+        let Some(Mount { running, hung, .. }) = mount else {
             return Ok(());
         };
         let end = tokio::select! {
@@ -516,16 +453,6 @@ impl Served {
                 leave_to_kernel(running);
                 return Err(HandoverError::Stuck(why).into());
             }
-            handed = offer.serve(Arc::clone(&running)) => match handed {
-                Ok(()) => End::Handed,
-                Err(why) => {
-                    // The store keeps the descriptor for the next start, as at the end of a
-                    // `tierstore fs` process that could not serve again.
-                    failed.notify_one();
-                    leave_to_kernel(running);
-                    return Err(why.into());
-                }
-            },
             () = hang(hung) => {
                 failed.notify_one();
                 End::Hung

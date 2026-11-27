@@ -1,5 +1,5 @@
-//! The `fs` interface of a file: the settings it makes, each rule the one file adds to `[fs]` by
-//! its exact message, and the lookups of the system it makes at load.
+//! The `fs` interface of a file: the settings it makes, each rule the one file adds to the params
+//! by its exact message, and the lookups of the system it makes at load.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -9,7 +9,7 @@ use tierstore_testkit::dir::TestDir;
 use super::{Host, not_served, volume_of};
 use crate::server::config::{PerRun, settings_from_text};
 use crate::server::config_testing::DEFAULTS;
-use crate::server::treefs::{self, FsSettings, builders};
+use crate::server::treefs::{FsSettings, builders, from_params};
 
 /// The file system every path of the tests is on.
 const ONE: u64 = 7;
@@ -173,13 +173,15 @@ fn refusal_on(entries: &[String], node: &str, volume: fn(&Path) -> io::Result<u6
         .to_string()
 }
 
-/// The `[fs]` table of `tierstore fs` that says what the params of `fs_params` say, read by its
-/// own loader.
-fn from_fs_table(text: &str) -> FsSettings {
-    treefs::from_text(text, &builders).expect("an [fs] table that loads")
+/// The settings of the params `text` made by the loader of the params alone (`from_params`),
+/// with the node's own `local_cache.path` as the cache directory, as the one file makes it.
+fn from_table(text: &str) -> FsSettings {
+    let mut settings = from_params(text, &builders).expect("params that load");
+    settings.cache_path = PathBuf::from("/var/lib/tierstore-cache");
+    settings
 }
 
-/// The keys that say the same thing in both tables: every param an `fs` interface takes, with a
+/// The params that both ways of loading say: every param an `fs` interface takes, with a
 /// value that is not its default.
 const SAME: &str = r#"mountpoint = "/mnt/build"
 runtime_dir = "/run/build-fs"
@@ -192,7 +194,7 @@ reattach_concurrency = 4
 tree_idle_secs = 60
 tree_list_ram_bytes = 8192"#;
 
-/// The `nfs` sub-table both say, every key but the hand-off ones, none at its default.
+/// The `nfs` sub-table both say, none at its default.
 const SAME_NFS: &str = r#"listen = "127.0.0.1:12050"
 mount = false
 mount_user = "builder"
@@ -217,37 +219,30 @@ commit_deadline_secs = 50
 stage_ttl_secs = 1000
 committed_ttl_secs = 70"#;
 
-/// Asserts that an `fs` interface makes the very settings the `[fs]` table of `tierstore fs` makes
-/// of the same keys, with the node's own `local_cache.path` as the cache directory and
-/// `handoff.sock` in the runtime directory as the hand-over socket of the mount; and that a file
-/// with only the needed params gets the `[fs]` defaults. The put directory is in it on Linux,
-/// where it is served.
+/// Asserts that an `fs` interface makes the very settings the loader of the params alone makes of
+/// the same keys, with the node's own `local_cache.path` as the cache directory and `handoff.sock`
+/// in the runtime directory as the hand-over socket of the mount; and that a file with only the
+/// needed params gets the defaults. The put directory is in it on Linux, where it is served.
 #[test]
-fn an_fs_interface_makes_the_settings_the_fs_table_made() {
+fn an_fs_interface_makes_the_settings_the_params_make() {
     let put = if cfg!(target_os = "linux") {
-        format!("[fs.put]\n{SAME_PUT}\n")
+        format!("[put]\n{SAME_PUT}\n")
     } else {
         String::new()
     };
     let table = format!(
-        "[fs]\nclient_group = \"builders\"\nowner = \"1000:1001\"\ncache_path = \"/var/lib/tierstore-cache\"\n{SAME}\n[fs.nfs]\n{SAME_NFS}\n{put}"
+        "client_group = \"builders\"\nowner = \"1000:1001\"\n{SAME}\n[nfs]\n{SAME_NFS}\n{put}"
     );
-    let want = from_fs_table(&table);
-    let put = put.replace("[fs.put]", "[interface.params.put]");
+    let want = from_table(&table);
+    let put = put.replace("[put]", "[interface.params.put]");
     let params = format!("{SAME}\n[interface.params.nfs]\n{SAME_NFS}\n{put}");
     let node = build_node("", "");
     let got = fs_of(&[s3(), fs(&params)], &node);
     assert_eq!(got, want);
     assert_eq!(got.cache_path, PathBuf::from("/var/lib/tierstore-cache"));
-    assert_eq!(
-        got.handoff_socket,
-        PathBuf::from("/run/build-fs/handoff.sock")
-    );
     assert_eq!(got.put.is_some(), cfg!(target_os = "linux"));
 
-    let want = from_fs_table(
-        "[fs]\nclient_group = \"builders\"\nowner = \"1000:1001\"\ncache_path = \"/var/lib/tierstore-cache\"\n",
-    );
+    let want = from_table("client_group = \"builders\"\nowner = \"1000:1001\"\n");
     let got = fs_of(&[s3(), fs("")], &build_node("", ""));
     assert_eq!(got, want);
 }
@@ -305,8 +300,8 @@ fn a_second_fs_interface_is_refused() {
     );
 }
 
-/// Asserts that a param an `fs` interface does not have is refused, not warned of as `[fs]` warns:
-/// at the top of the params, in `nfs` (a key `[fs.nfs]` has removed, too) and in `put`, each as a
+/// Asserts that a param an `fs` interface does not have is refused: at the top of the params, in
+/// `nfs` (a key an earlier release removed, too) and in `put`, each as a
 /// fault of the file at its line, naming the key.
 #[test]
 fn an_fs_param_this_release_lacks_is_refused() {
@@ -349,8 +344,9 @@ fn an_fs_param_this_release_lacks_is_refused() {
     assert!(!typed.contains("many"), "{typed}");
 }
 
-/// Asserts that the three keys of `[fs]` the one file gives otherwise, and the hand-off keys of
-/// `[fs.nfs]`, are refused as params by name, each with why, whatever their value.
+/// Asserts that the three keys of the two-process layout's `[fs]` table the one file gives
+/// otherwise are refused as params by name, each with why, whatever their value, and that the
+/// hand-off keys of its `[fs.nfs]` are refused as unknown keys of `nfs`, by name.
 #[test]
 fn fill_socket_cache_path_and_handoff_socket_are_refused_as_fs_params() {
     let node = build_node("", "");
@@ -371,8 +367,6 @@ fn fill_socket_cache_path_and_handoff_socket_are_refused_as_fs_params() {
     for (param, want) in cases {
         assert_eq!(refusal(&[s3(), fs(param)], &node), want);
     }
-    let why =
-        "not a param of an fs interface: the NFS front of the process has no hand-off of its own";
     for param in [
         "handoff_socket = \"/run/nfs.sock\"",
         "handoff_wait = \"5s\"",
@@ -380,14 +374,17 @@ fn fill_socket_cache_path_and_handoff_socket_are_refused_as_fs_params() {
     ] {
         let name = param.split(' ').next().expect("a name");
         let entry = fs(&format!("[interface.params.nfs]\n{param}"));
-        assert_eq!(
-            refusal(&[s3(), entry], &node),
-            format!("interface[1].params.nfs.{name}: {why}")
+        let why = refusal(&[s3(), entry], &node);
+        assert!(
+            why.contains(&format!(
+                "unknown field `{name}`, expected one of `listen`, `mount`"
+            )),
+            "{why}"
         );
     }
 }
 
-/// Asserts that the `[fs]` refusals of a param name it under the interface's place, its range and
+/// Asserts that the refusals of a param name it under the interface's place, its range and
 /// its defaults kept: a needed key left out, a path that is not absolute, a number out of range, a
 /// name the system does not have, and a value of `nfs` and of `put` out of range.
 #[test]

@@ -77,6 +77,7 @@ impl Ready {
     /// # Errors
     /// The running instance is gone from the connection: it did not wait for `ready` (it went on
     /// serving) and this instance must not serve beside it.
+    #[cfg(test)]
     pub(crate) async fn send(self) -> Result<(), HandoffError> {
         self.send_keeping().await.map(drop)
     }
@@ -196,6 +197,7 @@ pub(crate) async fn take(
 ///
 /// # Errors
 /// As [`take`].
+#[cfg(test)]
 pub(crate) async fn take_with_ready(
     handoff: &Handoff,
     want: &Want<'_>,

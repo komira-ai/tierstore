@@ -1,17 +1,16 @@
-//! The mount in the one hand-over (`server/handoff/`: `take 1`, `ready`, `mount`) and the `bye` of
-//! `take-fs 1`, over a process with a stand-in for the kernel's end of `/dev/fuse`: who reads the
-//! device at each step, what a taker that goes away at each step leaves, and the store entries.
+//! The mount in the one hand-over (`server/handoff/`: `take 1`, `ready`, `mount`), over a process
+//! with a stand-in for the kernel's end of `/dev/fuse`: who reads the device at each step, what a
+//! taker that goes away at each step leaves, and the store entries.
 
 use std::collections::BTreeSet;
 use std::os::fd::AsFd as _;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::net::UnixListener;
-
 use super::config::FsSettings;
-use super::fakedev::{FakeDevice, instance, outcome, pair};
-use super::handover::{self, HandoverError, check_device, offered, take};
+use super::fakedev::{FakeDevice, outcome, pair};
+use super::handover::{self, check_device, offered};
 use super::init_record::{self, Record};
 use super::ino;
 use super::run::{Prepared, Running};
@@ -35,6 +34,8 @@ struct One {
     kernel: FakeDevice,
     manager: FakeManager,
     serving: tokio::task::JoinHandle<()>,
+    /// The socket the instance offers on.
+    socket: PathBuf,
     settings: FsSettings,
     rig: Rig,
 }
@@ -61,7 +62,8 @@ fn one(name: &str) -> One {
         store,
         (Arc::new(|_| {}), Arc::default()),
     );
-    let offer = Offer::bind(&settings.handoff_socket, Vec::new())
+    let socket = rig.dir.path().join("handoff.sock");
+    let offer = Offer::bind(&socket, Vec::new())
         .unwrap()
         .with_ready_wait(WAIT)
         .with_mount(mount);
@@ -71,6 +73,7 @@ fn one(name: &str) -> One {
         kernel,
         manager,
         serving,
+        socket,
         settings,
         rig,
     }
@@ -79,7 +82,7 @@ fn one(name: &str) -> One {
 /// Takes the mount of `old` with the one hand-over; `prepare` runs with the device before `ack`.
 async fn take_one(old: &One, prepare: Prepare<'_>) -> crate::server::handoff::Inherited {
     let handoff = Handoff {
-        socket: old.settings.handoff_socket.clone(),
+        socket: old.socket.clone(),
         wait: WAIT,
     };
     let want = Want {
@@ -192,7 +195,7 @@ impl One {
     /// Waits for the hand-over socket, which the instance makes again after a taker that went away
     /// after `ack` (it removed the file then).
     async fn socket_again(&self) {
-        let socket = &self.settings.handoff_socket;
+        let socket = &self.socket;
         within("the hand-over socket again", async {
             while !socket.exists() {
                 tokio::task::yield_now().await;
@@ -235,7 +238,7 @@ async fn a_taker_gone_before_ready_leaves_the_old_resuming_and_one_gone_after_re
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_successor_killed_before_ready_leaves_the_old_serving() {
     let old = one("tfs-svc-killed");
-    let socket = old.settings.handoff_socket.clone();
+    let socket = old.socket.clone();
     let request = ["take 1", "ready", "mount"];
     for cut in 0..5 {
         let mut taker = connect(&socket).await;
@@ -349,184 +352,6 @@ async fn the_old_removes_its_store_entry_at_ready() {
     .await;
 }
 
-/// Asserts the `bye` of `take-fs 1`: a taker that asks for it with `ready` is answered `bye` to its
-/// `ready`, the running instance removes its store entry and ends, and once the taker is gone it
-/// does not read again; a taker of a release before it (`take-fs 1` alone) is answered nothing to
-/// its `ready`. It would catch an old `tierstore fs` that resumes after its successor read.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn take_fs_says_bye_and_the_old_fs_process_never_resumes_after_it() {
-    let old = instance("tfs-svc-takefs", WAIT, None);
-    let taken = within("the take", take(&old.paths(), Box::new(|_| Ok(()))))
-        .await
-        .unwrap()
-        .expect("answered");
-    within("bye", taken.notice.ready()).await.unwrap();
-    within("the end", old.serving).await.unwrap().unwrap();
-    assert!(!old.running.reading());
-    drop(taken);
-    old.kernel.getattr(1, ino::ROOT);
-    settle().await;
-    old.kernel.assert_silent();
-
-    for (request, answer) in [
-        (&["take-fs 1", "ready"][..], Some(vec!["bye".to_owned()])),
-        (&["take-fs 1"][..], None),
-    ] {
-        let old = instance("tfs-svc-takefs-raw", WAIT, None);
-        let taker = connect(&old.settings.handoff_socket).await;
-        let offer = ask(&taker, request).await;
-        assert_eq!(offer.fds.len(), 2);
-        assert_eq!(ask(&taker, &["ack"]).await.lines, ["done"]);
-        send(&taker, &["ready"]).await;
-        assert_eq!(
-            wire::recv(&taker).await.ok().map(|frame| frame.lines),
-            answer
-        );
-        within("the end", old.serving).await.unwrap().unwrap();
-    }
-}
-
-/// Asserts the taker of `take-fs 1` against a running instance of a release before the `bye`: it
-/// asks with `ready`, is refused as not understood, asks with `take-fs 1` alone, takes the mount,
-/// and its `ready` waits for no answer. It would catch a start of this release that cannot take
-/// the mount from the release before it.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_take_fs_taker_asks_a_previous_release_without_ready() {
-    let rig = Rig::new("tfs-svc-previous", sample());
-    let settings = rig.settings();
-    let listener = UnixListener::bind(&settings.handoff_socket).unwrap();
-    let (device, _kernel) = pair();
-    let control =
-        std::os::unix::net::UnixListener::bind(rig.dir.path().join("offered.sock")).unwrap();
-    let lines = handover::offer_lines(&settings.mountpoint, &settings.control_socket);
-    let previous = async {
-        let mut requests = Vec::new();
-        loop {
-            let (stream, _) = listener.accept().await.unwrap();
-            let request = wire::recv(&stream).await.unwrap().lines;
-            requests.push(request.clone());
-            if request != ["take-fs 1"] {
-                let refused = [
-                    "refused".to_owned(),
-                    "the request is not understood".to_owned(),
-                ];
-                wire::send(&stream, &refused, &[]).await.unwrap();
-                continue;
-            }
-            wire::send(&stream, &lines, &[device.as_fd(), control.as_fd()])
-                .await
-                .unwrap();
-            assert_eq!(wire::recv(&stream).await.unwrap().lines, ["ack"]);
-            wire::send(&stream, &["done".to_owned()], &[])
-                .await
-                .unwrap();
-            assert_eq!(wire::recv(&stream).await.unwrap().lines, ["ready"]);
-            return requests;
-        }
-    };
-    let paths = handover::Paths {
-        socket: &settings.handoff_socket,
-        mountpoint: &settings.mountpoint,
-        control: &settings.control_socket,
-        wait: WAIT,
-        device: |_| Ok(()),
-    };
-    let taking = async {
-        let taken = take(&paths, Box::new(|_| Ok(()))).await.unwrap().unwrap();
-        taken.notice.ready().await.unwrap();
-    };
-    let ((), requests) = tokio::join!(taking, previous);
-    assert_eq!(requests, [vec!["take-fs 1", "ready"], vec!["take-fs 1"]]);
-}
-
-/// Asserts the checks of a taker of `take-fs 1` before `ack`: a running instance of another user
-/// is refused before anything is asked, by name; a device the check refuses and a control socket
-/// that does not listen are each refused with a `nak`; and a frame other than `bye` after `ready`
-/// is an error. It would catch a successor that takes a mount from a process that is not the
-/// service's, or of the wrong kind.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_take_fs_taker_checks_its_peer_and_the_kinds_before_ack() {
-    let old = instance("tfs-svc-peer", WAIT, None);
-    let me = rustix::process::geteuid().as_raw();
-    let refused = handover::take_as(&old.paths(), Box::new(|_| Ok(())), me.wrapping_add(1))
-        .await
-        .err()
-        .unwrap();
-    assert_eq!(
-        refused.to_string(),
-        format!(
-            "hand-over: checking the running instance's user: the running instance is the user {me}"
-        )
-    );
-    old.assert_serving(1);
-    let refuse: fn(std::os::fd::BorrowedFd<'_>) -> std::io::Result<()> =
-        |_| Err(std::io::Error::other("not the FUSE device"));
-    let paths = handover::Paths {
-        device: refuse,
-        ..old.paths()
-    };
-    let refused = take(&paths, Box::new(|_| Ok(()))).await;
-    assert!(
-        matches!(refused, Err(HandoverError::Unprepared(ref why)) if why == "not the FUSE device")
-    );
-    old.assert_serving(2);
-    old.serving.abort();
-
-    // A control socket that does not listen, and an answer to `ready` that is not `bye`.
-    let rig = Rig::new("tfs-svc-kinds", sample());
-    let settings = rig.settings();
-    let listener = UnixListener::bind(&settings.handoff_socket).unwrap();
-    let (device, _kernel) = pair();
-    let control =
-        std::os::unix::net::UnixListener::bind(rig.dir.path().join("offered.sock")).unwrap();
-    let not_listening = std::fs::File::open(rig.dir.path()).unwrap();
-    let lines = handover::offer_lines(&settings.mountpoint, &settings.control_socket);
-    let peer = async {
-        let (stream, _) = listener.accept().await.unwrap();
-        let _ = wire::recv(&stream).await.unwrap();
-        wire::send(&stream, &lines, &[device.as_fd(), not_listening.as_fd()])
-            .await
-            .unwrap();
-        let first = wire::recv(&stream).await.unwrap().lines;
-        let (stream, _) = listener.accept().await.unwrap();
-        let _ = wire::recv(&stream).await.unwrap();
-        wire::send(&stream, &lines, &[device.as_fd(), control.as_fd()])
-            .await
-            .unwrap();
-        let _ = wire::recv(&stream).await.unwrap();
-        wire::send(&stream, &["done".to_owned()], &[])
-            .await
-            .unwrap();
-        let _ = wire::recv(&stream).await.unwrap();
-        wire::send(&stream, &["so long".to_owned()], &[])
-            .await
-            .unwrap();
-        first
-    };
-    let paths = handover::Paths {
-        socket: &settings.handoff_socket,
-        mountpoint: &settings.mountpoint,
-        control: &settings.control_socket,
-        wait: WAIT,
-        device: |_| Ok(()),
-    };
-    let taking = async {
-        let refused = take(&paths, Box::new(|_| Ok(()))).await.err().unwrap();
-        let taken = take(&paths, Box::new(|_| Ok(()))).await.unwrap().unwrap();
-        (refused, taken.notice.ready().await.err().unwrap())
-    };
-    let ((refused, not_bye), first) = tokio::join!(taking, peer);
-    assert_eq!(first, ["nak"]);
-    assert_eq!(
-        refused.to_string(),
-        "hand-over: not taken: the descriptor of the control socket is not a listening Unix socket"
-    );
-    assert_eq!(
-        not_bye.to_string(),
-        "hand-over: the running instance sent something other than bye after ready"
-    );
-}
-
 /// Asserts the check of the FUSE device: the character device of the FUSE numbers is it; another
 /// character device, and a regular file, are not, and a descriptor of a file is refused with words
 /// that say so. It would catch a successor that stores something other than the connection as its
@@ -588,79 +413,6 @@ async fn a_failed_resume_is_told_and_an_unreachable_store_does_not_stop_the_give
     assert!(!running.reading());
     kernel.getattr(1, ino::ROOT);
     kernel.assert_silent();
-}
-
-/// Asserts that a request of `take-fs` with a line this release does not know is refused as not
-/// understood: another version with the `ready` line, and another second line. It would catch a
-/// running instance that takes a later release's request for one of its own.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_take_fs_request_with_a_line_this_release_does_not_know_is_refused() {
-    let old = instance("tfs-svc-unknown", WAIT, None);
-    for request in [&["take-fs 2", "ready"][..], &["take-fs 1", "later"]] {
-        let taker = connect(&old.settings.handoff_socket).await;
-        let refused = ask(&taker, request).await;
-        assert_eq!(
-            refused.lines,
-            ["refused", "the request is not understood"],
-            "{request:?}"
-        );
-    }
-    old.assert_serving(1);
-    old.serving.abort();
-}
-
-/// Asserts that the `take-fs 1` offer of a process of the one-process layout shares its claim of
-/// the mount with the one hand-over: while a taker of the one hand-over is at the mount, a request
-/// is refused as busy; once that taker is gone, a request is offered the mount, and a taker that
-/// goes away before `ack` leaves the claim free again; once the mount was given up on the one
-/// hand-over, a request is refused as by an instance that holds none, and the socket's file, which
-/// the successor binds after its `bye`, is left in place when the offer goes. It would catch a
-/// mount offered on both conversations at once, or after it was given up.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn take_fs_shares_the_claim_of_the_mount_with_the_one_hand_over() {
-    use crate::server::handoff::{Claim, Holding};
-    let rig = Rig::new("tfs-svc-claim", sample());
-    let settings = rig.settings();
-    let record = Record::first(outcome(false), "mount-1".to_owned());
-    init_record::write(&rig.runtime, &record).unwrap();
-    let (device, _kernel) = pair();
-    let prepared = Prepared::load(&settings).unwrap();
-    let running = Arc::new(
-        Running::adopt((&settings, &rig.calls()), prepared, device, (None, false)).unwrap(),
-    );
-    let claim = Arc::new(Claim::default());
-    let offer = handover::Offer::bind(
-        &settings.handoff_socket,
-        &settings.mountpoint,
-        &settings.control_socket,
-        WAIT,
-    )
-    .unwrap()
-    .with_claim(Arc::clone(&claim));
-    let serving = tokio::spawn(offer.serve(Arc::clone(&running)));
-    let request = ["take-fs 1", "ready"];
-
-    assert_eq!(claim.claim(), Holding::Here);
-    let busy = ask(&connect(&settings.handoff_socket).await, &request).await;
-    assert_eq!(busy.lines, ["refused", "another taker is taking the mount"]);
-    claim.release();
-    let taker = connect(&settings.handoff_socket).await;
-    let offered = ask(&taker, &request).await;
-    assert_eq!(offered.lines[0], "offer-fs");
-    assert_eq!(claim.holding(), Holding::Taking);
-    drop((taker, offered));
-    crate::server::local_cache::testing::until("the claim is free again", || {
-        claim.holding() == Holding::Here
-    })
-    .await;
-
-    assert_eq!(claim.claim(), Holding::Here);
-    claim.give_up();
-    let gone = ask(&connect(&settings.handoff_socket).await, &request).await;
-    assert_eq!(gone.lines, ["refused", "this instance holds no mount"]);
-    serving.abort();
-    assert!(serving.await.is_err(), "the offer was ended");
-    assert!(settings.handoff_socket.exists());
 }
 
 /// Asserts that the mount the one hand-over offers keeps no part of the process's state of it

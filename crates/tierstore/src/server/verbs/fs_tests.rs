@@ -1,13 +1,6 @@
-//! The verb: its arguments, what a bad file does, and the list of attachments.
-
-use std::io::{BufRead as _, BufReader, Write as _};
-use std::os::unix::fs::MetadataExt as _;
-use std::os::unix::net::UnixListener;
-
-use tierstore_testkit::dir::TestDir;
+//! The verb that is gone: whatever it is given, it exits 2 and names the interface.
 
 use super::{NOT_A_PROCESS, run};
-use crate::server::treefs::testing::{Rig, sample};
 use crate::server::verbs::testing::{args, status};
 
 /// Runs `tierstore fs <words>` and gives its status and what it wrote to stdout and stderr.
@@ -23,61 +16,13 @@ fn fs(words: &[&str]) -> (String, String, String) {
     )
 }
 
-/// A file with the `[fs]` table over the scratch directories of `rig`.
-fn config(rig: &Rig, extra: &str) -> std::path::PathBuf {
-    let gid = std::fs::metadata(&rig.runtime).unwrap().gid();
-    let text = format!(
-        "[fs]\nmountpoint = {:?}\nruntime_dir = {:?}\ncontrol_socket = {:?}\nclient_group = \"{gid}\"\n\
-         owner = \"1:2\"\ncache_path = {:?}\n{extra}",
-        rig.mountpoint,
-        rig.runtime,
-        rig.dir.path().join("control.sock"),
-        rig.cache,
-    );
-    let path = rig.dir.path().join("fs.toml");
-    std::fs::write(&path, text).unwrap();
-    path
-}
-
-/// Asserts that help is a success and prints the verb's usage, and that flags the verb does not
-/// take, and a missing `--config`, are status 2.
-#[test]
-fn the_arguments_of_the_verb_are_parsed() {
-    let (code, out, _) = fs(&["--help"]);
-    assert_eq!(code, status(0));
-    assert!(out.contains("--config"), "{out}");
-    assert!(out.contains("attachments"), "{out}");
-    assert!(out.contains("--check-config"), "{out}");
-    let (code, _, err) = fs(&["--bogus"]);
-    assert_eq!(code, status(2));
-    assert!(err.contains("--bogus"), "{err}");
-    let (code, _, err) = fs(&[]);
-    assert_eq!(code, status(2));
-    assert!(err.contains("--config"), "{err}");
-}
-
-/// Asserts that a file that is missing, or has no usable `[fs]` table, is status 2 and the message
-/// names the key or the file, for a check of the file and for `attachments`.
-#[test]
-fn a_file_that_is_missing_or_wrong_is_status_two() {
-    let dir = TestDir::under(std::env::temp_dir(), "tfs-verb-config");
-    let missing = dir.path().join("none.toml");
-    let (code, _, err) = fs(&["--config", missing.to_str().unwrap(), "--check-config"]);
-    assert_eq!(code, status(2));
-    assert!(err.contains("none.toml"), "{err}");
-    let bad = dir.path().join("bad.toml");
-    std::fs::write(&bad, "[fs]\nowner = \"1:2\"\n").unwrap();
-    let (code, _, err) = fs(&["attachments", "--config", bad.to_str().unwrap()]);
-    assert_eq!(code, status(2));
-    assert!(err.contains("fs.client_group"), "{err}");
-}
-
-/// Asserts that a start of the verb (`--config` alone, with no `attachments` and no
-/// `--check-config`) is status 2 whatever the file, which need not exist: nothing on stdout and, on
-/// stderr, the one line that says the file system is the `fs` interface of the node's file.
+/// Asserts that a start of the verb (`--config` alone) is status 2 whatever the file, which need
+/// not exist: nothing on stdout and, on stderr, the one line that says the file system is the `fs`
+/// interface of the node's file.
 #[test]
 fn the_fs_verb_exits_2_and_names_the_interface() {
-    let dir = TestDir::under(std::env::temp_dir(), "tfs-verb-not-a-process");
+    let dir =
+        tierstore_testkit::dir::TestDir::under(std::env::temp_dir(), "tfs-verb-not-a-process");
     let file = dir.path().join("fs.toml");
     let (code, out, err) = fs(&["--config", file.to_str().unwrap()]);
     assert_eq!(code, status(2));
@@ -87,126 +32,34 @@ fn the_fs_verb_exits_2_and_names_the_interface() {
     assert!(err.contains("type = \"fs\""), "{err}");
 }
 
-/// Asserts that `attachments` lists one line for each attachment of the running process, the digest
-/// of the tree and the run, and nothing when there are none.
+/// Asserts that the forms of the old verb, the check of a file, the list of attachments, either
+/// flag order, and no arguments at all, are each status 2 with the same line and nothing on
+/// stdout, so that a unit of the old layout is stopped and told why.
 #[test]
-fn the_attachments_are_listed_from_the_control_socket() {
-    let rig = Rig::new("tfs-verb-list", sample());
-    let path = config(&rig, "");
-    let gid = std::fs::metadata(&rig.runtime).unwrap().gid();
-    let socket = rig.dir.path().join("control.sock");
-    let _control =
-        crate::server::treefs::control::Control::serve(rig.core.clone(), &socket, gid).unwrap();
-    let (code, out, _) = fs(&["attachments", "--config", path.to_str().unwrap()]);
-    assert_eq!(code, status(0));
-    assert!(out.is_empty());
-    let root = rig.upstream.built.lock().unwrap().root.clone();
-    for run in ["run-b", "run-a"] {
-        let stream = std::os::unix::net::UnixStream::connect(&socket).unwrap();
-        (&stream)
-            .write_all(format!("attach {root} for {run}\n").as_bytes())
-            .unwrap();
-        let mut line = String::new();
-        let _ = BufReader::new(&stream).read_line(&mut line).unwrap();
-        assert!(line.contains("\"ok\":true"), "{line}");
+fn every_form_of_the_old_verb_exits_2_with_the_same_line() {
+    for words in [
+        &["--config", "fs.toml", "--check-config"][..],
+        &["--check-config", "--config", "fs.toml"],
+        &["attachments", "--config", "fs.toml"],
+        &["--config", "fs.toml", "attachments"],
+        &["--bogus"],
+        &[],
+    ] {
+        let (code, out, err) = fs(words);
+        assert_eq!(code, status(2), "{words:?}");
+        assert!(out.is_empty(), "{words:?}: {out}");
+        assert_eq!(err, format!("{NOT_A_PROCESS}\n"), "{words:?}");
     }
-    let (code, out, _) = fs(&["--config", path.to_str().unwrap(), "attachments"]);
+}
+
+/// Asserts that a request for help is a success that says where the verb went, and that the verb
+/// is answered by name before the flags of a start are read.
+#[test]
+fn help_of_the_verb_says_where_it_went() {
+    let (code, out, err) = fs(&["--help"]);
     assert_eq!(code, status(0));
-    assert_eq!(out, format!("{root} run-a\n{root} run-b\n"));
-}
-
-/// Asserts that `attachments` against a socket that is not there, or one that answers what is not
-/// JSON, or hangs up, is status 1 and says so.
-#[test]
-fn the_attachments_of_a_socket_that_does_not_answer_are_an_error() {
-    let rig = Rig::new("tfs-verb-nolist", sample());
-    let path = config(&rig, "");
-    let (code, _, err) = fs(&["attachments", "--config", path.to_str().unwrap()]);
-    assert_eq!(code, status(1));
-    assert!(err.contains("the control socket"), "{err}");
-    let listener = UnixListener::bind(rig.dir.path().join("control.sock")).unwrap();
-    let server = std::thread::spawn(move || {
-        for (i, stream) in listener.incoming().flatten().take(2).enumerate() {
-            let mut line = String::new();
-            let _ = BufReader::new(&stream).read_line(&mut line).unwrap();
-            if i == 0 {
-                (&stream).write_all(b"not json\n").unwrap();
-            }
-        }
-    });
-    let (code, _, err) = fs(&["attachments", "--config", path.to_str().unwrap()]);
-    assert_eq!(code, status(1));
-    assert!(err.contains("expected ident"), "{err}");
-    let (code, _, err) = fs(&["attachments", "--config", path.to_str().unwrap()]);
-    assert_eq!(code, status(1));
-    assert!(err.contains("EOF while parsing"), "{err}");
-    server.join().unwrap();
-}
-
-/// Asserts that the verb is answered by name before its flags are read.
-#[test]
-fn the_verb_is_answered_by_name() {
+    assert!(err.is_empty(), "{err}");
+    assert!(out.contains("tierstore attachments"), "{out}");
     let answered = crate::server::verbs::answer(&args(&["fs", "--help"])).unwrap();
     assert_eq!(format!("{answered:?}"), status(0));
-}
-
-/// Asserts that `--check-config` of a file that loads is status 0 with nothing on stdout or stderr,
-/// and that it serves nothing: no control socket is made, though the file names one. Catches a check
-/// that starts the mount, or one that reports a good file.
-#[test]
-fn check_config_of_a_good_file_says_nothing_and_serves_nothing() {
-    let rig = Rig::new("tfs-verb-check", sample());
-    let path = config(&rig, "");
-    let (code, out, err) = fs(&["--config", path.to_str().unwrap(), "--check-config"]);
-    assert_eq!(code, status(0));
-    assert!(out.is_empty(), "{out}");
-    assert!(err.is_empty(), "{err}");
-    assert!(!rig.dir.path().join("control.sock").exists());
-}
-
-/// Asserts that `--check-config` of a file that is refused is status 2 with the line the verb prints
-/// for a refused file (`tierstore fs: ` and the reason), whichever side of `--config` the flag is
-/// on, and that a missing file is the same.
-#[test]
-fn check_config_of_a_refused_file_is_status_two_with_the_reason_of_a_start() {
-    let dir = TestDir::under(std::env::temp_dir(), "tfs-verb-check-bad");
-    let bad = dir.path().join("bad.toml");
-    std::fs::write(&bad, "[fs]\nclient_group = \"1\"\nowner = \"1\"\n").unwrap();
-    let bad = bad.to_str().unwrap();
-    let (code, out, err) = fs(&["--check-config", "--config", bad]);
-    assert_eq!(code, status(2));
-    assert!(out.is_empty(), "{out}");
-    assert!(
-        err.starts_with("tierstore fs: fs.owner: must be user:group"),
-        "{err}"
-    );
-    let (_, _, flag_last) = fs(&["--config", bad, "--check-config"]);
-    assert_eq!(err, flag_last);
-    let missing = dir.path().join("none.toml");
-    let (code, _, err) = fs(&["--config", missing.to_str().unwrap(), "--check-config"]);
-    assert_eq!(code, status(2));
-    assert!(
-        err.starts_with("tierstore fs: ") && err.contains("none.toml"),
-        "{err}"
-    );
-}
-
-/// Asserts that `--check-config` with `attachments` is refused with status 2 and a line that says
-/// so, before the file is read or the socket asked. Catches a check that lists attachments.
-#[test]
-fn check_config_does_not_go_with_attachments() {
-    let rig = Rig::new("tfs-verb-check-list", sample());
-    let path = config(&rig, "");
-    let (code, out, err) = fs(&[
-        "--check-config",
-        "--config",
-        path.to_str().unwrap(),
-        "attachments",
-    ]);
-    assert_eq!(code, status(2));
-    assert!(out.is_empty(), "{out}");
-    assert_eq!(
-        err,
-        "tierstore fs: --check-config does not go with attachments\n"
-    );
 }
