@@ -668,10 +668,9 @@ fn every_unit_and_job_allows_1048576_open_files() {
 }
 
 /// Asserts that the unit of `tierstore fs` runs the `fs` verb of the installed binary with
-/// a `--config` the binary reads (a file that is not there is status 2, naming it, which a flag the
-/// binary did not parse would not be), starts only under a marker of its own after the S3
-/// instances, and is enabled at boot. It would catch a verb or a flag that is renamed under the
-/// unit, which would leave the instance failing at every start.
+/// a `--config`, starts only under a marker of its own after the S3 instances, and is enabled at
+/// boot; and that the verb, which serves nothing now, exits 2 with the line that names the `fs`
+/// interface, so a unit left behind fails loudly and its `RestartPreventExitStatus=2` stops it.
 #[test]
 fn the_fs_template_runs_the_fs_verb_of_the_installed_binary() {
     let unit = read(FS_TEMPLATE);
@@ -695,9 +694,12 @@ fn the_fs_template_runs_the_fs_verb_of_the_installed_binary() {
         .output()
         .expect("the binary runs");
     assert_eq!(out.status.code(), Some(2));
-    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-    assert!(stderr.contains("fs.toml"), "{stderr}");
+    assert_eq!(String::from_utf8_lossy(&out.stderr), NOT_A_PROCESS);
 }
+
+/// What the `fs` verb says before it exits 2: the file system is the node's `fs` interface.
+const NOT_A_PROCESS: &str = "tierstore fs is no longer a process of its own: the file system is \
+     the [[interface]] with type = \"fs\" of the node's file\n";
 
 /// Asserts that the unit of `tierstore fs` looks at its marker at every start, its automatic
 /// restarts included: one `ExecCondition=` that tests, as root (`+`, as systemd tests the
@@ -730,9 +732,8 @@ fn the_fs_marker_is_not_a_marker_of_the_s3_instances() {
 }
 
 /// Asserts the launchd job of `tierstore fs`: its label is its file's name, it runs the `fs` verb of
-/// the installed binary with a `--config` the binary reads (a file that is not there is
-/// status 2, naming it), as the user and group of the store's job (the fill socket answers only a
-/// peer of its own user, so a job of any other user, root included, has every fill refused), it is
+/// the installed binary with a `--config` (the verb, which serves nothing now, exits 2 with the
+/// line that names the `fs` interface), as the user and group of the store's job, it is
 /// restarted when it exits, launchd waits 150 seconds after SIGTERM (the process's unmount is at
 /// most 120) before it kills it and kills the whole process group (no `AbandonProcessGroup`), it
 /// sets no environment variable, and no word of it names a secret. It would catch a verb or a flag
@@ -779,7 +780,7 @@ fn the_fs_launchd_job_runs_the_fs_verb_of_the_installed_binary() {
         .output()
         .expect("the binary runs");
     assert_eq!(out.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&out.stderr).contains("fs.toml"));
+    assert_eq!(String::from_utf8_lossy(&out.stderr), NOT_A_PROCESS);
 }
 
 /// The template the deb and rpm packages install.

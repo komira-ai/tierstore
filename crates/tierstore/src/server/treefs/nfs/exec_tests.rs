@@ -135,7 +135,7 @@ async fn the_next_image_serves_the_handed_sockets_and_finds_its_mount() {
     assert_eq!(Some(identity(listener.as_fd())), control.map(|(_, id)| id));
     let runner = Recorder::mounted_at(&rig.mountpoint);
     let new = Running::start_handed(
-        &settings,
+        (&settings, &rig.calls()),
         runner.clone(),
         euid(),
         Some(endless()),
@@ -210,9 +210,15 @@ async fn an_offer_the_new_image_refuses_starts_it_cold_on_the_same_addresses_and
     // between its fork and its exec at most).
     within("the refused socket closes", closed(address)).await;
     let runner = Recorder::mounted_at(&rig.mountpoint);
-    let cold = Running::start(&moved, runner.clone(), euid(), Some(endless()), EPOCH)
-        .await
-        .unwrap();
+    let cold = Running::start(
+        (&moved, &rig.calls()),
+        runner.clone(),
+        euid(),
+        Some(endless()),
+        EPOCH,
+    )
+    .await
+    .unwrap();
     assert_eq!(cold.address, address);
     assert_eq!(
         programs(&runner),

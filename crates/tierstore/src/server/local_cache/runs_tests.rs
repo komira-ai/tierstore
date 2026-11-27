@@ -1,5 +1,5 @@
 //! What the mounts report of the attaches and detaches of runs, as the cache counts and renders
-//! it: the reports read back as written and every other form refused; the families at zero before
+//! it: the families at zero before
 //! any report; an attach counted under its outcome with each of its parts; a detach under its
 //! outcome.
 
@@ -24,52 +24,6 @@ fn value(rig: &Rig, series: &str) -> String {
         .lines()
         .find_map(|line| line.strip_prefix(&prefix).map(str::to_owned))
         .unwrap_or_else(|| panic!("no {series}"))
-}
-
-/// Asserts that the reports read back as written, the largest numbers included, and that a
-/// report with an outcome that is not one, a number fewer or more, an empty word, a number with a
-/// sign or a non-digit, a number over 64 bits, and no words at all are refused.
-#[test]
-fn the_reports_read_back_as_written_and_any_other_form_is_refused() {
-    let attach = RunAttach {
-        outcome: RunOutcome::Failed,
-        ms: 35,
-        parts: [25, 7, 3],
-    };
-    assert_eq!(attach.line(), "run-attached failed 35 25 7 3");
-    assert_eq!(RunAttach::parse("failed 35 25 7 3"), Some(attach));
-    let most = RunAttach {
-        outcome: RunOutcome::Ok,
-        ms: u64::MAX,
-        parts: [u64::MAX; 3],
-    };
-    let line = most.line();
-    let rest = line.strip_prefix("run-attached ").unwrap();
-    assert_eq!(RunAttach::parse(rest), Some(most));
-    let big = format!("ok {}0 0 0 0", u64::MAX);
-    for refused in [
-        "",
-        "ok",
-        "absent 1 1 0 0",
-        "ok 1 1 0",
-        "ok 1 1 0 0 0",
-        "ok 1  1 0 0",
-        "ok +1 1 0 0",
-        "ok 1x 1 0 0",
-        big.as_str(),
-    ] {
-        assert_eq!(RunAttach::parse(refused), None, "{refused:?}");
-    }
-    let detach = RunDetach {
-        outcome: RunOutcome::Ok,
-        ms: 4,
-    };
-    assert_eq!(detach.line(), "run-detached ok 4");
-    assert_eq!(RunDetach::parse("ok 4"), Some(detach));
-    let big = format!("ok {}0", u64::MAX);
-    for refused in ["", "ok", "ok ", "gone 4", "ok 4 4", "ok -4", big.as_str()] {
-        assert_eq!(RunDetach::parse(refused), None, "{refused:?}");
-    }
 }
 
 /// Asserts that before any report the three families have their `# TYPE` lines and a series of

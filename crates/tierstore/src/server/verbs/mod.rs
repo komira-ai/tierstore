@@ -9,7 +9,8 @@
 //! tierstore fs [attachments] --config <file>
 //! ```
 //!
-//! `fs` ([`fs`]) is the virtual build file system. `update-hook` is [`update_hook`], and `config-hook`, the hook of a package of the node's configuration files, is [`update_hook::config_hook`]. `format-epoch` ([`format_epoch`]) and `entries`
+//! `fs` ([`fs`]) lists the attachments of the virtual build file system and checks an `[fs]` file;
+//! it serves nothing (the file system is the `fs` interface of the node's file). `update-hook` is [`update_hook`], and `config-hook`, the hook of a package of the node's configuration files, is [`update_hook::config_hook`]. `format-epoch` ([`format_epoch`]) and `entries`
 //! ([`entries`]) are the operator's: they read and write only tierstore's own objects in the hot
 //! tier (`_tiering/format`, `_tiering/proxies/`, `_entries/`) and never ask a store how it behaves.
 //! Both take the hot tier by the flags of the server that name it (`--hot`, `--hot-endpoint`,

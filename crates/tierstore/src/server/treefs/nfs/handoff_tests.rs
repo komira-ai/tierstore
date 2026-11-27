@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use super::super::boot::BootSource;
 use super::super::config::NfsSettings;
+use super::super::error::NfsError;
 use super::super::fixtures::{EPOCH, attached, endless, loopback, settings};
 use super::super::wire_client::{Client, Cred, Dec, Enc, GETATTR, LOOKUP, NFS, READ};
 use super::serve_with;
@@ -61,7 +62,7 @@ pub(super) async fn lookup(client: &mut Client, dir: &[u8], name: &str) -> Vec<u
 pub(super) async fn running(rig: &Rig) -> (Running, Client, Vec<u8>, Arc<Recorder>) {
     let runner = Recorder::new(true);
     let old = Running::start(
-        &handing(rig, 0),
+        (&handing(rig, 0), &rig.calls()),
         runner.clone(),
         euid(),
         Some(endless()),
@@ -79,7 +80,7 @@ pub(super) async fn running(rig: &Rig) -> (Running, Client, Vec<u8>, Arc<Recorde
 pub(super) async fn taking_over(rig: &Rig, old: &Running) -> (Running, Arc<Recorder>) {
     let runner = Recorder::mounted_at(&rig.mountpoint);
     let new = Running::start(
-        &handing(rig, old.address.port()),
+        (&handing(rig, old.address.port()), &rig.calls()),
         runner.clone(),
         euid(),
         Some(endless()),
@@ -211,7 +212,7 @@ async fn a_failed_ack_leaves_the_old_instance_serving() {
     let (old, mut client, root, _) = running(&rig).await;
     let other = if old.address.port() == 1 { 2 } else { 1 };
     let why = Running::start(
-        &handing(&rig, other),
+        (&handing(&rig, other), &rig.calls()),
         Recorder::mounted_at(&rig.mountpoint),
         euid(),
         Some(endless()),
@@ -224,7 +225,7 @@ async fn a_failed_ack_leaves_the_old_instance_serving() {
         why.to_string().contains("the running instance listens on"),
         "{why}"
     );
-    assert_eq!(why.status(), 1);
+    assert!(matches!(why, NfsError::Handoff(_)), "{why}");
     assert!(!old._setup.core.is_held(), "a refused taker holds nothing");
     assert_eq!(getattr(&mut client, &root).await, 0);
     let mut fresh = Client::connect(old.address).await;
@@ -259,10 +260,16 @@ async fn a_cold_start_binds_its_own_socket_and_a_bad_control_path_is_refused() {
         socket: rig.dir.path().join("none/handoff.sock"),
         wait: std::time::Duration::from_secs(1),
     });
-    let why = Running::start(&bad, Recorder::new(true), euid(), Some(endless()), EPOCH)
-        .await
-        .err()
-        .unwrap();
+    let why = Running::start(
+        (&bad, &rig.calls()),
+        Recorder::new(true),
+        euid(),
+        Some(endless()),
+        EPOCH,
+    )
+    .await
+    .err()
+    .unwrap();
     assert!(
         why.to_string()
             .contains("the directory of the control socket"),
@@ -280,9 +287,10 @@ fn the_process_ends_by_itself_when_its_socket_is_taken_and_leaves_the_mount() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (rig, _) = attached("nfs-handoff-serve");
     let runner = Recorder::new(true);
-    let (mine, theirs) = (handing(&rig, 0), runner.clone());
-    let thread =
-        std::thread::spawn(move || serve_with(&mine, theirs, euid(), &BootSource::fixed()));
+    let (mine, theirs, calls) = (handing(&rig, 0), runner.clone(), rig.calls());
+    let thread = std::thread::spawn(move || {
+        serve_with((&mine, &calls), theirs, euid(), &BootSource::fixed())
+    });
     until(|| runner.mounted_port().is_some());
     let port = runner.mounted_port().unwrap();
     let next = Recorder::mounted_at(&rig.mountpoint);
@@ -292,7 +300,7 @@ fn the_process_ends_by_itself_when_its_socket_is_taken_and_leaves_the_mount() {
         .unwrap();
     let new = runtime
         .block_on(Running::start(
-            &handing(&rig, port),
+            (&handing(&rig, port), &rig.calls()),
             next.clone(),
             euid(),
             Some(endless()),
@@ -401,7 +409,7 @@ async fn a_start_that_cannot_work_is_refused_before_the_running_instance_gives_u
     std::fs::remove_file(&table).unwrap();
     std::fs::create_dir(&table).unwrap();
     let why = Running::start(
-        &handing(&rig, old.address.port()),
+        (&handing(&rig, old.address.port()), &rig.calls()),
         Recorder::mounted_at(&rig.mountpoint),
         euid(),
         Some(endless()),
@@ -438,9 +446,15 @@ async fn a_client_that_never_closes_is_let_go_when_the_drain_wait_has_passed() {
     let mut impatient = handing(&rig, 0);
     impatient.nfs.drain_wait = std::time::Duration::from_millis(1);
     let runner = Recorder::new(true);
-    let mut old = Running::start(&impatient, runner.clone(), euid(), Some(endless()), EPOCH)
-        .await
-        .unwrap();
+    let mut old = Running::start(
+        (&impatient, &rig.calls()),
+        runner.clone(),
+        euid(),
+        Some(endless()),
+        EPOCH,
+    )
+    .await
+    .unwrap();
     let mut stubborn = Client::connect(old.address).await;
     let root = stubborn.mount("/").await;
     let (new, _) = taking_over(&rig, &old).await;
@@ -468,9 +482,15 @@ async fn a_stop_ends_the_offer_before_it_unmounts() {
     let (rig, _) = attached("nfs-handoff-stop-fence");
     let settings = handing(&rig, 0);
     let runner = Recorder::new(true);
-    let running = Running::start(&settings, runner.clone(), euid(), None, EPOCH)
-        .await
-        .unwrap();
+    let running = Running::start(
+        (&settings, &rig.calls()),
+        runner.clone(),
+        euid(),
+        None,
+        EPOCH,
+    )
+    .await
+    .unwrap();
     let socket = rig.dir.path().join("handoff.sock");
     assert!(socket.exists());
     runner.check_at_umount(move || std::os::unix::net::UnixStream::connect(&socket).is_err());

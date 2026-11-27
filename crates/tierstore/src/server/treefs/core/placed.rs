@@ -3,9 +3,9 @@
 //! read with no manifest.
 //!
 //! A lookup of a name in the mount's root, or in a directory above a location, asks the node's
-//! tree store over the fill socket where the path is (`place`). A path that is a location is the
+//! tree store from the node's cache where the path is (`place`). A path that is a location is the
 //! root of its placement's tree: the tree store holds the placement for this mount, and the core
-//! reads the tree whole (`image`, or `flat` from a node of a release before the images), numbers
+//! reads the tree whole (`image`, or `flat` for a tree that is not a version 2 list), numbers
 //! it under the placement's key in the table of tree numbers
 //! and attaches it as a lookup attaches a tree of `trees/`: implicitly, until it is idle for
 //! `fs.tree_idle_secs`, when the hold of the tree store is given back (`unplace`). A path that a
@@ -22,7 +22,7 @@
 //! (`ino::placed_dir`); a process that took the mount over and does not know the path of such a
 //! number asks the tree store for the paths of the locations (`mounted`) and finds it there.
 //!
-//! A file of a placed tree is a span of a cached pack: an open asks the fill socket for the span
+//! A file of a placed tree is a span of a cached pack: an open asks the node's cache for the span
 //! (`span`), which fills it if the cache does not hold it, and reads the pack's own file at the
 //! span's offset. It is never answered with a backing id an earlier release registered
 //! (`backing.rs`), since the kernel would map the whole pack onto the file, and the core pins nothing for it: the tree store pins the packs of its trees.
@@ -39,8 +39,7 @@ use crate::tree_manifest::{
     BlobSource, EntryKind, MAX_MANIFEST_BYTES, TreeDigest, TreeEntry, TreeError, flatten_in_waves,
 };
 
-use super::super::fill_client::{AskError, Place, PlacedTree, Until};
-use super::super::fills::Report;
+use super::super::fills::{AskError, Place, PlacedTree, Report, Until};
 use super::super::ino;
 use super::super::tree::Tree;
 use super::fetched::{Fetched, TreeAsked};
@@ -53,15 +52,15 @@ use crate::server::local_cache::{FILL_SOCKET_CONCURRENCY, is_list, manifest_path
 /// sixteen are the placement's id, the last eight the start of the SHA-256 of the location's path.
 const PLACED: &[u8; 8] = b"tsplaced";
 
-/// The answer of the fill socket for an object the upstream does not have.
+/// The answer of the node's cache for an object the upstream does not have.
 const ABSENT: &str = "upstream 404";
 
 /// Why the read of a tree's manifests stopped at its root: the root is a tree list, which is read
 /// as one ([`Core::read_tree`]).
 const LIST: &str = "the root is a tree list";
 
-/// The longest one read of a tree's manifests may take, every manifest it fills through the fill
-/// socket together. A job agent gives up on a lookup of `trees/<digest>` 60 s after it asked, and
+/// The longest one read of a tree's manifests may take, every manifest it fills through the
+/// cache together. A job agent gives up on a lookup of `trees/<digest>` 60 s after it asked, and
 /// that time includes the wait for one of the agent's few lookup threads; a lookup that needed
 /// longer was never answered in time, and it kept the agent's thread in the kernel until it ended,
 /// so the lookups behind it timed out too. Half of that bound is the read's, so the lookup is
@@ -73,7 +72,7 @@ pub(in crate::server::treefs) const TREE_READ: Duration = Duration::from_secs(30
 const MOST_ENTRIES: usize = 1 << 24;
 
 /// The most manifests of a tree one read fetches at once, each level of the tree before the next
-/// (`tree_manifest/waves.rs`): as many fills as the node's fill socket runs at once by default, so
+/// (`tree_manifest/waves.rs`): as many fills as the file system's fill pool runs at once by default, so
 /// that a read of a tree whose manifests the cache does not hold costs a round trip for each level
 /// of the tree and not one for each directory, where the node did not fill them first
 /// (`fill-tree`, [`Core::read_tree`]).
@@ -218,7 +217,7 @@ fn tree_of(flat: &FlatTree, path: String) -> Result<Tree, String> {
 impl Core {
     /// Reads the tree `digest`: a placement's from the node's tree store, whole (an image from
     /// the tree's directory in the cache directory, which the placement this mount holds keeps
-    /// there); any other's from its manifests, fetched through the fill socket where the cache
+    /// there); any other's from its manifests, fetched through the cache where the cache
     /// does not hold them, a level of the tree at a time and up to [`MANIFESTS_AT_ONCE`] at once,
     /// all of them by [`TREE_READ`] after the read began, and flattened. The manifests it fetches
     /// are counted in `fetched`, which the caller makes for this read alone, and reported to the
@@ -226,18 +225,16 @@ impl Core {
     ///
     /// A tree whose root manifest the cache does not hold is new, and so are the manifests of the
     /// chain of directories that changed below it, which a level at a time would cost a round
-    /// trip of the socket each: the node is first asked to fill them itself (`fill-tree`), going
+    /// trip of the cache each: the node is first asked to fill them itself (`fill-tree`), going
     /// down the tree in the cache and answering once. Whatever it answers, the tree is then read as
-    /// above, so a manifest the node did not fill (it failed, or it is of a release before the
-    /// request) is filled by the read itself, and fails the read in the words it did before.
+    /// above, so a manifest the node did not fill (it failed)
+    /// is filled by the read itself, and fails the read in the words it did before.
     ///
     /// A root whose file begins as a version 2 tree list is that list, the whole tree: the read
     /// stops at it, with no manifest read, and the tree is the list, mapped from the cache's file
     /// of the object and walked for its shape, not hashed again (the fill checked it against the
-    /// digest), under `fs.tree_list_ram_bytes` as a placement's list is ([`Core::image_of`]). A
-    /// node of this release stops its `fill-tree` at such a root, so the list costs the one fill
-    /// of it; a node of the release before fills it and then fails to read it, and the read finds
-    /// it in the cache all the same. A list below the root is read as a manifest, and refused.
+    /// digest), under `fs.tree_list_ram_bytes` as a placement's list is ([`Core::image_of`]). The
+    /// fill of a tree stops at such a root, so the list costs the one fill of it. A list below the root is read as a manifest, and refused.
     pub(in crate::server::treefs) fn read_tree(
         &self,
         digest: &TreeDigest,
@@ -377,7 +374,7 @@ impl Core {
     ///
     /// # Errors
     /// [`Errno::NoEnt`] for a path that is no location and is above none (and for a name that
-    /// cannot be one), [`Errno::Io`] for a fill socket that does not answer or a tree that cannot
+    /// cannot be one), [`Errno::Io`] for a cache that does not answer or a tree that cannot
     /// be read.
     pub(in crate::server::treefs) fn lookup_placed(
         &self,
@@ -389,7 +386,7 @@ impl Core {
         } else {
             format!("{}/{name}", self.dir_path(parent)?)
         };
-        // A name of a tree has no newline in the fill socket's lines, and the mount's own names
+        // A name of a tree has no newline in the words of a request, and the mount's own names
         // (`trees`, `views`, `put`) are no location.
         if path.contains('\n') || Location::fs(&path).is_err() {
             return Err(Errno::NoEnt);
@@ -466,7 +463,7 @@ impl Core {
     /// `attached` that are placed, so that it ends the mount's other holds.
     ///
     /// # Errors
-    /// [`AskError`]: the socket did not answer.
+    /// [`AskError`]: the cache did not answer.
     pub(in crate::server::treefs) fn places_live(
         &self,
         attached: &[TreeDigest],
@@ -485,8 +482,8 @@ impl Core {
     /// looked up, else from the locations there are now.
     ///
     /// # Errors
-    /// [`Errno::NoEnt`] for a number that is no such directory now, [`Errno::Io`] for a fill
-    /// socket that does not answer.
+    /// [`Errno::NoEnt`] for a number that is no such directory now, [`Errno::Io`] for a cache
+    /// that does not answer.
     pub(in crate::server::treefs) fn dir_path(&self, dir: u64) -> Result<String, Errno> {
         if let Some(path) = locked(&self.dirs).get(&dir) {
             return Ok(path.clone());
@@ -558,7 +555,7 @@ impl Core {
 }
 
 impl Core {
-    /// What a question to the fill socket about `path` that was not answered is: `EIO`, said on
+    /// What a question to the node's cache about `path` that was not answered is: `EIO`, said on
     /// stderr (`Core::say_failed`).
     fn asked(&self, path: &str, why: &str) -> Errno {
         self.say_failed((0, Failing::Other), None, &|| {

@@ -44,8 +44,8 @@ fn the_levels_are_said_in_order_with_their_fills_and_slowest() {
 }
 
 /// Asserts that each answer of a `fill-tree` is said after the levels, in its own words, and adds
-/// one round: filled, with the node's time and its fills by level; unknown to the node; failed,
-/// with the words of the failure.
+/// one round: filled, with the node's time and its fills by level; failed, with the words of the
+/// failure.
 #[test]
 fn each_answer_of_a_fill_tree_is_said_and_adds_a_round() {
     let said = |answer: TreeAnswer| {
@@ -69,10 +69,6 @@ fn each_answer_of_a_fill_tree_is_said_and_adds_a_round() {
     assert_eq!(
         said(filled),
         format!("{levels}; fill-tree ok in 7 ms, 5 ms at the node, fills by level: 1 2")
-    );
-    assert_eq!(
-        said(TreeAnswer::Unknown),
-        format!("{levels}; fill-tree unknown to the node in 7 ms")
     );
     assert_eq!(
         said(TreeAnswer::Failed("busy".to_owned())),

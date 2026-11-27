@@ -2,7 +2,7 @@
 //! locations, and the paths of the locations.
 
 use super::super::files::RECORDS;
-use super::super::testing::{Bench, built, fs_at, s3_at, tree_path};
+use super::super::testing::{Bench, built, flat_of, fs_at, s3_at, tree_path};
 use super::super::{CreateRequest, PlacementId, ReadError, TreeStore};
 use super::{FlatEntry, FlatError, FlatKind, MountPlace, placement_id};
 use crate::{NewEntry, NewKind, TreeDigest};
@@ -45,7 +45,7 @@ fn file(bench: &Bench, parent: u32, name: &str, mode: u16, blob: usize) -> FlatE
 #[tokio::test]
 async fn a_placement_is_flattened_root_first_and_depth_first_in_name_order() {
     let (bench, id) = placed("flat-order").await;
-    let flat = bench.store.flat(&id).unwrap();
+    let flat = flat_of(&bench.store, &id).unwrap();
     assert_eq!(flat.paths, vec!["jobs/1/root".to_owned()]);
     assert_eq!(flat.packs, vec![bench.pack.key.clone()]);
     let empty_file = FlatEntry {
@@ -94,7 +94,7 @@ async fn a_placement_at_two_fs_locations_lists_both_paths() {
     let bench = Bench::new("flat-two").await;
     let at = vec![fs_at("jobs/1/a"), s3_at("jobs/"), fs_at("other/b")];
     let id = bench.store.create(bench.request(at)).unwrap().placement;
-    let mut paths = bench.store.flat(&id).unwrap().paths;
+    let mut paths = flat_of(&bench.store, &id).unwrap().paths;
     paths.sort();
     assert_eq!(paths, vec!["jobs/1/a".to_owned(), "other/b".to_owned()]);
 }
@@ -121,8 +121,8 @@ async fn a_child_tree_held_twice_is_listed_at_both_places() {
             ready: false,
         })
         .unwrap();
-    let flat = bench.store.flat(&made.placement).unwrap();
-    let alone = bench.store.flat(&base.placement).unwrap();
+    let flat = flat_of(&bench.store, &made.placement).unwrap();
+    let alone = flat_of(&bench.store, &base.placement).unwrap();
     let width = alone.entries.len() as u32;
     assert_eq!(flat.packs, alone.packs);
     let mut want = vec![alone.entries[0].clone()];
@@ -147,19 +147,19 @@ async fn a_placement_that_is_unknown_bucket_only_or_released_is_not_flattened() 
     let bench = Bench::new("flat-none").await;
     let none = Err(FlatError::Read(ReadError::NoPlacement));
     let unknown = PlacementId::parse(&"ab".repeat(16)).unwrap();
-    assert_eq!(bench.store.flat(&unknown), none);
+    assert_eq!(flat_of(&bench.store, &unknown), none);
     let bucket = bench
         .store
         .create(bench.request(vec![s3_at("only/")]))
         .unwrap();
-    assert_eq!(bench.store.flat(&bucket.placement), none);
+    assert_eq!(flat_of(&bench.store, &bucket.placement), none);
     let gone = bench
         .store
         .create(bench.request(vec![fs_at("gone")]))
         .unwrap();
-    assert!(bench.store.flat(&gone.placement).is_ok());
+    assert!(flat_of(&bench.store, &gone.placement).is_ok());
     bench.store.release(&gone.placement).unwrap();
-    assert_eq!(bench.store.flat(&gone.placement), none);
+    assert_eq!(flat_of(&bench.store, &gone.placement), none);
 }
 
 /// Asserts that a placement released while a run holds it is still flattened by its id, as it
@@ -168,14 +168,14 @@ async fn a_placement_that_is_unknown_bucket_only_or_released_is_not_flattened() 
 #[tokio::test]
 async fn a_released_placement_that_a_run_holds_is_still_flattened_for_it() {
     let (bench, id) = placed("flat-held").await;
-    let before = bench.store.flat(&id).unwrap();
+    let before = flat_of(&bench.store, &id).unwrap();
     bench.store.attach(&id, "run").unwrap();
     bench.store.release(&id).unwrap();
     assert_eq!(bench.store.mount_place("jobs/1/root"), MountPlace::Nothing);
-    assert_eq!(bench.store.flat(&id), Ok(before));
+    assert_eq!(flat_of(&bench.store, &id), Ok(before));
     assert!(bench.store.detach(&id, "run"));
     assert_eq!(
-        bench.store.flat(&id),
+        flat_of(&bench.store, &id),
         Err(FlatError::Read(ReadError::NoPlacement))
     );
 }
@@ -189,7 +189,7 @@ async fn a_tree_with_damaged_records_is_not_flattened() {
     let good = std::fs::read(&file).unwrap();
     let damaged = |bench: &Bench| {
         matches!(
-            bench.store.flat(&id),
+            flat_of(&bench.store, &id),
             Err(FlatError::Read(ReadError::Corrupt(_)))
         )
     };
@@ -200,7 +200,7 @@ async fn a_tree_with_damaged_records_is_not_flattened() {
     std::fs::remove_file(&file).unwrap();
     assert!(damaged(&bench));
     std::fs::write(&file, &good).unwrap();
-    assert!(bench.store.flat(&id).is_ok());
+    assert!(flat_of(&bench.store, &id).is_ok());
 }
 
 /// Asserts where a path is: the exact location is the placement, each proper prefix at a `/`

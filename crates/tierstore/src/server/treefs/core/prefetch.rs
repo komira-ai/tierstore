@@ -1,8 +1,8 @@
 //! Prefetch (`docs/design/virtual-build-fs.md` section 6.4): an attach that asks for
 //! `prefetch = "all"` has every blob of its tree filled in the background, in manifest order, on
-//! the fill socket's permits, and pinned. The attach is answered without waiting for it.
+//! the permits of the file system's fill pool, and pinned. The attach is answered without waiting for it.
 //!
-//! One thread fills one tree, one blob at a time: the fill socket decides how many fills run, so
+//! One thread fills one tree, one blob at a time: the file system's fill pool decides how many fills run, so
 //! a prefetch never takes more than the permits a job's own open would wait for. It stops at the
 //! next blob when the tree is no longer attached, and pins what it has filled in batches, so that
 //! a tree of many files is not many requests.

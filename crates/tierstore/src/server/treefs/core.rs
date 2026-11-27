@@ -39,9 +39,9 @@ use crate::tree_manifest::{EntryKind, TreeDigest, TreeEntry};
 use super::attach::{Attachments, Snapshot};
 #[cfg(any(target_os = "linux", test))]
 use super::backing::{Adopted, Guard};
-use super::fills::Fills;
 #[cfg(any(target_os = "linux", test))]
 use super::handle;
+use super::in_process::InProcess;
 use super::ino;
 use super::locked;
 #[cfg(target_os = "linux")]
@@ -220,10 +220,10 @@ pub(super) struct Settings {
 /// The core.
 pub(in crate::server) struct Core {
     settings: Settings,
-    fills: Arc<dyn Fills>,
+    fills: Arc<InProcess>,
     table: TreeTable,
     /// The attachments, for short looks and changes: never held across a write of the attachments
-    /// file or a round trip on the fill socket.
+    /// file or a call of the cache.
     state: Mutex<State>,
     /// The trees in memory, read with no lock (`core/loaded.rs`).
     trees: Trees,
@@ -232,7 +232,7 @@ pub(in crate::server) struct Core {
     /// Held by an attach, a restore and a detach for the work that changes the table of tree
     /// numbers or the attachments (and their file), and by a lookup that attaches a tree: so that
     /// `Core::hold` waits for that work and none starts after it, and two of them never write the
-    /// attachments file at once. Not held across a round trip on the fill socket, nor while a
+    /// attachments file at once. Not held across a call of the cache, nor while a
     /// manifest is read, but by the restore at a start, before any request is served.
     lifecycle: Mutex<()>,
     /// The locks of the pins and unpins of the trees (`core/pins.rs`): a pin is never made after the
@@ -249,7 +249,7 @@ pub(in crate::server) struct Core {
     /// Whether a successor is taking over: no attach or detach is done, so that this process
     /// writes neither the table of tree numbers nor the attachments file (`Core::hold`).
     held: AtomicBool,
-    /// Whether the fill socket is still to be told the mount's pins and placements, or is being
+    /// Whether the node's cache is still to be told the mount's pins and placements, or is being
     /// told them (`core/live.rs`).
     live: live::Announcement,
     /// The trees a thread is filling now for an attach that asked for `prefetch = "all"`, each
@@ -319,7 +319,7 @@ impl Core {
     /// A core with no tree attached, whose attachments are kept in `runtime_dir`.
     pub(super) fn new(
         settings: Settings,
-        fills: Arc<dyn Fills>,
+        fills: Arc<InProcess>,
         table: TreeTable,
         runtime_dir: &Path,
     ) -> Self {
@@ -463,7 +463,7 @@ impl Core {
 
     /// Unpins the tree `number`, `digest`, which a detach has found that nothing attaches, and
     /// takes it out of memory if the kernel holds none of its inodes. The caller has released
-    /// the lifecycle lock: the round trip to the cache holds only the lock of the tree's pins
+    /// the lifecycle lock: the call of the cache holds only the lock of the tree's pins
     /// (`core/pins.rs`), and a tree that was attached again since the caller decided is left as
     /// it is, pinned.
     pub(super) fn free_tree(&self, number: u64, digest: &TreeDigest) {
@@ -545,12 +545,12 @@ impl Core {
 
     /// Looks up `name` in the directory `parent`. A digest in `trees/` that no run has attached is
     /// attached by the lookup (`Core::resolve`); a name in the root or in a directory above the fs
-    /// locations is asked of the node's tree store over the fill socket (`Core::lookup_placed`).
+    /// locations is asked of the node's tree store from the node's cache (`Core::lookup_placed`).
     ///
     /// # Errors
     /// [`Errno::NoEnt`] for a name the namespace does not have (a digest of a tree the upstream
     /// does not have, a path that is no location and above none), [`Errno::NotDir`] for a parent
-    /// that is not a directory, [`Errno::Io`] for a tree that cannot be read or a fill socket that
+    /// that is not a directory, [`Errno::Io`] for a tree that cannot be read or a node's cache that
     /// does not answer.
     pub(super) fn lookup(&self, parent: u64, name: &str) -> Result<Looked, Errno> {
         let (number, index) = ino::split(parent);

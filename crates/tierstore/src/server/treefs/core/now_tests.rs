@@ -1,4 +1,4 @@
-//! The opens answered with no request of the fill socket: what they refuse at once, and the line
+//! The opens answered with no request of the node's cache: what they refuse at once, and the line
 //! of a table of tree numbers that cannot be read, said once in ten seconds.
 
 use std::time::Duration;
