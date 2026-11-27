@@ -32,6 +32,9 @@ fn client(h: &Harness) -> Client {
     Client::from_conf(settings.build())
 }
 
+/// The time, in milliseconds, the memory tier writes the sources of the time conditions at.
+const WRITTEN_MS: u64 = 1_800_000_000_000;
+
 /// The HTTP status and the S3 error code of a call the server refused.
 fn refusal<T: Debug, E: ProvideErrorMetadata + Debug>(
     result: Result<T, SdkError<E, HttpResponse>>,
@@ -202,6 +205,9 @@ async fn modified_of(sdk: &Client, name: &str) -> DateTime {
 #[tokio::test]
 async fn copy_source_if_modified_since_compares_with_the_time_of_last_write() {
     let h = Harness::start(|_| {}).await;
+    // The memory tier stamps an object with its own clock, from 0: a date an hour before the
+    // write would be before the epoch, which is no date and is ignored.
+    h.hot_mem.clock().set(WRITTEN_MS);
     let sdk = client(&h);
     put(&sdk, "src/a", b"timed").await;
     let at = modified_of(&sdk, "src/a").await.secs();
@@ -230,6 +236,9 @@ async fn copy_source_if_modified_since_compares_with_the_time_of_last_write() {
 #[tokio::test]
 async fn copy_source_if_unmodified_since_compares_with_the_time_of_last_write() {
     let h = Harness::start(|_| {}).await;
+    // The memory tier stamps an object with its own clock, from 0: a date an hour before the
+    // write would be before the epoch, which is no date and is ignored.
+    h.hot_mem.clock().set(WRITTEN_MS);
     let sdk = client(&h);
     put(&sdk, "src/a", b"timed").await;
     let at = modified_of(&sdk, "src/a").await.secs();

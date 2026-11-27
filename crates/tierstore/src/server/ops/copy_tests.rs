@@ -85,7 +85,7 @@ async fn a_copy_streams_the_source_into_a_create_only_put() {
     let tag = rig.call("HEAD", "a", b"").await.header("etag").to_owned();
     let done = copy_a(&rig, "b", &[]).await;
     assert_eq!(done.status, StatusCode::OK, "{}", done.body);
-    assert_eq!(texts(&done.body, "ETag"), [tag.clone()]);
+    assert_eq!(texts(&done.body, "ETag"), [tag.as_str()]);
     assert_eq!(texts(&done.body, "LastModified"), [iso8601(NOW)]);
     assert_eq!(rig.get("b", None).await.body, "abc");
     assert_eq!(rig.call("HEAD", "b", b"").await.header("etag"), tag);

@@ -470,16 +470,18 @@ async fn a_refused_create_only_copy_reads_nothing_of_the_source() {
     assert_eq!(d.s3.stats(), stats);
 }
 
-/// Asserts that a copy of an object that is overwritten while it is copied is one whole version:
-/// the read of the source has its bytes when the source is replaced by another object of another
-/// length, and the copy answers 200 and writes exactly the bytes that were read (not a mix, and
-/// not the new object), with the tag of those bytes.
+/// Asserts that a copy of an object that is overwritten while it is copied never makes a mix of
+/// two versions: the read of the source has its bytes when the source is replaced by another
+/// object of another length, the cache's read of the source is pinned to the version it began
+/// with and ends with an error, so the copy answers 503 (a client retries) and writes nothing;
+/// the retry copies the new object whole, with the tag of its bytes.
 #[tokio::test]
-async fn a_source_overwritten_during_the_copy_is_copied_as_the_one_version_that_was_read() {
+async fn a_source_overwritten_during_the_copy_is_never_copied_as_a_mix() {
     let rig = Rig::writing("tscache-copy-overwritten");
     let front = Front::over(&rig.cache);
     rig.put("other/src", b"the old bytes").await;
-    rig.put("other/reference", b"the old bytes").await;
+    rig.put("other/reference", b"the new bytes, which are longer")
+        .await;
     let gate = rig.tamper.hold_key_after_read("other/src");
 
     let (copied, ()) = tokio::join!(front.copy("other/dst", "other/src", &[]), async {
@@ -492,13 +494,20 @@ async fn a_source_overwritten_during_the_copy_is_copied_as_the_one_version_that_
         gate.add_permits(10);
     });
 
-    assert_eq!(copied.status, StatusCode::OK, "{}", copied.body);
-    assert_eq!(front.read("other/dst").await, "the old bytes");
-    let tag = front.tag("other/dst").await;
-    assert_eq!(answered_tag(&copied), tag);
-    assert_eq!(tag, front.tag("other/reference").await);
     assert_eq!(
-        front.read("other/src").await,
+        copied.status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "{}",
+        copied.body
+    );
+    assert!(rig.tamper.memory.head("other/dst").await.is_err());
+    let again = front.copy("other/dst", "other/src", &[]).await;
+    assert_eq!(again.status, StatusCode::OK, "{}", again.body);
+    assert_eq!(
+        front.read("other/dst").await,
         "the new bytes, which are longer"
     );
+    let tag = front.tag("other/dst").await;
+    assert_eq!(answered_tag(&again), tag);
+    assert_eq!(tag, front.tag("other/reference").await);
 }
