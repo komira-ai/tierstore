@@ -602,14 +602,13 @@ impl Server {
     /// A server over `backend`.
     #[must_use]
     pub fn new(backend: Arc<dyn Backend>, config: ServerConfig) -> Arc<Self> {
-        let drain = Drain::new(config.header_timeout, Arc::default());
         Arc::new(Self {
             puts: Arc::new(Semaphore::new(config.max_concurrent_puts)),
             reads: Arc::new(Semaphore::new(config.max_concurrent_reads)),
+            drain: Arc::new(Drain::new(config.header_timeout, Arc::default())),
             backend,
             started: config.clock.now(),
             config,
-            drain: Arc::new(drain),
             drain_requested: Notify::new(),
             inflight: AtomicUsize::new(0),
             open: AtomicUsize::new(0),
@@ -709,8 +708,7 @@ impl Server {
         self.finish_by_deadline().await
     }
 
-    /// Once there is room for one (`bounds`), takes the next connection `incoming` gives and serves
-    /// it (see [`Server::take`]).
+    /// Takes the next connection `incoming` gives, once there is room (`bounds`), and serves it.
     async fn accept_one<I: Incoming>(self: &Arc<Self>, incoming: &mut I) {
         self.room_for_a_connection().await;
         let accepted = poll_fn(|cx| incoming.poll_incoming(cx)).await;
@@ -990,6 +988,9 @@ impl Server {
         if text.is_empty() {
             text = "# this server has no proxy, no OCI read front and no local cache\n".to_owned();
         }
+        let late = self.late_requests();
+        text.push_str("# TYPE tierstore_drain_late_requests_total counter\n");
+        text.push_str(&format!("tierstore_drain_late_requests_total {late}\n"));
         text.push_str(&self.front_families());
         let (version, commit) = (build_info::VERSION, build_info::COMMIT);
         text.push_str(&build_info::gauge(version, commit, self.config.slot));

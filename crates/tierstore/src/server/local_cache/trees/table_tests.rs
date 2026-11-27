@@ -222,7 +222,7 @@ fn only_a_build_node_has_the_table_and_an_unknown_key_is_a_warning() {
     );
     assert!(refusal(&combined).starts_with("trees: only a build node has trees"));
     let known = fields_of::<TreesTable>();
-    assert_eq!(known.len(), 14);
+    assert_eq!(known.len(), 16);
     let table: toml::Table = toml::from_str("[trees]\nttl = \"1h\"\nnew_knob = 1\n").unwrap();
     assert_eq!(
         unknown_key_warnings(&table),

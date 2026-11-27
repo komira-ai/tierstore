@@ -108,15 +108,10 @@ impl Server {
         reader.read_whole(check, || self.permit()).await
     }
 
-    /// The families of the front on `/metricz`: the requests that came too late in a drain, the
-    /// failed puts, and the gauges of the bounds (module docs).
+    /// The families of the front on `/metricz` after the late requests of a drain (which
+    /// `server/mod.rs` prints): the failed puts, and the gauges of the bounds (module docs).
     pub(super) fn front_families(&self) -> String {
-        let late = self.late_requests();
-        let mut text = format!(
-            "# TYPE tierstore_drain_late_requests_total counter\n\
-             tierstore_drain_late_requests_total {late}\n"
-        );
-        text.push_str(&self.put_failure_family());
+        let mut text = self.put_failure_family();
         let taken = |most: usize, free: usize| most.saturating_sub(free);
         let reads = taken(
             self.config.max_concurrent_reads,
