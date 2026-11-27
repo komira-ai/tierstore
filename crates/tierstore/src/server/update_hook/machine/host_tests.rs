@@ -922,3 +922,34 @@ fn a_mount_list_that_cannot_be_had_is_an_error() {
     let ended = message(host.mounted(path).unwrap_err());
     assert_eq!(ended, "/sbin/mount: ended by a signal: ");
 }
+
+/// Asserts that the look-up of a directory goes to its place under the root: a directory is
+/// `true`, also through a link; a file and nothing there are `false`; and a look-up that fails
+/// any other way (a path through a file, `ENOTDIR`) is an error naming the path and the error,
+/// not taken for "nothing there". Catches a verify that reads a mount whose server is gone as a
+/// plain absence, or that looks at the hook's own `/` instead of the root.
+#[test]
+fn a_directory_is_looked_up_under_the_root() {
+    let (_guard, root) = scratch("host-is-dir");
+    fs::create_dir_all(root.join("private/var/tierstore/fs/trees")).unwrap();
+    fs::write(root.join("private/var/tierstore/fs/file"), "x").unwrap();
+    symlink("private/var", root.join("var")).unwrap();
+    let runner = FakeRunner::replying(vec![]);
+    let host = host(&root, &runner);
+    for (path, want) in [
+        ("/private/var/tierstore/fs/trees", true),
+        ("/var/tierstore/fs/trees", true),
+        ("/private/var/tierstore/fs/file", false),
+        ("/private/var/tierstore/fs/none", false),
+    ] {
+        assert_eq!(host.is_dir(Path::new(path)), Ok(want), "{path}");
+    }
+    let through = Path::new("/private/var/tierstore/fs/file/trees");
+    let failed = message(host.is_dir(through).unwrap_err());
+    let at = root.join("private/var/tierstore/fs/file/trees");
+    assert_eq!(
+        failed,
+        format!("stat {}: Not a directory (os error 20)", at.display())
+    );
+    assert!(runner.calls().is_empty());
+}

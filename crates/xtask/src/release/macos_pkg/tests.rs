@@ -180,11 +180,6 @@ fn the_builder_lays_out_the_payload_and_the_postinstall_and_builds_the_product()
         0o644,
         Some(PLIST.as_bytes().to_vec()),
     ));
-    want.push((
-        "Library/LaunchDaemons/tierstore-fs.plist".to_owned(),
-        0o644,
-        Some(FS_PLIST.as_bytes().to_vec()),
-    ));
     want.sort();
     let scripts: Vec<Seen> = vec![
         (String::new(), 0o755, None),
@@ -421,11 +416,10 @@ fn the_manifest_is_the_archive_manifests_bounds_with_the_launchd_job_and_the_ins
     assert_eq!(manifest["params"]["config_file"]["text"], CONFIG_FILE);
     assert_eq!(manifest["params"]["service_manager"]["text"], "launchd");
     assert_eq!(manifest["params"]["launchd_label"]["text"], "tierstore");
-    assert_eq!(
-        manifest["params"]["fs_launchd_label"]["text"],
-        "tierstore-fs"
-    );
-    assert_eq!(manifest["params"].as_object().map(|o| o.len()), Some(4));
+    assert!(manifest["params"].get("fs_launchd_label").is_none());
+    let mut keys: Vec<&String> = manifest["params"].as_object().unwrap().keys().collect();
+    keys.sort();
+    assert_eq!(keys, ["config_file", "launchd_label", "service_manager"]);
     assert_eq!(manifest["minHostkeeper"], "0.1.225");
     assert_eq!(manifest["hook"]["boot"], "restore");
     for key in [
@@ -498,20 +492,12 @@ pub(super) fn good_entries(binary: &[u8]) -> Vec<Vec<u8>> {
             0,
             PLIST.as_bytes(),
         ),
-        odc_entry(
-            "./Library/LaunchDaemons/tierstore-fs.plist",
-            0o100_644,
-            0,
-            0,
-            FS_PLIST.as_bytes(),
-        ),
     ]
 }
 
-/// The index of the binary's, the plist's and the file service plist's entry in [`good_entries`].
+/// The index of the binary's and the plist's entry in [`good_entries`].
 pub(super) const BIN_AT: usize = 5;
 pub(super) const PLIST_AT: usize = 7;
-pub(super) const FS_PLIST_AT: usize = 8;
 
 /// `PackageInfo` as `pkgbuild` writes it for the pkg of 1.2.3, with `attributes` in place of the
 /// identifier, version and install location and `extra` among the root's children.

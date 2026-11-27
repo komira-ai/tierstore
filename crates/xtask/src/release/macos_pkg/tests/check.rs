@@ -7,6 +7,13 @@ const BIN: &str = "Library/Application Support/tierstore/bin/tierstore";
 const PLIST_FILE: &str = "Library/LaunchDaemons/tierstore.plist";
 const FS_PLIST_FILE: &str = "Library/LaunchDaemons/tierstore-fs.plist";
 
+/// A plist of the job of the second process the pkg no longer ships: the job `tierstore-fs`, of the
+/// binary of the payload.
+const OLD_FS_PLIST: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<plist version=\"1.0\"><dict>\
+<key>Label</key><string>tierstore-fs</string><key>ProgramArguments</key><array>\
+<string>/Library/Application Support/tierstore/bin/tierstore</string><string>fs</string></array>\
+</dict></plist>\n";
+
 /// What the check says of a part that is not the file or the directory it must be.
 const ONLY: &str = "an expanded component of tierstore's pkg holds only the files Bom, \
                     PackageInfo and Payload and the directory Scripts";
@@ -29,8 +36,7 @@ fn a_good_expanded_pkg_passes_the_check() {
             "check-macos-pkg: {} is a product of the one component tierstore.pkg \
              (com.komira.tierstore 1.2.3), with the one script postinstall, which installs \
              exactly /Library/Application Support/tierstore/bin/tierstore (755), \
-             /Library/LaunchDaemons/tierstore.plist (644) and \
-             /Library/LaunchDaemons/tierstore-fs.plist (644), owned by root",
+             /Library/LaunchDaemons/tierstore.plist (644), owned by root",
             expanded.product().display()
         )])
     );
@@ -294,7 +300,6 @@ fn a_payload_with_another_entry_is_refused_naming_it() {
         ]
     );
     let mut entries = good_entries(BINARY_BYTES);
-    entries.remove(FS_PLIST_AT);
     entries.remove(PLIST_AT);
     entries.remove(BIN_AT);
     let expanded = Expanded::new("macos-pkg-check-missing", &entries);
@@ -302,7 +307,6 @@ fn a_payload_with_another_entry_is_refused_naming_it() {
         expanded.problems(),
         [
             format!("missing /{BIN} in the payload"),
-            format!("missing /{FS_PLIST_FILE} in the payload"),
             format!("missing /{PLIST_FILE} in the payload"),
         ]
     );
@@ -427,68 +431,37 @@ fn a_binary_or_plist_of_other_bytes_is_refused() {
 }
 
 #[test]
-fn the_file_service_plist_is_held_to_its_own_label_program_and_bytes() {
-    // Catches: a check that holds every plist to the label `tierstore` (so the file service's job
-    // is refused) or to no label (a job of another name, or the main job's file under the file
-    // service's name, installed), a file service job whose program is not a file of the pkg (a
-    // job that cannot run), and one of other bytes than the repository's.
-    let plist = |text: &str| {
-        let entry = odc_entry(
-            &format!("./{FS_PLIST_FILE}"),
-            0o100_644,
-            0,
-            0,
-            text.as_bytes(),
-        );
-        with_entry("macos-pkg-check-fs-plist", FS_PLIST_AT, entry).problems()
-    };
-    let bytes = format!("/{FS_PLIST_FILE}: not the bytes release macos-pkg writes");
-    let edited = FS_PLIST.replace(
-        "<string>tierstore-fs</string>",
-        "<string>tierstore-other</string>",
-    );
+fn a_pkg_still_carrying_the_file_service_plist_is_refused() {
+    // Catches: a pkg that still installs /Library/LaunchDaemons/tierstore-fs.plist, the job of the
+    // process `tierstore fs`, which no release runs since 0.3.196: the check refuses every entry
+    // the build does not write.
+    let mut entries = good_entries(BINARY_BYTES);
+    entries.push(odc_entry(
+        &format!("./{FS_PLIST_FILE}"),
+        0o100_644,
+        0,
+        0,
+        OLD_FS_PLIST.as_bytes(),
+    ));
+    let expanded = Expanded::new("macos-pkg-check-fs-plist", &entries);
     assert_eq!(
-        plist(&edited),
-        [
-            bytes.clone(),
-            format!(
-                "/{FS_PLIST_FILE}: the label is Some(\"tierstore-other\"), not \"tierstore-fs\""
-            )
-        ]
-    );
-    assert_eq!(
-        plist(PLIST),
-        [
-            bytes.clone(),
-            format!("/{FS_PLIST_FILE}: the label is Some(\"tierstore\"), not \"tierstore-fs\"")
-        ]
-    );
-    let moved = FS_PLIST.replace(
-        "<string>/Library/Application Support/tierstore/bin/tierstore</string>",
-        "<string>/usr/local/libexec/tierstore/tierstore</string>",
-    );
-    assert_eq!(
-        plist(&moved),
-        [
-            bytes,
-            format!(
-                "/{FS_PLIST_FILE}: the job runs Some(\"/usr/local/libexec/tierstore/tierstore\"), \
-                 which is not a file of the payload"
-            )
-        ]
+        expanded.problems(),
+        [format!(
+            "/{FS_PLIST_FILE} (\"./{FS_PLIST_FILE}\") is in the payload: not a file of tierstore's pkg"
+        )]
     );
 }
 
 #[test]
-fn the_main_plist_is_held_to_its_own_label_not_the_file_services() {
-    // Catches: a check that holds both plists to one label: the file service's plist given under
-    // the main job's name passes as the main job.
+fn the_main_plist_is_held_to_the_label_tierstore() {
+    // Catches: a check that holds the plist to no label: the file service's plist given under the
+    // main job's name passes as the main job.
     let entry = odc_entry(
         &format!("./{PLIST_FILE}"),
         0o100_644,
         0,
         0,
-        FS_PLIST.as_bytes(),
+        OLD_FS_PLIST.as_bytes(),
     );
     assert_eq!(
         with_entry("macos-pkg-check-plist-swapped", PLIST_AT, entry).problems(),

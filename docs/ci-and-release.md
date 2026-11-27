@@ -335,16 +335,18 @@ fake.
   `productbuild`. `--stage` must not exist; the
   payload is laid out in it first. The payload is exactly the binary
   `/Library/Application Support/tierstore/bin/tierstore` (0755, the given binary's bytes, so it keeps
-  its code signature), the job `/Library/LaunchDaemons/tierstore.plist` (0644,
-  `packaging/macos-pkg/tierstore.plist`) and the job of the file service
-  `/Library/LaunchDaemons/tierstore-fs.plist` (0644, `packaging/macos-pkg/tierstore-fs.plist`), with
+  its code signature), and the job `/Library/LaunchDaemons/tierstore.plist` (0644,
+  `packaging/macos-pkg/tierstore.plist`), with
   the directories above them (0755), everything `root:wheel`. The `postinstall`
   (`packaging/macos-pkg/postinstall`, 0755) makes the account `_tierstore`, the directories under
   `/usr/local/tierstore` (with `run/fs`) and the mount point `/private/var/tierstore/fs` (left as it
   is while it is mounted: an upgrade runs with the file service's read-only mount on it), and starts
-  nothing: hostkeeper's hook (`tierstore update-hook`) bootstraps the jobs. Each plist is the one of
-  `packaging/hostkeeper/units` (`tierstore.plist`, `tierstore-fs.plist`) but for the program path, and
-  `crates/tierstore/tests/packaging_macos.rs` holds each pair together.
+  nothing: hostkeeper's hook (`tierstore update-hook`) bootstraps the jobs. The plist is the one of
+  `packaging/hostkeeper/units` (`tierstore.plist`) but for the program path, and
+  `crates/tierstore/tests/packaging_macos.rs` holds the pair together. The file system of a Mac is the
+  `fs` interface of the one process, so the package ships no job for it. hostkeeper's activate of
+  it on a Mac that has the earlier `tierstore-fs.plist` removes that file (activate deletes the files
+  the old version shipped and the new one does not); the package itself removes nothing.
 - `cargo xtask release check-macos-pkg <dir> --version <X.Y.Z> --binary <path>` reads the directory
   `pkgutil --expand` made of the pkg and refuses anything but what the builder writes: the
   `Distribution` names the one component with no installer script, installation check or volume
@@ -352,8 +354,8 @@ fake.
   and no other script and no bundle; the component holds `Bom`, `PackageInfo`, `Payload` and
   `Scripts`, which holds the `postinstall` alone (0755, its bytes); the payload
   holds exactly the entries above, with their modes and bytes, each owned by root, group wheel or
-  admin (so nothing is group or other writable, set-id or sticky); each plist's label is its file's
-  name (`tierstore`, `tierstore-fs`) and its program is a file of the payload. Every deviation is listed.
+  admin (so nothing is group or other writable, set-id or sticky); the plist's label is its file's
+  name (`tierstore`) and its program is a file of the payload. Every deviation is listed.
 - `cargo xtask release check-pkg-signature <pkg> --identity "Developer ID Installer: <name> (<team>)"`
   runs `pkgutil --check-signature` and refuses the pkg unless the signature is trusted, carries a
   trusted timestamp, and its certificate chain is exactly the identity, Apple's Developer ID
@@ -366,7 +368,7 @@ package `com.komira.tierstore`, the run label `tierstore`, the hook `/Library/Ap
 Support/tierstore/bin/tierstore update-hook` with the boot step `restore` and the bounds and deadlines
 of `packaging/hostkeeper/manifest.toml.in`, the params `config_file`
 (`/usr/local/tierstore/etc/tierstore.toml`), `service_manager` `launchd` and `launchd_label`
-`tierstore`, `fs_launchd_label` `tierstore-fs`, and the health URL `http://127.0.0.1:9300/readyz`. How a Mac gets the package and the
+`tierstore`, no `fs_launchd_label` (the hook still reads it for the config hook's switch back to two processes), and the health URL `http://127.0.0.1:9300/readyz`. How a Mac gets the package and the
 file it needs is in `packaging/macos/README.md`.
 
 ### The order of a release

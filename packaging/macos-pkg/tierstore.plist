@@ -48,7 +48,7 @@
   <string>Standard</string>
   <key>Umask</key>
   <integer>63</integer>
-  <!-- The same value as tierstore-fs.plist: this process serves the node's cache and the fill socket for the mount, whose jobs keep files of it open as long as they run. -->
+  <!-- This process serves the node's cache, the fill socket and the NFS mount of the file system, whose jobs keep files of it open as long as they run. -->
   <key>SoftResourceLimits</key>
   <dict>
     <key>NumberOfFiles</key>
