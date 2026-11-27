@@ -724,9 +724,6 @@ is bound only while the instance holds the lock of the cache directory, so durin
 old instance answers until it exits, and the new one binds when it takes the lock. A Mac's file
 (`macos/tierstore.toml`) has the entry with its own paths. What the provider does, and what each of
 its answers means to a job, is in `crates/tierstore/docs/operations.md`, "The mount provider".
-An update of the node through hostkeeper's update hook drives the provider in its `verify`, with two
-small trees of its own under the agent `tierstore-verify`, before the update may be reported
-healthy (`crates/tierstore/docs/update-hook.md`, "verify").
 
 ### A unit that needs the mount
 

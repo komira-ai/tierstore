@@ -119,11 +119,11 @@ An observation. After the commit it looks at the service again (`observed`) and 
 
 1. `Release` of both sources, so that nothing of a check that ended halfway remains.
 2. `Prepare` of each source with its tree's list, read-only.
-3. `Mount` of each. The answer must be a directory below the interface's `mountpoint`.
+3. `Mount` of each. The answer must be a directory below the interface's `mountpoint`, with no `..` leading out of it.
 4. A read of every path below each directory through the mount, as root and without following a link, compared with the tree: every file's bytes, every directory, and the link's target, with nothing more.
-5. `Release` of both, then a `Mount` of each, which must be answered `UNAVAILABLE` with `the source is not prepared here`: the provider finds no placement at the source's path.
+5. `Release` of both, then a `Mount` of each, which must be answered `UNAVAILABLE` with `the source is not prepared here`: the provider finds no placement at the source's path. A directory answered then is a placement that outlived its release. Any other answer is judged as at any call, below.
 
-The calls have the bounds jobscheduler's agent gives them (`Prepare` 10 s, `Mount` 30 s, `Release` 5 s), and the read has 30 s. A check of a healthy node takes well under a second.
+The calls have the bounds jobscheduler's agent gives them (`Prepare` 10 s, `Mount` 30 s, `Release` 5 s), and the read has 30 s. A call that passes its bound is a provider that does not answer.
 
 The outcomes are:
 
@@ -137,7 +137,7 @@ The outcomes are:
   The detail names the tree, its directory and the first difference. A file that differs is described by its size, never its bytes.
 - **Deferral, `not_ready`.** A provider that does not answer (its socket not bound yet), or that answers `UNAVAILABLE` (a tree not placed within the call's wait), defers `verify` with `not_ready` and `verify_retry_secs`. hostkeeper ends the deferrals itself at `verify_deadline_secs`.
 
-Before the check ends with a failure or a deferral, it releases both sources, so no placement stays behind. A node whose file has no `mount-provider` interface, or whose params name no `config_file`, has no check. An interface with no absolute `socket` or `mountpoint` is `config_refused`. After the commit, `verify` does not run the check again.
+Before a check that got as far as `Prepare` ends with a failure or a deferral, it asks for the release of both sources, each even when the other's release is not answered. A placement the provider cannot release then is released by the first step of the next check, or ends at `trees.ttl_max`. A node whose file has no `mount-provider` interface, or whose params name no `config_file`, has no check. An interface with no absolute `socket` or `mountpoint` is `config_refused`. After the commit, `verify` does not run the check again.
 
 **The binary of the fs process.** An active unit does not say which binary its process runs. On a node whose fs process was handed over, `verify` reads the main process of `tierstore-fs@<fs_next>` from systemd (the unit's `MainPID`) and the file its `/proc/<pid>/exe` names, and requires it to be the file at `/usr/local/libexec/tierstore/tierstore` that the update installed: the same device and inode. The hook installs its copy by a rename, so a process that still runs an older copy runs a file that no longer has that name: its link reads `/usr/local/libexec/tierstore/tierstore (deleted)` and the inodes differ. That fails the step with `not_ready`, before the commit and so reversible, and the detail names the unit, the pid, both paths and both files (`tierstore-fs@b (pid 4102) runs /usr/local/libexec/tierstore/tierstore (deleted) (device 2049, inode 10), not the binary the update installed, /usr/local/libexec/tierstore/tierstore (device 2049, inode 11): it is still on an older release`). A unit that systemd names no main process of is `not_ready` too (a `systemctl show` that fails is `unit_failed`), and a process whose link cannot be read or followed (it is gone, or the hook may not look at it), or an installed binary that cannot be looked at, is `host_failed` with words of its own: none of them is a pass.
 

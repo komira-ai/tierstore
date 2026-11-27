@@ -68,17 +68,7 @@ pub(super) fn verify(c: &Ctx<'_, '_>, params: &Params, record: &Record) -> Resul
     if !record.has(Marker::Verified) {
         c.save(&record.with(Marker::Verified))?;
     }
-    let done = led_by(verified(mode, target), mounted);
-    Ok(led_by(done, fs_said))
-}
-
-/// `done` with `first` before its detail, when there is anything to say first.
-fn led_by(mut done: Done, first: String) -> Done {
-    if !first.is_empty() {
-        let rest = done.report.detail.take().unwrap_or_default();
-        done.report.detail = Some(format!("{first}; {rest}"));
-    }
-    done
+    Ok(verified(mode, target).led_by(mounted).led_by(fs_said))
 }
 
 /// `done` deferred when it is a look at `/readyz` that was not answered ready, so that hostkeeper

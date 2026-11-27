@@ -185,7 +185,7 @@ fn silence_and_unavailable_defer_the_check() {
             "the mount provider at {FAKE_SOCKET} does not answer Release yet: connection refused"
         )
     );
-    assert_eq!(provider.calls(), ["Release 0"]);
+    assert_eq!(provider.calls(), ["Release 0", "Release 1"]);
 
     let provider = FakeProvider::default();
     provider.answer("Mount", 0, ProviderCode::Unavailable, "not ready");
@@ -295,12 +295,17 @@ fn a_tree_read_back_wrong_fails_the_check_by_its_first_difference() {
     }
 }
 
-/// Asserts that a `Mount` that answers a directory outside the provider's mount, or the mount
-/// itself, fails the check with `mounted_tree_wrong` before anything is read, and releases both.
+/// Asserts that a `Mount` that answers a directory outside the provider's mount, the mount
+/// itself, or a path below it that leads out of it by `..`, fails the check with `mounted_tree_wrong` before anything is read, and releases both.
 /// Catches a check that has root read whatever directory the provider names.
 #[test]
 fn a_directory_outside_the_mount_fails_the_check_unread() {
-    for dir in ["/etc", FAKE_MOUNT, "/run/tierstore/fsx/a"] {
+    for dir in [
+        "/etc",
+        FAKE_MOUNT,
+        "/run/tierstore/fsx/a",
+        "/run/tierstore/fs/../../etc",
+    ] {
         let provider = FakeProvider::default();
         provider.mount_at(1, dir);
         let (outcome, why, _, detail) = failed(checked(&provider));
@@ -321,9 +326,12 @@ fn a_directory_outside_the_mount_fails_the_check_unread() {
 }
 
 /// Asserts that a placement that outlives its release (a `Mount` after it still answers the
-/// directory), or a `Mount` after the release answered with anything but `UNAVAILABLE` and
-/// `the source is not prepared here`, fails the check with `mounted_tree_wrong` and says what it answered.
-/// Catches a release that leaves the placement to count against `trees.max_placements`.
+/// directory) fails the check with `mounted_tree_wrong`, says so, and asks for the release of both
+/// again before it ends; and that any other answer of that `Mount` but `UNAVAILABLE` with
+/// `the source is not prepared here` is judged as at any call: `UNAVAILABLE` with another reason
+/// and silence defer, a refusal fails with `provider_refused`. Catches a release that leaves the
+/// placement to count against `trees.max_placements`, and a provider that dies at the last call
+/// taken for a wrong tree.
 #[test]
 fn a_placement_that_outlives_its_release_fails_the_check() {
     let provider = FakeProvider::default();
@@ -341,44 +349,123 @@ fn a_placement_that_outlives_its_release_fails_the_check() {
             FakeProvider::dir_of(0).display()
         )
     );
-    let unavailable = |reason: &str| ProviderFault::Answered {
+    let calls = provider.calls();
+    assert_eq!(
+        calls[calls.len() - 3..],
+        [
+            "Mount 0".to_owned(),
+            "Release 0".to_owned(),
+            "Release 1".to_owned()
+        ]
+    );
+    let unavailable = ProviderFault::Answered {
         code: ProviderCode::Unavailable,
-        reason: reason.to_owned(),
+        reason: "not ready".to_owned(),
     };
+    let refused = ProviderFault::Answered {
+        code: ProviderCode::FailedPrecondition,
+        reason: "the source was released".to_owned(),
+    };
+    let silent = ProviderFault::Silent("timed out".to_owned());
+    let socket = FAKE_SOCKET;
     let cases = [
-        (unavailable("not ready"), "Unavailable: not ready"),
         (
-            ProviderFault::Answered {
-                code: ProviderCode::FailedPrecondition,
-                reason: "the source was released".to_owned(),
-            },
-            "FailedPrecondition: the source was released",
+            unavailable,
+            Outcome::Deferred,
+            Reason::NotReady,
+            format!(
+                "the mount provider at {socket} answered Mount of the tree with its L2 sidecar \
+                 with UNAVAILABLE: not ready"
+            ),
         ),
         (
-            ProviderFault::Silent("timed out".to_owned()),
-            "nothing: timed out",
+            refused,
+            Outcome::Failure,
+            Reason::ProviderRefused,
+            format!(
+                "the mount provider at {socket} refused Mount of the tree with its L2 sidecar ({}) \
+                 with FailedPrecondition: the source was released",
+                WITH_SIDECAR.key()
+            ),
+        ),
+        (
+            silent,
+            Outcome::Deferred,
+            Reason::NotReady,
+            format!("the mount provider at {socket} does not answer Mount yet: timed out"),
         ),
     ];
-    for (fault, said) in cases {
+    for (fault, outcome, reason, said) in cases {
         let provider = FakeProvider::default();
         // The first Mount of the source places it; the fault is the answer of the one after the
-        // release, which a fresh provider is told after the check has mounted.
+        // release.
         let gone = GoneFault {
             inner: &provider,
-            fault: fault.clone(),
+            fault,
         };
-        let (outcome, why, _, detail) = failed(check(&gone, &shape(), 5));
-        assert_eq!(
-            (outcome, why),
-            (Outcome::Failure, Some(Reason::MountedTreeWrong))
-        );
-        assert_eq!(
-            detail,
-            format!(
-                "the placement of the tree with its L2 sidecar outlived its Release: a Mount \
-                 after it answered {said}"
-            )
-        );
+        let (got, why, _, detail) = failed(check(&gone, &shape(), 5));
+        assert_eq!((got, why), (outcome, Some(reason)));
+        assert_eq!(detail, said);
+        assert!(provider.placed().is_empty());
+    }
+}
+
+/// Asserts that a release of the first source that is not answered still asks for the release
+/// of the second, at the check's start and after a failure, and that the first failure is the
+/// check's answer. Catches a check that leaves the second tree placed behind a first release
+/// that failed.
+#[test]
+fn a_failed_release_of_one_source_still_releases_the_other() {
+    let provider = FakeProvider::default();
+    provider.answer("Mount", 1, ProviderCode::FailedPrecondition, "no");
+    let refusing = FirstReleaseFailsAfterPrepare { inner: &provider };
+    let (outcome, why, _, detail) = failed(check(&refusing, &shape(), 5));
+    assert_eq!(
+        (outcome, why),
+        (Outcome::Failure, Some(Reason::ProviderRefused))
+    );
+    assert!(
+        detail.contains("refused Mount of the tree without"),
+        "{detail}"
+    );
+    let calls = provider.calls();
+    assert_eq!(calls.last().map(String::as_str), Some("Release 1"));
+    assert_eq!(provider.placed(), [0]);
+}
+
+/// A provider whose `Release` of source 0 is not answered once a `Prepare` was.
+struct FirstReleaseFailsAfterPrepare<'a> {
+    inner: &'a FakeProvider,
+}
+
+impl super::ports::MountProvider for FirstReleaseFailsAfterPrepare<'_> {
+    fn prepare(
+        &self,
+        socket: &std::path::Path,
+        index: u32,
+        reference: &str,
+    ) -> Result<(), ProviderFault> {
+        self.inner.prepare(socket, index, reference)
+    }
+
+    fn mount(&self, socket: &std::path::Path, index: u32) -> Result<PathBuf, ProviderFault> {
+        self.inner.mount(socket, index)
+    }
+
+    fn release(&self, socket: &std::path::Path, index: u32) -> Result<(), ProviderFault> {
+        let prepared = self
+            .inner
+            .calls()
+            .iter()
+            .any(|call| call.starts_with("Prepare"));
+        if prepared && index == 0 {
+            return Err(ProviderFault::Silent("reset".to_owned()));
+        }
+        self.inner.release(socket, index)
+    }
+
+    fn read_tree(&self, dir: &std::path::Path) -> Result<BTreeMap<String, TreeNode>, String> {
+        self.inner.read_tree(dir)
     }
 }
 

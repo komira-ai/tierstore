@@ -386,3 +386,87 @@ fn a_request_frame_is_its_message_after_five_bytes() {
     let frame: Bytes = framed(&MountResponse::default()).unwrap();
     assert_eq!(frame.as_ref(), [0, 0, 0, 0, 0]);
 }
+
+/// A listener on a socket in `dir` that answers every connection with `answer` (none: it keeps
+/// the connection open and never answers), as long as the test runs.
+fn answering(dir: &TestDir, name: &str, answer: Option<&'static [u8]>) -> PathBuf {
+    let path = dir.path().join(name);
+    let listener = UnixListener::bind(&path).unwrap();
+    std::thread::spawn(move || {
+        let mut held = Vec::new();
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { return };
+            if let Some(answer) = answer {
+                use std::io::Write as _;
+                let _ = stream.write_all(answer);
+            }
+            held.push(stream);
+        }
+    });
+    path
+}
+
+/// Asserts that a provider that takes the connection and never answers is silence once the
+/// call's bound has passed, naming the call and its bound, and that one that answers with
+/// something that is not HTTP/2 is silence naming the connection. The bound ends a call the other
+/// side never ends, so the outcome is the same however long the bound is. Catches a call that
+/// waits for ever on a provider that hangs, holding `verify` until hostkeeper kills it.
+#[test]
+fn a_provider_that_never_answers_or_answers_no_protocol_is_silence() {
+    let dir = TestDir::under(std::env::temp_dir(), "hook-prov-hang");
+    let times = ProviderTimes {
+        mount: std::time::Duration::from_millis(200),
+        ..ProviderTimes::default()
+    };
+    let client = ProviderSocket::new(PathBuf::from("/"), times);
+    let hanging = answering(&dir, "hang.sock", None);
+    assert_eq!(
+        client.mount(&hanging, 0),
+        Err(ProviderFault::Silent(
+            "Mount: no answer within 200 ms".to_owned()
+        ))
+    );
+    let garbage = answering(&dir, "junk.sock", Some(b"HTTP/1.1 200 OK\r\n\r\n"));
+    match client.mount(&garbage, 0) {
+        Err(ProviderFault::Silent(why)) => {
+            assert!(why.starts_with("Mount: no "), "{why}");
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+/// Asserts that an HTTP/2 answer with no `grpc-status` is silence that says so, with the HTTP
+/// status. Catches a server that is not the provider (or a broken one) taken for one that
+/// answered success.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_answer_with_no_grpc_status_is_silence() {
+    use http_body_util::Full;
+    use hyper::server::conn::http2 as server;
+    use hyper_util::rt::{TokioExecutor, TokioIo};
+
+    let dir = TestDir::under(std::env::temp_dir(), "hook-prov-nostatus");
+    let path = dir.path().join("plain.sock");
+    let listener = tokio::net::UnixListener::bind(&path).unwrap();
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            let service = hyper::service::service_fn(|_request| async {
+                Ok::<_, std::convert::Infallible>(hyper::Response::new(Full::new(Bytes::new())))
+            });
+            tokio::spawn(
+                server::Builder::new(TokioExecutor::new())
+                    .serve_connection(TokioIo::new(stream), service),
+            );
+        }
+    });
+    let answered = tokio::task::spawn_blocking(move || {
+        ProviderSocket::new(PathBuf::from("/"), ProviderTimes::default()).release(&path, 0)
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        answered,
+        Err(ProviderFault::Silent(
+            "Release: an answer with no grpc-status (HTTP 200 OK)".to_owned()
+        ))
+    );
+}

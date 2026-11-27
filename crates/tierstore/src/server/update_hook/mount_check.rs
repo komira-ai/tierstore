@@ -10,7 +10,9 @@
 //! 3. A read of every path below each directory, compared with the tree: every file's bytes,
 //!    every directory and the link's target, and nothing else.
 //! 4. `Release` of both, then a `Mount` of each, which must be answered `UNAVAILABLE` with
-//!    [`NOT_PREPARED_HERE`]: the provider finds no placement at the source's path.
+//!    [`NOT_PREPARED_HERE`]: the provider finds no placement at the source's path. A directory
+//!    answered then is a placement that outlived its release; any other answer is judged as at
+//!    any call.
 //!
 //! What fails the check, and so `verify`, with the provider's reason: a refusal of any call
 //! (`FAILED_PRECONDITION`, `INVALID_ARGUMENT` or any status but `UNAVAILABLE`,
@@ -19,16 +21,17 @@
 //! node's jobs would fail the same way. What defers it ([`Reason::NotReady`], hostkeeper asks
 //! again and ends the deferrals itself at `verify_deadline_secs`): a provider that does not answer
 //! (its socket not bound yet: the new instance binds it once it holds the cache's lock) or answers
-//! `UNAVAILABLE` (a tree not placed within the call's wait). Every path after the first `Prepare`
-//! that does not end the check with its own releases releases both sources first, so that a
-//! failed or deferred check leaves no placement behind; the trees' objects are the release's own
+//! `UNAVAILABLE` (a tree not placed within the call's wait). A check that fails or defers after
+//! its first `Prepare` asks for the release of both sources before it ends (each asked even when
+//! the other's is not answered), so that it leaves no placement the provider can release; a
+//! placement it cannot is released by the next check's first step, or at `trees.ttl_max`; the trees' objects are the release's own
 //! and nothing is written to the store.
 //!
 //! The check's sources are its own agent's, which no job's are, and it never sweeps: it is safe
 //! while jobs run. A node without the interface has no provider, and nothing is checked.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Component, PathBuf};
 
 use super::params::Params;
 use super::ports::{Host, MountProvider, ProviderCode, ProviderFault, TreeNode};
@@ -84,7 +87,10 @@ pub(super) fn check(
     placed?;
     asked.release_all()?;
     for tree in TREES {
-        asked.gone(&tree)?;
+        if let Err(done) = asked.gone(&tree) {
+            let _ = asked.release_all();
+            return Err(done);
+        }
     }
     let forms: Vec<&str> = TREES.iter().map(|tree| tree.form).collect();
     Ok(format!(
@@ -103,12 +109,17 @@ struct Asked<'a> {
 
 impl Asked<'_> {
     /// Releases both sources.
+    /// Releases both sources, the second also when the first is not released: the first
+    /// failure is the answer.
     fn release_all(&self) -> Result<(), Done> {
+        let mut first = Ok(());
         for tree in TREES {
             let released = self.provider.release(&self.shape.socket, tree.index);
-            released.map_err(|fault| self.failed("Release", &tree, fault))?;
+            if let (Err(fault), Ok(())) = (released, &first) {
+                first = Err(self.failed("Release", &tree, fault));
+            }
         }
-        Ok(())
+        first
     }
 
     /// Prepares both sources, mounts both, and reads both trees.
@@ -147,7 +158,14 @@ impl Asked<'_> {
     /// `dir`, if it is below the provider's mount.
     fn below_mount(&self, tree: &CheckTree, dir: PathBuf) -> Result<PathBuf, Done> {
         let mount = &self.shape.mountpoint;
-        if dir.starts_with(mount) && dir != *mount {
+        // Below the mount, with nothing after it but names: no `..` that leads out of it.
+        let below = dir.strip_prefix(mount).ok().filter(|rest| {
+            rest.components().next().is_some()
+                && rest
+                    .components()
+                    .all(|part| matches!(part, Component::Normal(_)))
+        });
+        if below.is_some() {
             return Ok(dir);
         }
         Err(wrong(format!(
@@ -160,20 +178,21 @@ impl Asked<'_> {
 
     /// Asks for `tree`'s source after its release: the provider must find no placement of it.
     fn gone(&self, tree: &CheckTree) -> Result<(), Done> {
-        let after = self.provider.mount(&self.shape.socket, tree.index);
-        let said = match after {
+        match self.provider.mount(&self.shape.socket, tree.index) {
             Err(ProviderFault::Answered {
                 code: ProviderCode::Unavailable,
                 reason,
-            }) if reason == NOT_PREPARED_HERE => return Ok(()),
-            Ok(dir) => format!("its directory {}", dir.display()),
-            Err(ProviderFault::Answered { code, reason }) => format!("{code:?}: {reason}"),
-            Err(ProviderFault::Silent(why)) => format!("nothing: {why}"),
-        };
-        Err(wrong(format!(
-            "the placement of the tree {} outlived its Release: a Mount after it answered {said}",
-            tree.form
-        )))
+            }) if reason == NOT_PREPARED_HERE => Ok(()),
+            Ok(dir) => Err(wrong(format!(
+                "the placement of the tree {} outlived its Release: a Mount after it answered \
+                 its directory {}",
+                tree.form,
+                dir.display()
+            ))),
+            // Any other answer is judged as at any call: silence and `UNAVAILABLE` defer, a
+            // refusal fails.
+            Err(fault) => Err(self.failed("Mount", tree, fault)),
+        }
     }
 
     /// What `call` of `tree`'s source answered with `fault` makes of the check.

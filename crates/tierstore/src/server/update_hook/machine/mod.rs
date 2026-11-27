@@ -40,10 +40,7 @@ pub use launchd::{
 };
 pub use markers::MarkerFiles;
 pub use processes::ProcFiles;
-pub use provider::{
-    MAX_FILE_BYTES, MAX_PATHS, MOUNT_TIMEOUT, PREPARE_TIMEOUT, ProviderSocket, ProviderTimes,
-    READ_TREE_TIMEOUT, RELEASE_TIMEOUT,
-};
+pub use provider::{ProviderSocket, ProviderTimes};
 pub use runner::{Call, Output, RunError, Runner, SystemRunner};
 pub use state::{CONFIG_STATE_FILE, LOCK_FILE, STATE_FILE, StateFiles};
 pub use units::{GuardUnit, SystemdUnits};

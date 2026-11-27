@@ -331,12 +331,7 @@ fn verify(c: &Ctx<'_, '_>, params: &Params, record: &mut Record) -> Result<Done,
         let marked = record.with(Marker::Verified);
         c.save(record, marked)?;
     }
-    let mut done = verified(mode, target);
-    if !mounted.is_empty() {
-        let rest = done.report.detail.take().unwrap_or_default();
-        done.report.detail = Some(format!("{mounted}; {rest}"));
-    }
-    Ok(done)
+    Ok(verified(mode, target).led_by(mounted))
 }
 
 fn rollback(c: &Ctx<'_, '_>, params: &Params, record: &mut Record) -> Result<Done, Done> {

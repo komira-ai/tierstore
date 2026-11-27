@@ -38,17 +38,17 @@ use super::host::under;
 use crate::server::provider::check::{AGENT, RUN};
 
 /// The longest a `Prepare` may take, as jobscheduler's agent bounds it.
-pub const PREPARE_TIMEOUT: Duration = Duration::from_secs(10);
+pub(super) const PREPARE_TIMEOUT: Duration = Duration::from_secs(10);
 /// The longest a `Mount` may take: the provider answers "not ready" within 25 s.
-pub const MOUNT_TIMEOUT: Duration = Duration::from_secs(30);
+pub(super) const MOUNT_TIMEOUT: Duration = Duration::from_secs(30);
 /// The longest a `Release` may take.
-pub const RELEASE_TIMEOUT: Duration = Duration::from_secs(5);
+pub(super) const RELEASE_TIMEOUT: Duration = Duration::from_secs(5);
 /// The longest the read of a tree may take.
-pub const READ_TREE_TIMEOUT: Duration = Duration::from_secs(30);
+pub(super) const READ_TREE_TIMEOUT: Duration = Duration::from_secs(30);
 /// The most paths a tree read through the mount may have.
-pub const MAX_PATHS: usize = 64;
+pub(super) const MAX_PATHS: usize = 64;
 /// The most bytes a file of a tree read through the mount may have.
-pub const MAX_FILE_BYTES: u64 = 1 << 20;
+pub(super) const MAX_FILE_BYTES: u64 = 1 << 20;
 
 /// The bounds of the calls and of the read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -106,7 +106,7 @@ impl ProviderSocket {
         let answered = runtime.block_on(async {
             tokio::time::timeout(bound, ask(&at, &path, frame))
                 .await
-                .unwrap_or_else(|_| Err(format!("no answer within {} s", bound.as_secs())))
+                .unwrap_or_else(|_| Err(format!("no answer within {} ms", bound.as_millis())))
         });
         let (status, data) = answered.map_err(silent)?;
         if status.code() != Code::Ok {
@@ -230,8 +230,8 @@ impl MountProvider for ProviderSocket {
         std::thread::spawn(move || sender.send(walk(&at)));
         read.recv_timeout(self.times.read).unwrap_or_else(|_| {
             Err(format!(
-                "the read did not end within {} s",
-                self.times.read.as_secs()
+                "the read did not end within {} ms",
+                self.times.read.as_millis()
             ))
         })
     }

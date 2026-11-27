@@ -216,6 +216,18 @@ impl Reason {
     }
 }
 
+impl Done {
+    /// The same, with `first` before its detail, when there is anything to say first.
+    #[must_use]
+    pub(super) fn led_by(mut self, first: String) -> Done {
+        if !first.is_empty() {
+            let rest = self.report.detail.take().unwrap_or_default();
+            self.report.detail = Some(format!("{first}; {rest}"));
+        }
+        self
+    }
+}
+
 /// What a step tells the updater besides its exit code.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Report {
