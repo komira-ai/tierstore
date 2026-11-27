@@ -1,7 +1,7 @@
 //! The provider as the start of a build node serves it: bound beside the S3 front from the node's
 //! `mount-provider` interface, a source prepared, mounted and released over the socket from a tree
 //! list in the node's upstream, and the socket gone when the node has drained; and, on a node whose
-//! file has no `fs` interface, every `Prepare` and `Mount` answered `UNAVAILABLE` over the socket.
+//! provider is not served, every `Prepare` and `Mount` answered `UNAVAILABLE` over the socket.
 
 use std::sync::Arc;
 
@@ -13,6 +13,7 @@ use tonic::Code;
 
 use super::super::Drained;
 use super::super::cache_cli_tests::{Node, serving};
+use super::super::config_cache::CacheSettings;
 use super::super::local_cache::pack_testing::Pack;
 use super::super::local_cache::{Disk, SystemDisk};
 use super::sources::no_fs;
@@ -27,6 +28,22 @@ fn provider_interface(socket: &std::path::Path) -> String {
     )
 }
 
+/// The settings of a build node whose file has a `mount-provider` interface on `socket` and the
+/// `fs` interface that serves its mount, as a file must (a provider with no `fs` interface is
+/// refused at load), with the file system itself left out: the test mounts none.
+fn settings_of(node: &Node, socket: &std::path::Path) -> CacheSettings {
+    let (uid, gid) = (
+        rustix::process::geteuid().as_raw(),
+        rustix::process::getegid().as_raw(),
+    );
+    let fs = format!(
+        "\n[[interface]]\ntype = \"fs\"\n[interface.params]\nmountpoint = \"{MOUNT}\"\nclient_group = \"{gid}\"\nowner = \"{uid}:{gid}\"\n"
+    );
+    let mut settings = node.settings("", &format!("{}{fs}", provider_interface(socket)));
+    settings.fs = None;
+    settings
+}
+
 /// Asserts that a build node whose file has a `mount-provider` interface serves the provider on
 /// its socket while it serves: a prepare of a tree list in the node's upstream, a mount that
 /// answers the source's directory under the interface's mount, and a release; and that the socket
@@ -36,8 +53,8 @@ fn provider_interface(socket: &std::path::Path) -> String {
 async fn a_build_node_serves_its_mount_provider_beside_the_s3_front() {
     let node = Node::new("prov-node");
     let socket = node.cache_dir().with_file_name("provider.sock");
-    let mut settings = node.settings("", &provider_interface(&socket));
-    settings.provider.as_mut().expect("a provider").served = true;
+    let settings = settings_of(&node, &socket);
+    assert!(settings.provider.as_ref().expect("a provider").served);
     let memory = Arc::new(MemoryBackend::new());
     let pack = Pack::new("cas/pack/one", &[1000, 2000, 3000]);
     memory
@@ -77,17 +94,20 @@ async fn a_build_node_serves_its_mount_provider_beside_the_s3_front() {
     assert!(!socket.exists());
 }
 
-/// Asserts that a build node whose file has a `mount-provider` interface and no `fs` interface
-/// (a Mac's file of the two-process layout) still serves the provider's socket, and answers its
-/// `Prepare` and `Mount` `UNAVAILABLE` with the reason that names the mount no process serves,
-/// over the wire as the agent reads it, and its `Release` with success; and that the socket is
-/// gone when the node has drained. Catches a node that answers the agent a directory under a
-/// mount nothing serves, which fails the job's start on every try.
+/// Asserts that a build node whose provider is not served (its mount is not served by any
+/// process) still serves the provider's socket, and answers its `Prepare` and `Mount`
+/// `UNAVAILABLE` with the reason that names the mount no process serves, over the wire as the
+/// agent reads it, and its `Release` with success; and that the socket is gone when the node has
+/// drained. A file can no longer make such a provider (a `mount-provider` interface with no `fs`
+/// interface is refused at load), so the test loads a file with both and clears `served`, as a
+/// start whose file system is gone would leave it. Catches a node that answers the agent a
+/// directory under a mount nothing serves, which fails the job's start on every try.
 #[tokio::test]
 async fn a_build_node_with_no_fs_interface_answers_its_provider_unavailable() {
     let node = Node::new("prov-node-no-fs");
     let socket = node.cache_dir().with_file_name("provider.sock");
-    let settings = node.settings("", &provider_interface(&socket));
+    let mut settings = settings_of(&node, &socket);
+    settings.provider.as_mut().expect("a provider").served = false;
     let upstream: Arc<dyn Backend> = Arc::new(FaultyBackend::new(Arc::new(MemoryBackend::new())));
     let disk: Arc<dyn Disk> = Arc::new(SystemDisk);
     let pack = Pack::new("cas/pack/one", &[1000, 2000, 3000]);
