@@ -69,6 +69,8 @@ fn a_build_node_has_the_default_trees_with_no_table_and_with_an_empty_one() {
     );
     assert_eq!(default.max_placements, 1024);
     assert_eq!(default.fill_concurrency, 8);
+    assert_eq!(default.prepare_concurrency, 8);
+    assert_eq!(default.max_sources, 16_384);
     assert_eq!(default.prefetch_default, Prefetch::Wait);
     assert_eq!(default.prepare_prefetch, PreparePrefetch::Background);
     assert_eq!(default.create_timeout, Duration::from_secs(120));
@@ -91,6 +93,8 @@ max_request_bytes = "1MiB"
 max_bytes = "2GiB"
 max_placements = 7
 fill_concurrency = 3
+prepare_concurrency = 2
+max_sources = 9
 prefetch_default = "background"
 prepare_prefetch = "none"
 create_timeout = "30s"
@@ -110,6 +114,8 @@ max_failures = 5
             max_bytes: 2 << 30,
             max_placements: 7,
             fill_concurrency: 3,
+            prepare_concurrency: 2,
+            max_sources: 9,
             prefetch_default: Prefetch::Background,
             prepare_prefetch: PreparePrefetch::None,
             create_timeout: Duration::from_secs(30),
@@ -166,6 +172,10 @@ fn a_key_out_of_its_range_is_refused_by_name() {
         ("max_placements = 1000001", "trees.max_placements:"),
         ("fill_concurrency = 0", "trees.fill_concurrency:"),
         ("fill_concurrency = 1025", "trees.fill_concurrency:"),
+        ("prepare_concurrency = 0", "trees.prepare_concurrency:"),
+        ("prepare_concurrency = 1025", "trees.prepare_concurrency:"),
+        ("max_sources = 0", "trees.max_sources:"),
+        ("max_sources = 1000001", "trees.max_sources:"),
         ("create_timeout = \"0s\"", "trees.create_timeout:"),
         ("create_timeout = \"2h\"", "trees.create_timeout:"),
         ("max_failures = 0", "trees.max_failures:"),
@@ -212,7 +222,7 @@ fn only_a_build_node_has_the_table_and_an_unknown_key_is_a_warning() {
     );
     assert!(refusal(&combined).starts_with("trees: only a build node has trees"));
     let known = fields_of::<TreesTable>();
-    assert_eq!(known.len(), 14);
+    assert_eq!(known.len(), 16);
     let table: toml::Table = toml::from_str("[trees]\nttl = \"1h\"\nnew_knob = 1\n").unwrap();
     assert_eq!(
         unknown_key_warnings(&table),

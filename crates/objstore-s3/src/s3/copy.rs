@@ -144,10 +144,11 @@ async fn send_copy(
     moved: u64,
 ) -> Result<Response, ObjectStoreError> {
     let timeout = conn.timeout_for(usize::try_from(moved).unwrap_or(usize::MAX));
-    conn.failing_over(|keys| {
+    conn.failing_over(false, |keys, target| {
         let req = conn
             .signed_payload(
                 &keys,
+                target,
                 Method::PUT,
                 Some(key),
                 query,
