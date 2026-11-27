@@ -37,7 +37,7 @@ impl Server {
     /// holds while it is made, and a copy into a part while it puts the bytes it reads: at once if the server takes fewer writes than it may,
     /// otherwise the first that is freed within
     /// [`put_permit_wait`](crate::server::ServerConfig::put_permit_wait), or 503 `SlowDown`.
-    pub(super) async fn permit(&self) -> Result<OwnedSemaphorePermit, S3Error> {
+    pub(in crate::server) async fn permit(&self) -> Result<OwnedSemaphorePermit, S3Error> {
         if let Ok(permit) = Arc::clone(&self.puts).try_acquire_owned() {
             return Ok(permit);
         }

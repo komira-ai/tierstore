@@ -56,8 +56,8 @@ export function code(text: string): string {
   return out.join('\n');
 }
 
-/** The files that export metrics: the OCI front's, the cache's (and its entries by extents', its runs' request to start, its mounts' tree attaches, its mounts' descriptors, its mounts' opens, its mounts' tree lists, its mounts' requests, its mounts' attaches and detaches of runs, and its provider's refused tree lists) and the tiers'. */
-const EXPORTERS = new Set(['server/oci/metrics.rs', 'server/local_cache/metrics.rs', 'server/local_cache/extents/counts.rs', 'server/local_cache/starts.rs', 'server/local_cache/attaches.rs', 'server/local_cache/descriptors.rs', 'server/local_cache/opens.rs', 'server/local_cache/tree_lists.rs', 'server/local_cache/requests.rs', 'server/local_cache/runs.rs', 'server/local_cache/list_refusals.rs', 'server/local_cache/provider_unavailable.rs', 'metrics.rs', 'server/build_info.rs', 'server/mod.rs', 'server/front_counts.rs']);
+/** The files that export metrics: the OCI front's, the cache's (and its entries by extents', its runs' request to start, its mounts' tree attaches, its mounts' descriptors, its mounts' opens, its mounts' tree lists, its mounts' requests, its mounts' attaches and detaches of runs, its provider's refused tree lists, and its provider's sources and preparations), the tiers', and the S3 front's bounds. */
+const EXPORTERS = new Set(['server/oci/metrics.rs', 'server/local_cache/metrics.rs', 'server/local_cache/extents/counts.rs', 'server/local_cache/starts.rs', 'server/local_cache/attaches.rs', 'server/local_cache/descriptors.rs', 'server/local_cache/opens.rs', 'server/local_cache/tree_lists.rs', 'server/local_cache/requests.rs', 'server/local_cache/runs.rs', 'server/local_cache/list_refusals.rs', 'server/local_cache/provider_unavailable.rs', 'metrics.rs', 'server/build_info.rs', 'server/mod.rs', 'server/front_counts.rs', 'server/bounds.rs', 'server/local_cache/preparations.rs']);
 
 /** What in the source no longer matches the pages. Each problem names the pages to change. */
 export function staleClaims(src: ReadonlyMap<string, string>): string[] {

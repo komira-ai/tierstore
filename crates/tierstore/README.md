@@ -32,7 +32,9 @@ The format and the rules are in `docs/configuration.md`.
 
 ## When the puts are at their limit
 
-At most `server.max_concurrent_puts` put bodies and upload parts are taken at once. A request that
+At most `server.max_concurrent_puts` request bodies are taken at once: put bodies and upload parts,
+and the bodies read whole (a completion of an upload, a DeleteObjects, a CreateBucket; at most
+8 MiB each), which take their slot when their first bytes arrive. A put or a part that
 arrives when all are taken waits up to `server.put_permit_wait` (15s by
 default) for one to end, without reading its body, and is taken if one ends in that time. If none
 does, it is answered 503 `SlowDown` with `Retry-After: 1` and its body is never read. With a tier

@@ -3,6 +3,7 @@
 
 use std::borrow::Cow;
 use std::collections::VecDeque;
+use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
@@ -273,19 +274,47 @@ where
         }
     }
 
-    /// The whole body, if it has at most the limit and comes to the hashes of `check`.
+    /// The whole body, if it has at most the limit and comes to the hashes of `check`: what the
+    /// tests of the reader read. The server reads a whole body with [`Reader::read_whole`].
     ///
     /// # Errors
-    /// As [`Reader::next`], and the error of [`Check::finish`].
-    pub(crate) async fn read_all(mut self, mut check: Check) -> Result<Bytes, S3Error> {
+    /// As [`Reader::read_whole`].
+    #[cfg(test)]
+    pub(crate) async fn read_all(self, check: Check) -> Result<Bytes, S3Error> {
+        let (whole, _) = self.read_whole(check, || async { Ok(()) }).await?;
+        Ok(whole)
+    }
+
+    /// The whole body, if it has at most the limit and comes to the hashes of `check`, and what
+    /// `at_first` gave when the first byte of it came, before that byte is kept (none for a body
+    /// of no bytes): the server takes a permit of the bodies there (`bounds`).
+    ///
+    /// # Errors
+    /// As [`Reader::next`], the error of `at_first`, and the error of [`Check::finish`].
+    pub(crate) async fn read_whole<T, F, Fut>(
+        mut self,
+        mut check: Check,
+        at_first: F,
+    ) -> Result<(Bytes, Option<T>), S3Error>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<T, S3Error>>,
+    {
         let mut whole = BytesMut::new();
+        let mut at_first = Some(at_first);
+        let mut taken = None;
         while let Some(piece) = self.next().await? {
+            if !piece.is_empty()
+                && let Some(first) = at_first.take()
+            {
+                taken = Some(first().await?);
+            }
             check.update(&piece);
             whole.extend_from_slice(&piece);
         }
         check.accept_trailer(self.trailer())?;
         check.finish()?;
-        Ok(whole.freeze())
+        Ok((whole.freeze(), taken))
     }
 }
 
