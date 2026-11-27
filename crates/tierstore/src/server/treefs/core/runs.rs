@@ -15,7 +15,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::server::local_cache::runs::{RunAttach, RunDetach, RunOutcome};
+use crate::server::local_cache::attaches::runs::{RunAttach, RunDetach, RunOutcome};
 use crate::tree_manifest::TreeDigest;
 
 use super::super::attach::{Failure, is_run};

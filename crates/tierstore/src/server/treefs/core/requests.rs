@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::server::local_cache::attaches::{BUCKETS, bucket_of};
 use crate::server::local_cache::opens::Spans;
-use crate::server::local_cache::requests::{KINDS, RequestKind, Requests};
+use crate::server::local_cache::opens::requests::{KINDS, RequestKind, Requests};
 
 use super::super::fills::Report;
 use super::Core;

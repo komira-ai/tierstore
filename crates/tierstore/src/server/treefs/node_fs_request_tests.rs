@@ -9,7 +9,7 @@ use std::time::Duration;
 use super::*;
 use crate::server::local_cache::attaches::BUCKETS;
 use crate::server::local_cache::opens::Spans;
-use crate::server::local_cache::requests::{KINDS, RequestKind, Requests};
+use crate::server::local_cache::opens::requests::{KINDS, RequestKind, Requests};
 
 /// How many requests of each kind the core of `wire` counted, in the order of [`KINDS`].
 fn counts(wire: &Wire) -> [u64; KINDS.len()] {

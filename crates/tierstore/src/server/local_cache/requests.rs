@@ -14,13 +14,13 @@
 //! - `<mount>`: the id of the mount;
 //! - `<process>`: the id of the mount process (its pid);
 //! - then, for each kind in the order of [`KINDS`], the milliseconds of all those requests and how
-//!   many fell in each bucket of [`BOUNDS_MS`](super::attaches::BOUNDS_MS) and above the last:
+//!   many fell in each bucket of [`BOUNDS_MS`](super::super::attaches::BOUNDS_MS) and above the last:
 //!   running totals since that process started, so that a report lost loses nothing the next one
 //!   carries.
 //!
 //! The node adds to `tierstore_fs_request_seconds` what each process's totals grew by since its
-//! report before, by the rule of the opens ([`grown`]): the totals of the
-//! [`PROCESSES`](super::descriptors::PROCESSES) latest processes of a mount are kept, and at most
+//! report before, by the rule of the opens ([`grown`], `opens.rs`): the totals of the
+//! [`PROCESSES`](super::super::descriptors::PROCESSES) latest processes of a mount are kept, and at most
 //! [`MOST_MOUNTS`] mounts; a report of another, when that many are, is answered `ok` and counted
 //! nowhere.
 //!
@@ -34,10 +34,10 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::sync::Mutex;
 
-use super::attaches::{BUCKETS, Histogram};
-use super::descriptors::{MOST_MOUNTS, number};
-use super::opens::{Spans, grown};
-use super::{LocalCache, locked};
+use super::super::attaches::{BUCKETS, Histogram};
+use super::super::descriptors::{MOST_MOUNTS, number};
+use super::super::{LocalCache, locked};
+use super::{Spans, grown};
 use crate::server::fill_socket::request::is_name;
 
 /// The family, with a `# TYPE` line, and its series, each written out for `docs/metrics.md`.

@@ -16,11 +16,11 @@ use crate::TreeDigest;
 #[cfg(any(target_os = "linux", target_os = "macos", test))]
 use crate::server::local_cache::LocalCache;
 use crate::server::local_cache::TreeFilled;
+use crate::server::local_cache::attaches::runs::{RunAttach, RunDetach};
 use crate::server::local_cache::attaches::{Attach, Fetches, Levels};
 use crate::server::local_cache::descriptors::Descriptors;
 use crate::server::local_cache::opens::Opens;
-use crate::server::local_cache::requests::Requests;
-use crate::server::local_cache::runs::{RunAttach, RunDetach};
+use crate::server::local_cache::opens::requests::Requests;
 use crate::server::local_cache::tree_lists::TreeLists;
 #[cfg(any(target_os = "linux", target_os = "macos", test))]
 use crate::server::local_cache::trees::{MappedLists, TreeStore};

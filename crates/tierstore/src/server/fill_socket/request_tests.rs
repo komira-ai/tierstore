@@ -4,11 +4,11 @@ use std::path::PathBuf;
 
 use super::{MountRequest, Refusal, Request, parse};
 use crate::TreeDigest;
+use crate::server::local_cache::attaches::runs::{RunAttach, RunDetach, RunOutcome};
 use crate::server::local_cache::attaches::{Attach, Fetches, Levels, Outcome};
 use crate::server::local_cache::descriptors::Descriptors;
+use crate::server::local_cache::opens::requests::{RequestKind, Requests};
 use crate::server::local_cache::opens::{Opens, Spans};
-use crate::server::local_cache::requests::{RequestKind, Requests};
-use crate::server::local_cache::runs::{RunAttach, RunDetach, RunOutcome};
 use crate::server::local_cache::tree_lists::{Totals, TreeLists};
 use crate::server::local_cache::trees::{PlacementId, placement_id};
 

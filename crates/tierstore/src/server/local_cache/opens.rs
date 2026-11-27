@@ -282,6 +282,11 @@ impl LocalCache {
     }
 }
 
+// The requests of the mounts' frontends, whose totals the node follows by the rule of the opens
+// (`grown`).
+#[path = "requests.rs"]
+pub(in crate::server) mod requests;
+
 #[cfg(test)]
 #[path = "opens_tests.rs"]
 mod tests;

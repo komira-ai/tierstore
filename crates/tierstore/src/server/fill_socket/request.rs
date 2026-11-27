@@ -54,23 +54,23 @@
 //! histogram. The words of a `treelists` are those of
 //! [`TreeLists`](crate::server::local_cache::tree_lists::TreeLists): a mount name and seven
 //! numbers. The words of a `requests` are those of
-//! [`Requests`](crate::server::local_cache::requests::Requests): a mount name, a number, and for
+//! [`Requests`](crate::server::local_cache::opens::requests::Requests): a mount name, a number, and for
 //! each kind of request the milliseconds and one number for each bucket of the histogram. The
 //! words of a `run-attached` and a `run-detached` are those of
-//! [`RunAttach`](crate::server::local_cache::runs::RunAttach) and
-//! [`RunDetach`](crate::server::local_cache::runs::RunDetach): an outcome (`ok`, `failed`) and
+//! [`RunAttach`](crate::server::local_cache::attaches::runs::RunAttach) and
+//! [`RunDetach`](crate::server::local_cache::attaches::runs::RunDetach): an outcome (`ok`, `failed`) and
 //! four numbers, and an outcome and a number.
 
 use std::path::PathBuf;
 
 use crate::TreeDigest;
 use crate::journal::is_reserved;
+use crate::server::local_cache::attaches::runs::{RunAttach, RunDetach};
 use crate::server::local_cache::attaches::{Attach, Fetches, Levels};
 use crate::server::local_cache::descriptors::Descriptors;
 use crate::server::local_cache::layout::is_digest;
 use crate::server::local_cache::opens::Opens;
-use crate::server::local_cache::requests::Requests;
-use crate::server::local_cache::runs::{RunAttach, RunDetach};
+use crate::server::local_cache::opens::requests::Requests;
 use crate::server::local_cache::tree_lists::TreeLists;
 use crate::server::local_cache::trees::{Location, PlacementId, placement_id};
 

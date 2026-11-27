@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use crate::server::local_cache::attaches::BUCKETS;
 use crate::server::local_cache::opens::Spans;
-use crate::server::local_cache::requests::{RequestKind, Requests};
+use crate::server::local_cache::opens::requests::{RequestKind, Requests};
 use crate::server::treefs::testing::{Rig, sample, until};
 
 /// Times one request of `kind` that takes `ms` milliseconds on the core's clock of `rig`.

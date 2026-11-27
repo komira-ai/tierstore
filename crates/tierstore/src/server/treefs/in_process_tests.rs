@@ -11,12 +11,12 @@ use tokio::sync::Notify;
 
 use super::InProcess;
 use crate::server::fill_socket;
+use crate::server::local_cache::attaches::runs::{RunAttach, RunDetach, RunOutcome};
 use crate::server::local_cache::attaches::{Attach, Fetches, Levels, Outcome};
 use crate::server::local_cache::descriptors::Descriptors;
+use crate::server::local_cache::opens::requests::{RequestKind, Requests};
 use crate::server::local_cache::opens::{Opens, Spans};
 use crate::server::local_cache::pack_testing::{Pack, blob_hex, fills, recency};
-use crate::server::local_cache::requests::{RequestKind, Requests};
-use crate::server::local_cache::runs::{RunAttach, RunDetach, RunOutcome};
 use crate::server::local_cache::testing::{Rig, until};
 use crate::server::local_cache::tree_lists::{Totals, TreeLists};
 use crate::server::local_cache::trees::TreeStore;

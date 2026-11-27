@@ -69,7 +69,7 @@ use super::core::{self, Core, FIXED_MTIME, Failing, Kind, Looked, Opened};
 use super::fetches::Fetches;
 use super::ino;
 use super::put_fs::PutFs;
-use crate::server::local_cache::requests::RequestKind;
+use crate::server::local_cache::opens::requests::RequestKind;
 
 /// `ENOENT`.
 const ENOENT: Errno = Errno(2);

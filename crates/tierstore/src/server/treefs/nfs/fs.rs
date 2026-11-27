@@ -33,7 +33,7 @@ use tokio::sync::watch;
 use super::config::NfsSettings;
 use super::fdcache::FdCache;
 use super::handle;
-use crate::server::local_cache::requests::RequestKind;
+use crate::server::local_cache::opens::requests::RequestKind;
 use crate::server::treefs::core::{Attr, Core, Errno, FIXED_MTIME, FileBytes, Kind, Looked};
 use crate::server::treefs::{ino, locked};
 

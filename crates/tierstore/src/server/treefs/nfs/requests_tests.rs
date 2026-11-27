@@ -8,7 +8,7 @@ use std::time::Duration;
 use nfsserve::nfs::sattr3;
 use nfsserve::vfs::NFSFileSystem as _;
 
-use crate::server::local_cache::requests::{KINDS, RequestKind};
+use crate::server::local_cache::opens::requests::{KINDS, RequestKind};
 use crate::server::treefs::ino;
 use crate::server::treefs::nfs::config::NfsSettings;
 use crate::server::treefs::nfs::fixtures::{UID, attached, auth, endless, fs_of};

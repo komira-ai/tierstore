@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use super::super::{Errno, Opened};
 use super::SAY_EVERY_MS;
-use crate::server::local_cache::requests::{Answered, RequestKind, Requests};
+use crate::server::local_cache::opens::requests::{Answered, RequestKind, Requests};
 use crate::server::treefs::ino;
 use crate::server::treefs::testing::{Logged, Rig, logged, sample, sha, until};
 

@@ -35,9 +35,9 @@
 use std::fmt::Write as _;
 use std::sync::Mutex;
 
-use super::attaches::{BUCKETS, Histogram, bucket_of};
-use super::descriptors::number;
-use super::{LocalCache, locked};
+use super::super::descriptors::number;
+use super::super::{LocalCache, locked};
+use super::{BUCKETS, Histogram, bucket_of};
 
 /// The families, with a `# TYPE` line each, and their series, each written out for
 /// `docs/metrics.md`.
@@ -164,7 +164,7 @@ struct State {
 
 /// The reports of the attaches and detaches of runs of the mounts of one cache.
 #[derive(Debug, Default)]
-pub(super) struct Runs {
+pub(in crate::server::local_cache) struct Runs {
     state: Mutex<State>,
 }
 
@@ -190,7 +190,7 @@ impl Runs {
 
     /// The families in the Prometheus text format, all of one moment: the attaches by outcome,
     /// their parts by part and outcome, and the detaches by outcome.
-    pub(super) fn render(&self) -> String {
+    pub(in crate::server::local_cache) fn render(&self) -> String {
         let state = locked(&self.state);
         let mut text = format!("# TYPE {ATTACH} histogram\n");
         for (outcome, histogram) in RunOutcome::ALL.iter().zip(&state.attaches) {

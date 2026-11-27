@@ -14,9 +14,9 @@ use tokio::task::JoinHandle;
 
 use super::{Listening, SocketFile, pinned, serve, serve_as};
 use crate::Op;
+use crate::server::local_cache::opens::requests::{RequestKind, Requests};
 use crate::server::local_cache::opens::{Opens, Spans};
 use crate::server::local_cache::pack_testing::{Pack, blob_hex, fills, recency};
-use crate::server::local_cache::requests::{RequestKind, Requests};
 use crate::server::local_cache::testing::{Rig, digest, pattern, until, wait_advancing};
 use crate::server::local_cache::{LocalCache, PinError, Tick, blob_path};
 
