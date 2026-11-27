@@ -445,6 +445,28 @@ tierstore_memory_degraded == 1
 increase(tierstore_memory_bound_exits_total[1h]) > 0
 ```
 
+### Build node: the reads the mount provider queues
+
+The mount provider's `Prepare` queues a read of every file of a source's tree (unless
+`trees.prepare_prefetch = "none"`), and the queue drains only as fast as the node's
+`trees.fill_concurrency` reads go. A queued read holds about a hundred bytes of heap for each file until it is made or dropped.
+While the upstream does not answer, the reads drain at a few a minute, so the queues of every
+source prepared meanwhile stay in memory. The reads of every source together are held under a
+bound of 256 MiB: a source whose reads do not fit queues none, and its files are read when they
+are first opened, as with `"none"`. A release of a source drops its queued reads at once.
+
+| name | type | labels | value |
+|---|---|---|---|
+| `tierstore_provider_prefetch_queued_bytes` | gauge | none | the bytes of heap the reads queued by every source's `Prepare` hold now (the reads and their spans; not the pack names they share) |
+| `tierstore_provider_prefetch_skipped_total` | counter | none | the sources whose reads were not queued because they did not fit under the bound |
+
+```promql
+# The queued reads near their bound: the upstream is slow to answer the node's reads.
+tierstore_provider_prefetch_queued_bytes > 200 * 1024 * 1024
+# Sources prepared with no read queued: their files are read when first opened.
+increase(tierstore_provider_prefetch_skipped_total[10m]) > 0
+```
+
 ### Build node: request to start
 
 A build node whose cache has a tree store and serves jobscheduler's mount provider (the
