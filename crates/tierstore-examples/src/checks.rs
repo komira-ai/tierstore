@@ -92,7 +92,8 @@ fn json_value(work: &Path, check: &JsonCheck) -> Result<String, String> {
     }
 }
 
-/// `same` when the two paths hold the same files with the same bytes; else the first file found
+/// `same, <n> files` when the two paths hold the same `n` files with the same bytes (so two empty
+/// trees show as `same, 0 files`, not as a bare match); else the first file found
 /// in one of them only, or the first file that differs.
 fn same_bytes(work: &Path, check: &SameCheck) -> Result<String, String> {
     let (a, b) = (files(&work.join(&check.a))?, files(&work.join(&check.b))?);
@@ -110,7 +111,7 @@ fn same_bytes(work: &Path, check: &SameCheck) -> Result<String, String> {
         (Some(name), _, _) => format!("only {}", shown(&check.a, name)),
         (None, Some(name), _) => format!("only {}", shown(&check.b, name)),
         (None, None, Some((name, _))) => format!("differ at {}", shown(&check.a, name)),
-        (None, None, None) => "same".to_owned(),
+        (None, None, None) => format!("same, {} files", a.len()),
     })
 }
 

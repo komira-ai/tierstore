@@ -21,7 +21,7 @@ const START_POLL: Duration = Duration::from_millis(20);
 
 /// A running tierstore.
 pub struct Tierstore {
-    child: Child,
+    child: Reaped,
     addr: SocketAddr,
     log: PathBuf,
 }
@@ -35,7 +35,7 @@ impl Tierstore {
     pub fn start(binary: &Path, config: &Path, log: &Path) -> Result<Self, Error> {
         let file = File::create(log).map_err(io_at(log))?;
         let errors = file.try_clone().map_err(io_at(log))?;
-        let mut child = Command::new(binary)
+        let spawned = Command::new(binary)
             .arg("--config")
             .arg(config)
             .env_clear()
@@ -44,16 +44,18 @@ impl Tierstore {
             .stderr(errors)
             .spawn()
             .map_err(io_at(binary))?;
+        // From here on every way out of this function stops the process unless it returns it.
+        let mut child = Reaped(spawned);
         loop {
-            let text = std::fs::read_to_string(log).map_err(io_at(log))?;
+            let text = read_log(log)?;
             // Whole lines only: a line still being written could hold half a port.
             let whole = &text[..text.rfind('\n').map_or(0, |at| at + 1)];
             if let Some(addr) = whole.lines().find_map(listen_address) {
                 let log = log.to_path_buf();
                 return Ok(Self { child, addr, log });
             }
-            if let Some(status) = child.try_wait().map_err(io_at(binary))? {
-                let log_text = std::fs::read_to_string(log).map_err(io_at(log))?;
+            if let Some(status) = child.0.try_wait().map_err(io_at(binary))? {
+                let log_text = read_log(log)?;
                 let (status, log) = (status.to_string(), log.to_path_buf());
                 return Err(Error::TierstoreStart {
                     status,
@@ -82,21 +84,30 @@ impl Tierstore {
     /// # Errors
     /// The signal cannot be sent or the process waited for.
     pub fn stop(mut self) -> Result<String, Error> {
-        let pid = Pid::from_child(&self.child);
+        let pid = Pid::from_child(&self.child.0);
         let sent = kill_process(pid, Signal::TERM).map_err(std::io::Error::from);
         sent.map_err(io_at(&self.log))?;
-        let status = self.child.wait().map_err(io_at(&self.log))?;
+        let status = self.child.0.wait().map_err(io_at(&self.log))?;
         Ok(status.to_string())
     }
 }
 
-impl Drop for Tierstore {
-    /// A run that ends by an error before [`Tierstore::stop`] leaves no tierstore behind; after a
-    /// stop, the process is already reaped and this does nothing.
+/// A child process that is killed and reaped when it is dropped: a run that ends by an error, in
+/// [`Tierstore::start`] or before [`Tierstore::stop`], leaves no tierstore behind. After a stop the
+/// process is already reaped and this does nothing.
+struct Reaped(Child);
+
+impl Drop for Reaped {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        let _ = self.0.kill();
+        let _ = self.0.wait();
     }
+}
+
+/// The text of the log, with any bytes that are not UTF-8 replaced.
+fn read_log(log: &Path) -> Result<String, Error> {
+    let bytes = std::fs::read(log).map_err(io_at(log))?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 /// The first address of the start line `line`, if it is one.

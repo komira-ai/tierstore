@@ -9,8 +9,8 @@ publish.workspace = true
 description = "The runner of the examples in examples/: starts tierstore on a free port, runs an example's own S3 client against it, reads /metricz before and after each step, and compares what it found with the example's expected output."
 
 # The runner spawns the `tierstore` binary it is given (`--tierstore`); it does not link the
-# library. Its tests are in crates/tierstore/tests/examples, which have that binary
-# (`CARGO_BIN_EXE_tierstore`).
+# library. The tests of runs are in crates/tierstore/tests/examples, which have that binary
+# (`CARGO_BIN_EXE_tierstore`); tests/binary.rs here runs `tierstore-example` itself.
 
 [dependencies]
 # The command line of `tierstore-example`.
@@ -28,6 +28,10 @@ tokio = { workspace = true, features = ["rt", "net", "time"] }
 # `example.toml`, and the bucket of the example's `tierstore.toml`.
 toml.workspace = true
 
+[dev-dependencies]
+# The scratch directory of the test of the binary.
+tierstore-testkit.workspace = true
+
 [[bin]]
 name = "tierstore-example"
 path = "src/main.rs"
@@ -37,9 +41,9 @@ workspace = true
 
 [package.metadata.buildrules]
 # The farm lane's `//:ci` (docs/farm.md) checks the format of, builds and lints this package but does
-# not run its tests: they are in crates/tierstore/tests/examples (they need the `tierstore` binary,
-# and the example's client and compiler, none of which a farm action has), so this package's own
-# targets list no test, which buildrules' test gate refuses.
+# not run its tests: the tests of runs are in crates/tierstore/tests/examples (they need the
+# `tierstore` binary, and the example's client and compiler, none of which a farm action has), so
+# the library's own target lists no test, which buildrules' test gate refuses.
 
 [package.metadata.buildrules.actions]
 ci = ["fmt", "lint"]

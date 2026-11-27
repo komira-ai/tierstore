@@ -33,7 +33,8 @@
 //!
 //! The kinds of check: `json` (the value at a JSON pointer of a file a command wrote, or `default`
 //! where there is none), `metric` (how much a series of `/metricz` rose over a step), `same`
-//! (whether two files or directory trees of the work directory hold the same bytes) and `objects`
+//! (whether two files or directory trees of the work directory hold the same bytes, and how many
+//! files) and `objects`
 //! (how many objects the bucket lists under a prefix). A check with `expected_failure` stands for
 //! a call that fails because tierstore lacks a feature: its line names the issue, and the run fails
 //! when its value becomes `passing`, so the check is updated when the feature lands.

@@ -4,7 +4,7 @@ build1.sccache.writes 30
 build1.tierstore.puts 31
 build2.sccache.hits 30
 build2.sccache.misses 0
-build2.objects same
+build2.objects same, 30 files
 build2.tierstore.hits 31
 build2.tierstore.misses 0
 build2.tierstore.upstream_gets 0

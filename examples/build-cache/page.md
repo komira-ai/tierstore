@@ -22,7 +22,7 @@ repository:
 
 ```sh
 cargo run -p tierstore-examples -- run examples/build-cache \
-  --tierstore "$(command -v tierstore)" --work /path/to/an/empty/directory --tmp /tmp/sccache-example
+  --tierstore "$(command -v tierstore)" --work /path/to/an/empty/directory --tmp /path/to/a/short/directory
 ```
 
 sccache binds a Unix socket under `TMPDIR` when its server starts, and a socket's path may be
@@ -270,7 +270,7 @@ build1.sccache.writes 30
 build1.tierstore.puts 31
 build2.sccache.hits 30
 build2.sccache.misses 0
-build2.objects same
+build2.objects same, 30 files
 build2.tierstore.hits 31
 build2.tierstore.misses 0
 build2.tierstore.upstream_gets 0
@@ -284,7 +284,7 @@ tierstore.stop exit status: 0
 ```
 
 The second build: every lookup hits (`build2.sccache.hits 30`, no miss), the objects it took
-from the cache are those the first build compiled (`build2.objects same`), and tierstore
+from the cache are those the first build compiled (`build2.objects same, 30 files`), and tierstore
 answered all 31 reads from its disk: no miss and not one request or byte to the cold tier.
 
 A cache that does not keep sccache's keys fails here and nowhere else: sccache still gets its

@@ -31,13 +31,14 @@ fn files(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
 
 /// Asserts the problems the check finds in a page: a file not shown, a file shown twice, a block
 /// of a file that is not there, a block that differs (at its first differing line, also where
-/// one text is the other's start), and a block that is not closed. A block without `file=` and a
-/// longer fence are read as such.
+/// one text is the other's start), and a block that is not closed. A block without `file=`, a
+/// shorter fence inside a longer one, and a fence of the same length with an info string inside
+/// a block are read as such.
 #[test]
 fn a_page_that_differs_from_its_files_is_refused_with_each_problem() {
-    let ok = "intro\n```sh\nnot a file\n```\n````toml file=a.toml\nx = 1\n```\n````\n";
+    let ok = "intro\n```sh\nnot a file\n```\n````toml file=a.toml\nx = 1\n```\n````sh\n````\n";
     assert_eq!(
-        page_problems(ok, &files(&[("a.toml", "x = 1\n```\n")])),
+        page_problems(ok, &files(&[("a.toml", "x = 1\n```\n````sh\n")])),
         Vec::<String>::new()
     );
 

@@ -62,9 +62,14 @@ pub fn run(options: &Options) -> Result<Report, Error> {
         ("access_key_id".to_owned(), ACCESS_KEY_ID.to_owned()),
         ("secret_access_key".to_owned(), SECRET_ACCESS_KEY.to_owned()),
     ]);
+    // Every port is held until all are picked, so no two names get one port.
+    let mut held = Vec::new();
     for name in port_names(&spec.expanded_texts()) {
-        vars.insert(format!("port:{name}"), free_port(&work)?.to_string());
+        let (port, listener) = free_port(&work)?;
+        vars.insert(format!("port:{name}"), port.to_string());
+        held.push(listener);
     }
+    drop(held);
     let config_path = options
         .config
         .clone()
@@ -183,10 +188,11 @@ fn prepare(work: &Path) -> Result<PathBuf, Error> {
     Ok(work)
 }
 
-/// A loopback port that nothing listens on now: bound and let go.
-fn free_port(work: &Path) -> Result<u16, Error> {
-    let bound = TcpListener::bind("127.0.0.1:0").and_then(|l| l.local_addr());
-    Ok(bound.map_err(io_at(work))?.port())
+/// A free loopback port, and the listener that holds it until it is dropped.
+fn free_port(work: &Path) -> Result<(u16, TcpListener), Error> {
+    let listener = TcpListener::bind("127.0.0.1:0").map_err(io_at(work))?;
+    let port = listener.local_addr().map_err(io_at(work))?.port();
+    Ok((port, listener))
 }
 
 /// The `server.bucket` of a tierstore configuration.

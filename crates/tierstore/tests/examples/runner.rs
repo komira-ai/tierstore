@@ -120,7 +120,7 @@ objects = { prefix = "" }
 "#;
 
 /// The lines of [`CHECKS`] over a run that wrote nothing to the store.
-const LINES: &str = "json.n 1\njson.text t2\njson.default 0\njson.flag true\nsame.dirs same\n\
+const LINES: &str = "json.n 1\njson.text t2\njson.default 0\njson.flag true\nsame.dirs same, 2 files\n\
 same.files differ at data/1.json\nsame.only_a only data/2.json\nsame.only_b only data/2.json\n\
 same.inside differ at more/1.json\nmetric.hits 0\nmetric.none absent\nobjects 0\n";
 
@@ -355,6 +355,10 @@ fn a_run_that_cannot_start_its_programs_says_which() {
         panic!("{error}");
     };
     assert_eq!(program, "/no/such/client");
+    assert_eq!(
+        error.to_string(),
+        "the client /no/such/client is not installed: No such file or directory (os error 2)"
+    );
 
     let dir = scratch("runner-client-version");
     let text =
@@ -385,6 +389,16 @@ fn a_run_that_cannot_start_its_programs_says_which() {
     };
     assert_eq!(status, "exit status: 2");
     assert!(log_text.contains("budget"), "{log_text}");
+    let log = std::fs::canonicalize(dir.path().join("work"))
+        .unwrap()
+        .join("logs/tierstore.log");
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "tierstore did not start (exit status: 2); its log {}:\n{log_text}",
+            log.display()
+        )
+    );
 
     let dir = scratch("runner-not-empty");
     let options = standin(
@@ -620,6 +634,25 @@ fn the_command_line_runs_an_example_and_exits_with_its_verdict() {
         format!(
             "tierstore-example: {}: it has no server.bucket\n",
             refused.display()
+        )
+    );
+
+    let dir = scratch("cli-check-page");
+    let options = standin(&dir, &checks_spec(""), CONFIG, &expected);
+    let example = path(&options.example);
+    assert_eq!(
+        cli(&["tierstore-example", "check-page", example]),
+        (0, String::new(), String::new())
+    );
+    std::fs::write(options.example.join("expected.txt"), "changed\n").unwrap();
+    let (code, out, err) = cli(&["tierstore-example", "check-page", example]);
+    assert_eq!((code, out.as_str()), (1, ""));
+    let page = options.example.join("page.md");
+    assert_eq!(
+        err,
+        format!(
+            "tierstore-example: {}: the page's expected.txt differs from the file at line 1\n",
+            page.display()
         )
     );
 
