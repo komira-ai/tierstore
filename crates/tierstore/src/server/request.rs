@@ -18,7 +18,7 @@ use hyper::body::Body;
 use hyper::header::HeaderMap;
 use percent_encoding::percent_decode_str;
 
-use crate::{Clock, Error, PartBody, PutClaim};
+use crate::{BodyDigests, Clock, Error, PartBody, PutClaim};
 
 use super::chunked::{Decoder, Framing};
 use super::digests::{Algorithm, Digests};
@@ -397,6 +397,17 @@ impl Check {
         PutClaim { tags }
     }
 
+    /// The digests of the body the request named before it, for the store to check it against
+    /// (see [`BodyDigests`]): the MD5 of `Content-MD5`, and the SHA-256 the signature covers
+    /// (`x-amz-content-sha256`) or of `x-amz-checksum-sha256`. A hash the trailer of an
+    /// `aws-chunked` body carries is not known yet, and is not named.
+    pub(crate) fn digests(&self) -> BodyDigests {
+        BodyDigests {
+            md5: named(&self.wants, Algorithm::Md5),
+            sha256: named(&self.wants, Algorithm::Sha256),
+        }
+    }
+
     /// The framing of the body, if it is an `aws-chunked` one.
     pub(crate) fn framing(&self) -> Option<&Framing> {
         self.framing.as_ref()
@@ -439,6 +450,13 @@ impl Check {
         }
         Ok(())
     }
+}
+
+/// The first hash of `algorithm` that `wants` names in full: a claim of no hash yet (the
+/// trailer's, before the body) or of one of another length names none.
+fn named<const N: usize>(wants: &[Want], algorithm: Algorithm) -> Option<[u8; N]> {
+    let of = wants.iter().filter(|want| want.algorithm == algorithm);
+    of.find_map(|want| <[u8; N]>::try_from(want.expected.as_slice()).ok())
 }
 
 /// The answer to send for a streamed body that was refused (its hashes did not match, it was

@@ -37,18 +37,22 @@ pub(super) async fn abort_dropped<S: AsyncRead + Unpin>(
     true
 }
 
-/// Waits until HEADs are not held.
+/// Waits until this HEAD is not held: it is one of those let through, or the HEADs are let go.
 pub(super) async fn heads_let_go(state: &Mutex<State>, changed: &Notify) {
     loop {
         // Registered before the look, so a release between the two is not lost.
         let mut released = std::pin::pin!(changed.notified());
         released.as_mut().enable();
-        if !state
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .hold_heads
         {
-            return;
+            let mut state = state.lock().unwrap_or_else(PoisonError::into_inner);
+            match state.hold_heads {
+                None => return,
+                Some(0) => {}
+                Some(passing) => {
+                    state.hold_heads = Some(passing - 1);
+                    return;
+                }
+            }
         }
         released.await;
     }

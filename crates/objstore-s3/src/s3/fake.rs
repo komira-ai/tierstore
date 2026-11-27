@@ -237,6 +237,8 @@ struct State {
     keep_cut: bool,
     /// How many requests had a body cut short ([`FakeS3::cut_requests`]).
     cut: u64,
+    /// How many requests the service has read the head of ([`FakeS3::requests_begun`]).
+    begun: u64,
     /// How many HEADs, and how many DELETEs of a whole object, the service has taken.
     heads: u32,
     deletes: u32,
@@ -244,8 +246,9 @@ struct State {
     hold_abort: bool,
     /// AbortMultipartUpload requests held and not yet dropped.
     held_aborts: usize,
-    /// HEADs wait unanswered until a test lets them go ([`FakeS3::hold_heads`]).
-    hold_heads: bool,
+    /// HEADs wait unanswered until a test lets them go, after this many more are let through
+    /// ([`FakeS3::hold_heads`]); none: no HEAD is held.
+    hold_heads: Option<u32>,
 }
 
 /// An S3 service on loopback (module docs). It serves until the runtime it was
@@ -399,16 +402,23 @@ impl FakeS3 {
         self.lock().held_aborts
     }
 
-    /// Holds every HEAD from now on, read and not yet handled, until [`FakeS3::release_heads`]:
-    /// for a test that must have the service take a request (a PUT cut short) before it answers
-    /// a HEAD that the client sends after it, on another connection.
-    pub fn hold_heads(&self) {
-        self.lock().hold_heads = true;
+    /// How many requests so far the service has read the head of, whatever came of their body:
+    /// for a test that must fail a body only once its request has reached the service.
+    #[must_use]
+    pub fn requests_begun(&self) -> u64 {
+        self.lock().begun
+    }
+
+    /// Holds every HEAD from now on but the next `after`, read and not yet handled, until
+    /// [`FakeS3::release_heads`]: for a test that must have the service take a request (a PUT cut
+    /// short) before it answers a HEAD that the client sends after it, on another connection.
+    pub fn hold_heads(&self, after: u32) {
+        self.lock().hold_heads = Some(after);
     }
 
     /// Lets the HEADs held by [`FakeS3::hold_heads`] be handled, and every one after them.
     pub fn release_heads(&self) {
-        self.lock().hold_heads = false;
+        self.lock().hold_heads = None;
         self.changed.notify_waiters();
     }
 
@@ -445,6 +455,16 @@ impl FakeS3 {
     #[must_use]
     pub fn object_len(&self, key: &ObjectKey) -> Option<u64> {
         self.lock().objects.get(key.as_str()).map(|o| o.kept.len)
+    }
+
+    /// The metadata `name` (an `x-amz-meta-*` header, in lower case) of the object under `key`,
+    /// if there is an object and it keeps one.
+    #[must_use]
+    pub fn object_meta(&self, key: &ObjectKey, name: &str) -> Option<String> {
+        let state = self.lock();
+        let meta = &state.objects.get(key.as_str())?.sums.meta;
+        let found = meta.iter().find(|(held, _)| held == name);
+        found.map(|(_, value)| value.clone())
     }
 
     /// From now on stamps the objects it takes with this time, in seconds since the Unix
@@ -487,6 +507,8 @@ async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
         let head_end = head_end?;
         let head = String::from_utf8_lossy(&buf[..head_end]).into_owned();
         let mut request = parse_head(&head)?;
+        state.lock().unwrap_or_else(PoisonError::into_inner).begun += 1;
+        changed.notify_waiters();
         let len: usize = request
             .headers
             .get("content-length")

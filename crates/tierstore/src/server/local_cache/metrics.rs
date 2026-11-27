@@ -4,7 +4,7 @@ use std::fmt::Write as _;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::Error;
+use crate::{Backend as _, Error, ShortObjects};
 
 use super::prefetch::Prefetched;
 use super::stall::BusyLog;
@@ -286,6 +286,7 @@ const FILL_SOCKET_WAITING: &str = "tierstore_cache_fill_socket_waiting";
 const FILL_SOCKET_RUNNING: &str = "tierstore_cache_fill_socket_running";
 const UPSTREAM_READS_IN_FLIGHT: &str = "tierstore_cache_upstream_reads_in_flight";
 const FILL_SOCKET_BUSY: &str = "tierstore_cache_fill_socket_busy_total";
+const UPSTREAM_SHORT_OBJECTS: &str = "tierstore_cache_upstream_short_objects_total";
 
 /// The families of one sample, with their kinds, in the order `/metricz` shows them.
 pub(super) const PLAIN: [(&str, &str); 36] = [
@@ -683,8 +684,28 @@ impl LocalCache {
             depth,
             inner.socket_running(),
         );
+        text.push_str(&short_objects(inner.upstream.short_objects()));
         text.push_str(&inner.extents.counters.render(entries, filled));
         text.push_str(&inner.starts.render());
         text
     }
+}
+
+/// The family of what the upstream did about the objects its store kept of its puts that got no
+/// answer ([`Backend::short_objects`](crate::Backend::short_objects)): one series for each
+/// `result`, `removed`, `left` and `failed`, 0 for an upstream that is not an S3 store.
+pub(super) fn short_objects(short: ShortObjects) -> String {
+    let mut text = format!("# TYPE {UPSTREAM_SHORT_OBJECTS} {COUNTER}\n");
+    let results = [
+        ("removed", short.removed),
+        ("left", short.left),
+        ("failed", short.failed),
+    ];
+    for (result, value) in results {
+        let _ = writeln!(
+            text,
+            "{UPSTREAM_SHORT_OBJECTS}{{result=\"{result}\"}} {value}"
+        );
+    }
+    text
 }
