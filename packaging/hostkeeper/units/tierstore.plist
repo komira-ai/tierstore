@@ -4,8 +4,9 @@
   /Library/LaunchDaemons/tierstore.plist: tierstore as a LaunchDaemon on a Mac, installed by
   hostkeeper's package of tierstore (hostkeeper links it from the package's units/). root:wheel,
   mode 0644. One job, which the update hook (`tierstore update-hook`,
-  crates/tierstore/docs/update-hook.md) boots out and bootstraps by the label below; an update is
-  a restart with a gap in serving. The label is the service name, `tierstore`: hostkeeper takes a
+  crates/tierstore/docs/update-hook.md) signals for a hand-over (SIGUSR2: the process keeps its pid
+  and its mount, and executes the new binary) when both releases can, and otherwise boots out and
+  bootstraps by the label below, a restart with a gap in serving. The label is the service name, `tierstore`: hostkeeper takes a
   package's job from units/<label>.plist and watches it by the label its manifest's run entry and
   the hook's `launchd_label` param name, so the file name, the label and both entries agree.
 
@@ -16,6 +17,10 @@
   root's and that no other user can write) before it loads the job: in cutover the staged
   release's, in rollback the previous release's, at boot (restore) the current release's. The hook
   never moves the link.
+
+  This job serves the whole Mac: the file system of a Mac is the `fs` interface of its file
+  (packaging/macos/tierstore.toml), served by this process as NFS on loopback. No other job runs
+  `tierstore fs`, which serves nothing since 0.3.196.
 
   Configuration is the file, nothing else; the drain is the macOS defaults of the file's
   server.drain_lb_wait (1 s) and server.drain_deadline (60 s). The file holds no
@@ -63,7 +68,7 @@
   <string>Standard</string>
   <key>Umask</key>
   <integer>63</integer>
-  <!-- The same value as tierstore-fs.plist: this process serves the node's cache and the fill socket for the mount, whose jobs keep files of it open as long as they run. -->
+  <!-- This process serves the node's cache and the mount of its `fs` interface, whose jobs keep files of it open as long as they run. -->
   <key>SoftResourceLimits</key>
   <dict>
     <key>NumberOfFiles</key>

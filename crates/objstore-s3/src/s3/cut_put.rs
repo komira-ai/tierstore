@@ -24,7 +24,11 @@
 //! - a HEAD or a DELETE that fails, or an object of this PUT with no entity tag to delete it on:
 //!   the object stays; `failed`.
 //!
-//! The look never changes what the put gives: the error it ended with.
+//! The look never changes what the put gives: the error it ended with. It runs in a task of its
+//! own, so the put gives that error at once, and it ends at its own deadline (`cleanup.rs`, which
+//! also says how many such tasks run at once). A PUT that never reached the store (the
+//! connection to it could not be made, or no credentials could be had to sign it) left nothing,
+//! and is not looked after.
 
 use std::collections::hash_map::RandomState;
 use std::hash::BuildHasher as _;
@@ -33,6 +37,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use bytes::Bytes;
 use reqwest::{Method, StatusCode};
 
+use super::cleanup::CLEANUP_DEADLINE;
 use super::tagged::header;
 use super::{S3Store, failure};
 use crate::{ObjectKey, ObjectStoreError};
@@ -143,10 +148,31 @@ pub(super) fn deleted(result: &Result<(), ObjectStoreError>) -> Outcome {
 
 impl S3Store {
     /// The look after a PUT of `len` bytes to `key` that carried `token` and got no answer
-    /// (module docs).
-    pub(super) async fn look_after_cut(&self, key: &ObjectKey, len: u64, token: &str) {
-        tokio::time::sleep(self.conn.tuning.cut_put_look_after).await;
-        let outcome = match self.head_written(key).await {
+    /// (module docs), in a task of its own once
+    /// [`S3Tuning::cut_put_look_after`](super::S3Tuning::cut_put_look_after) has passed: the
+    /// PUT gives its error at once. The task is bounded as `cleanup.rs` says; one that finds no
+    /// place is not made.
+    pub(super) fn look_after_cut(&self, key: &ObjectKey, len: u64, token: String) {
+        let key = key.clone();
+        let after = self.conn.tuning.cut_put_look_after;
+        self.conn.cleaner.look(after, move |conn| async move {
+            S3Store { conn }.look_within(&key, len, &token).await;
+        });
+    }
+
+    /// The look, ended as a failure at [`CLEANUP_DEADLINE`], and counted.
+    async fn look_within(&self, key: &ObjectKey, len: u64, token: &str) {
+        let looked = tokio::time::timeout(CLEANUP_DEADLINE, self.look(key, len, token)).await;
+        let outcome = looked.unwrap_or_else(|_| {
+            tracing::warn!(%key, "the look at the key of a PUT that got no answer ran out of time");
+            Outcome::Failed
+        });
+        self.count_look(key, len, outcome);
+    }
+
+    /// One HEAD of the key, and the DELETE of the PUT's own object of the wrong length.
+    async fn look(&self, key: &ObjectKey, len: u64, token: &str) -> Outcome {
+        match self.head_written(key).await {
             Err(error) => {
                 tracing::warn!(%key, %error, "could not look at the key of a PUT that got no answer");
                 Outcome::Failed
@@ -155,8 +181,7 @@ impl S3Store {
                 Look::Done(outcome) => outcome,
                 Look::Remove(etag) => deleted(&self.delete_if_match(key, &etag).await),
             },
-        };
-        self.count_look(key, len, outcome);
+        }
     }
 
     /// Counts and logs what the look at `key`, after a PUT of `len` bytes, came to.

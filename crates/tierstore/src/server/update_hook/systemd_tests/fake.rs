@@ -914,6 +914,11 @@ impl Host for SystemdFake {
         Ok(false)
     }
 
+    // The systemd arm looks no directory up.
+    fn is_dir(&self, _path: &Path) -> Result<bool, PortError> {
+        Ok(false)
+    }
+
     fn capabilities(&self, release: &Path) -> Result<Vec<String>, PortError> {
         self.count(
             format!("host.capabilities {}", release.display()),

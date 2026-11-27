@@ -31,8 +31,48 @@ The files of the build, all generated or written once by `buildrules`:
 | `buildrules.lock.bzl`, `buildrules.bzl`, `third_party/buildrules/` | Cargo's unit graph of every member, every crates.io crate as a unit pinned by SHA-256 and size, and every git dependency (hostkeeper's crates, the nfsserve fork, the two pinned earlier releases of tierstore) as GitHub's archive of its pinned commit, by SHA-256 and size (`git_archives.tsv`) | `buildrules sync`; never edited by hand |
 
 `Cargo.toml`, `Cargo.lock` and `rust-toolchain.toml` stay the source: `//:check` fails every
-target when the generated table no longer matches them, and prints `buildrules sync` as the fix.
-After a change to a manifest or the lock, run `buildrules sync` and commit what it wrote.
+target when the generated table no longer matches them, and prints `buildrules sync` as the fix
+(with `STALE TABLE ONLY: ...` when the table alone is stale). After a change to a manifest or the
+lock, either run `buildrules sync` and commit what it wrote, or take the patch the farm lane
+offers (below).
+
+### A stale table in a pull request
+
+When the build of `farm.yml` fails, four more steps of the same job, as buildrules' docs/how.md
+gives them, build buildrules' `//:sync_patch` through buck2-farm: `buildrules sync` as a farm
+action, with no network (the sources `Cargo.lock` pins, fetched by hash), whose output is what the
+sync would change rather than the change. They upload `offer/` as the run's artifact `sync-patch`
+(`sync.patch`, one patch `git apply` takes, and `files/`, the regenerated files themselves), build
+buildrules' summary tool on the farm (the doc's `buck2 run` of it, through buck2-farm instead) and
+run it on the runner, which writes the verdict to the job's summary: `none`
+(the generated files are current, and the failure is elsewhere), `tables` (only the generated
+files are stale) or `lock` (cargo changed `Cargo.lock` too, and the patch holds that
+`Cargo.lock`: read that part before you commit it). Nothing is pushed, and the job stays red.
+
+For the verdicts `tables` and `lock`, the summary gives two commands. Run them at the root of a
+checkout of the pull request's branch, then commit what changed and push:
+
+```sh
+gh run download <run> -R komira-ai/tierstore -n sync-patch -D ../sync-patch-<run>
+git apply ../sync-patch-<run>/sync.patch
+```
+
+So a pull request that adds or bumps a dependency needs no `buildrules sync` on a workstation: push
+the `Cargo.toml` change with the `Cargo.lock` that cargo writes for it (any `cargo` command of the
+workspace does), wait for the farm lane, and take its patch. A pull request's run builds the
+branch merged into `main` (the `pull_request` checkout), so the patch is made for that merge: when
+the branch is behind `main`, merge `main` into it and push first, and take the patch of that run.
+After any other push that touches a manifest, take the patch of the newer run.
+
+What the farm sync cannot do, the first step says in its log, and the summary says there is no
+patch; these need `buildrules sync` where there is a network:
+
+- a crate or a git commit that `Cargo.lock` does not name yet (a `Cargo.toml` changed without the
+  `Cargo.lock` cargo writes for it);
+- a member the table does not list yet: its package cannot load until the table lists it;
+- a change of `rust-toolchain.toml`: the sync runs the Rust of the table.
+
+A fork's pull request and Dependabot's get no farm-lane run (below), so no patch either.
 
 A file a crate reads beyond its unit's own sources is declared in its BUCK file (`extra_srcs`): a
 library sees `src/` and `build.rs`, a test target `tests/`, a build script its whole package. So
@@ -112,6 +152,7 @@ token) and Dependabot's; farm-connect's inputs exactly the variables above, and 
 two actions (with buck2-farm) pinned by commit with no version comment, in this file alone; the
 build of `//:ci` through buck2-farm with exactly its three inputs, after the farm check, after
 farm-connect, after the build of the action's tool from komira's sources, all at one komira commit;
+after the build, in order, the four steps that offer the sync patch (above), each word for word;
 and the triggers, one job and one runner. It does not fix the job's other steps, each of which could ask for the token: a change to
 them is reviewed like any change to a workflow.
 

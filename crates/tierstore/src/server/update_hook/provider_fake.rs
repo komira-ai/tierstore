@@ -41,9 +41,27 @@ struct State {
 #[derive(Default)]
 pub(crate) struct FakeProvider {
     state: RefCell<State>,
+    /// The mount its trees are under; [`FAKE_MOUNT`] when none is given.
+    mount: Option<PathBuf>,
 }
 
 impl FakeProvider {
+    /// A fake that places its trees under `mount`.
+    pub(crate) fn under(mount: &str) -> FakeProvider {
+        FakeProvider {
+            mount: Some(PathBuf::from(mount)),
+            ..FakeProvider::default()
+        }
+    }
+
+    /// The directory of the source `index` under this fake's mount.
+    fn dir(&self, index: u32) -> PathBuf {
+        self.mount
+            .as_deref()
+            .unwrap_or(Path::new(FAKE_MOUNT))
+            .join(format!("mount-provider/check/{index}"))
+    }
+
     /// Answers `call` (`Prepare`, `Mount` or `Release`) of the source `index` with `fault`, every
     /// time.
     pub(crate) fn fail(&self, call: &str, index: u32, fault: ProviderFault) {
@@ -100,16 +118,14 @@ impl FakeProvider {
 }
 
 impl MountProvider for FakeProvider {
-    fn prepare(&self, socket: &Path, index: u32, reference: &str) -> Result<(), ProviderFault> {
-        assert_eq!(socket, Path::new(FAKE_SOCKET));
+    fn prepare(&self, _socket: &Path, index: u32, reference: &str) -> Result<(), ProviderFault> {
         self.called("Prepare", index)?;
         let mut state = self.state.borrow_mut();
         state.placed.insert(index, reference.to_owned());
         Ok(())
     }
 
-    fn mount(&self, socket: &Path, index: u32) -> Result<PathBuf, ProviderFault> {
-        assert_eq!(socket, Path::new(FAKE_SOCKET));
+    fn mount(&self, _socket: &Path, index: u32) -> Result<PathBuf, ProviderFault> {
         self.called("Mount", index)?;
         let state = self.state.borrow();
         if !state.placed.contains_key(&index) {
@@ -122,11 +138,10 @@ impl MountProvider for FakeProvider {
             .dirs
             .get(&index)
             .cloned()
-            .unwrap_or_else(|| Self::dir_of(index)))
+            .unwrap_or_else(|| self.dir(index)))
     }
 
-    fn release(&self, socket: &Path, index: u32) -> Result<(), ProviderFault> {
-        assert_eq!(socket, Path::new(FAKE_SOCKET));
+    fn release(&self, _socket: &Path, index: u32) -> Result<(), ProviderFault> {
         self.called("Release", index)?;
         let mut state = self.state.borrow_mut();
         if !state.keeps {
@@ -139,7 +154,7 @@ impl MountProvider for FakeProvider {
         let mut state = self.state.borrow_mut();
         state.calls.push(format!("read {}", dir.display()));
         let index = (0..2)
-            .find(|index| *dir == Self::dir_of(*index))
+            .find(|index| *dir == self.dir(*index))
             .ok_or_else(|| {
                 ReadFault::NotTheTree(format!("{} is no source's directory", dir.display()))
             })?;

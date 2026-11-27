@@ -184,6 +184,9 @@ impl Backend for Recorder {
             removed: 1,
             left: 2,
             failed: 3,
+            skipped: 4,
+            failed_aborts: 5,
+            aborts_dropped: 6,
         }
     }
 

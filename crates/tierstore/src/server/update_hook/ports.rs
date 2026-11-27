@@ -364,6 +364,15 @@ pub trait Host {
     /// The list cannot be had.
     fn mounted(&self, path: &Path) -> Result<bool, PortError>;
 
+    /// Whether `path` is a directory, as the file system that holds it answers a look-up of it
+    /// (`stat`, which follows links): what a job agent's `canonicalize` asks of a directory the
+    /// mount provider answers. `false` when nothing is there.
+    ///
+    /// # Errors
+    /// The look-up fails any other way (a mount whose server is gone answers `EIO` or
+    /// `ETIMEDOUT` once the kernel marks it dead).
+    fn is_dir(&self, path: &Path) -> Result<bool, PortError>;
+
     /// The capabilities (`bin/tierstore --capabilities`) of the release in `release`. A release
     /// that does not know the flag has none.
     ///

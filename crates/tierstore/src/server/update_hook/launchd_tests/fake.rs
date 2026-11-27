@@ -17,6 +17,11 @@
 //! that makes a mount (`FS_MOUNT`) when it is loaded and ends it when it is booted out, unless
 //! `keep_mount` says the mount stays; `mounted` lists it.
 //!
+//! The main job serves the volume of the node's file: while it runs a release and the file at
+//! [`CONFIG`] has an `fs` interface, the mount at that interface's mount point is listed and a
+//! look-up of `trees` in it finds a directory (`is_dir`). `set_volume` makes that mount missing,
+//! another file system's, or one whose server is gone.
+//!
 //! Every call of a port except the clock is counted and logged. `fail_at(n)` makes the n-th call
 //! fail without effect (a failure the step sees and may recover from); `halt_at(n)` makes that
 //! call and every later one fail (a crash: no recovery code of the step gets through);
@@ -29,8 +34,9 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
 
-use crate::server::update_hook::launchd::run_step_with;
+use crate::server::update_hook::launchd::{run_step, run_step_with};
 use crate::server::update_hook::provider_fake::FakeProvider;
+use crate::server::update_hook::shape::fs_interface;
 use crate::server::update_hook::{
     Clock, Done, FS_CONFIG_FILE, FS_LAUNCHD_PLIST, Host, Instances, LAUNCHD_PLIST, Launchd,
     LaunchdPorts, Lock, Outcome, Params, PortError, PortKind, Reason, Record, Reply,
@@ -67,6 +73,19 @@ pub fn plist_program() -> &'static str {
         .expect("the plist has a program")
 }
 
+/// What the main job's process makes of the volume of the node's file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Volume {
+    /// It mounts tierstore's file system at the fs interface's mount point and serves it.
+    Served,
+    /// Nothing is mounted there.
+    NotMounted,
+    /// A mount is listed there, and it has no `trees`: another file system's.
+    Foreign,
+    /// The mount is listed, and every look-up in it fails: its server is gone.
+    Dead,
+}
+
 /// A failure picked by what a call's log line starts with.
 struct Fault {
     prefix: String,
@@ -92,6 +111,8 @@ struct World {
     mount: Option<PathBuf>,
     /// The mount stays when the fs job is booted out.
     mount_stays: bool,
+    /// What the main job makes of the volume of the node's file.
+    volume: Volume,
     /// The labels launchd was told to disable, and not enabled since.
     disabled: BTreeSet<String>,
     /// The bounds each `bootout_within` was given: label, call, looks.
@@ -188,6 +209,7 @@ impl Fake {
             fs_job: false,
             mount: None,
             mount_stays: false,
+            volume: Volume::Served,
             disabled: BTreeSet::new(),
             bounds: Vec::new(),
             versions: BTreeMap::from([
@@ -225,7 +247,7 @@ impl Fake {
             )),
             locks: Rc::new(Cell::new(0)),
             first: false,
-            provider: FakeProvider::default(),
+            provider: FakeProvider::under(FS_MOUNT),
         }
     }
 
@@ -235,7 +257,7 @@ impl Fake {
             w: RefCell::new(Fake::world(None, None, None)),
             locks: Rc::new(Cell::new(0)),
             first: true,
-            provider: FakeProvider::default(),
+            provider: FakeProvider::under(FS_MOUNT),
         }
     }
 
@@ -275,9 +297,19 @@ impl Fake {
         );
     }
 
+    /// Whether the params of this host's update name the fs job.
+    pub fn name_fs_job(&self, named: bool) {
+        self.w.borrow_mut().fs_named = named;
+    }
+
     /// Whether the mount stays listed after the fs job is booted out.
     pub fn keep_mount(&self, stays: bool) {
         self.w.borrow_mut().mount_stays = stays;
+    }
+
+    /// What the main job's process makes of the volume of the node's file.
+    pub fn set_volume(&self, volume: Volume) {
+        self.w.borrow_mut().volume = volume;
     }
 
     /// The bounds of each `bootout_within` call so far: label, call time and looks.
@@ -293,6 +325,11 @@ impl Fake {
     /// Runs `step` with `params` and the job `label`.
     pub fn run_with(&self, step: Step, params: &Params, label: &str) -> Done {
         run_step_with(step, params, label, &self.ports(), true)
+    }
+
+    /// Runs `step` as the config hook drives the arm: for a package that carries no binary.
+    pub fn run_for_config(&self, step: Step) -> Done {
+        run_step(step, &self.params(), LABEL, &self.ports())
     }
 
     /// Runs `step` as hostkeeper does. hostkeeper moves `current` to the staged release before
@@ -737,10 +774,43 @@ impl Instances for Fake {
     }
 }
 
+impl World {
+    /// Where the main job lists a mount: the mount point of the `fs` interface of the node's file,
+    /// while the job runs a release that mounts it.
+    fn job_mount(&self) -> Option<PathBuf> {
+        if self.job.is_none() || self.volume == Volume::NotMounted {
+            return None;
+        }
+        let text = self.configs.get(Path::new(CONFIG))?;
+        fs_interface(text).map(|shape| shape.mountpoint)
+    }
+
+    fn lists(&self, path: &Path) -> bool {
+        self.mount.as_deref() == Some(path) || self.job_mount().as_deref() == Some(path)
+    }
+}
+
 impl Host for Fake {
     fn mounted(&self, path: &Path) -> Result<bool, PortError> {
         self.tick(format!("host.mounted {}", path.display()), PortKind::Host)?;
-        Ok(self.w.borrow().mount.as_deref() == Some(path))
+        Ok(self.w.borrow().lists(path))
+    }
+
+    /// `trees` just below a mount that is listed is a directory, unless the mount is another file
+    /// system's; a look-up in the main job's mount fails when its server is gone.
+    fn is_dir(&self, path: &Path) -> Result<bool, PortError> {
+        self.tick(format!("host.is_dir {}", path.display()), PortKind::Host)?;
+        let w = self.w.borrow();
+        let Some(mount) = path.parent().filter(|mount| w.lists(mount)) else {
+            return Ok(false);
+        };
+        if w.volume == Volume::Dead && w.job_mount().as_deref() == Some(mount) {
+            return Err(PortError::failed(
+                PortKind::Host,
+                format!("stat {}: Input/output error (os error 5)", path.display()),
+            ));
+        }
+        Ok(w.volume != Volume::Foreign && path.file_name() == Some("trees".as_ref()))
     }
 
     fn config(&self, path: &Path) -> Result<Option<String>, PortError> {

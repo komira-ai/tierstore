@@ -914,18 +914,19 @@ fn exit_timeout(path: &str) -> u64 {
     number.trim().parse().unwrap()
 }
 
-/// Asserts that launchd waits for an unmount to end before it kills the file service: the
-/// `ExitTimeOut` of both fs jobs (the package's and the hostkeeper unit) is more than the longest
-/// unmount, four bounded steps (the listing, `umount`, `diskutil`, `unmount(2)`), each the limit
-/// and the wait to collect a killed command, for the default limit and for the largest one the
+/// Asserts that launchd waits for an unmount to end before it kills the process that serves the
+/// mount: the `ExitTimeOut` of the one job of a Mac (the package's and the hostkeeper unit's
+/// `tierstore.plist`, whose process serves the `fs` interface) is more than the longest unmount,
+/// four bounded steps (the listing, `umount`, `diskutil`, `unmount(2)`), each the limit and the
+/// wait to collect a killed command, for the default limit and for the largest one the
 /// configuration takes. Catches a job file whose launchd kills the process in the middle of its
 /// unmount.
 #[test]
-fn the_fs_jobs_wait_longer_than_the_longest_unmount() {
+fn the_mac_job_waits_longer_than_the_longest_unmount() {
     let longest = |limit: Duration| (limit + super::REAP_WAIT) * 4;
     for job in [
-        "packaging/macos-pkg/tierstore-fs.plist",
-        "packaging/hostkeeper/units/tierstore-fs.plist",
+        "packaging/macos-pkg/tierstore.plist",
+        "packaging/hostkeeper/units/tierstore.plist",
     ] {
         let waits = Duration::from_secs(exit_timeout(job));
         assert!(

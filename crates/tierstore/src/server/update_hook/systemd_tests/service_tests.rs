@@ -2,9 +2,11 @@
 //! both releases list `handoff-service-v1`, and otherwise a refusal in `prepare`, which
 //! `mode = "restart"` overrides.
 
+use std::path::Path;
+
 use crate::server::update_hook::{
     CACHE_HANDOFF_CAPABILITY, HANDOFF_CAPABILITY, HANDOFF_SERVICE_CAPABILITY,
-    HANDOFF_STATE_DIR_CAPABILITY, Instance, Mode, Reason, Record, Step,
+    HANDOFF_STATE_DIR_CAPABILITY, Host, Instance, Mode, Reason, Record, Step,
 };
 
 use super::fake::{
@@ -200,4 +202,13 @@ fn the_boot_step_starts_no_fs_instance_once_a_switch_has_swapped() {
         fs_acts(&fake, before),
         ["fs_markers.set a", "fs_units.start a"]
     );
+}
+
+/// Asserts that the systemd arm's host finds no directory: the look-up of a mount is the launchd
+/// arm's proof of a Mac's volume, and no systemd step asks for it. Catches a systemd fake that
+/// would let a step pass on a look-up it never made.
+#[test]
+fn the_systemd_host_finds_no_directory() {
+    let fake = SystemdFake::installed();
+    assert_eq!(fake.is_dir(Path::new("/run/tierstore/fs/trees")), Ok(false));
 }

@@ -17,6 +17,9 @@ use crate::server::treefs::{DEFAULT_CONTROL_SOCKET, DEFAULT_MOUNTPOINT, DEFAULT_
 
 /// The `type` of the interface that serves the trees as a file system.
 pub(super) const FS_INTERFACE: &str = "fs";
+/// The `type` of the interface that answers a job agent's `Prepare` and `Mount` with a directory
+/// under the mount.
+pub(super) const PROVIDER_INTERFACE: &str = "mount-provider";
 
 /// The paths of a file's `fs` interface that a successor shares with the instance it takes the
 /// mount from.
@@ -47,16 +50,29 @@ impl FsShape {
     }
 }
 
-/// The `fs` interface of the file whose text is `text`: `None` for a file with none, and for a
-/// text that is not TOML (the release's check of the file refuses that).
-pub(super) fn fs_interface(text: &str) -> Option<FsShape> {
+/// The first interface of type `kind` of the file whose text is `text`: `None` for a file with
+/// none, and for a text that is not TOML.
+fn interface(text: &str, kind: &str) -> Option<toml::Table> {
     let table: toml::Table = text.parse().ok()?;
-    let entry = table
+    table
         .get("interface")?
         .as_array()?
         .iter()
         .filter_map(toml::Value::as_table)
-        .find(|entry| entry.get("type").and_then(toml::Value::as_str) == Some(FS_INTERFACE))?;
+        .find(|entry| entry.get("type").and_then(toml::Value::as_str) == Some(kind))
+        .cloned()
+}
+
+/// Whether the file whose text is `text` has a `mount-provider` interface. A text that is not
+/// TOML has none.
+pub(super) fn has_provider(text: &str) -> bool {
+    interface(text, PROVIDER_INTERFACE).is_some()
+}
+
+/// The `fs` interface of the file whose text is `text`: `None` for a file with none, and for a
+/// text that is not TOML (the release's check of the file refuses that).
+pub(super) fn fs_interface(text: &str) -> Option<FsShape> {
+    let entry = interface(text, FS_INTERFACE)?;
     let params = entry.get("params").and_then(toml::Value::as_table);
     let path = |key: &str| -> Option<PathBuf> {
         params.and_then(|params| params.get(key)).map(|value| {
@@ -76,9 +92,6 @@ pub(super) fn fs_interface(text: &str) -> Option<FsShape> {
     })
 }
 
-/// The `type` of the interface of the mount provider.
-pub(super) const PROVIDER_INTERFACE: &str = "mount-provider";
-
 /// Where a file's `mount-provider` interface is served: its socket, and the mount of
 /// `tierstore fs` its trees are placed under.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -93,21 +106,7 @@ pub(in crate::server) struct ProviderShape {
 /// (or a text that is not TOML); an error for an entry whose socket or mount point is not an
 /// absolute path, which the release's check of the file refuses.
 pub(super) fn provider_interface(text: &str) -> Result<Option<ProviderShape>, String> {
-    let Ok(table) = text.parse::<toml::Table>() else {
-        return Ok(None);
-    };
-    let entry = table
-        .get("interface")
-        .and_then(toml::Value::as_array)
-        .and_then(|entries| {
-            entries
-                .iter()
-                .filter_map(toml::Value::as_table)
-                .find(|entry| {
-                    entry.get("type").and_then(toml::Value::as_str) == Some(PROVIDER_INTERFACE)
-                })
-        });
-    let Some(entry) = entry else {
+    let Some(entry) = interface(text, PROVIDER_INTERFACE) else {
         return Ok(None);
     };
     let params = entry.get("params").and_then(toml::Value::as_table);
@@ -131,7 +130,7 @@ pub(super) fn provider_interface(text: &str) -> Result<Option<ProviderShape>, St
 mod tests {
     use std::path::PathBuf;
 
-    use super::{FsShape, ProviderShape, fs_interface, provider_interface};
+    use super::{FsShape, ProviderShape, fs_interface, has_provider, provider_interface};
 
     fn shape(mountpoint: &str, control_socket: &str, runtime_dir: &str) -> FsShape {
         FsShape {
@@ -187,6 +186,29 @@ mod tests {
             "= not toml",
         ] {
             assert_eq!(fs_interface(none), None, "{none:?}");
+        }
+    }
+
+    /// Asserts that a file has a mount provider when one of its interfaces has the type
+    /// `mount-provider`, beside others or alone, and none when no interface has that type, when
+    /// `interface` is no array, or when the text is not TOML. Catches a Mac of the two-process
+    /// layout taken for one with nothing to serve, whose update would then leave its provider
+    /// answering directories no process serves.
+    #[test]
+    fn a_mount_provider_is_found_among_the_interfaces() {
+        let provider = "[[interface]]\ntype = \"mount-provider\"\n";
+        let s3 = "[[interface]]\ntype = \"s3\"\n";
+        assert!(has_provider(provider));
+        assert!(has_provider(&format!("{s3}{provider}")));
+        for none in [
+            "",
+            s3,
+            "[[interface]]\ntype = \"fs\"\n",
+            "interface = 1\n",
+            "[[interface]]\nparams = {}\n",
+            "= not toml",
+        ] {
+            assert!(!has_provider(none), "{none:?}");
         }
     }
 
