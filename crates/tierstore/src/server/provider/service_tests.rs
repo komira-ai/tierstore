@@ -1,6 +1,6 @@
 //! The provider on its socket: the four calls and a refusal over gRPC, the codes and the bound of a
-//! refusal's reason, a tree with no L2 sidecar refused with the distinct status the CAS service
-//! takes its miss path on, and when the socket is bound, rebound and removed.
+//! refusal's reason, a tree with no L2 sidecar mounted from its list, and when the socket is bound,
+//! rebound and removed.
 
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
@@ -184,13 +184,11 @@ async fn the_four_calls_are_answered_over_the_socket() {
 }
 
 /// Asserts that a tree whose version 2 list is in the store but whose L2 sidecar (`cas/l2/<id>`) is
-/// not is refused over the socket with the distinct status of `ListVersionUnsupported`: the
-/// `Mount` answers `FAILED_PRECONDITION` with the reason `tree list not supported:
-/// missing_sidecar`, the text the CAS service takes its miss path on, and a `Mount` asked again
-/// answers the same. The refusal is counted once, under its reason and as a missing sidecar;
-/// nothing is placed, the list itself is never read and no file of the tree is.
+/// not is mounted over the socket from its list: `Mount` answers the source's directory, and a
+/// `Mount` asked again answers the same; the list is read once, and the preparation is counted
+/// once as a missing sidecar and once as a tree placed from its list, and as no refusal.
 #[tokio::test]
-async fn a_tree_with_no_sidecar_is_refused_list_version_unsupported_and_counted() {
+async fn a_tree_with_no_sidecar_is_mounted_from_its_list_and_counted() {
     let rig = Rig::new("prov-no-sidecar").await;
     let place = Place::new("prov-no-sidecar");
     let served = Served::start(&rig.provider, &rig.bench.rig.cache, &place.path);
@@ -211,29 +209,28 @@ async fn a_tree_with_no_sidecar_is_refused_list_version_unsupported_and_counted(
         source: source("js.1", 0),
     };
     for _ in 0..2 {
-        let refused = client
-            .call::<MountResponse>("Mount", &mount)
-            .await
-            .unwrap_err();
+        let mounted: MountResponse = client.call("Mount", &mount).await.unwrap();
         assert_eq!(
-            (refused.code(), refused.message()),
-            (
-                Code::FailedPrecondition,
-                "tree list not supported: missing_sidecar"
-            )
+            mounted.path,
+            Rig::path_of("js.1", 0).to_string_lossy().into_owned()
         );
     }
     let metricz = rig.bench.rig.cache.metrics();
     for counted in [
-        "tierstore_list_refused_total{reason=\"missing_sidecar\"} 1\n",
+        "tierstore_list_refused_total{reason=\"missing_sidecar\"} 0\n",
         "tierstore_list_refused_total{reason=\"v1_list\"} 0\n",
         "tierstore_l2_sidecar_missing_total 1\n",
+        "tierstore_l2_sidecar_fallback_total 1\n",
     ] {
         assert!(metricz.contains(counted), "{counted} in {metricz}");
     }
-    assert!(rig.bench.store.mount_paths().is_empty());
-    assert_eq!(rig.bench.rig.calls_on(Op::Get, &key), 0);
-    assert_eq!(rig.bench.rig.calls_on(Op::Get, &rig.bench.pack.key), 0);
+    assert!(
+        rig.bench
+            .store
+            .locate_fs(&Rig::place_of("js.1", 0))
+            .is_some()
+    );
+    assert_eq!(rig.bench.rig.calls_on(Op::Get, &key), 1);
     served.stop().await;
 }
 
