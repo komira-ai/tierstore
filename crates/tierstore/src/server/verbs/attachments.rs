@@ -20,7 +20,7 @@ use std::process::ExitCode;
 use clap::Parser;
 
 use super::parsed;
-use crate::server::config::{Host, PerRun};
+use crate::server::config::{Host, PerRun, Settings};
 use crate::server::config_load::load;
 
 /// What the verb says of a file that has no `fs` interface.
@@ -84,7 +84,10 @@ fn control_socket(config: &Path) -> Result<PathBuf, String> {
         host: Host::SYSTEM,
     };
     let settings = load(config, per_run).map_err(|why| why.to_string())?;
-    let fs = settings.into_cache().and_then(|cache| cache.fs);
+    let fs = match settings {
+        Settings::Cache(cache) => cache.fs,
+        Settings::Storage(_) | Settings::Combined(_) | Settings::Cold(_) => None,
+    };
     fs.map(|fs| fs.control_socket)
         .ok_or_else(|| NO_FS_INTERFACE.to_owned())
 }
