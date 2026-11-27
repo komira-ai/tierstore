@@ -66,6 +66,11 @@ pub(in crate::server) enum StartError {
     #[cfg(target_os = "linux")]
     #[error("{0}")]
     Handover(#[from] super::handover::HandoverError),
+    /// The one hand-over of the mount with the sockets failed after the running instance's `done`
+    /// (its `bye` did not come).
+    #[cfg(target_os = "linux")]
+    #[error("{0}")]
+    Handoff(#[from] crate::server::handoff::HandoffError),
     /// The stage directory of the put directory could not be used.
     #[cfg(target_os = "linux")]
     #[error("fs.put: {0}")]

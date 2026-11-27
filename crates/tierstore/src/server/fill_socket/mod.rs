@@ -319,6 +319,18 @@ async fn session((cache, trees): (LocalCache, Option<TreeStore>), stream: UnixSt
                 cache.tree_lists_reported(report);
                 "ok".to_owned()
             }
+            Ok(Request::Requests(report)) => {
+                cache.requests_reported(*report);
+                "ok".to_owned()
+            }
+            Ok(Request::RunAttached(attach)) => {
+                cache.run_attached(attach);
+                "ok".to_owned()
+            }
+            Ok(Request::RunDetached(detach)) => {
+                cache.run_detached(detach);
+                "ok".to_owned()
+            }
             Err(refusal) => format!("refused {refusal}"),
         };
         if write

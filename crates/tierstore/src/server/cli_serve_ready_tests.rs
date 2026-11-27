@@ -37,7 +37,7 @@ fn running(path: &Path, listener: &std::net::TcpListener, cache: LocalCache) -> 
 /// The sockets the running instance at `path` offers to a start whose S3 address is `addr` and
 /// whose lock file is `lock`, accepted (the running instance has said `done`).
 async fn taken(path: &Path, addr: SocketAddr, lock: &Path) -> Got {
-    let asked = ask_sockets(&handoff(path.to_owned()), &[addr], &[], lock).await;
+    let asked = ask_sockets(&handoff(path.to_owned()), (&[addr], &[]), lock, None).await;
     let offered = asked.unwrap().expect("an instance answers");
     let inherited = within("done", offered.accept()).await.unwrap();
     Got::Taken(Box::new(inherited))
