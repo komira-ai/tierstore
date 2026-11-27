@@ -348,11 +348,10 @@ pub(super) async fn serve_cache_on(
     // A build node with a mount provider has the objects of the update check in front of its
     // upstream, so that the update hook's `verify` can have the provider mount a tree that is
     // neither read from the network nor written to the store (`provider/check.rs`).
-    let upstream: Arc<dyn Backend> = if settings.provider.is_some() {
-        Arc::new(CheckUpstream::new(upstream))
-    } else {
-        upstream
-    };
+    let upstream = settings.provider.as_ref().map_or_else(
+        || Arc::clone(&upstream),
+        |_| -> Arc<dyn Backend> { Arc::new(CheckUpstream::new(Arc::clone(&upstream))) },
+    );
     let cache = open(&settings.cache, &upstream, &disk, &run).await?;
     if settings.cache.write_through {
         config.cache_writes = true;

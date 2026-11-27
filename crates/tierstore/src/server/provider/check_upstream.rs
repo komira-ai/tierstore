@@ -2,9 +2,9 @@
 //! the update check's objects itself.
 //!
 //! A read (`get`, `get_tagged`, `get_stream`, `open_read`, `head`) of the key of the check's pack,
-//! of the list of one of its trees, or of the sidecar of [`WITH_SIDECAR`] is answered from memory,
+//! of the list of one of its trees, or of the sidecar of [`WITH_SIDECAR`](super::WITH_SIDECAR) is answered from memory,
 //! as the upstream would answer it had a build service stored the objects: the object, ranged as
-//! asked, tagged with the hex of its SHA-256. A read of the sidecar key of [`WITHOUT_SIDECAR`] is
+//! asked, tagged with the hex of its SHA-256. A read of the sidecar key of [`WITHOUT_SIDECAR`](super::WITHOUT_SIDECAR) is
 //! `NotFound`, as the upstream answers for a tree with no sidecar, without asking it. Every other
 //! call, and every call that is not a read, goes to the upstream unchanged.
 //!
@@ -21,7 +21,7 @@ use bytes::Bytes;
 use futures::StreamExt;
 use sha2::{Digest, Sha256};
 
-use super::{TREES, WITH_SIDECAR, WITHOUT_SIDECAR, pack, pack_key};
+use super::{TREES, pack, pack_key};
 use crate::{
     Backend, BodyDigests, ByteRange, Error, Listed, Meta, OpenUpload, Opened, PartBody, PutAnswer,
     PutClaim, PutKind, PutOutcome, ReadBody, ShortObjects, Span, StoreCopy, TreeDigest,
@@ -43,13 +43,15 @@ impl CheckUpstream {
     pub(in crate::server) fn new(inner: Arc<dyn Backend>) -> Self {
         let mut objects = BTreeMap::new();
         objects.insert(pack_key(), Bytes::from(pack()));
+        let mut absent = BTreeSet::new();
         for tree in TREES {
             objects.insert(tree.key(), Bytes::from_static(tree.list));
+            if let Some(sidecar) = tree.sidecar {
+                objects.insert(tree.sidecar_key(), Bytes::from_static(sidecar));
+            } else {
+                absent.insert(tree.sidecar_key());
+            }
         }
-        if let Some(sidecar) = WITH_SIDECAR.sidecar {
-            objects.insert(WITH_SIDECAR.sidecar_key(), Bytes::from_static(sidecar));
-        }
-        let absent = BTreeSet::from([WITHOUT_SIDECAR.sidecar_key()]);
         Self {
             objects,
             absent,

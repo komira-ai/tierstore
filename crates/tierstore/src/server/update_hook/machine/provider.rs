@@ -240,11 +240,16 @@ impl MountProvider for ProviderSocket {
 /// Every path below `root`, by its path from `root` with `/` between names.
 fn walk(root: &Path) -> Result<BTreeMap<String, TreeNode>, String> {
     let mut nodes = BTreeMap::new();
-    let mut dirs = vec![(String::new(), root.to_path_buf())];
-    while let Some((name, dir)) = dirs.pop() {
-        let listed = fs::read_dir(&dir).map_err(|error| shown(&name, "listed", &error))?;
+    // Each directory to list: its path from `root`, what a failure calls it, and where it is.
+    let mut dirs = vec![(
+        String::new(),
+        "the directory".to_owned(),
+        root.to_path_buf(),
+    )];
+    while let Some((name, label, dir)) = dirs.pop() {
+        let listed = fs::read_dir(&dir).map_err(|error| shown(&label, "listed", &error))?;
         for entry in listed {
-            let entry = entry.map_err(|error| shown(&name, "listed", &error))?;
+            let entry = entry.map_err(|error| shown(&label, "listed", &error))?;
             let file_name = entry.file_name();
             let leaf = file_name
                 .to_str()
@@ -261,7 +266,7 @@ fn walk(root: &Path) -> Result<BTreeMap<String, TreeNode>, String> {
                 .file_type()
                 .map_err(|error| shown(&path, "looked at", &error))?;
             let node = if kind.is_dir() {
-                dirs.push((path.clone(), entry.path()));
+                dirs.push((path.clone(), path.clone(), entry.path()));
                 TreeNode::Dir
             } else if kind.is_symlink() {
                 let target =
@@ -297,10 +302,5 @@ fn read_file(path: &str, at: &Path) -> Result<Vec<u8>, String> {
 
 /// `path` could not be `done`, with the system's words.
 fn shown(path: &str, done: &str, error: &std::io::Error) -> String {
-    let path = if path.is_empty() {
-        "the directory"
-    } else {
-        path
-    };
     format!("{path} could not be {done}: {error}")
 }

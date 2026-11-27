@@ -222,6 +222,25 @@ async fn a_taker_takes_the_lease_when_the_tag_has_stood_for_the_ttl_on_its_own_c
     );
 }
 
+/// Asserts that a taker whose look at the lease object fails takes nothing and writes no tag
+/// down: its next look that is answered is its first, from which the ttl is counted, so the lease
+/// is taken a ttl after that look and not after the failed one. Catches a failed look counted as
+/// the start of the wait, which would take a lease that has not stood for the ttl.
+#[tokio::test]
+async fn a_taker_whose_look_fails_starts_its_wait_at_the_next_look() {
+    let pair = pair();
+    assert!(pair.holder.ensure().await);
+    let down = Error::Unavailable("on purpose".to_owned());
+    pair.counted.fail_next_on(Op::Head, LEASE_KEY, down);
+    assert!(!pair.taker.ensure().await);
+    pair.taker_mono.advance(ms(TTL));
+    assert!(!pair.taker.ensure().await);
+    assert_eq!(pair.counted.calls(Op::PutIfMatch), 0);
+    pair.taker_mono.advance(ms(TTL));
+    assert!(pair.taker.ensure().await);
+    assert_eq!(pair.counted.calls(Op::PutIfMatch), 1);
+}
+
 /// Asserts that a renewal restarts the wait: the taker looked at 0, the holder renews, the taker
 /// looks again at 30 seconds, sees another tag, and takes the lease 30 seconds after that look
 /// and not before. Catches a taker that counts from the first tag it ever saw.
