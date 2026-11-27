@@ -35,9 +35,14 @@ fn labelled() -> Params {
 
 /// Whether any call so far named the fs job, its plist or its file.
 fn touched_fs_job(fake: &Fake) -> bool {
-    fake.log()
+    named_any(&fake.log(), &["tierstore-fs", "fs.toml"])
+}
+
+/// Whether any of `lines` holds one of `words`.
+fn named_any(lines: &[String], words: &[&str]) -> bool {
+    lines
         .iter()
-        .any(|line| line.contains("tierstore-fs") || line.contains("fs.toml"))
+        .any(|line| words.iter().any(|word| line.contains(word)))
 }
 
 /// A Mac's file of the two-process layout: a mount provider under the mount `tierstore fs`
@@ -127,11 +132,14 @@ fn a_release_update_of_a_two_process_mac_is_refused_and_stops_nothing() {
                 assert_eq!(fake.snapshot(), before, "{case}");
                 assert!(fake.launchd_calls().is_empty(), "{case}");
                 assert!(
-                    !fake.log().iter().any(|line| {
-                        line.starts_with("host.capabilities")
-                            || line.starts_with("host.check_config")
-                            || line.starts_with("host.install_binary")
-                    }),
+                    !named_any(
+                        &fake.log(),
+                        &[
+                            "host.capabilities",
+                            "host.check_config",
+                            "host.install_binary"
+                        ]
+                    ),
                     "{case}: {:?}",
                     fake.log()
                 );
@@ -207,12 +215,7 @@ fn a_switched_mac_hands_over_and_verify_proves_the_volume() {
     assert!(fake.record().has(Marker::Verified));
     fake.advance(&[Cleanup]);
     assert!(fake.record().committed());
-    assert!(
-        !fake
-            .launchd_calls()
-            .iter()
-            .any(|call| call.contains(FS_LABEL) || call.contains("bootout"))
-    );
+    assert!(!named_any(&fake.launchd_calls(), &[FS_LABEL, "bootout"]));
     assert!(fake.strays().is_empty());
 }
 
@@ -273,12 +276,7 @@ fn verify_fails_and_the_update_goes_back_when_the_volume_is_not_served() {
 fn verify_looks_for_a_volume_only_where_the_release_update_has_one() {
     let plain = Fake::new();
     plain.advance(&[Prepare, Cutover, Verify]);
-    assert!(
-        !plain
-            .log()
-            .iter()
-            .any(|line| line.starts_with("host.mounted") || line.starts_with("host.is_dir"))
-    );
+    assert!(!named_any(&plain.log(), &["host.mounted", "host.is_dir"]));
 
     let config = switched();
     for step in [Prepare, Cutover] {
@@ -449,4 +447,44 @@ fn the_boot_step_drives_the_fs_job_only_where_the_file_has_no_fs_interface() {
     two.with_fs(false);
     assert_ok(&two.run(Restore));
     assert!(two.snapshot().fs_job);
+}
+
+/// Asserts that params that name the fs job and no `config_file` (a boot step's params carry the
+/// manifest's, which name one; these do not) leave the fs job driven as before: with no file to
+/// read, the node is not taken for one that serves its own mount, so `restore` boots the fs job
+/// in. Catches a guard that drops the fs job of a node whose file it never read.
+#[test]
+fn params_with_no_config_file_still_drive_the_fs_job() {
+    let fake = Fake::new();
+    fake.with_fs(false);
+    let params = Params::parse(&format!(
+        "service_manager = \"launchd\"\n\
+         launchd_label = \"{LABEL}\"\n\
+         fs_launchd_label = \"{FS_LABEL}\"\n\
+         \"updater.staged_release\" = \"{OLD}\"\n\
+         \"updater.target_version\" = \"{OLD_VERSION}\"\n"
+    ))
+    .expect("params");
+    assert_ok(&fake.run_with(Restore, &params, LABEL));
+    assert!(fake.snapshot().fs_job);
+    assert!(
+        !fake
+            .log()
+            .iter()
+            .any(|line| line.starts_with("host.config"))
+    );
+}
+
+/// Asserts the fake's look-up at its edges: a path whose directory is not a listed mount finds
+/// nothing, and a gone server fails only the look-ups in the main job's mount, not in the fs
+/// job's. Catches a fake that answers a look-up off any mount, which would let a verify pass with
+/// nothing mounted.
+#[test]
+fn the_fakes_look_up_answers_only_within_a_listed_mount() {
+    let fake = Fake::new();
+    assert_eq!(fake.is_dir(Path::new("/elsewhere/trees")), Ok(false));
+    fake.with_fs(true);
+    fake.set_volume(Volume::Dead);
+    let trees = Path::new(FS_MOUNT).join("trees");
+    assert_eq!(fake.is_dir(&trees), Ok(true));
 }
