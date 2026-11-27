@@ -185,6 +185,37 @@ impl Opens {
     }
 }
 
+/// What the totals `now` of the process `process` of a mount add to the histograms, given
+/// `processes`, the last totals of the latest processes of that mount (the latest last): what
+/// they grew by since that process's report before, or all of them for a process not kept (or one
+/// whose totals went down: a new process given the same id). `processes` then keeps `now` as the
+/// latest, and at most [`PROCESSES`] processes. Also the rule of the requests' report
+/// (`requests.rs`).
+pub(super) fn grown<const N: usize>(
+    processes: &mut Vec<(u64, [Spans; N])>,
+    process: u64,
+    now: [Spans; N],
+) -> [Spans; N] {
+    let seen = processes.iter().position(|(kept, _)| *kept == process);
+    let before = seen.map(|at| processes.remove(at).1);
+    let before = before
+        .filter(|before| {
+            now.iter()
+                .zip(before)
+                .all(|(now, before)| now.grew_from(before))
+        })
+        .unwrap_or([Spans::default(); N]);
+    let mut more = [Spans::default(); N];
+    for ((more, now), before) in more.iter_mut().zip(&now).zip(&before) {
+        *more = now.less(before);
+    }
+    processes.push((process, now));
+    if processes.len() > PROCESSES {
+        let _ = processes.remove(0);
+    }
+    more
+}
+
 /// What one mount reported.
 #[derive(Debug, Default)]
 struct Mount {
@@ -219,27 +250,9 @@ impl Opened {
         }
         let mount = mounts.entry(report.mount).or_default();
         mount.waiting = report.waiting;
-        let seen = mount
-            .processes
-            .iter()
-            .position(|(process, _)| *process == report.process);
-        let before = seen.map(|at| mount.processes.remove(at).1);
-        // A process whose totals went down is a new one given the same id: all of it is new.
-        let grown = |before: &[Spans; KINDS.len()]| {
-            report
-                .spans
-                .iter()
-                .zip(before)
-                .all(|(now, before)| now.grew_from(before))
-        };
-        let before = before.filter(grown).unwrap_or_default();
-        for ((histogram, now), before) in opens.iter_mut().zip(&report.spans).zip(&before) {
-            let more = now.less(before);
+        let more = grown(&mut mount.processes, report.process, report.spans);
+        for (histogram, more) in opens.iter_mut().zip(&more) {
             histogram.add(&more.buckets, more.ms);
-        }
-        mount.processes.push((report.process, report.spans));
-        if mount.processes.len() > PROCESSES {
-            let _ = mount.processes.remove(0);
         }
     }
 
@@ -268,6 +281,11 @@ impl LocalCache {
         self.inner.starts.opens.reported(report);
     }
 }
+
+// The requests of the mounts' frontends, whose totals the node follows by the rule of the opens
+// (`grown`).
+#[path = "requests.rs"]
+pub(in crate::server) mod requests;
 
 #[cfg(test)]
 #[path = "opens_tests.rs"]

@@ -47,25 +47,27 @@
 //! takes as it would from a running instance.
 //!
 //! On Linux, with an `[[interface]]` of type `fs` the start serves the mount of the virtual build
-//! file system too (see [`Service`]): after the cache and the tree store are open it takes the
-//! mount from a running instance, or serves the descriptor the service manager kept, or mounts
-//! afresh, and only then takes or binds the S3 and OCI sockets; a start
-//! that fails after that leaves the mount as a stop does. The S3 and OCI sockets of a running
-//! instance are asked for with the `ready` step and the cache lock (`take 1`, `ready`): the running
-//! instance serves them until this start says `ready`, then starts no cache write and says
+//! file system too (see [`Service`] and `cache_cli_mount.rs`): after the cache and the tree store
+//! are open, it takes the mount from a
+//! running instance, or serves the descriptor the service manager kept, or mounts afresh, and only
+//! then takes or binds the S3 and OCI sockets; a start that fails after that leaves the mount as a stop does. A running
+//! instance of the one process is asked for its mount, its S3 and OCI sockets and its cache lock in
+//! one conversation (`take 1`, `ready`, `mount`); one that holds no mount (the S3 process of the
+//! two-process layout) for its sockets and lock alone, and the mount is then taken on `take-fs 1`.
+//! The running instance serves until this start says `ready`, then starts no cache write and says
 //! `written` once its writes in flight have ended, and this start's cache takes the write role with
 //! the lock it handed over then, rather than after that instance's drain, so that the mount's fills
 //! and the mount provider (bound while the cache is the writer) wait for that instance's last
 //! writes and one scan of the cache only. Every build node's start then tells the
 //! service manager `READY=1` where one listens. The mount is served while the fronts drain and is
-//! left once they have; a mount that cannot be served on stops the fronts as a signal does, and the
-//! start ends in failure.
+//! left once they have, or once a successor has taken it; a mount that cannot be served on stops
+//! the fronts as a signal does, and the start ends in failure.
 //!
 //! On macOS, with an `[[interface]]` of type `fs` the start serves the NFS front of the file system
 //! too (see [`NfsService`]): after the cache and the tree store are open it serves the front (on the
 //! sockets it was handed, or on its own) and mounts the export where the `mount` listing does not
-//! show it mounted, and only then takes or binds the S3 and OCI sockets; a
-//! start that fails after that leaves the mount where it is. A stop drains the fronts, serving the
+//! show it mounted, and only then takes or binds the S3 and OCI
+//! sockets; a start that fails after that leaves the mount where it is. A stop drains the fronts, serving the
 //! mount, and then unmounts while the NFS front still answers; an NFS server that stops by itself
 //! stops the fronts as a signal does, and the start ends in failure.
 //!
@@ -88,8 +90,6 @@ use crate::{Backend, Clock, Proxy, SystemClock};
 
 use super::build_info::{COMMIT, VERSION};
 use super::cli::{Addresses, Error, OciSetup, S3Flags, oci_setup_of, open_tier, probe_run_id};
-#[cfg(target_os = "linux")]
-use super::cli_serve::ask_sockets;
 use super::cli_serve::{Bound, Got, bind_fronts, bind_s3, cut_note, sockets_of, stopped_by};
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 use super::config::fs::not_served;
@@ -97,9 +97,6 @@ use super::config_cache::CacheSettings;
 use super::drain::late_of;
 use super::fill_socket;
 use super::front::{InvalidFlags, server_config};
-use super::handoff::Inherited;
-#[cfg(target_os = "linux")]
-use super::handoff::Offered;
 use super::handoff::{self, Handed, Handing, Handoff, Image, Own, Want, read_handed};
 use super::listen::{LoopbackBind, bind_set, bind_with, joined};
 use super::local_cache::trees::{TreeStore, TreesConfig};
@@ -108,11 +105,13 @@ use super::oci::OciListener;
 use super::provider::{self, Provider, ProviderFlags};
 use super::put_ingest::PutIngest;
 use super::stop_watcher::{oci_cut_note, serve_fronts, serve_oci, stop_watcher};
+#[cfg(target_os = "linux")]
+use super::treefs::Service;
 #[cfg(any(target_os = "macos", test))]
 use super::treefs::{NfsServed, NfsService};
-#[cfg(target_os = "linux")]
-use super::treefs::{Served, Service};
 use super::{Drained, Server, ServerConfig};
+#[cfg(target_os = "linux")]
+use mount::{Own as Asked, take_mount_and_sockets, with_mount};
 use next_image::{NextImage, stop_or_next, take_write_role};
 
 /// What the start of a node gets from the system it runs on: on Linux, the service manager and
@@ -412,46 +411,6 @@ pub(super) struct Fronts<'a> {
     pub(super) imaging: Imaging<'a>,
 }
 
-/// The mount of the `fs` interface of `service`, and the sockets `asked` offers, in the order of
-/// the switch from two processes to one (`docs/design/one-service.md` section 4.2): both offers
-/// are checked before either is accepted, and the mount's is accepted first. `asked` was checked
-/// when it was asked for; the mount's offer is checked as it is taken, and a mount that is not
-/// taken (refused, mismatched, not answered) refuses `asked` too, so both running instances serve
-/// on as they were. The sockets are accepted once the mount's instance has said `done` and before
-/// it is told `ready`: sockets that cannot be accepted leave the mount to that instance, which
-/// serves it again. Only then is it told `ready`, and the mount read.
-///
-/// # Errors
-/// What the mount's start said ([`StartError`]), or the hand-off of the sockets
-/// ([`HandingError`](super::cli::HandingError), boxed).
-#[cfg(target_os = "linux")]
-async fn take_mount_and_sockets(
-    service: Service,
-    stores: (LocalCache, Option<TreeStore>),
-    asked: Option<Offered>,
-) -> Result<(Served, Option<Inherited>), Error> {
-    let taking = match service.take(stores).await {
-        Ok(taking) => taking,
-        Err(why) => {
-            if let Some(asked) = asked {
-                asked.refuse().await;
-            }
-            return Err(why.into());
-        }
-    };
-    let sockets = match asked {
-        Some(asked) => match asked.accept().await {
-            Ok(inherited) => Some(inherited),
-            Err(why) => {
-                taking.abandon().await;
-                return Err(super::cli::HandingError::from(why).into_boxed());
-            }
-        },
-        None => None,
-    };
-    Ok((taking.serve().await?, sockets))
-}
-
 /// Reads the offer the image before this one handed over on `fd` (`handoff/exec.rs`) and takes it,
 /// checked as a taker checks an offer: its S3 and OCI sockets must be on `s3` and `oci`, its NFS
 /// socket on the address of `nfs` and its control socket at the path of `nfs` (an `fs` interface
@@ -493,7 +452,10 @@ async fn read_offer(
 /// process has exited, but for a successor that asks for the `ready` step (`take 1`, `ready`):
 /// it is offered the lock too, waited for until `server.handoff_wait` after `done`, and this
 /// cache starts no write from its `ready` on and says `written` once its writes in flight have
-/// ended (`handoff/written.rs`). A request for a mount is refused: this instance holds none.
+/// ended (`handoff/written.rs`). On Linux, a node that serves the mount of an `fs` interface
+/// offers it there too, to a successor that asks for it (`take 1`, `ready`, `mount`), and refuses
+/// one that does not while it holds the mount; any other node refuses a request for a mount: it
+/// holds none.
 ///
 /// With `fronts.imaging.handed` the sockets and the cache lock are those the image this process
 /// executed from handed over: the cache takes the write role with the lock ([`take_write_role`])
@@ -572,32 +534,30 @@ pub(super) async fn serve_front(
     drop(fs_handed);
     // The mount is got, and the instance it was taken from told that it is served, before any
     // socket of a front is bound: a start that cannot get it leaves the running instances serving
-    // everything. Where the file has an `fs` interface and a hand-off, the running instance's
-    // offer of its sockets is asked for and checked first, and accepted only after the mount's
+    // everything. Where the file has an `fs` interface and a hand-off, the running instance is
+    // asked for its mount with its sockets and lock in one conversation, and one that holds no
+    // mount for its sockets and lock alone, its offer accepted only after the mount's
     // ([`take_mount_and_sockets`]).
     #[cfg(not(target_os = "linux"))]
-    let sockets: Option<Inherited> = None;
+    let sockets: Option<Got> = None;
     #[cfg(target_os = "linux")]
     let (served, sockets) = match service {
         Some(service) => {
-            let switch = fronts
+            let handoff = fronts
                 .handoff
                 .filter(|_| service.has_mount() && handed.is_none());
-            let asked = match switch {
-                Some(handoff) => {
-                    let oci_listen = oci
-                        .as_ref()
-                        .map_or_else(Vec::new, |setup| setup.listen.clone());
-                    let s3 = bind_set(fronts.listen, true);
-                    ask_sockets(handoff, &s3, &oci_listen, &lock_path)
-                        .await
-                        .map_err(super::cli::HandingError::into_boxed)?
-                }
-                None => None,
+            let oci_listen = oci
+                .as_ref()
+                .map_or_else(Vec::new, |setup| setup.listen.clone());
+            let s3 = bind_set(fronts.listen, true);
+            let own = Asked {
+                s3: &s3,
+                oci: &oci_listen,
+                lock: &lock_path,
             };
             let stores = (cache.clone(), trees.clone());
             let (served, sockets) =
-                Box::pin(take_mount_and_sockets(service, stores, asked)).await?;
+                Box::pin(take_mount_and_sockets(service, stores, handoff, &own)).await?;
             (Some(served), sockets)
         }
         None => (None, None),
@@ -606,9 +566,9 @@ pub(super) async fn serve_front(
     // The registry front reads what the S3 front reads: through the cache.
     let backend: Arc<dyn Backend> = Arc::new(cache.clone());
     let server = Server::new(Arc::clone(&backend), config);
-    let got = handed.or(sockets).map(|taken| Got::Taken(Box::new(taken)));
+    let got = handed.map(|taken| Got::Taken(Box::new(taken))).or(sockets);
     let fronts_bound = async {
-        let bound = bind_fronts(
+        bind_fronts(
             fronts.handoff,
             got,
             &bind_set(fronts.listen, true),
@@ -617,8 +577,7 @@ pub(super) async fn serve_front(
             backend,
         )
         .await
-        .map_err(super::cli::HandingError::into_boxed)?;
-        Ok::<_, Error>(bound)
+        .map_err(super::cli::HandingError::into_boxed)
     };
     let Bound {
         s3: listeners,
@@ -659,10 +618,14 @@ pub(super) async fn serve_front(
         .map(|_| sockets_of(&listeners, oci.as_ref()))
         .transpose()?;
     let offer = offer.zip(fronts.handoff).map(|(offer, handoff)| {
-        offer
+        let offer = offer
             .with_accept_pause(listen.accept_pause)
             .with_ready_wait(handoff.wait)
-            .with_lock(cache.clone())
+            .with_lock(cache.clone());
+        // The mount is offered with the sockets and the lock, to a successor that asks for it.
+        #[cfg(target_os = "linux")]
+        let offer = with_mount(offer, served.as_ref());
+        offer
     });
     // A mount that cannot be served on stops the fronts as a signal does.
     let failed = Arc::new(Notify::new());
@@ -905,5 +868,8 @@ pub(super) async fn serve_cache_until_signalled(
     Ok(next.image(program, std::env::args_os()).await?)
 }
 
+#[cfg(target_os = "linux")]
+#[path = "cache_cli_mount.rs"]
+mod mount;
 #[path = "next_image.rs"]
 pub(super) mod next_image;

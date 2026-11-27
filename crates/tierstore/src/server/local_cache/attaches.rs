@@ -389,6 +389,10 @@ impl LocalCache {
     }
 }
 
+// The attaches and detaches of runs, which the mount reports as it reports the attaches above.
+#[path = "runs.rs"]
+pub(in crate::server) mod runs;
+
 #[cfg(test)]
 #[path = "attaches_tests.rs"]
 mod tests;

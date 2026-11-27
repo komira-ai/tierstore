@@ -1,5 +1,5 @@
 //! The ask of a start whose file has an `fs` interface on `server.handoff_socket`
-//! ([`offered_with_lock`]): the `ready` step and the cache lock with the sockets, the lock of
+//! ([`offered_with`] with no mount): the `ready` step and the cache lock with the sockets, the lock of
 //! another file left with the running instance, and a running instance that knows no `ready` step.
 
 use std::path::Path;
@@ -11,7 +11,7 @@ use crate::server::local_cache::testing::Rig;
 use crate::server::local_cache::{LocalCache, Mode};
 use crate::server::lock::try_take;
 
-use super::{Inherited, Want, offered_with_lock};
+use super::{Ask, Inherited, Offered, Want, offered_with};
 
 /// The wait of the `ready` step: only a hung test reaches it.
 const WAIT: Duration = Duration::from_secs(3600);
@@ -36,6 +36,22 @@ fn cache_offer(
         offer
     };
     offer.with_lock(cache)
+}
+
+/// The offer of the running instance on `handoff` to a start that asks for the `ready` step and
+/// the lock at `lock`, and leaves a lock of another file with that instance: what a start whose
+/// file has an `fs` interface asks of an instance that holds no mount.
+async fn offered_with_lock(
+    handoff: &crate::server::handoff::Handoff,
+    want: &Want<'_>,
+    lock: &Path,
+) -> Result<Option<Offered>, HandoffError> {
+    let ask = Ask {
+        mount: None,
+        lock: Some(lock),
+        leaves_another_lock: true,
+    };
+    offered_with(handoff, want, ask).await
 }
 
 /// What a start whose S3 address is `addr` and whose lock file is `lock` gets of the running
