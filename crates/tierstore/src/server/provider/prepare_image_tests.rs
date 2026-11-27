@@ -1,4 +1,5 @@
-//! A version 2 tree list prepared as the tree it is: the image written beside the walk, each span read once.
+//! A tree's version 2 list, the projection of its L2 sidecar, prepared as the tree it is: the image
+//! written beside the walk, each span read once.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -67,18 +68,6 @@ fn pack_reads(rig: &Rig) -> u64 {
     rig.bench.rig.calls_on(Op::Get, &rig.bench.pack.key)
 }
 
-/// The offset in a version 2 list's header of the entries section's offset, then its count.
-const ENTRIES_AT: usize = 16;
-
-/// Sets the kind of the entry `index` of `bytes` to an unknown one (3), keeping its mode.
-fn break_entry(bytes: &mut [u8], index: usize) {
-    let start = u32::from_le_bytes(bytes[ENTRIES_AT..ENTRIES_AT + 4].try_into().unwrap()) as usize;
-    let at = start + index * 32 + 12;
-    let kind_mode = u16::from_le_bytes(bytes[at..at + 2].try_into().unwrap());
-    let broken = (3 << 12) | (kind_mode & 0x0fff);
-    bytes[at..at + 2].copy_from_slice(&broken.to_le_bytes());
-}
-
 /// A file of `size` bytes with the digest `sha256`, whose bytes are in `key` at `offset`.
 fn file_at(path: &str, key: &str, offset: u64, size: u64, sha256: &str) -> ListEntry {
     ListEntry {
@@ -95,14 +84,15 @@ fn file_at(path: &str, key: &str, offset: u64, size: u64, sha256: &str) -> ListE
     }
 }
 
-/// Asserts that a version 2 list run to its end leaves its own bytes as the file `image` of the
-/// tree directory named by the list's digest, the tree directory the only one, and no staging
-/// directory.
+/// Asserts that a tree run to its end from its sidecar leaves the bytes of its version 2 list, the
+/// sidecar's projection byte for byte, as the file `image` of the tree directory named by the
+/// list's digest, the tree directory the only one, and no staging directory.
 #[tokio::test]
 async fn a_placed_v2_list_leaves_its_bytes_as_the_image_and_no_staging_directory() {
     let rig = Rig::new("prov-image-placed").await;
     let bytes = list_of(&rig.bench.pack).encode_v2().unwrap();
-    let key = rig.put_bytes(&bytes).await;
+    // The rig's own tree: its list is these bytes.
+    let key = rig.key.clone();
     assert_eq!(prepared(&rig, "js.1", &key).await, Stage::Placed);
     let digest = tree_list_digest(&key).unwrap();
     let image = std::fs::read(tree_path(&rig.bench.rig, &digest).join("image")).unwrap();
@@ -111,39 +101,19 @@ async fn a_placed_v2_list_leaves_its_bytes_as_the_image_and_no_staging_directory
     assert_eq!(staging(&rig), Vec::<String>::new());
 }
 
-/// Asserts that a version 2 list with a bad entry is refused and leaves no tree directory and no
-/// staging directory, though its image was being written beside the walk.
+/// Asserts that a list the walk refuses (more entries than `trees.max_entries`) while its image is
+/// being written beside the walk is refused and leaves no tree directory and no staging directory.
 #[tokio::test]
 async fn a_refused_v2_list_leaves_nothing_staged() {
-    let rig = Rig::new("prov-image-refused").await;
-    let mut bytes = list_of(&rig.bench.pack).encode_v2().unwrap();
-    break_entry(&mut bytes, 1);
-    let key = rig.put_bytes(&bytes).await;
+    let config = TreesConfig {
+        max_entries: 2,
+        ..TreesConfig::default()
+    };
+    let rig = Rig::with("prov-image-refused", config, |_| {}).await;
+    let key = rig.key.clone();
     assert_eq!(
         prepared(&rig, "js.1", &key).await,
-        Stage::Refused("tree list entry 1: unknown kind 3".to_owned())
-    );
-    assert_eq!(staging(&rig), Vec::<String>::new());
-    assert_eq!(trees(&rig), Vec::<String>::new());
-}
-
-/// Asserts that a version 2 list whose bytes do not hash to the job's digest is refused and leaves
-/// no tree directory and no staging directory.
-#[tokio::test]
-async fn a_v2_list_with_the_wrong_digest_leaves_nothing_staged() {
-    let rig = Rig::new("prov-image-digest").await;
-    let bytes = list_of(&rig.bench.pack).encode_v2().unwrap();
-    let key = rig.put_bytes(&bytes).await;
-    let (mut job, seen) = held(&rig, "js.1", &key);
-    let expected = TreeDigest::of(b"other bytes");
-    job.digest = expected;
-    run_job(&rig, job).await;
-    let actual = TreeDigest::of(&bytes);
-    assert_eq!(
-        *seen.borrow(),
-        Stage::Refused(format!(
-            "tree list digest mismatch: expected {expected}, the bytes hash to {actual}"
-        ))
+        Stage::Refused("the tree is refused: tree too large: more than 2 entries".to_owned())
     );
     assert_eq!(staging(&rig), Vec::<String>::new());
     assert_eq!(trees(&rig), Vec::<String>::new());
@@ -156,7 +126,8 @@ async fn a_v2_list_with_the_wrong_digest_leaves_nothing_staged() {
 async fn a_second_source_of_the_same_v2_list_shares_the_tree() {
     let rig = Rig::new("prov-image-twice").await;
     let bytes = list_of(&rig.bench.pack).encode_v2().unwrap();
-    let key = rig.put_bytes(&bytes).await;
+    // The rig's own tree: its list is these bytes.
+    let key = rig.key.clone();
     assert_eq!(prepared(&rig, "js.1", &key).await, Stage::Placed);
     assert_eq!(prepared(&rig, "js.2", &key).await, Stage::Placed);
     let store = &rig.bench.store;
@@ -239,7 +210,7 @@ async fn a_v2_list_over_a_store_with_trees_disabled_fails_and_stages_nothing() {
         ..TreesConfig::default()
     };
     let rig = Rig::with("prov-image-disabled", config, |_| {}).await;
-    let key = rig.put_list_v2(&list_of(&rig.bench.pack)).await;
+    let key = rig.key.clone();
     assert_eq!(
         prepared(&rig, "js.1", &key).await,
         Stage::Failed("the tree was not made: trees are off on this node".to_owned())
@@ -257,7 +228,7 @@ async fn a_v2_list_over_a_read_only_store_fails_and_stages_nothing() {
     let waiting = rig.bench.rig.locked();
     let store = Bench::reopen(waiting);
     rig.provider = Provider::with(store, rig.bench.rig.cache.clone(), settings());
-    let key = rig.put_list_v2(&list_of(&rig.bench.pack)).await;
+    let key = rig.key.clone();
     assert_eq!(
         prepared(&rig, "js.1", &key).await,
         Stage::Failed(

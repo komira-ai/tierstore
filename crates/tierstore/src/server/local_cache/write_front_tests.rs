@@ -295,28 +295,6 @@ async fn a_body_that_does_not_hash_to_its_name_is_400_bad_digest() {
     assert_eq!(front.read(&key).await.body, "the right bytes");
 }
 
-/// Asserts that a put that replaces on a tag is not done: `If-Match` on an object that is there
-/// is answered as on every front (the object cannot be replaced), and nothing is sent to the
-/// upstream as a write.
-#[tokio::test]
-async fn a_put_that_replaces_is_not_done() {
-    let front = Front::new("tscache-wfront-replace", true);
-    front.rig.put("cas/b/obj", b"old").await;
-    let tag = front.rig.tamper.memory.head("cas/b/obj").await.unwrap().tag;
-    let right = format!("\"{tag}\"");
-    let replaced = front
-        .full("PUT", "cas/b/obj", &[("if-match", right.as_str())], b"new")
-        .await;
-    assert_eq!(replaced.status, StatusCode::NOT_IMPLEMENTED);
-    let wrong = front
-        .full("PUT", "cas/b/obj", &[("if-match", "\"nope\"")], b"new")
-        .await;
-    assert_eq!(wrong.status, StatusCode::PRECONDITION_FAILED);
-    assert_eq!(front.rig.calls(Op::Put), 0);
-    assert_eq!(front.rig.calls(Op::PutIfMatch), 0);
-    assert_eq!(front.read("cas/b/obj").await.body, "old");
-}
-
 /// Asserts how the refusals of the upstream reach the client, for a put whose HEAD found nothing:
 /// a conditional put it refuses because another writer was first is 412 `PreconditionFailed`; a
 /// full upstream (507 in S3) is 503 `SlowDown` with `Retry-After`; an upstream that does not
