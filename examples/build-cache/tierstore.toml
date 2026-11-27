@@ -25,5 +25,5 @@ path = "${work}/cold"
 
 # The keys the cache keeps: sccache's, under its SCCACHE_S3_KEY_PREFIX.
 [[policy]]
-prefix = "cache/"
+prefix = "sccache/"
 cache  = true

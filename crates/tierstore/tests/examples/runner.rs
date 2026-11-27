@@ -544,8 +544,8 @@ fn a_generator_that_cannot_write_its_files_says_why() {
         let example = std::fs::canonicalize(&options.example).unwrap();
         let work = std::fs::canonicalize(&options.work).unwrap();
         let why = why
-            .replace("{example}", path(&example))
-            .replace("{work}", path(&work));
+            .replace("<example>", path(&example))
+            .replace("<work>", path(&work));
         assert_eq!(error.to_string(), why, "{name}");
     }
 }

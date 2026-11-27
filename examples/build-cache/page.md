@@ -109,7 +109,7 @@ path = "${work}/cold"
 
 # The keys the cache keeps: sccache's, under its SCCACHE_S3_KEY_PREFIX.
 [[policy]]
-prefix = "cache/"
+prefix = "sccache/"
 cache  = true
 ```
 
@@ -201,7 +201,7 @@ json = { file = "build1-stats.json", pointer = "/stats/compile_requests" }
 
 [[check]]
 name = "build1.sccache.misses"
-json = { file = "build1-stats.json", pointer = "/stats/cache_misses/counts/C", default = "0" }
+json = { file = "build1-stats.json", pointer = "/stats/cache_misses/counts/C~1C++", default = "0" }
 
 [[check]]
 name = "build1.sccache.writes"
@@ -213,11 +213,11 @@ metric = { series = "tierstore_cache_upstream_puts_total", step = "build1" }
 
 [[check]]
 name = "build2.sccache.hits"
-json = { file = "build2-stats.json", pointer = "/stats/cache_hits/counts/C", default = "0" }
+json = { file = "build2-stats.json", pointer = "/stats/cache_hits/counts/C~1C++", default = "0" }
 
 [[check]]
 name = "build2.sccache.misses"
-json = { file = "build2-stats.json", pointer = "/stats/cache_misses/counts/C", default = "0" }
+json = { file = "build2-stats.json", pointer = "/stats/cache_misses/counts/C~1C++", default = "0" }
 
 [[check]]
 name = "build2.objects"
@@ -245,11 +245,11 @@ metric = { series = "tierstore_cache_upstream_bytes_read_total", step = "build2"
 
 [[check]]
 name = "build3.sccache.hits"
-json = { file = "build3-stats.json", pointer = "/stats/cache_hits/counts/C", default = "0" }
+json = { file = "build3-stats.json", pointer = "/stats/cache_hits/counts/C~1C++", default = "0" }
 
 [[check]]
 name = "build3.sccache.misses"
-json = { file = "build3-stats.json", pointer = "/stats/cache_misses/counts/C", default = "0" }
+json = { file = "build3-stats.json", pointer = "/stats/cache_misses/counts/C~1C++", default = "0" }
 
 [[check]]
 name = "build3.tierstore.rewrite_refused"
