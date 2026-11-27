@@ -1,10 +1,10 @@
-//! `plan`: the needed ranges of a tree, in tree order, and a first-touch profile, to the cell runs
-//! Prepare ensures and their ranks (section 6).
+//! `plan`: the needed ranges of a tree, in tree order, to the cell runs Prepare ensures and their
+//! ranks: shared packs first, then tree order (section 6, 6.1).
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use tierstore_fetch_api::ids::{ByteRange, CellRun, PackKey, Rank};
-use tierstore_fetch_api::list::{ListL2, PackRecord};
+use tierstore_fetch_api::ids::{ByteRange, CellRun, Rank};
+use tierstore_fetch_api::list::{ListL2, PACK_SHARED, PackRecord};
 
 use crate::config::{Medium, PlanConfig};
 
@@ -14,17 +14,6 @@ pub struct Needed {
     /// The pack's index in the list.
     pub pack: u32,
     /// The bytes.
-    pub range: ByteRange,
-}
-
-/// One first touch of a profile: a byte range of the pack with this key, read before every later
-/// touch of the profile. A profile is a hint recorded by an earlier run, so a touch names its pack
-/// by key, not by an index of some list.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct Touch {
-    /// The pack's object key.
-    pub key: PackKey,
-    /// The bytes touched.
     pub range: ByteRange,
 }
 
@@ -54,8 +43,6 @@ pub struct PlanInput<'a> {
     pub list: &'a dyn ListL2,
     /// The ranges the job needs, in tree order.
     pub needed: &'a [Needed],
-    /// The profile's first touches, in first-touch order; empty when there is no profile.
-    pub profile: &'a [Touch],
     /// The medium of the packs whose location is known; any other pack is [`Medium::Cold`].
     pub media: &'a BTreeMap<u32, Medium>,
     /// The node's backlog.
@@ -66,7 +53,6 @@ impl std::fmt::Debug for PlanInput<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PlanInput")
             .field("needed", &self.needed)
-            .field("profile", &self.profile)
             .field("media", &self.media)
             .field("backlog", &self.backlog)
             .finish_non_exhaustive()
@@ -80,7 +66,7 @@ pub struct Ensure {
     pub pack: u32,
     /// The runs, ascending and separated by at least one cell not in this ensure.
     pub runs: Vec<CellRun>,
-    /// The first-touch rank of the runs' needed cells.
+    /// The rank of the runs' needed cells: shared packs first, then tree order.
     pub rank: Rank,
 }
 
@@ -125,8 +111,7 @@ pub struct Plan {
     pub packs: Vec<PackPlan>,
 }
 
-/// Why a plan cannot be made: the needed ranges and the list disagree. A profile never makes a
-/// plan fail: a touch of a pack or cell the job does not need is ignored.
+/// Why a plan cannot be made: the needed ranges and the list disagree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum PlanError {
     /// A needed range names a pack the list does not have.
@@ -168,14 +153,13 @@ impl Segment {
     }
 }
 
-/// One pack with a needed cell: its record and the cells the job needs, at their tree ranks.
+/// One pack with a needed cell: its record and the cells the job needs, at their ranks.
 struct PackWork {
     record: PackRecord,
     needed: Vec<Segment>,
 }
 
-/// The rank of the `n`th first touch. Ranks past `u32::MAX` share the last one, which only
-/// ties their order.
+/// The `n`th rank. Ranks past `u32::MAX` share the last one, which only ties their order.
 fn rank_at(n: usize) -> u32 {
     u32::try_from(n).unwrap_or(u32::MAX)
 }
@@ -197,12 +181,10 @@ fn needed_cells(record: &PackRecord, pack: u32, range: ByteRange) -> Result<(u32
     Ok((run.first, run.first + run.count))
 }
 
-/// The cells of `record` that a profile's `range` covers, clipped to the pack; `None` when it
-/// covers none.
-fn touched_cells(record: &PackRecord, range: ByteRange) -> Option<(u32, u32)> {
-    let run = range.cells(record.cell_shift)?;
-    let end = run.first.saturating_add(run.count).min(record.cell_count);
-    (run.first < end).then_some((run.first, end))
+/// Whether the CAS service marked the pack shared (`pack_flags` bit 1, 6.1). The other bits,
+/// known or not, say nothing of the order.
+fn is_shared(record: &PackRecord) -> bool {
+    record.pack_flags & PACK_SHARED != 0
 }
 
 /// Appends `seg` to `out`, joining it to the last segment when they touch at the same rank.
@@ -214,28 +196,22 @@ fn push(out: &mut Vec<Segment>, seg: Segment) {
 }
 
 /// The needed cells of a pack as ascending segments, each cell at its rank: the lowest rank of
-/// every needed range and profile touch that covers it. Cells no needed range covers are left out,
-/// whatever the profile touched.
-fn ranked(needed: &[Segment], touched: &[Segment]) -> Vec<Segment> {
-    // (cell, opens, is_needed, (rank, interval)): each interval opens at its start and closes at
-    // its end. The interval's number makes every open entry distinct, even where ranks tie.
-    let mut events: Vec<(u32, bool, bool, (u32, usize))> = Vec::new();
-    let all = needed
-        .iter()
-        .map(|s| (s, true))
-        .chain(touched.iter().map(|s| (s, false)));
-    for (id, (s, is_needed)) in all.enumerate() {
-        events.push((s.start, true, is_needed, (s.rank, id)));
-        events.push((s.end, false, is_needed, (s.rank, id)));
+/// every needed range that covers it.
+fn ranked(needed: &[Segment]) -> Vec<Segment> {
+    // (cell, opens, (rank, interval)): each interval opens at its start and closes at its end.
+    // The interval's number makes every open entry distinct, even where ranks tie.
+    let mut events: Vec<(u32, bool, (u32, usize))> = Vec::with_capacity(needed.len() * 2);
+    for (id, s) in needed.iter().enumerate() {
+        events.push((s.start, true, (s.rank, id)));
+        events.push((s.end, false, (s.rank, id)));
     }
     events.sort_unstable();
     let mut out = Vec::new();
-    let mut open_needed = 0u32;
     let mut open: BTreeSet<(u32, usize)> = BTreeSet::new();
     let mut at = 0u32;
     let mut events = events.into_iter().peekable();
     while let Some(&(cell, ..)) = events.peek() {
-        if let Some(&(rank, _)) = open.first().filter(|_| open_needed > 0) {
+        if let Some(&(rank, _)) = open.first() {
             push(
                 &mut out,
                 Segment {
@@ -245,12 +221,10 @@ fn ranked(needed: &[Segment], touched: &[Segment]) -> Vec<Segment> {
                 },
             );
         }
-        while let Some((_, opens, is_needed, entry)) = events.next_if(|e| e.0 == cell) {
+        while let Some((_, opens, entry)) = events.next_if(|e| e.0 == cell) {
             if opens {
-                open_needed += u32::from(is_needed);
                 open.insert(entry);
             } else {
-                open_needed -= u32::from(is_needed);
                 open.remove(&entry);
             }
         }
@@ -306,24 +280,39 @@ fn at_least(part: u32, whole: u32, percent: u8) -> bool {
 
 /// The plan of a tree's Prepare (section 6): which cells of which packs to ensure, at which rank.
 ///
-/// A cell is needed when a needed range covers it. Its rank is the index of the first profile
-/// touch covering it, else the number of touches plus the index of the first needed range covering
-/// it. A pack's needed runs are merged across gaps of at most its medium's gap rule; the pack is
-/// fetched whole when the merged cells reach the coverage of [`PlanConfig`] and the backlog does
-/// not exceed its bound. Fetched cells no needed range covers take the rank of the nearest needed
-/// cell before them in the pack, or after them when none is before.
+/// A cell is needed when a needed range covers it. The needed ranges are ranked shared packs
+/// first (6.1): every range of a pack whose record has [`PACK_SHARED`] set, in tree order, then
+/// every other range, in tree order; a cell's rank is the lowest rank of the ranges covering it.
+/// No other bit of `pack_flags` changes the order. A pack's needed runs are merged across gaps of
+/// at most its medium's gap rule; the pack is fetched whole when the merged cells reach the
+/// coverage of [`PlanConfig`] and the backlog does not exceed its bound. Fetched cells no needed
+/// range covers take the rank of the nearest needed cell before them in the pack, or after them
+/// when none is before.
 ///
 /// # Errors
 /// [`PlanError`] when a needed range names a pack the list does not have, lies outside its pack,
 /// or its pack's record cannot hold its cells.
 pub fn plan(input: &PlanInput<'_>, config: &PlanConfig) -> Result<Plan, PlanError> {
+    // One record per needed range, looked up once; a missing pack fails at its range, in tree
+    // order, below.
+    let records: Vec<Option<PackRecord>> = input
+        .needed
+        .iter()
+        .map(|need| input.list.pack_record(need.pack))
+        .collect();
+    // The ranges of shared packs take ranks 0, 1, ... in tree order, and the others follow them.
+    let shared_ranges = records.iter().flatten().filter(|r| is_shared(r)).count();
+    let (mut next_shared, mut next_other) = (0usize, shared_ranges);
     let mut work: BTreeMap<u32, PackWork> = BTreeMap::new();
-    let first_tree_rank = input.profile.len();
-    for (i, need) in input.needed.iter().enumerate() {
-        let record = input
-            .list
-            .pack_record(need.pack)
-            .ok_or(PlanError::NoSuchPack { pack: need.pack })?;
+    for (need, record) in input.needed.iter().zip(records) {
+        let record = record.ok_or(PlanError::NoSuchPack { pack: need.pack })?;
+        let next = if is_shared(&record) {
+            &mut next_shared
+        } else {
+            &mut next_other
+        };
+        let rank = rank_at(*next);
+        *next += 1;
         if need.range.len == 0 {
             continue;
         }
@@ -332,26 +321,7 @@ pub fn plan(input: &PlanInput<'_>, config: &PlanConfig) -> Result<Plan, PlanErro
             record,
             needed: Vec::new(),
         });
-        entry.needed.push(Segment {
-            start,
-            end,
-            rank: rank_at(first_tree_rank.saturating_add(i)),
-        });
-    }
-
-    let mut by_key: BTreeMap<PackKey, Vec<u32>> = BTreeMap::new();
-    for (&pack, w) in &work {
-        by_key.entry(w.record.key.clone()).or_default().push(pack);
-    }
-    // The touches of each needed pack, at their profile ranks.
-    let mut touches: BTreeMap<u32, Vec<(ByteRange, u32)>> = BTreeMap::new();
-    for (j, touch) in input.profile.iter().enumerate() {
-        for &pack in by_key.get(&touch.key).into_iter().flatten() {
-            touches
-                .entry(pack)
-                .or_default()
-                .push((touch.range, rank_at(j)));
-        }
+        entry.needed.push(Segment { start, end, rank });
     }
 
     let downgrade = input.backlog.exceeds(config.backlog_ms);
@@ -360,15 +330,7 @@ pub fn plan(input: &PlanInput<'_>, config: &PlanConfig) -> Result<Plan, PlanErro
     for (&pack, w) in &work {
         let medium = input.media.get(&pack).copied().unwrap_or(Medium::Cold);
         let gap_cells = config.gap_cells(medium, w.record.cell_shift);
-        let touched: Vec<Segment> = touches
-            .remove(&pack)
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|(range, rank)| {
-                touched_cells(&w.record, range).map(|(start, end)| Segment { start, end, rank })
-            })
-            .collect();
-        let needed = ranked(&w.needed, &touched);
+        let needed = ranked(&w.needed);
         let runs = merged(&needed, gap_cells);
         let merged_cells = total(&runs);
         let cell_count = w.record.cell_count;

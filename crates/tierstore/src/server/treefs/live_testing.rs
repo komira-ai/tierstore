@@ -223,16 +223,21 @@ impl Live {
     /// over the same table of tree numbers, runtime directory and fill socket (or the same cache
     /// in process), with nothing in memory.
     pub(in crate::server) fn successor(&self) -> Arc<Core> {
+        self.successor_over((&self.cache, &self.bench.store))
+    }
+
+    /// The same, reaching `cache` and `trees` in process when the core is [`Over::InProcess`]: the
+    /// core of a process that takes the mount over with a cache and a tree store of its own,
+    /// opened before the hand-over over the same directory.
+    pub(in crate::server) fn successor_over(
+        &self,
+        (cache, trees): (&LocalCache, &TreeStore),
+    ) -> Arc<Core> {
         let mut settings = self.core.settings().clone();
         settings.generation += 1;
         Arc::new(Core::new(
             settings,
-            Self::fills_of(
-                self.over,
-                &self.socket,
-                (&self.cache, &self.bench.store),
-                self.fetch_timeout,
-            ),
+            Self::fills_of(self.over, &self.socket, (cache, trees), self.fetch_timeout),
             TreeTable::open(&self.runtime).unwrap(),
             &self.runtime,
         ))

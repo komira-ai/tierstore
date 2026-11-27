@@ -21,7 +21,7 @@ pub struct ItemRef {
 pub struct Queued {
     /// The job whose want ranks the item.
     pub job: JobId,
-    /// The first-touch rank of the item's first needed cell.
+    /// The rank of the item's first needed cell (shared packs first, then tree order; 4.5, 6.1).
     pub rank: Rank,
     /// The item's offset in its pack.
     pub offset: u64,

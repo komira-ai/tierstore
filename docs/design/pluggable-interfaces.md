@@ -69,7 +69,7 @@ One small pull request, so that a later feature cannot take names from users.
 - Add the rule to the design (section 7 and the decisions list): any internal object a later feature needs (staged multipart parts, a new coordination object) is named under `_tiering/`. No fourth reserved prefix is added; the reserved set stays `_entries/`, `_journal/`, `_tiering/`.
 - Add the guard: a unit test next to the constants in `journal.rs` that lists every internal key and prefix constant in the crate and asserts that each starts with one of the three, and that `RESERVED_PREFIXES` (what `is_reserved` and so the proxy refuse) is exactly those three.
 
-Tests: `internal_keys_are_under_reserved_prefixes` (every internal key constant is under a reserved prefix); `reserved_set_is_the_three_prefixes` (a key under each is refused, and a key under any other prefix such as `_uploads/` is accepted as an ordinary key). Neither touches a format.
+Tests: `internal_keys_are_under_reserved_prefixes` (every internal key constant is under a reserved prefix); `reserved_set_is_the_three_prefixes` (`RESERVED_PREFIXES` is exactly the three), both in `crates/tierstore/src/journal_tests.rs`; and, through the proxy over in-memory tiers in `crates/tierstore/tests/tierstore/reserved_keys.rs`, `a_key_under_each_reserved_prefix_is_refused_by_every_call` (a put, a head, a get, a streamed or open read and a delete of a key under each are refused), `key_under_uploads_prefix_is_an_ordinary_key` and `keys_beside_the_reserved_prefixes_are_ordinary_keys_for_every_call` (a key under any other prefix such as `_uploads/`, or `_entries` with no slash, is accepted as an ordinary key). None touches a format.
 
 Nothing else is needed now: no format changes, no config change, no renames.
 
