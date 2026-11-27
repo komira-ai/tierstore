@@ -30,10 +30,11 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// The longest a PUT that the store read whole and never answered takes to fail: the request is
 /// cut after a whole `request_timeout` with no progress, and the window in which the body was
-/// sent counts as progress, so it fails between one and two request timeouts after it began. A
-/// put that also waited for the look after it (1 s, then a HEAD of up to a request timeout) took
-/// at least 121 s, and up to 181 s.
-const PUT_GIVES_UP: Duration = Duration::from_secs(120);
+/// sent counts as progress, so it fails between one and two request timeouts after it began (and
+/// the timer rounds its deadline up to the next millisecond; half a second covers that). A put
+/// that also waited for the look after it (1 s, then a HEAD of up to a request timeout) took at
+/// least 121 s, and up to 181 s.
+const PUT_GIVES_UP: Duration = Duration::from_millis(120_500);
 
 /// The keys whose requests the upstream hangs.
 const STALLED: &str = "stall/";
