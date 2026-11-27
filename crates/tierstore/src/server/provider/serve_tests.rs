@@ -90,7 +90,7 @@ async fn a_build_node_with_no_fs_interface_answers_its_provider_unavailable() {
     let settings = node.settings("", &provider_interface(&socket));
     let upstream: Arc<dyn Backend> = Arc::new(FaultyBackend::new(Arc::new(MemoryBackend::new())));
     let disk: Arc<dyn Disk> = Arc::new(SystemDisk);
-    let pack = Pack::new("cas/pack/one", &[1000]);
+    let pack = Pack::new("cas/pack/one", &[1000, 2000, 3000]);
     let [(key, _), _] = tree_objects(&pack);
     let path = socket.clone();
     let work = |_| async move {
