@@ -41,6 +41,15 @@
 //! it forgets it: the request end of `tierstore_request_to_start_seconds`, whose other end is the
 //! first look of `tierstore fs` inside one of the run's trees (`local_cache/starts.rs`).
 //!
+//! The trees are served by the `fs` interface of the node's file, in this process. In a file with
+//! no `fs` interface no process of this release serves the mount (`tierstore fs` is no longer a
+//! process of its own, and a node of the earlier two-process layout keeps its `mountpoint` with
+//! nothing behind it): there every `Prepare` and `Mount` is `UNAVAILABLE` with
+//! the reason `sources::no_fs` gives, and no directory under the mount is answered, so the
+//! agent's start fails `input-unavailable` saying so instead of on a directory that is not there.
+//! Every answer `UNAVAILABLE` counts once under its reason in
+//! `tierstore_provider_unavailable_total{reason}` (`local_cache/provider_unavailable.rs`).
+//!
 //! Every call is idempotent by its source. Every read of the store has a bound,
 //! `params.fetch_timeout`; a read that passes it fails that file (an open reads it again) or, for
 //! the sidecar or the list, the preparation, which the next `Mount` starts again. A placement lasts
@@ -87,6 +96,8 @@ mod sources_tests;
 mod start_tests;
 #[cfg(test)]
 pub(in crate::server) mod testing;
+#[cfg(test)]
+mod unavailable_tests;
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -112,10 +123,14 @@ pub(super) const MAX_REASON_BYTES: usize = 256;
 pub(super) struct ProviderFlags {
     /// The path of the socket.
     pub socket: PathBuf,
-    /// The mount of `tierstore fs`, under which a source's directory is answered.
+    /// The mount of the node's file system, under which a source's directory is answered.
     pub mountpoint: PathBuf,
     /// How long one read of the store may take.
     pub fetch_timeout: Duration,
+    /// Whether this process serves the file system at `mountpoint`: the node's file has an `fs`
+    /// interface. Without one no process of this release serves it (`tierstore fs` is no longer a
+    /// process of its own), and every `Prepare` and `Mount` is `UNAVAILABLE`.
+    pub served: bool,
 }
 
 /// Why a call is not answered with success: the three other answers of the contract.

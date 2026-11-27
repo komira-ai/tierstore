@@ -29,6 +29,7 @@ use std::fmt::Write as _;
 use std::sync::Mutex;
 
 use self::list_refusals::ListRefusals;
+use self::provider_unavailable::ProviderUnavailable;
 use super::attaches::Attaches;
 use super::attaches::runs::Runs;
 use super::descriptors::Held;
@@ -92,6 +93,8 @@ pub(super) struct Starts {
     pub(super) runs: Runs,
     /// The tree lists the mount provider refused (`list_refusals`).
     list_refusals: ListRefusals,
+    /// The mount provider's answers `UNAVAILABLE`, by reason (`provider_unavailable`).
+    provider_unavailable: ProviderUnavailable,
 }
 
 impl Starts {
@@ -149,8 +152,8 @@ impl Starts {
 
     /// The family in the Prometheus text format: cumulative buckets, the sum in seconds and the
     /// count, all of one moment; then the families of the mounts' reports (`attaches`,
-    /// `descriptors`, `opens`, `tree_lists`, `requests`, `runs`) and of the provider's refused
-    /// lists (`list_refusals`).
+    /// `descriptors`, `opens`, `tree_lists`, `requests`, `runs`), of the provider's refused lists
+    /// (`list_refusals`) and of its answers `UNAVAILABLE` (`provider_unavailable`).
     pub(super) fn render(&self) -> String {
         let state = locked(&self.state);
         let mut text = format!("# TYPE {REQUEST_TO_START} histogram\n");
@@ -170,6 +173,7 @@ impl Starts {
         text.push_str(&self.requests.render());
         text.push_str(&self.runs.render());
         text.push_str(&self.list_refusals.render());
+        text.push_str(&self.provider_unavailable.render());
         text
     }
 }
@@ -214,6 +218,8 @@ impl LocalCache {
 // Declared here, not in the cache's root module, since the counters are a field of `Starts`.
 #[path = "list_refusals.rs"]
 mod list_refusals;
+#[path = "provider_unavailable.rs"]
+pub(super) mod provider_unavailable;
 
 #[cfg(test)]
 #[path = "starts_tests.rs"]
