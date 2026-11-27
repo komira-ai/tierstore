@@ -11,6 +11,7 @@
 //! limit at all, and a read that went to the silent gate would never complete:
 //! [`read_avoiding`] fails the test as soon as the gate holds one more request than it expects.
 
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -55,13 +56,31 @@ impl Hold {
 
 /// An endpoint that holds every request it is sent, unanswered, until [`Gate::open_to`] names a
 /// front; from then on it relays every connection to that front, the held ones included.
+/// [`Gate::release`] relays one held request alone.
 struct Gate {
     endpoint: String,
     /// The requests held so far: their head arrived while the gate was shut.
     held: watch::Receiver<usize>,
     /// The connections whose client went away while the gate held them.
     dropped: watch::Receiver<usize>,
-    relay: watch::Sender<Option<SocketAddr>>,
+    relay: watch::Sender<Relay>,
+}
+
+/// Where a [`Gate`] relays its connections.
+#[derive(Clone, Default)]
+struct Relay {
+    /// Every connection, held or new.
+    all: Option<SocketAddr>,
+    /// The held requests named by their number (the first held is 1), each alone.
+    one: BTreeMap<usize, SocketAddr>,
+}
+
+fn addr_of(front: &FakeS3) -> SocketAddr {
+    front
+        .endpoint()
+        .trim_start_matches("http://")
+        .parse()
+        .unwrap()
 }
 
 impl Gate {
@@ -70,7 +89,7 @@ impl Gate {
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
         let (held_tx, held) = watch::channel(0);
         let (dropped_tx, dropped) = watch::channel(0);
-        let (relay, relay_rx) = watch::channel(None);
+        let (relay, relay_rx) = watch::channel(Relay::default());
         let (held_tx, dropped_tx) = (Arc::new(held_tx), Arc::new(dropped_tx));
         tokio::spawn(async move {
             loop {
@@ -89,12 +108,14 @@ impl Gate {
 
     /// From now on every connection, held or new, is relayed to `front`.
     fn open_to(&self, front: &FakeS3) {
-        let addr = front
-            .endpoint()
-            .trim_start_matches("http://")
-            .parse()
-            .unwrap();
-        self.relay.send_replace(Some(addr));
+        self.relay.send_modify(|r| r.all = Some(addr_of(front)));
+    }
+
+    /// Relays the `n`th request the gate held (the first is 1) to `front`, and no other.
+    fn release(&self, n: usize, front: &FakeS3) {
+        self.relay.send_modify(|r| {
+            r.one.insert(n, addr_of(front));
+        });
     }
 
     fn held(&self) -> usize {
@@ -117,18 +138,18 @@ impl Gate {
 type Counts = (Arc<watch::Sender<usize>>, Arc<watch::Sender<usize>>);
 
 /// One connection of a [`Gate`]: relayed at once if the gate is open; else held, every byte the
-/// client sends kept, until the gate opens (and then relayed from its first byte) or the client
-/// goes away.
-async fn serve(
-    mut sock: TcpStream,
-    mut relay: watch::Receiver<Option<SocketAddr>>,
-    (held, dropped): Counts,
-) {
+/// client sends kept, until the gate opens or releases it (and then relayed from its first
+/// byte) or the client goes away.
+async fn serve(mut sock: TcpStream, mut relay: watch::Receiver<Relay>, (held, dropped): Counts) {
     let mut sent = Vec::new();
-    let mut counted = false;
+    let mut mine: Option<usize> = None;
     let mut chunk = [0u8; 4096];
     let to = loop {
-        if let Some(to) = *relay.borrow_and_update() {
+        let target = {
+            let r = relay.borrow_and_update();
+            r.all.or_else(|| mine.and_then(|n| r.one.get(&n).copied()))
+        };
+        if let Some(to) = target {
             break to;
         }
         tokio::select! {
@@ -145,9 +166,11 @@ async fn serve(
                     return;
                 }
                 sent.extend_from_slice(&chunk[..n]);
-                if !counted && sent.windows(4).any(|w| w == b"\r\n\r\n") {
-                    counted = true;
-                    held.send_modify(|h| *h += 1);
+                if mine.is_none() && sent.windows(4).any(|w| w == b"\r\n\r\n") {
+                    held.send_modify(|h| {
+                        *h += 1;
+                        mine = Some(*h);
+                    });
                 }
             }
         }
@@ -569,5 +592,52 @@ async fn an_answer_to_a_request_sent_before_the_endpoint_was_set_aside_brings_it
     assert_eq!(aside(&s), [true, false, false]);
     gate.open_to(&service.fronts[2]);
     assert_eq!(&late.await.unwrap().unwrap()[..], BODY);
+    assert_eq!(aside(&s), [false, false, false]);
+}
+
+/// Asserts that a probe with no answer changes nothing for an endpoint that an answer brought
+/// back while the probe was out: a read held at the gate since before the endpoint was set aside
+/// is answered while the probe is held, which puts the endpoint back in turn, and when the
+/// probe's limit then runs out the endpoint stays in turn.
+#[tokio::test(start_paused = true)]
+async fn a_probe_with_no_answer_leaves_an_endpoint_an_answer_brought_back_in_turn() {
+    let _hold = Hold::new();
+    let service = Service::start().await;
+    let gate = Gate::start().await;
+    let s = store(
+        &service,
+        &[
+            &gate.endpoint,
+            service.fronts[0].endpoint(),
+            service.fronts[1].endpoint(),
+        ],
+    );
+    let early = spawn_read(&s);
+    gate.held_reaches(1).await;
+    tokio::time::advance(LIMIT / 2).await;
+    for _ in 0..2 {
+        assert_eq!(&read_avoiding(&s, &gate, 1).await[..], BODY);
+    }
+    // Held second, with a limit that runs out after the probe's start.
+    let late = spawn_read(&s);
+    gate.held_reaches(2).await;
+    tokio::time::advance(LIMIT / 2).await;
+    assert_eq!(&early.await.unwrap().unwrap()[..], BODY);
+    gate.dropped_reaches(1).await;
+    assert_eq!(aside(&s), [true, false, false]);
+
+    // The time aside is up: this read starts the probe, held third.
+    tokio::time::advance(super::FIRST_ASIDE).await;
+    assert_eq!(&read_avoiding(&s, &gate, 3).await[..], BODY);
+    until(|| gate.held() == 3).await;
+
+    // The late read is answered: the endpoint is back in turn while its probe is out.
+    gate.release(2, &service.fronts[2]);
+    assert_eq!(&late.await.unwrap().unwrap()[..], BODY);
+    assert_eq!(aside(&s), [false, false, false]);
+
+    // The probe's limit runs out with no answer: the endpoint stays in turn.
+    tokio::time::advance(LIMIT).await;
+    gate.dropped_reaches(2).await;
     assert_eq!(aside(&s), [false, false, false]);
 }

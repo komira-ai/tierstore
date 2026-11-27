@@ -162,9 +162,7 @@ impl Health {
     pub(super) fn probe_failed(&self, index: usize, now: Instant) -> Option<Duration> {
         let mut inner = self.inner();
         let state = &mut inner.states[index];
-        if state.aside_until.is_none() {
-            return None;
-        }
+        state.aside_until?;
         state.failures = state.failures.saturating_add(1);
         let aside = self.aside_for(index, state.failures);
         state.aside_until = Some(now + aside);
