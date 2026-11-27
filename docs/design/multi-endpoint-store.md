@@ -1,6 +1,6 @@
 # One store, several endpoints: the S3 client sends each request to the next endpoint in turn
 
-Status: **built in the pull request that adds `endpoints` (tierstore#229); failover on a failed connect added in section 8.** This document replaces the first version of #228, which also planned a random mode, failover, down marks and metrics; none of that is decided (section 7). Terms in bold are those of [tierstore-design.md](tierstore-design.md) and [put-without-lock.md](put-without-lock.md).
+Status: **built: the round robin over `endpoints` (komira-ai/tierstore#229) and failover on a failed connect, section 8 (komira-ai/tierstore#232). TLS to an endpoint is built too (komira-ai/tierstore#465).** Down marks, a random mode, least-in-flight choice and metrics per endpoint are not built and not decided (section 7). This document replaces the first version (komira-ai/tierstore#228), which also planned a random mode, failover, down marks and metrics; only failover was later decided and built. Terms in bold are those of [tierstore-design.md](tierstore-design.md) and [put-without-lock.md](put-without-lock.md).
 
 ## 1. The problem
 
@@ -63,6 +63,8 @@ No extra store request: the client sends the same requests as before, to a diffe
 ## 6. Tests and compatibility
 
 Tests, in the pull request: nine requests over three loopback fakes that verify the signature against the Host land round robin; one entry behaves as `endpoint`; config refusals (both, empty, repeated, neither, a list in a `dir` or `memory` tier); and a compat test that the release before refuses `endpoints` in a storage node's `[hot_store]` and reads the same file with `endpoint` (B8: the key is additive, and a host that may roll back keeps `endpoint` until every process has this release).
+
+Section 4 has its tests in `crates/tierstore/tests/tierstore/s3_multi_endpoint.rs` (komira-ai/tierstore#515), over fronts of one loopback S3 service, each logging the requests it took: one upload's creation, two parts and completion through three endpoints land creation and completion on the first and one part on each of the others, and the object has both parts in order; an abort at an endpoint that did not create the upload removes it for all; with one endpoint refusing connections the part whose turn it is lands on the next; a listing read two keys a page goes to the endpoints in turn and gives each key once; and an upload of the hot tier begun through one proxy is continued, completed or aborted through others, each over its own front.
 
 ## 7. Later work, not decided
 

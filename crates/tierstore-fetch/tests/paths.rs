@@ -126,6 +126,7 @@ fn engine(
         budget,
         verifier: Arc::new(Sha256Verifier),
         timer: Arc::new(ManualTimer::new(clock.clone())),
+        cache_metrics: None,
     };
     let e = FetchEngine::new(parts, config, &tokio::runtime::Handle::current());
     (e, store, clock)

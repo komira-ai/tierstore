@@ -195,6 +195,7 @@ async fn the_debug_of_the_engine_and_its_parts_prints_only_their_names() {
         budget: Arc::new(TestBudget::new(1)),
         verifier: Arc::new(Sha256Verifier),
         timer: Arc::new(ManualTimer::new(ManualClock::new())),
+        cache_metrics: None,
     };
     assert_eq!(format!("{:?}", rig.engine), "FetchEngine { .. }");
     assert_eq!(format!("{parts:?}"), "EngineParts { .. }");

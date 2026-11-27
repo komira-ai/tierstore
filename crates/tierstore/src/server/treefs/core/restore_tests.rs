@@ -93,7 +93,10 @@ fn a_tree_that_fails_does_not_lose_the_others() {
     let text = std::fs::read_to_string(rig.runtime.join("attachments")).unwrap();
     assert_eq!(text, want);
     assert!(text.contains(&format!("{gone} run-2\n")));
-    assert_eq!(rig.core.detach("run-2"), Some(Vec::new()));
+    assert_eq!(
+        rig.core.detach("run-2").map(|got| got.failures),
+        Some(Vec::new())
+    );
     let text = std::fs::read_to_string(rig.runtime.join("attachments")).unwrap();
     assert!(!text.contains(&gone));
 }

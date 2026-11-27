@@ -4,13 +4,19 @@ The host updater this hook plugs into is hostkeeper, a separate program with a p
 arguments, a params file, an exit status and one JSON line), so a hook in any language can speak it; this one is written in Rust
 because tierstore is.
 
-Status: built. The hook is `crates/tierstore/src/server/update_hook/`, and the operator's page is
+Status: built, except the one-conversation start on Linux (below). The hook is `crates/tierstore/src/server/update_hook/`, and the operator's page is
 `crates/tierstore/docs/update-hook.md`. Section 0 is the design of record of the hook: the new instance takes the listening
 sockets of the old one, so no redirect, no second port and no privilege beyond root's are involved. Sections 1 to 4, 9 and 10 describe the
 port-forward design (nftables redirect, slot units on private ports, an updater declaration and a hook-only account) that the
 hook of section 0 replaces; they are kept as the record of that design and each is marked superseded. Sections 5 to 8 (the cache lock,
 entries and lease, the drain, the metrics) are about the server, which both designs share; where they speak of slots or a
 redirect, read the two instances `tierstore@a` and `tierstore@b` and the hand-over.
+Built on Linux since komira-ai/tierstore#571: the new instance of a node with a cache takes the cache lock with the sockets (`take 1`
+and `ready` on `server.handoff_socket`) and its cache is the writer at the old instance's `written`, and `verify` defers until the new
+instance is read-write. Not built: the one conversation that takes sockets, mount, control socket and lock together on a Linux start
+(komira-ai/tierstore#522, which carries komira-ai/tierstore#479): the start of a node with an `fs` interface still takes the mount by
+`take-fs 1` and the sockets by `take 1`, and the new cache's scan at `written` and the mount-provider socket that follows it are as long as
+before. Nothing on this page is decided against.
 
 tierstore ships its update as a subcommand of its own binary, `tierstore update-hook <step>`, run by hostkeeper: steps `prepare`,
 `cutover`, `verify`, `rollback`, `cleanup`, `uninstall` and the boot step `restore`; exit `0`, `1`, `75` deferred; the last stdout line
@@ -119,11 +125,20 @@ refuses a taker that does not ask for it: at the request of one that asks `take 
 asked for that step (`refused` in place of `bye`), unless the mount was taken meanwhile on the instance's `take-fs 1`, as the
 start of the previous release takes it (the two conversations share a claim of the mount, `handoff/mount.rs`). A cache instance offers its lock (`lock <path>`, a descriptor of `<cache>/.lock`) to a
 taker that asked for `ready`, starts no cache write from `ready` on, and says `written` after `bye` once its writes in flight
-have ended; the taker takes the write role then, or when the connection ends (`handoff/written.rs`). The taker checks that
+have ended; the taker takes the write role then, or when the connection ends (`handoff/written.rs`). Its cache tells
+the requests that wait for the write role that it is read-write only after its tree store has read the cache directory again
+(`LocalCache::before_read_write`; a read that fails is said, and the store's next pass reads it again), so the placements
+the old instance made after the taker opened its store are there for the first request that waited for the write role: a
+read of a file the old instance opened for a job under one of them is answered with its bytes, not `EIO`, which a job that
+maps the file would take as SIGBUS
+(`a_handed_lock_is_taken_with_the_placements_the_holder_made_after_the_store_opened`,
+`a_file_opened_before_the_hand_over_under_a_newer_placement_is_read_by_the_successor`). The taker checks that
 the running instance is its own user and the kind of each descriptor (the sockets listen, the lock is the regular file at
 its path) before `ack`. A build node's instance takes part in all of it (`serve_front`), offering the mount where its file
-has an `fs` interface, and the start of the one process asks for the mount, the sockets and the lock in this one
-conversation (`cache_cli_mount.rs`), falling back to `take-fs 1` for the mount only where the instance holds none. The frames are read one at a time
+has an `fs` interface; the Linux start of a node with a cache asks for the lock with the sockets (komira-ai/tierstore#571,
+`handoff::follow`), and the start of the one process asks for the mount, the sockets and the lock in this one conversation
+(`cache_cli_mount.rs`, komira-ai/tierstore#522), falling back to `take-fs 1` for the mount only where the instance holds
+none. The frames are read one at a time
 (`frames_sent_together_are_read_one_at_a_time`), as `bye` and `written` may come back to back.
 
 Two processes must not write the table of tree numbers and the attachments file, which the taker reads after `done`. The offer
@@ -149,7 +164,8 @@ handed. An offer it refuses fails its start, and launchd's next start binds the 
 interface adds to that offer (`server/treefs/nfs/interface.rs`): it serves the file system there by its NFS front, as it
 serves it on Linux by FUSE.
 
-Not built yet: the proxy id that does not derive from a port. No package sets either key, and the macOS package is not to
+The proxy id no longer derives from a port: `server.proxy_id_from_facts` makes it of a prefix and the host id of the facts file
+(`server/config_facts.rs`; the macOS package sets it). No package sets either hand-over key, and the macOS package is not to
 set `server.handoff_socket`: an update of a Mac is the hand-over to the next image when both releases list `handoff-exec-v1`
 and the params name no fs job, and a restart otherwise; a Mac whose file has an `fs` interface is refused that restart unless
 the params say `mode = "restart"` (`docs/design/one-service.md` section 3.6). `fs.nfs.handoff_socket` is for an operator or a

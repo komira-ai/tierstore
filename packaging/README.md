@@ -47,6 +47,55 @@ boot, that both wait for the drain, that no secret is on the command line, and t
 the file the hook bootstraps.
 
 
+## Installing from a package manager
+
+A user who wants tierstore on a host without hostkeeper has three package channels, besides the
+script (`curl -fsSL https://tierstore.dev/install.sh | sh`, which puts the binary in
+`~/.local/bin`, checks its SHA-256 and starts nothing) and the tarball. The same steps are on the
+site's install page (`crates/tierstore/site/content/install.html`) and in the install guide
+(`crates/tierstore/docs/install.md`). Every channel serves a release that has passed the install
+checks (`docs/ci-and-release.md`); none starts a server.
+
+Homebrew (macOS on Apple silicon, Linux x86_64 and aarch64) puts `tierstore` on the `PATH`:
+
+```sh
+brew install komira-ai/tap/tierstore
+tierstore --version
+```
+
+apt (Debian and Ubuntu, amd64 and arm64) uses the repository `packages.komira.ai`, suite `stable`.
+The first lines fetch the repository's key and trust it for this source only (`Signed-By`):
+
+```sh
+sudo install -d -m 0755 /usr/share/keyrings
+sudo curl -fsSL https://packages.komira.ai/apt/komira-archive-keyring.gpg -o /usr/share/keyrings/komira-archive-keyring.gpg
+sudo tee /etc/apt/sources.list.d/komira.sources >/dev/null <<'EOF'
+Types: deb
+URIs: https://packages.komira.ai/apt
+Suites: stable
+Components: main
+Signed-By: /usr/share/keyrings/komira-archive-keyring.gpg
+EOF
+sudo apt update
+sudo apt install tierstore
+/usr/libexec/tierstore/tierstore --version
+```
+
+dnf (AlmaLinux, Rocky Linux and RHEL 8 and newer, Fedora, Amazon Linux 2023; x86_64 and aarch64)
+saves the repository file, which names the repository's key, then installs:
+
+```sh
+sudo curl -fsSLo /etc/yum.repos.d/komira.repo https://packages.komira.ai/rpm/komira.repo
+sudo dnf install tierstore
+/usr/libexec/tierstore/tierstore --version
+```
+
+The `.deb` and the `.rpm` put the binary at `/usr/libexec/tierstore/tierstore` and nothing on the
+`PATH`. They add the service account, the unit template `tierstore@.service` and an example
+configuration, and start no instance: write `/etc/tierstore/config.toml` and start an instance as
+"Starting it" below says. The suite `testing` of the apt and rpm repositories holds a release before
+it is promoted; it is for the release process, not for users.
+
 ## Placing the binary
 
 The release carries `tierstore-<commit>-linux-x86_64.tar.gz` and

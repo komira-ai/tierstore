@@ -531,6 +531,7 @@ fn engine_on(store: Arc<FlakyStore>) -> (FetchEngine, Arc<TestUpstream>) {
         budget: Arc::new(TestBudget::new(64)),
         verifier: Arc::new(Sha256Verifier),
         timer: Arc::new(ManualTimer::new(ManualClock::new())),
+        cache_metrics: None,
     };
     let engine = FetchEngine::new(
         parts,
