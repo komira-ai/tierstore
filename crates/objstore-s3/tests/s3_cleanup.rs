@@ -31,6 +31,13 @@ const CONDITIONAL: Capabilities = Capabilities {
 /// The request timeout of the store that never answers: the default of a tierstore cache.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// The longest a PUT that the store read whole and never answered takes to fail: the request is
+/// cut after a whole `request_timeout` with no progress, and the window in which the body was
+/// sent counts as progress, so it fails between one and two request timeouts after it began. A
+/// put that also waited for the look after it (1 s, then a HEAD of up to a request timeout) took
+/// at least 121 s, and up to 181 s.
+const PUT_GIVES_UP: Duration = Duration::from_secs(120);
+
 fn key(name: &str) -> ObjectKey {
     ObjectKey::new(format!("cas/{name}")).unwrap()
 }
@@ -141,7 +148,7 @@ async fn read_request(sock: &mut TcpStream) -> Option<String> {
 }
 
 /// Asserts that a put to a store that takes the connection, reads the whole PUT and never
-/// answers gives its error at the request timeout, with nothing more: the look at the key that
+/// answers gives its error when its request is cut, with nothing more: the look at the key that
 /// follows runs after the error is given, and ends at its own deadline (counted a failure), not
 /// at the HEAD's request timeout. Catches: a failed put that holds its caller (and the write
 /// permit a server above holds for it) through the look, about 121 s in all.
@@ -150,7 +157,7 @@ async fn read_request(sock: &mut TcpStream) -> Option<String> {
 /// has read the whole PUT (it says so): from then on the client has nothing to wait for but its
 /// timer, and the paused clock moves on to it by itself.
 #[tokio::test]
-async fn a_put_to_a_store_that_never_answers_gives_its_error_at_the_request_timeout() {
+async fn a_put_to_a_store_that_never_answers_gives_its_error_when_its_request_is_cut() {
     let (endpoint, read, heard) = never_answers().await;
     let store = Arc::new(store_at(&endpoint, REQUEST_TIMEOUT, S3Tuning::default()));
     let putting = {
@@ -164,7 +171,7 @@ async fn a_put_to_a_store_that_never_answers_gives_its_error_at_the_request_time
     let waited = paused.elapsed();
     assert!(matches!(error, ObjectStoreError::Transport(_)), "{error:?}");
     assert!(
-        waited <= REQUEST_TIMEOUT,
+        waited <= PUT_GIVES_UP,
         "the put gave its error after {waited:?}"
     );
     assert_eq!(

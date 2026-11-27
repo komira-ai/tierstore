@@ -1,5 +1,5 @@
 //! A put through `Server::handle` to an S3 tier that takes the connection and never answers: the
-//! put is answered with the upstream's error at the request timeout and its write permit is free
+//! put is answered with the upstream's error when its request is cut and its write permit is free
 //! then, so a stall of the upstream does not take every permit for the look or the abort that
 //! follows a failed put (`objstore-s3`'s `s3/cleanup.rs`).
 //!
@@ -27,6 +27,13 @@ use super::{Server, ServerConfig};
 
 /// The request timeout of the S3 tier: the default of `server.s3_request_timeout`.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// The longest a PUT that the store read whole and never answered takes to fail: the request is
+/// cut after a whole `request_timeout` with no progress, and the window in which the body was
+/// sent counts as progress, so it fails between one and two request timeouts after it began. A
+/// put that also waited for the look after it (1 s, then a HEAD of up to a request timeout) took
+/// at least 121 s, and up to 181 s.
+const PUT_GIVES_UP: Duration = Duration::from_secs(120);
 
 /// The keys whose requests the upstream hangs.
 const STALLED: &str = "stall/";
@@ -136,7 +143,10 @@ fn server(endpoint: &str) -> (Arc<Server>, ServerConfig, Arc<S3Backend>) {
 
 /// Puts `body` under `key` through `server`.
 async fn put(server: &Server, config: &ServerConfig, key: &str, body: &[u8]) -> Reply {
-    let request = sign(config, "PUT", &format!("/{BUCKET}/{key}"), &[], body);
+    // An S3 tier takes a body only with its length (411 without).
+    let length = body.len().to_string();
+    let told = [("content-length", length.as_str())];
+    let request = sign(config, "PUT", &format!("/{BUCKET}/{key}"), &told, body);
     let response = server.handle(request).await;
     let (parts, body) = response.into_parts();
     let bytes = http_body_util::BodyExt::collect(body)
@@ -151,11 +161,11 @@ async fn put(server: &Server, config: &ServerConfig, key: &str, body: &[u8]) -> 
 }
 
 /// Asserts that a put to an upstream that reads the whole PUT and never answers is answered
-/// with a server error (not `SlowDown`) at the request timeout, not later, and that its permit
-/// is free then. Catches: a put that holds its permit through the look at the key after the
+/// with a server error (not `SlowDown`) when its request is cut ([`PUT_GIVES_UP`]), not later,
+/// and that its permit is free then. Catches: a put that holds its permit through the look at the key after the
 /// failed PUT (a second, a HEAD of up to the request timeout again: about 121 s in all).
 #[tokio::test]
-async fn a_put_to_an_upstream_that_never_answers_frees_its_permit_at_the_request_timeout() {
+async fn a_put_to_an_upstream_that_never_answers_frees_its_permit_when_its_request_is_cut() {
     let s3 = FakeS3::start().await;
     let (endpoint, held) = stalling_upstream(&s3).await;
     let (server, config, backend) = server(&endpoint);
@@ -170,7 +180,7 @@ async fn a_put_to_an_upstream_that_never_answers_frees_its_permit_at_the_request
     let waited = paused.elapsed();
     assert!(failed.status.is_server_error(), "{}", failed.status);
     assert_ne!(failed.code(), "SlowDown");
-    assert!(waited <= REQUEST_TIMEOUT, "answered after {waited:?}");
+    assert!(waited <= PUT_GIVES_UP, "answered after {waited:?}");
     assert_eq!(server.put_permits_free(), config.max_concurrent_puts);
     backend.cleanups_idle().await;
     assert_eq!(
@@ -181,8 +191,8 @@ async fn a_put_to_an_upstream_that_never_answers_frees_its_permit_at_the_request
 }
 
 /// Asserts that 64 puts at once to an upstream that hangs them (twice the 32 permits) leave the
-/// permits free at the request timeout: the 32 that got a permit are answered with the
-/// upstream's error by then, the 32 that waited for one are answered `SlowDown` at the permit
+/// permits free once their requests are cut ([`PUT_GIVES_UP`]): the 32 that got a permit are
+/// answered with the upstream's error by then, the 32 that waited for one are answered `SlowDown` at the permit
 /// wait, and a put of a healthy key right after is taken. Catches: one stall of the upstream
 /// holding every permit through the looks after the failed puts, so that every writer, also of
 /// keys the upstream would take, is answered `SlowDown`.
@@ -209,7 +219,7 @@ async fn stalled_puts_leave_the_permits_for_a_healthy_key() {
     }
     let waited = paused.elapsed();
     assert!(
-        waited <= REQUEST_TIMEOUT,
+        waited <= PUT_GIVES_UP,
         "the last put was answered after {waited:?}"
     );
     let busy = (StatusCode::SERVICE_UNAVAILABLE, "SlowDown".to_owned());
