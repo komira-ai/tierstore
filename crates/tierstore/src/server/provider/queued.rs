@@ -1,5 +1,5 @@
 //! A read a preparation queued ([`Group`]), holding its room in the node's bound of queued reads
-//! (`local_cache/queued_reads.rs`) until it leaves the queue: read, refused, or dropped with the
+//! (`local_cache/queued_reads.rs`) until it has been read, refused, or dropped with the
 //! queue of a source that was released.
 
 use std::mem::size_of;

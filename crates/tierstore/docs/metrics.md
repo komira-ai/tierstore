@@ -428,7 +428,7 @@ object of a failed put. The series stay 0 for an upstream that is not an S3 stor
 
 The mount provider's `Prepare` queues a read of every file of a source's tree (unless
 `trees.prepare_prefetch = "none"`), and the queue drains only as fast as the node's
-`trees.fill_concurrency` reads go. A queued read holds some tens of bytes of heap for each file.
+`trees.fill_concurrency` reads go. A queued read holds about a hundred bytes of heap for each file until it is made or dropped.
 While the upstream does not answer, the reads drain at a few a minute, so the queues of every
 source prepared meanwhile stay in memory. The reads of every source together are held under a
 bound of 256 MiB: a source whose reads do not fit queues none, and its files are read when they

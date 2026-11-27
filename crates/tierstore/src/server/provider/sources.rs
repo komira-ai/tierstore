@@ -77,9 +77,10 @@ pub(super) struct Settings {
     pub max_queued_bytes: u64,
 }
 
-/// The most bytes of heap the reads queued by the preparations of the node hold together: some
-/// tens of bytes for each file, so the reads of a few million files. A preparation whose reads do
-/// not fit queues none, and its files are read when first opened (`local_cache/queued_reads.rs`).
+/// The most bytes of heap the reads queued by the preparations of the node hold together: about a
+/// hundred bytes for each file, so the reads of two or three million files. A preparation whose
+/// reads do not fit queues none, and its files are read when first opened
+/// (`local_cache/queued_reads.rs`).
 pub(super) const PREFETCH_QUEUE_BYTES: u64 = 256 << 20;
 
 /// What the preparations share.

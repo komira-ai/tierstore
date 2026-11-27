@@ -3,12 +3,13 @@
 //! A preparation of a source queues the reads of every file of its tree (the provider's module
 //! `prepare`), and the queue is drained only as fast as the node's reads of files go
 //! (`trees.fill_concurrency` at once). A read queued holds the pack's name and the offset, size and
-//! digest of each of its spans: some tens of bytes of heap for every file. While the upstream does
-//! not answer, the reads drain at a few a minute, and the queues of every source prepared
+//! digest of each of its spans: about a hundred bytes of heap for every file. While the upstream
+//! does not answer, the reads drain at a few a minute, and the queues of every source prepared
 //! meanwhile stay on the heap. So the provider takes room here for a source's reads before it
 //! queues them, and queues none when they do not fit under its bound: the files of that source are
 //! then read when first opened, as with `trees.prepare_prefetch = "none"`. Each read gives its room
-//! back when it leaves the queue, read, refused or dropped.
+//! back once it has been read, refused or dropped (a read holds it while it waits for its turn and
+//! while it runs).
 //!
 //! The cache keeps the count, and shows it on `/metricz`: the bytes the queued reads hold
 //! (`tierstore_provider_prefetch_queued_bytes`) and the preparations whose reads were not queued

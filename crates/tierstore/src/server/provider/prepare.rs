@@ -15,8 +15,8 @@
 //! preparation's, the reads still queued are not made; a release of the source drops them at once,
 //! even while every read of the node is taken (as when the upstream does not answer).
 //!
-//! The reads queued hold some tens of bytes of heap for each file until they leave the queue, and
-//! the queue drains only as fast as the node's reads go. So the reads of a source are queued only
+//! The reads queued hold about a hundred bytes of heap for each file until each is read or
+//! dropped, and the queue drains only as fast as the node's reads go. So the reads of a source are queued only
 //! if they fit, with those of every other source, under the node's bound (the provider's
 //! `max_queued_bytes`, counted in the cache's `queued_reads`); a source whose reads do not fit
 //! queues none, and its tree is placed as with `trees.prepare_prefetch = "none"`.
@@ -353,9 +353,10 @@ async fn read_whole(shared: &Shared, key: &str) -> Result<Option<Vec<u8>>, Error
 /// Makes the `reads` as they come; how many spans are in the cache and how many were not read (a
 /// failure, a bound passed, a release, a refused list or a stop before their turn). `ends` is the
 /// release flag of the source and its stage: once the stage is released, no read is taken from
-/// `reads` and the reads still in it are dropped at once (with the room they hold), and a read
-/// waiting for its turn gives it up; they are not counted. A read already running goes on to its
-/// end or its bound.
+/// `reads`, the reads still in it are dropped at once with the room they hold and are not counted,
+/// and a read waiting for its turn gives it up and is counted as not read. A read already running
+/// goes on to its end or its bound. A refused list is not so quick: its queued reads each wait for
+/// a turn before they see the refusal, as before.
 pub(super) async fn fill(
     shared: &Shared,
     reads: impl Stream<Item = Queued> + Send,
