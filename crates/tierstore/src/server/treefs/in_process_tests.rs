@@ -314,7 +314,10 @@ async fn a_request_stops_watching_the_mode_when_its_wait_ends() {
     assert_eq!(waiting.mode(), Mode::ReadOnly);
     let watchers = waiting.mode_watchers();
     let over = in_process(&waiting, None, Duration::ZERO);
-    assert_eq!(off_runtime(move || over.writer()).await, Err(Missed::ReadOnly));
+    assert_eq!(
+        off_runtime(move || over.writer()).await,
+        Err(Missed::ReadOnly)
+    );
     assert_eq!(waiting.mode_watchers(), watchers);
 }
 

@@ -136,7 +136,9 @@ impl InProcess {
 
     /// The answer of `work`, run on the runtime as a task of its own once the cache is
     /// read-write, waiting `wait` in all for the write role and for the answer. A `work` that
-    /// started goes on when its answer is not waited for; one that did not start never does.
+    /// started goes on when its answer is not waited for; one that did not start never does. The
+    /// request watches the mode of the cache until its wait for the write role ends, not up to
+    /// its answer.
     ///
     /// # Errors
     /// [`Missed::ReadOnly`] if the cache did not take the write role in `wait`; [`Missed::Late`]
@@ -155,6 +157,9 @@ impl InProcess {
             let writable = modes.wait_for(|mode| *mode == Mode::ReadWrite);
             // The borrow of the mode a wait ends with is let go here, before the work.
             let writer = matches!(timeout_at(end, writable).await, Ok(Ok(_)));
+            // And the receiver of the mode, so the request watches the mode only while it waits:
+            // once its caller has the answer it is no watcher (`LocalCache::mode_watchers`).
+            drop(modes);
             let got = if writer {
                 let done = timeout_at(end, tokio::spawn(work)).await;
                 done.ok().and_then(Result::ok).ok_or(Missed::Late)
