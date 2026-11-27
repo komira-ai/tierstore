@@ -16,10 +16,10 @@
 //! even while every read of the node is taken (as when the upstream does not answer).
 //!
 //! The reads queued hold about a hundred bytes of heap for each file until each is read or
-//! dropped, and the queue drains only as fast as the node's reads go. So the reads of a source are queued only
-//! if they fit, with those of every other source, under the node's bound (the provider's
-//! `max_queued_bytes`, counted in the cache's `queued_reads`); a source whose reads do not fit
-//! queues none, and its tree is placed as with `trees.prepare_prefetch = "none"`.
+//! dropped, and the queue drains only as fast as the node's reads go. So the reads of a source
+//! are queued only if they fit, with those of every other source, under the node's bound (the
+//! provider's `max_queued_bytes`, counted in the cache's `queued_reads`); a source whose reads do
+//! not fit queues none, and its tree is placed as with `trees.prepare_prefetch = "none"`.
 //!
 //! A group of one span is read by [`TreeStore::fetch_span`] with the file's own span, size and
 //! digest: the call an open of the mount makes for the file, which joins a fill of the same range
