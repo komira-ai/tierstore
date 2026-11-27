@@ -115,8 +115,8 @@
 //!
 //! The body of a put that only creates is not held. It is read a piece at a time, checked
 //! against its hashes as the pieces pass, and handed through a queue of a few pieces to the
-//! backend's streamed put ([`Backend::put_stream`](crate::Backend::put_stream)), so that the
-//! memory of a put does not grow with the length of the object, and a slow backend slows the
+//! backend's streamed put (whose answer gives the `ETag` of the 200, see `ops/landed.rs`), so that
+//! the memory of a put does not grow with the length of the object, and a slow backend slows the
 //! client down instead of filling memory. The object becomes visible, and its entry
 //! is made pending, only after the last piece was read and every hash came out right: a hash that
 //! does not match at the last byte, a body over the limit, a stalled body and a connection cut
