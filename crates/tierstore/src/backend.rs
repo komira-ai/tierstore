@@ -504,7 +504,8 @@ pub trait Backend: Send + Sync {
     /// [`PutKind::Replaces`]) of a body whose request named `digests` of it (see [`BodyDigests`]).
     /// A backend whose store checks a body against its digests sends them with the write, so that
     /// the store refuses a body that is not them, one cut short included: the S3 backend does, and
-    /// the local cache passes them to its upstream. The provided implementation ignores them.
+    /// the local cache passes them to its upstream. The provided implementation ignores them, so a
+    /// wrapper of another backend that does not override it does not pass them on.
     ///
     /// # Errors
     /// As the call it stands for, and the store's refusal of a body that is not `digests`.

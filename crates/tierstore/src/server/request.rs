@@ -455,8 +455,10 @@ impl Check {
 /// The first hash of `algorithm` that `wants` names in full: a claim of no hash yet (the
 /// trailer's, before the body) or of one of another length names none.
 fn named<const N: usize>(wants: &[Want], algorithm: Algorithm) -> Option<[u8; N]> {
-    let of = wants.iter().filter(|want| want.algorithm == algorithm);
-    of.find_map(|want| <[u8; N]>::try_from(want.expected.as_slice()).ok())
+    wants
+        .iter()
+        .filter(|want| want.algorithm == algorithm)
+        .find_map(|want| <[u8; N]>::try_from(want.expected.as_slice()).ok())
 }
 
 /// The answer to send for a streamed body that was refused (its hashes did not match, it was

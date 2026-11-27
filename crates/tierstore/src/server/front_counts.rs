@@ -69,14 +69,6 @@ pub(super) struct FrontCounts {
     put_failures: [AtomicU64; REASONS.len()],
 }
 
-impl FrontCounts {
-    /// The failed puts of `why` so far.
-    #[cfg(test)]
-    pub(super) fn put_failures(&self, why: PutFailure) -> u64 {
-        self.put_failures[why as usize].load(Ordering::Relaxed)
-    }
-}
-
 impl Server {
     /// `put`, the answer to a streamed put, counted if it is a failure.
     pub(super) fn counted_put(&self, put: Result<Answer, S3Error>) -> Result<Answer, S3Error> {

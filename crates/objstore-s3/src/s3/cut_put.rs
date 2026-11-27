@@ -99,31 +99,29 @@ pub(super) struct Seen {
 /// and got no answer (module docs).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum Look {
-    /// No object, or one of the length declared.
-    Nothing,
+    /// Nothing to delete; the look comes to this.
+    Done(Outcome),
     /// The PUT's own object, of another length: delete it on this entity tag.
     Remove(String),
-    /// An object of another length (or of a length the answer did not give) that the PUT did
-    /// not make.
-    Left,
-    /// The PUT's own object, of another length, with no entity tag to delete it on.
-    Failed,
 }
 
-/// The judgement of the module docs.
+/// The judgement of the module docs: [`Outcome::Nothing`] for no object or one of the length
+/// declared, [`Outcome::Left`] for another object of another length (or of a length the answer
+/// did not give), the removal of the PUT's own object of another length, or [`Outcome::Failed`]
+/// when it has no entity tag to delete it on.
 pub(super) fn judge(seen: Option<&Seen>, len: u64, token: &str) -> Look {
     let Some(seen) = seen else {
-        return Look::Nothing;
+        return Look::Done(Outcome::Nothing);
     };
     if seen.size == Some(len) {
-        return Look::Nothing;
+        return Look::Done(Outcome::Nothing);
     }
     if seen.token.as_deref() != Some(token) {
-        return Look::Left;
+        return Look::Done(Outcome::Left);
     }
     match &seen.etag {
         Some(etag) => Look::Remove(etag.clone()),
-        None => Look::Failed,
+        None => Look::Done(Outcome::Failed),
     }
 }
 
@@ -158,9 +156,7 @@ impl S3Store {
                 Outcome::Failed
             }
             Ok(seen) => match judge(seen.as_ref(), len, token) {
-                Look::Nothing => Outcome::Nothing,
-                Look::Left => Outcome::Left,
-                Look::Failed => Outcome::Failed,
+                Look::Done(outcome) => outcome,
                 Look::Remove(etag) => deleted(&self.delete_if_match(key, &etag).await),
             },
         };
@@ -232,24 +228,30 @@ mod tests {
     #[test]
     fn only_the_puts_own_object_of_another_length_is_removed() {
         let ours = "aa";
-        assert_eq!(judge(None, 10, ours), Look::Nothing);
+        assert_eq!(judge(None, 10, ours), Look::Done(Outcome::Nothing));
         let whole = seen(Some(10), Some("\"t\""), Some(ours));
-        assert_eq!(judge(Some(&whole), 10, ours), Look::Nothing);
+        assert_eq!(judge(Some(&whole), 10, ours), Look::Done(Outcome::Nothing));
         let theirs_whole = seen(Some(10), Some("\"t\""), None);
-        assert_eq!(judge(Some(&theirs_whole), 10, ours), Look::Nothing);
+        assert_eq!(
+            judge(Some(&theirs_whole), 10, ours),
+            Look::Done(Outcome::Nothing)
+        );
         let short = seen(Some(0), Some("\"t\""), Some(ours));
         assert_eq!(
             judge(Some(&short), 10, ours),
             Look::Remove("\"t\"".to_owned())
         );
         let untagged = seen(Some(0), None, Some(ours));
-        assert_eq!(judge(Some(&untagged), 10, ours), Look::Failed);
+        assert_eq!(
+            judge(Some(&untagged), 10, ours),
+            Look::Done(Outcome::Failed)
+        );
         let before = seen(Some(0), Some("\"t\""), None);
-        assert_eq!(judge(Some(&before), 10, ours), Look::Left);
+        assert_eq!(judge(Some(&before), 10, ours), Look::Done(Outcome::Left));
         let another = seen(Some(4), Some("\"t\""), Some("bb"));
-        assert_eq!(judge(Some(&another), 10, ours), Look::Left);
+        assert_eq!(judge(Some(&another), 10, ours), Look::Done(Outcome::Left));
         let no_length = seen(None, Some("\"t\""), None);
-        assert_eq!(judge(Some(&no_length), 10, ours), Look::Left);
+        assert_eq!(judge(Some(&no_length), 10, ours), Look::Done(Outcome::Left));
     }
 
     /// Asserts what each answer to the DELETE comes to: a removal, nothing for an object gone
