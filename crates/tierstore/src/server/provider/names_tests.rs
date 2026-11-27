@@ -12,6 +12,7 @@ fn id(agent: &str, run: &str, index: u32) -> SourceId {
         agent: agent.to_owned(),
         run: run.to_owned(),
         index,
+        attempt: 0,
     }
 }
 
@@ -43,6 +44,7 @@ fn a_source_is_refused_without_names_or_with_long_ones() {
             agent: agent.into(),
             run: run.into(),
             index: 9,
+            attempt: 0,
         })
     };
     assert_eq!(SourceId::of(source("a", "js.1")), Ok(id("a", "js.1", 9)));
@@ -88,6 +90,72 @@ fn only_a_sources_own_path_is_read_back_to_it() {
         format!("{dir}6a732e37/03"),
         format!("{dir}6a732e37/3/4"),
         "trees/abc".to_owned(),
+    ] {
+        assert_eq!(source_of(&path, "agent-1"), None, "{path}");
+    }
+}
+
+/// The source `index` of the attempt `attempt` of `run` of `agent`.
+fn attempt(agent: &str, run: &str, index: u32, attempt: u64) -> SourceId {
+    SourceId {
+        attempt,
+        ..id(agent, run, index)
+    }
+}
+
+/// Asserts that a source that names its attempt is placed in a directory of that attempt under its
+/// run's (`a` and the attempt in decimal), the cache's run being that directory, that the same
+/// source without an attempt is at the path of before, that the largest attempt with the longest
+/// names is still a location the tree store takes, and that a request's attempt is taken as it is.
+#[test]
+fn an_attempt_has_a_directory_of_its_own_under_the_run() {
+    let source = attempt("agent-1", "js.7", 3, 12);
+    assert_eq!(
+        source.path(),
+        "mount-provider/6167656e742d31/6a732e37/a12/3"
+    );
+    assert_eq!(
+        source.run_dir(),
+        "mount-provider/6167656e742d31/6a732e37/a12"
+    );
+    assert_eq!(source.unnumbered(), id("agent-1", "js.7", 3));
+    assert_eq!(
+        source.unnumbered().path(),
+        "mount-provider/6167656e742d31/6a732e37/3"
+    );
+    let longest = attempt(&"a".repeat(120), &"/.\0".repeat(40), u32::MAX, u64::MAX);
+    assert_eq!(Location::fs(&longest.path()), Ok(longest.location()));
+    let request = Some(Source {
+        agent: "agent-1".into(),
+        run: "js.7".into(),
+        index: 3,
+        attempt: 12,
+    });
+    assert_eq!(SourceId::of(request), Ok(source));
+}
+
+/// Asserts that the path of a source that names its attempt is read back to exactly that source,
+/// and that a path whose attempt is not `a` and a decimal number of 1 or more written as one, or
+/// that has no index under the attempt or more below it, is not a source of the agent.
+#[test]
+fn only_an_attempts_own_path_is_read_back_to_it() {
+    let source = attempt("agent-1", "js.7", 3, 12);
+    assert_eq!(source_of(&source.path(), "agent-1"), Some(source));
+    let max = attempt("agent-1", "js.7", 0, u64::MAX);
+    assert_eq!(source_of(&max.path(), "agent-1"), Some(max));
+    let run = format!("{}6a732e37", agent_dir("agent-1"));
+    for path in [
+        format!("{run}/a0/3"),
+        format!("{run}/a012/3"),
+        format!("{run}/a/3"),
+        format!("{run}/ax/3"),
+        format!("{run}/b12/3"),
+        format!("{run}/12/3"),
+        format!("{run}/a+12/3"),
+        format!("{run}/a18446744073709551616/3"),
+        format!("{run}/a12"),
+        format!("{run}/a12/"),
+        format!("{run}/a12/3/4"),
     ] {
         assert_eq!(source_of(&path, "agent-1"), None, "{path}");
     }
