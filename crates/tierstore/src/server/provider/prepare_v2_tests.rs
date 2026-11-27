@@ -287,7 +287,8 @@ async fn a_sidecar_with_a_cell_shift_other_than_20_is_refused() {
     let (key, v2) = bare_tree(&rig).await;
     let mut l2 = sidecar_of(&rig.bench.pack, &v2);
     // The cell shift of pack 0 is byte 28 of its 48-byte record.
-    l2[section_at(&l2, Section::Packs) + 28] = 21;
+    let shift = section_at(&l2, Section::Packs) + 28;
+    l2[shift] = 21;
     rig.put_sidecar(&key, &l2).await;
     let sidecar = sidecar_key_of(&key);
     assert_eq!(
@@ -306,7 +307,8 @@ async fn an_unknown_pack_flags_bit_is_ignored_and_the_tree_placed() {
     let rig = Rig::new("prov-l2-flags").await;
     let (key, v2) = bare_tree(&rig).await;
     let mut l2 = sidecar_of(&rig.bench.pack, &v2);
-    l2[section_at(&l2, Section::Packs) + 29] |= 0x80;
+    let flags = section_at(&l2, Section::Packs) + 29;
+    l2[flags] |= 0x80;
     rig.put_sidecar(&key, &l2).await;
     assert_eq!(prepared(&rig, "js.1", &key).await, Stage::Placed);
     assert!((0..3).all(|blob| rig.holds(blob)));
