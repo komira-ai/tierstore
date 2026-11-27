@@ -26,7 +26,14 @@ fn left_by_a_gone_updater() -> (SystemdFake, Record) {
     fake.set_unit(Instance::A, UnitState::Active, Some(OLD), true);
     fake.set_installed(Some(OLD));
     let stale = fake.record();
-    assert!(stale.updating && stale.has(Marker::Swapped) && !stale.committed());
+    assert_eq!(
+        (
+            stale.updating,
+            stale.has(Marker::Swapped),
+            stale.committed()
+        ),
+        (true, true, false)
+    );
     (fake, stale)
 }
 
@@ -123,7 +130,7 @@ fn prepare_of_the_next_order_rolls_back_a_stale_update_and_prepares_its_own() {
         )
     );
     let record = fake.record();
-    assert!(record.updating && record.markers.is_empty());
+    assert_eq!((record.updating, record.markers.len()), (true, 0));
     assert_eq!(record.to.as_deref(), Some(std::path::Path::new(NEWER)));
     assert_eq!(record.from.as_deref(), Some(std::path::Path::new(OLD)));
     assert_eq!(
@@ -216,7 +223,10 @@ fn a_committed_stale_update_is_finished_and_never_rolled_back() {
         "{done:?}"
     );
     assert_eq!(fake.actions().len(), before);
-    assert!(fake.record().committed() && fake.record().updating);
+    assert_eq!(
+        (fake.record().committed(), fake.record().updating),
+        (true, true)
+    );
 
     let fake = committed();
     let done = fake.run(Prepare, &params(NEWER, Some(NEW)));

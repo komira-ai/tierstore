@@ -33,7 +33,14 @@ fn left_by_a_gone_updater() -> Fake {
     fake.set_job(Some(OLD));
     fake.set_capabilities(NEWER, &[]);
     let stale = fake.record();
-    assert!(stale.updating && stale.has(Marker::Swapped) && !stale.committed());
+    assert_eq!(
+        (
+            stale.updating,
+            stale.has(Marker::Swapped),
+            stale.committed()
+        ),
+        (true, true, false)
+    );
     fake
 }
 
@@ -116,7 +123,7 @@ fn prepare_of_the_next_order_rolls_back_a_stale_update_whose_job_still_serves_it
         ]
     );
     let record = fake.record();
-    assert!(record.updating && record.markers.is_empty());
+    assert_eq!((record.updating, record.markers.len()), (true, 0));
     assert_eq!(record.to.as_deref(), path(NEWER).as_deref());
     assert_eq!(record.from.as_deref(), path(OLD).as_deref());
 }

@@ -5,9 +5,9 @@
 
 use std::path::{Path, PathBuf};
 
-use super::super::super::{Instance, Reason, Record, Step};
+use super::super::super::{Instance, Marker, Reason, Record, Step};
 use super::reload::{GIB, cap, changed, changing, fs_file, set};
-use super::{Cutover, Linux, PKG_NEW, PKG_OLD, Prepare, build, lin, staged_copy, update};
+use super::{Cutover, Linux, PKG_NEW, PKG_OLD, Prepare, Verify, build, lin, staged_copy, update};
 use Step::Rollback;
 
 /// The next config package.
@@ -24,7 +24,10 @@ fn left_by_a_gone_updater() -> Linux {
         &fs_file(&cap(2 * GIB)),
     );
     let stale = node.fake.record();
-    assert!(stale.updating && !stale.markers.is_empty() && !stale.committed());
+    assert_eq!(
+        (stale.updating, stale.markers.is_empty(), stale.committed()),
+        (true, false, false)
+    );
     node
 }
 
@@ -78,7 +81,7 @@ fn prepare_of_the_next_package_rolls_back_a_stale_reload_and_prepares_its_own() 
     );
     assert_eq!(node.control.asked(), [set(2 * GIB), set(GIB)]);
     let record = node.fake.record();
-    assert!(record.updating && record.markers.is_empty());
+    assert_eq!((record.updating, record.markers.len()), (true, 0));
     assert_eq!(record.to, Some(PathBuf::from(PKG_NEWER)));
     assert_eq!(record.reload, Some(changed(GIB, 2 * GIB)));
 }
@@ -153,4 +156,22 @@ fn a_stale_reload_whose_rollback_fails_keeps_the_record() {
         "{done:?}"
     );
     assert_eq!(node.fake.record(), stale);
+}
+
+/// Asserts that a reload of another package that is committed and still in flight is never
+/// rolled back by the next package, even with params that name another previous package: its
+/// `rollback` is refused (`bad_params`) as before, nothing is set and the record stays. Catches a
+/// rule that rolls back what `cleanup` has committed.
+#[test]
+fn a_committed_stale_reload_is_never_rolled_back() {
+    let node = changing(Some(GIB), Some(2 * GIB));
+    node.go(&update(), &[Prepare, Cutover, Verify]);
+    node.fake
+        .set_record(&node.fake.record().with(Marker::Stopping));
+    let committed = node.fake.record();
+    let asked = node.control.asked();
+    let refused = node.step(Rollback, &next(PKG_OLD));
+    lin::assert_failed(&refused, Reason::BadParams);
+    assert_eq!(node.control.asked(), asked);
+    assert_eq!(node.fake.record(), committed);
 }
