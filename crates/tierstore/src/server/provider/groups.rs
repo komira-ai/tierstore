@@ -6,15 +6,16 @@
 //! digest as the bytes pass ([`TreeStore::fetch_parts`]). A group is cut at [`GROUP_MAX_BYTES`],
 //! so that an open of a file late in a long range does not wait for all of it, and the groups
 //! of a list are read [`fill_concurrency`] at a time. A span in no range (the ranges are a hint)
-//! is read alone.
+//! is read alone, as is every span of a version 1 list.
 //!
 //! [`ListRange`]: crate::ListRange
 //! [`TreeStore::fetch_parts`]: crate::server::local_cache::trees::TreeStore::fetch_parts
 //! [`fill_concurrency`]: crate::server::local_cache::trees::TreesConfig::fill_concurrency
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use crate::{ListRange, ListSpan, TreeDigest};
+use crate::{BuiltFile, ListRange, ListSpan, TreeDigest};
 
 /// The most bytes one group reads, from its first span's start to its last one's end.
 pub(super) const GROUP_MAX_BYTES: u64 = 8 << 20;
@@ -81,4 +82,23 @@ fn grouped(keys: &[Arc<str>], mut spans: Vec<ListSpan>, mut ranges: Vec<ListRang
         });
     }
     groups
+}
+
+/// The reads of a version 1 list's `files`: each digest's span once, at its first file's, alone.
+/// The tree store keeps one span for each digest, the first file's in the order of the files, and
+/// an open reads that span: so is it read here. (A file of a tree list has a source exactly when
+/// it has bytes.)
+pub(super) fn alone(files: &[BuiltFile]) -> Vec<Group> {
+    let mut seen = BTreeSet::new();
+    files
+        .iter()
+        .filter_map(|file| {
+            let source = file.source.as_ref()?;
+            let part = (source.offset, file.size, file.sha256);
+            seen.insert(*file.sha256.as_bytes()).then(|| Group {
+                pack: source.key.clone(),
+                parts: vec![part],
+            })
+        })
+        .collect()
 }

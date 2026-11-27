@@ -14,7 +14,7 @@ use super::{Provider, ProviderError};
 use crate::server::local_cache::testing::until;
 use crate::server::local_cache::trees::testing::{Bench, fs_at};
 use crate::server::local_cache::trees::{FileSpan, Resolved, TreesConfig};
-use crate::{ListEntry, ListKind, Mode, Op, TreeDigest, TreeList, tree_list_key};
+use crate::{BlobSource, ListEntry, ListKind, Mode, Op, TreeDigest, TreeList, tree_list_key};
 
 /// The calls the upstream has had on `key`: GETs.
 fn gets(rig: &Rig, key: &str) -> u64 {
@@ -166,8 +166,11 @@ fn empty_files(paths: &[&str]) -> TreeList {
 }
 
 /// Asserts that a ref the provider cannot use is refused at `Mount` with the reason, each by name:
-/// a tree whose list and sidecar are not there, one whose list (a version 1 list here) has no
-/// sidecar, a sidecar over the bound, and a tree over the store's limit.
+/// a tree with no sidecar whose list is not there either, whose list (version 1 here, read for
+/// want of a sidecar) has a malformed line or a file without its digest or is a tree the builder
+/// refuses; a sidecar over the bound, and a tree over the store's limit. Each tree with no sidecar
+/// counts once as a missing sidecar, none as a refusal of `missing_sidecar` or as a tree placed
+/// from its list.
 #[tokio::test]
 async fn a_ref_the_provider_cannot_use_is_refused_with_its_reason() {
     let config = TreesConfig {
@@ -181,16 +184,42 @@ async fn a_ref_the_provider_cannot_use_is_refused_with_its_reason() {
     let missing = tree_list_key(b"never written");
     assert_eq!(
         refusal_of(&rig, "js.missing", &missing).await,
-        "tree list not supported: missing_sidecar"
+        format!("no tree list at {missing}")
     );
 
-    let v1 = b"{\"format\":\"tierstore.tree-list\",\"version\":1}\n";
-    let key = rig.put_bytes(v1).await;
-    assert_eq!(
-        refusal_of(&rig, "js.v1", &key).await,
-        "tree list not supported: missing_sidecar"
+    let malformed = b"{\"format\":\"tierstore.tree-list\",\"version\":1}\n{}\n";
+    let key = rig.put_bytes(malformed).await;
+    assert!(
+        refusal_of(&rig, "js.malformed", &key)
+            .await
+            .starts_with("tree list line 2: malformed: ")
     );
-    assert_eq!(gets(&rig, &key), 0);
+
+    let unhashed = TreeList {
+        entries: vec![ListEntry {
+            path: "a".into(),
+            kind: ListKind::File {
+                mode: Mode::FILE,
+                size: 5,
+                source: Some(BlobSource {
+                    key: "k".into(),
+                    offset: 0,
+                }),
+                sha256: None,
+            },
+        }],
+    };
+    let key = rig.put_list(&unhashed).await;
+    assert_eq!(
+        refusal_of(&rig, "js.unhashed", &key).await,
+        "tree list line 2: file without sha256"
+    );
+
+    let key = rig.put_list(&empty_files(&["a", "a/b"])).await;
+    assert_eq!(
+        refusal_of(&rig, "js.below", &key).await,
+        r#"the tree is refused: file and directory at one path "a/b""#
+    );
 
     let names: Vec<String> = (0..40).map(|n| format!("file-{n:02}")).collect();
     let names: Vec<&str> = names.iter().map(String::as_str).collect();
@@ -206,10 +235,31 @@ async fn a_ref_the_provider_cannot_use_is_refused_with_its_reason() {
     );
     assert!(rig.bench.store.mount_paths().is_empty());
     let metricz = rig.bench.rig.cache.metrics();
-    assert!(
-        metricz.contains("tierstore_l2_sidecar_missing_total 2\n"),
-        "{metricz}"
+    for line in [
+        "tierstore_l2_sidecar_missing_total 4\n",
+        "tierstore_l2_sidecar_fallback_total 0\n",
+        "tierstore_list_refused_total{reason=\"missing_sidecar\"} 0\n",
+    ] {
+        assert!(metricz.contains(line), "{line} in {metricz}");
+    }
+}
+
+/// Asserts that a tree with no sidecar whose list is over the bound of a list is refused, naming
+/// the bound, and is not placed.
+#[tokio::test]
+async fn a_list_read_for_want_of_a_sidecar_over_the_bound_is_refused() {
+    let rig = Rig::with("prov-list-over", TreesConfig::default(), |settings| {
+        settings.max_list_bytes = 2000;
+    })
+    .await;
+    let names: Vec<String> = (0..40).map(|n| format!("file-{n:02}")).collect();
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    let key = rig.put_list(&empty_files(&names)).await;
+    assert_eq!(
+        refusal_of(&rig, "js.long", &key).await,
+        "the tree list is over 2000 bytes"
     );
+    assert!(rig.bench.store.mount_paths().is_empty());
 }
 
 /// Asserts that a preparation that failed for a reason that may pass (the upstream failed the read
@@ -524,6 +574,26 @@ async fn a_release_the_store_cannot_make_is_unavailable() {
         "the placement was not released: this node does not hold the lock of its cache directory"
     );
     drop(holder);
+}
+
+/// Asserts that a list read for want of a sidecar whose bytes do not hash to its key is
+/// unavailable, not refused: the cache checks the bytes of a key of `cas/l/` as it fills them and
+/// fails the read, as it fails a read of a store that gave bad bytes, which a retry may mend.
+#[tokio::test]
+async fn a_list_that_does_not_hash_to_its_key_is_unavailable() {
+    let rig = Rig::new("prov-mismatch").await;
+    let other = tree_list_key(b"other bytes");
+    rig.bench
+        .rig
+        .put(&other, &TreeList::default().encode())
+        .await;
+    rig.provider
+        .prepare(source("js.1", 0), &other, READ_ONLY)
+        .unwrap();
+    let answer = rig.provider.mount(source("js.1", 0)).await.unwrap_err();
+    let why = unavailable(answer);
+    assert!(why.starts_with("the tree list was not read: "), "{why}");
+    assert!(rig.bench.store.mount_paths().is_empty());
 }
 
 /// Asserts that a source whose placement's lease ended (the run outlived `trees.ttl_max`) is made
