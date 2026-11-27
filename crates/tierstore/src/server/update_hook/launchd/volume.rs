@@ -18,18 +18,39 @@
 //!   `not_ready`, and hostkeeper rolls the update back. A node whose file has no `fs` interface
 //!   serves no volume, and there is nothing to prove.
 //!
-//! Both are the update hook's alone (`releases`): the config hook drives the arm for its own
+//! - Every step of an update of the release on a node whose file has an `fs` interface leaves the
+//!   fs job alone, even when the params name it ([`serves_its_mount`]).
+//!
+//! All three are the update hook's alone (`releases`): the config hook drives the arm for its own
 //! packages, and its switch is the way off the two-process layout.
 
 use std::path::Path;
 
 use super::super::params::Params;
+use super::super::ports::LaunchdPorts;
 use super::super::report::{Done, Reason};
 use super::super::shape::{fs_interface, has_provider};
 use super::Ctx;
 
 /// The directory at the root of every mount of tierstore's file system.
 const NAMESPACE_DIR: &str = "trees";
+
+/// Whether the node's file (the params' `config_file`) has an `fs` interface: its one process
+/// serves the mount, and an update of the release drives no fs job there even when the params
+/// name one (the manifests of the releases before komira-ai/tierstore#624 did, and their boot
+/// step and rollback would bootstrap a job the switch disabled). No file named, or none there, is
+/// `false`.
+pub(super) fn serves_its_mount(ports: &LaunchdPorts<'_>, params: &Params) -> Result<bool, Done> {
+    let Some(config) = &params.config_file else {
+        return Ok(false);
+    };
+    Ok(ports
+        .host
+        .config(config)?
+        .as_deref()
+        .and_then(fs_interface)
+        .is_some())
+}
 
 impl Ctx<'_, '_> {
     /// Refuses, in `prepare` of the release, a node of the two-process layout: its file (`text`,

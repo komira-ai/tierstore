@@ -15,7 +15,9 @@
 //! the two-process layout and proves the node's volume in `verify`, as [`volume`] describes.
 //!
 //! When the params name the job of `tierstore fs` (`fs_launchd_label`), the arm drives it too, as
-//! [`fs`] describes. The macOS package's manifest does not name it: that job serves nothing since
+//! [`fs`] describes, except in an update of the release on a node whose file has an `fs`
+//! interface: that node's one process serves the mount, its fs job is booted out and disabled by
+//! the switch, and every step (the boot step too) leaves it alone, whatever the params say. The macOS package's manifest does not name it: that job serves nothing since
 //! 0.3.196 (`tierstore fs --config` exits 2). The config hook's switch of a Mac names it for its
 //! rollback, which goes back to the two-process layout. Every boot-out of the main job (`cutover`
 //! of an update or of a first install over a loaded job, `rollback`, `uninstall`) is then
@@ -257,10 +259,14 @@ fn attempt(
     };
     record.check()?;
     launchd_record(&record)?;
+    let fs = match params.fs_launchd_label() {
+        Some(fs) if !(releases && volume::serves_its_mount(ports, params)?) => Some(fs),
+        _ => None,
+    };
     let c = Ctx {
         ports,
         label,
-        fs: params.fs_launchd_label(),
+        fs,
         releases,
         commit_written: Cell::new(false),
     };

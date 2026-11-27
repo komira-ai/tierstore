@@ -10,10 +10,35 @@ use super::fake::{
     assert_failed, assert_ok, in_flight, params_with, path,
 };
 use crate::server::update_hook::{
-    Done, FS_LAUNCHD_PLIST, HANDOFF_EXEC_CAPABILITY, Host, Marker, Reason, Record, Step,
+    Done, HANDOFF_EXEC_CAPABILITY, Host, Marker, Params, Reason, Record, Step,
 };
 
-use Step::{Cleanup, Cutover, Prepare, Rollback, Verify};
+use Step::{Cleanup, Cutover, Prepare, Restore, Rollback, Verify};
+
+/// The release whose update failed on the farm Macs after their switch: its manifest named the fs
+/// job, its `cutover` failed at the bootstrap of the disabled `tierstore-fs.plist` after the job
+/// served it, and so did its `rollback`, after the job served `OLD` again.
+const HALTED: &str = "/var/lib/hostkeeper/packages/tierstore/0.3.203+000000000203";
+/// Its version.
+const HALTED_VERSION: &str = "0.3.203+000000000203";
+
+/// The params of the update to `NEW` as the manifests before this one wrote them: they name the fs
+/// job.
+fn labelled() -> Params {
+    params_with(
+        NEW,
+        NEW_VERSION,
+        Some((OLD, OLD_VERSION)),
+        &format!("fs_launchd_label = \"{FS_LABEL}\"\n"),
+    )
+}
+
+/// Whether any call so far named the fs job, its plist or its file.
+fn touched_fs_job(fake: &Fake) -> bool {
+    fake.log()
+        .iter()
+        .any(|line| line.contains("tierstore-fs") || line.contains("fs.toml"))
+}
 
 /// A Mac's file of the two-process layout: a mount provider under the mount `tierstore fs`
 /// served, the fill socket that process read through, and no `fs` interface.
@@ -278,31 +303,6 @@ fn verify_looks_for_a_volume_only_where_the_release_update_has_one() {
     );
 }
 
-/// Asserts that a Mac switched to one process whose params name the old fs job (as the manifest of
-/// the releases before this one did) is not refused: the update restarts the job and boots the fs
-/// job in after the main job serves, with no signal; while the same update with the params of
-/// this release's manifest, which name no fs job, is the hand-over. Catches a manifest that keeps
-/// the fs label, with which every update of a switched Mac unmounts under its jobs.
-#[test]
-fn an_fs_label_in_the_params_makes_a_switched_mac_restart() {
-    let named = switched();
-    let params = params_with(
-        NEW,
-        NEW_VERSION,
-        Some((OLD, OLD_VERSION)),
-        &format!("fs_launchd_label = \"{FS_LABEL}\"\n"),
-    );
-    for step in [Prepare, Cutover] {
-        assert_ok(&named.run_with(step, &params, LABEL));
-    }
-    let calls = named.launchd_calls();
-    assert!(!calls.contains(&kill()));
-    assert!(calls.contains(&format!("launchd.bootstrap {FS_LAUNCHD_PLIST}")));
-    let plain = switched();
-    plain.advance(&[Prepare, Cutover]);
-    assert_eq!(plain.launchd_calls(), [loaded(), kill()]);
-}
-
 /// Asserts that a failure to read the node's file, the mount list or the look-up in the mount
 /// during `verify` fails the step (`host_failed` for the file and the list, `not_ready` for the
 /// look-up) without `verified`, reversible, and that `verify` run again once the host answers
@@ -325,4 +325,128 @@ fn verify_that_cannot_look_at_the_volume_fails_and_succeeds_once_it_can() {
         assert_ok(&fake.host_run(Verify));
         assert!(fake.record().has(Marker::Verified), "{call}");
     }
+}
+
+/// Asserts the update of a Mac in the state the switch to one process leaves (its file has the
+/// `fs` interface, `tierstore-fs` is not loaded and is disabled), with the params of this
+/// release's manifest and with params that name the fs job: `prepare`, `cutover` (the look and
+/// `SIGUSR2` alone), `verify` and `cleanup` succeed; a `rollback` after a failed `verify` hands
+/// back by `SIGUSR2`; and the boot step after a reboot loads the job alone. No call names the fs
+/// job, its plist or `fs.toml`; the fs job stays disabled and unloaded. Catches the update that
+/// failed on every switched Mac: a hook that bootstraps the disabled `tierstore-fs.plist`
+/// (`Bootstrap failed: 5`) after the job served, in `cutover`, `rollback` or the boot step.
+#[test]
+fn a_switched_mac_is_updated_without_touching_its_disabled_fs_job() {
+    for named in [false, true] {
+        let params = if named {
+            labelled()
+        } else {
+            switched().params()
+        };
+        let fake = switched();
+        fake.set_disabled(FS_LABEL);
+        for step in [Prepare, Cutover, Verify, Cleanup] {
+            assert_ok(&fake.run_with(step, &params, LABEL));
+        }
+        assert_eq!(
+            fake.launchd_calls(),
+            [loaded(), kill(), loaded(), loaded()],
+            "named {named}"
+        );
+        assert!(fake.record().committed(), "named {named}");
+        fake.reboot();
+        assert_ok(&fake.run_with(Restore, &params, LABEL));
+        assert_eq!(fake.snapshot().job, path(NEW), "named {named}");
+        assert_eq!(fake.mounted(Path::new(FS_MOUNT)), Ok(true));
+
+        let back = switched();
+        back.set_disabled(FS_LABEL);
+        for step in [Prepare, Cutover] {
+            assert_ok(&back.run_with(step, &params, LABEL));
+        }
+        back.set_volume(Volume::NotMounted);
+        assert_failed(&back.run_with(Verify, &params, LABEL), Reason::NotReady);
+        back.set_volume(Volume::Served);
+        assert_ok(&back.run_with(Rollback, &params, LABEL));
+        assert_eq!(back.snapshot().job, path(OLD), "named {named}");
+
+        for host in [&fake, &back] {
+            assert!(!touched_fs_job(host), "named {named}: {:?}", host.log());
+            assert_eq!(host.disabled(), [FS_LABEL]);
+            assert!(!host.snapshot().fs_job);
+            assert!(host.strays().is_empty());
+        }
+    }
+}
+
+/// Asserts what the next update does on a switched Mac whose earlier update was left in flight by
+/// a `cutover` and a `rollback` that both failed at the bootstrap of the fs job: the record names
+/// the update to `HALTED` from `OLD`, with no marker (the step failed before `swapped`) or with
+/// `swapped`, and the job serves `OLD`. The update to `NEW` from `OLD` prepares over the record
+/// with no marker, and rolls the one with `swapped` back first with its own target (the job
+/// already serves `OLD`: nothing is stopped); then it hands over, verifies and commits, and no
+/// call names the fs job. Catches a halted record that refuses every later release, and a
+/// rollback of it that touches the job the switch disabled.
+#[test]
+fn the_update_after_a_halted_one_goes_over_its_record() {
+    for swapped in [false, true] {
+        let fake = switched();
+        fake.set_disabled(FS_LABEL);
+        let mut halted = Record {
+            updating: true,
+            from: path(OLD),
+            to: path(HALTED),
+            version: Some(HALTED_VERSION.to_owned()),
+            ..Record::idle(None)
+        };
+        if swapped {
+            halted = halted.with(Marker::Swapped);
+        }
+        fake.set_record(&halted);
+        let prepared = fake.run(Prepare);
+        assert_ok(&prepared);
+        assert_eq!(fake.record(), in_flight(false), "swapped {swapped}");
+        assert_eq!(
+            detail(&prepared).starts_with("the record is of the update to "),
+            swapped,
+            "{prepared:?}"
+        );
+        fake.advance(&[Cutover, Verify, Cleanup]);
+        assert!(fake.record().committed());
+        assert_eq!(fake.snapshot().job, path(NEW));
+        let calls = fake.launchd_calls();
+        assert!(calls.contains(&kill()), "{calls:?}");
+        assert!(
+            !calls.iter().any(|call| call.contains("bootout")),
+            "{calls:?}"
+        );
+        assert!(!touched_fs_job(&fake), "{:?}", fake.log());
+        assert_eq!(fake.disabled(), [FS_LABEL]);
+    }
+}
+
+/// Asserts that the boot step of a release whose params name the fs job leaves it alone on a Mac
+/// whose file has an `fs` interface (the job loaded already, as launchd loads it at boot, or not
+/// loaded), and still loads it on a Mac whose file has none, as before. Catches the boot step
+/// that failed on the switched Macs (`boot_step_failed`, `Bootstrap failed: 5`) and a guard that
+/// would also stop the fs job of a node that still needs it.
+#[test]
+fn the_boot_step_drives_the_fs_job_only_where_the_file_has_no_fs_interface() {
+    for loaded_at_boot in [false, true] {
+        let fake = switched();
+        fake.set_disabled(FS_LABEL);
+        if !loaded_at_boot {
+            fake.reboot();
+        }
+        assert_ok(&fake.run_with(Restore, &labelled(), LABEL));
+        assert!(!touched_fs_job(&fake), "{:?}", fake.log());
+        assert!(
+            fake.snapshot().job.is_some(),
+            "loaded at boot {loaded_at_boot}"
+        );
+    }
+    let two = Fake::new();
+    two.with_fs(false);
+    assert_ok(&two.run(Restore));
+    assert!(two.snapshot().fs_job);
 }

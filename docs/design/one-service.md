@@ -795,7 +795,11 @@ an update booted the `tierstore-fs` job out (which unmounts) and in again after 
   rolls back, which for a hand-over is the hand-over to the previous release by `SIGUSR2`. After the commit `verify` only
   observes the version.
 - **`fs_launchd_label` is still read**, because the switch's rollback of a config package names it to go back to the
-  two-process layout: a params file that names it is driven as before (the fs job out before the main job, in after). No
+  two-process layout: a params file that names it is driven as before (the fs job out before the main job, in after),
+  except in an update of the release on a node whose file has an `fs` interface. There every step, the boot step and the
+  rollback included, leaves the fs job alone whatever the params say: on the four switched farm Macs the update to 0.3.203,
+  whose manifest still named the job, failed in `cutover` and again in `rollback` at `launchctl bootstrap` of the disabled
+  `tierstore-fs.plist` (`Bootstrap failed: 5`) after the main job served, and its boot step fails the same way. No
   release manifest names it, and the package ships no `tierstore-fs.plist`; hostkeeper's activate removes the file from a Mac
   that has it, and a rollback to the old release lays it down again, where the job stays disabled on a switched Mac.
 - **Failure modes.** A mount that is not listed, or has no `trees`, fails `verify` and rolls the update back. On a hard NFS
