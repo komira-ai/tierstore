@@ -220,8 +220,9 @@ fn aside(store: &S3Store) -> Vec<bool> {
 /// Reads the object, failing the test if `gate` holds a request beyond the `expected` it held
 /// before: a read sent there would never end on the held clock.
 async fn read_avoiding(store: &S3Store, gate: &Gate, expected: usize) -> Bytes {
+    let key = key();
     tokio::select! {
-        got = store.get_range(&key(), all()) => got.unwrap(),
+        got = store.get_range(&key, all()) => got.unwrap(),
         () = gate.held_reaches(expected + 1) => panic!("a read went to the silent endpoint"),
     }
 }
@@ -256,7 +257,7 @@ async fn stall_the_first_read(store: &Arc<S3Store>, gate: &Gate) {
     assert_eq!(&first.await.unwrap().unwrap()[..], BODY);
 }
 
-/// Asserts the task's case: with three endpoints of one store and the first accepting
+/// Asserts that with three endpoints of one store and the first accepting
 /// connections and never answering, 100 reads all come back whole; the first waits out its
 /// limit on the silent endpoint and is sent on to the next, and the other 99 complete with the
 /// clock standing still, none sent to the silent endpoint, which is reported set aside. Before
@@ -436,8 +437,8 @@ async fn an_endpoint_that_refuses_the_connection_is_set_aside() {
 }
 
 /// Asserts that a write whose endpoint stalls is not sent again (it may have landed) but sets
-/// the endpoint aside, so the look at its key after it and the next write go to the other
-/// endpoint; and that a HEAD that stalls is sent on to the next endpoint and answered.
+/// the endpoint aside, so the next write goes to the other endpoint and lands there; and that a
+/// HEAD that stalls is sent on to the next endpoint and answered.
 #[tokio::test(start_paused = true)]
 async fn a_stalled_write_is_not_sent_again_and_a_stalled_head_is() {
     let _hold = Hold::new();
@@ -458,7 +459,18 @@ async fn a_stalled_write_is_not_sent_again_and_a_stalled_head_is() {
     assert_eq!(aside(&s), [true, false]);
     let seen = service.fronts[0].requests();
     assert!(
-        !seen.iter().any(|r| r.starts_with("PUT /tierstore-fake/w")),
+        !seen.iter().any(|r| r.starts_with("PUT /tierstore-fake/w?")),
+        "{seen:?}"
+    );
+    let next = ObjectKey::new("w2").unwrap();
+    s.put_new(&next, Bytes::from_static(BODY), None)
+        .await
+        .unwrap();
+    assert_eq!(gate.held(), 1);
+    let seen = service.fronts[0].requests();
+    assert!(
+        seen.iter()
+            .any(|r| r.starts_with("PUT /tierstore-fake/w2?")),
         "{seen:?}"
     );
 

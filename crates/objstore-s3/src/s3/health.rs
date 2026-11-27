@@ -156,14 +156,19 @@ impl Health {
     }
 
     /// The probe of endpoint `index` got no answer, at `now`: it is set aside again, for longer.
-    /// The time it is set aside for.
-    pub(super) fn probe_failed(&self, index: usize, now: Instant) -> Duration {
+    /// The time it is set aside for, or `None` when it is in turn already: another request it
+    /// answered while the probe was out proved it alive, and the probe changes nothing (so it
+    /// never sets aside an endpoint in turn, the last one included).
+    pub(super) fn probe_failed(&self, index: usize, now: Instant) -> Option<Duration> {
         let mut inner = self.inner();
         let state = &mut inner.states[index];
+        if state.aside_until.is_none() {
+            return None;
+        }
         state.failures = state.failures.saturating_add(1);
         let aside = self.aside_for(index, state.failures);
         state.aside_until = Some(now + aside);
-        aside
+        Some(aside)
     }
 
     /// For each endpoint, whether it is set aside.
@@ -267,8 +272,7 @@ impl Conn {
             if probe(client, base, timeout).await {
                 health.answered(index);
                 tracing::info!(%endpoint, "the endpoint answered its probe: back in turn");
-            } else {
-                let aside = health.probe_failed(index, Instant::now());
+            } else if let Some(aside) = health.probe_failed(index, Instant::now()) {
                 tracing::warn!(%endpoint, ?aside, "the endpoint did not answer its probe: set aside again");
             }
         }));

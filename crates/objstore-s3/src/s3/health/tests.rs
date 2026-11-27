@@ -43,7 +43,7 @@ fn the_time_aside_doubles_from_two_seconds_to_thirty_shortened_by_at_most_a_quar
         };
         firsts.insert(first);
         let mut times = vec![first];
-        times.extend((1..full.len()).map(|_| health.probe_failed(0, t0)));
+        times.extend((1..full.len()).map(|_| health.probe_failed(0, t0).unwrap()));
         for (n, (time, full)) in times.iter().zip(full).enumerate() {
             assert!(
                 *time <= full && *time >= full - full / 4,
@@ -125,7 +125,7 @@ fn an_answer_puts_the_endpoint_back_and_clears_its_failures() {
     let t0 = Instant::now();
     assert!(matches!(health.failed(0, t0), Verdict::SetAside(_)));
     for _ in 0..3 {
-        health.probe_failed(0, t0);
+        assert!(health.probe_failed(0, t0).is_some());
     }
     assert!(health.answered(0));
     assert_eq!(health.aside(), [false, false]);
@@ -135,4 +135,22 @@ fn an_answer_puts_the_endpoint_back_and_clears_its_failures() {
     };
     assert!(again <= FIRST_ASIDE, "{again:?}");
     assert_eq!(picks(&health, t0, 3), [1, 1, 1]);
+}
+
+/// Asserts that a probe with no answer changes nothing for an endpoint that another request's
+/// answer put back in turn while the probe was out, even when that endpoint is by then the last
+/// one in turn: it is not set aside, so one endpoint stays in turn.
+#[test]
+fn a_failed_probe_of_an_endpoint_back_in_turn_changes_nothing() {
+    let health = Health::new(2, 11, HOLD);
+    let t0 = Instant::now();
+    let Verdict::SetAside(aside) = health.failed(0, t0) else {
+        panic!("not set aside");
+    };
+    assert_eq!(health.pick(t0 + aside).probes, [0]);
+    assert!(health.answered(0));
+    assert!(matches!(health.failed(1, t0 + aside), Verdict::SetAside(_)));
+    assert_eq!(health.probe_failed(0, t0 + aside), None);
+    assert_eq!(health.aside(), [false, true]);
+    assert_eq!(picks(&health, t0 + aside, 2), [0, 0]);
 }
