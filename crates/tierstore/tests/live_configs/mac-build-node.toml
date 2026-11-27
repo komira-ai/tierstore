@@ -1,0 +1,49 @@
+[[interface]]
+type   = "s3"
+params = { addresses = ["127.0.0.1:9300"] }
+
+[[interface]]
+type   = "mount-provider"
+params = { socket = "/usr/local/tierstore/run/provider.sock", mountpoint = "/private/var/tierstore/fs" }
+
+[[interface]]
+type = "fs"
+[interface.params]
+mountpoint   = "/private/var/tierstore/fs"
+client_group = "_tierstore"
+owner        = "_tierstore:_tierstore"
+runtime_dir  = "/usr/local/tierstore/run/fs"
+tree_list_ram_bytes = 2147483648
+[interface.params.nfs]
+listen = "127.0.0.1:12049"
+
+[server]
+proxy_id_from_facts  = { path = "/var/lib/hostkeeper/facts.json", prefix = "tierstore-cache-" }
+bucket               = "kbf-cas"
+access_key_file      = "/usr/local/tierstore/etc/access.key"
+read_only_key_files  = ["/usr/local/tierstore/etc/daemons.key"]
+s3_endpoint_attempts = 6
+
+[local_cache]
+path             = "/usr/local/tierstore/cache/kbf-cas"
+budget           = "200GiB"
+whole_fill_limit = "128MiB"
+write_through    = true
+put_ingest       = "/usr/local/tierstore/put"
+
+[cold_store]
+kind             = "s3"
+bucket           = "kbf-cas"
+endpoints        = [
+  "http://192.0.2.1:9300",
+  "http://192.0.2.2:9300",
+  "http://192.0.2.3:9300",
+  "http://192.0.2.4:9300",
+  "http://192.0.2.5:9300",
+  "http://192.0.2.6:9300",
+]
+credentials_file = "/usr/local/tierstore/etc/upstream.key"
+
+[[policy]]
+prefix = "cas/"
+cache  = true
