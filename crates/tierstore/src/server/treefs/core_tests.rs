@@ -557,7 +557,7 @@ fn a_fill_that_leaves_no_file_to_open_is_an_io_failure() {
     let tool = blob_of(&rig, 10);
     assert_eq!(open_cached(&core, ino::of(1, 4), false), Err(Errno::Io));
     assert_eq!(core.open_files(), 0);
-    let failures = core.detach(RUN).unwrap();
+    let failures = core.detach(RUN).unwrap().failures;
     assert_eq!(
         failures,
         [Failure {
