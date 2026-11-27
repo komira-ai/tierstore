@@ -37,6 +37,10 @@ use futures::StreamExt;
 use http_body_util::BodyExt;
 use sha2::Digest;
 
+// The puts to an S3 tier that never answers; a file of its own, declared here.
+#[path = "stream_put_stall_tests.rs"]
+mod stall;
+
 /// The size of a piece of a generated body.
 const PIECE: usize = 32 << 10;
 

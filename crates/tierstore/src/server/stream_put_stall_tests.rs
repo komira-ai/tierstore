@@ -21,9 +21,9 @@ use tokio::sync::Notify;
 use crate::s3::{Addressing, Capabilities, Credentials, S3Config};
 use crate::{Backend as _, S3Backend, TestClock};
 
-use super::auth::sign;
-use super::testing::{BUCKET, KEY_ID, NOW, Reply, SECRET};
-use super::{Server, ServerConfig};
+use crate::server::auth::sign;
+use crate::server::testing::{BUCKET, KEY_ID, NOW, Reply, SECRET};
+use crate::server::{Server, ServerConfig};
 
 /// The request timeout of the S3 tier: the default of `server.s3_request_timeout`.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
