@@ -6,7 +6,8 @@ use std::os::unix::fs::MetadataExt as _;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use super::{AttachError, Attr, Core, DirItem, Entry, Errno, Failure, Kind, Looked, TREE_TTL};
+use super::{AttachError, Attr, Core, DirItem, Entry, Errno, Kind, Looked, TREE_TTL};
+use crate::server::treefs::attach::Failure;
 use crate::server::treefs::ino;
 use crate::server::treefs::testing::{
     Built, Logged, OWNER, Rig, file, logged, open_cached, sample, sha, until,
