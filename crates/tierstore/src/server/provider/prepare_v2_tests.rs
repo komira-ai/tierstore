@@ -423,7 +423,7 @@ async fn a_v2_list_the_store_cannot_place_now_is_failed() {
     run(Arc::clone(&rig.provider.shared), job).await;
     assert_eq!(
         *seen.borrow(),
-        Stage::Failed("the tree was not made: too many placements: 0 are alive".to_owned())
+        Stage::Unmade("the tree was not made: too many placements: 0 are alive".to_owned())
     );
 }
 

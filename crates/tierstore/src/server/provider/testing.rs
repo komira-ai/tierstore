@@ -38,6 +38,7 @@ pub(super) fn settings() -> Settings {
     let long = Duration::from_secs(3600);
     Settings {
         mountpoint: PathBuf::from(MOUNT),
+        served: true,
         list_timeout: long,
         fill_timeout: long,
         mount_wait: long,

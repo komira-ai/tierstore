@@ -18,7 +18,7 @@ use super::names::{SourceId, check_name, source_of};
 use super::prepare::{Job, run};
 use super::{MOUNT_WAIT, ProviderError, ProviderFlags};
 use crate::server::local_cache::trees::{LifeError, PlacementId, PreparePrefetch, TreeStore};
-use crate::server::local_cache::{LocalCache, QueuedReads};
+use crate::server::local_cache::{LocalCache, QueuedReads, Unavailable};
 use crate::{MAX_TREE_LIST_BYTES, TreeDigest, tree_list_digest};
 
 /// Where the preparation of a source is.
@@ -30,8 +30,12 @@ pub(super) enum Stage {
     Placed,
     /// What the source names cannot be used: why.
     Refused(String),
-    /// The preparation failed for a reason that may pass: why. The next `Mount` starts it again.
+    /// The preparation could not read the tree's sidecar or list, for a reason that may pass: why.
+    /// The next `Mount` starts it again.
     Failed(String),
+    /// The tree store could not make the tree now (too many placements, trees off or read-only, a
+    /// disk error): why. The next `Mount` starts it again.
+    Unmade(String),
     /// The source was released.
     Released,
 }
@@ -60,8 +64,11 @@ struct Held {
 /// The settings of the provider.
 #[derive(Clone, Debug)]
 pub(super) struct Settings {
-    /// The mount of `tierstore fs`.
+    /// The mount of the node's file system.
     pub mountpoint: PathBuf,
+    /// Whether this process serves the file system at `mountpoint` (the file has an `fs`
+    /// interface); every `Prepare` and `Mount` is [`no_fs`] if not.
+    pub served: bool,
     /// The longest read of a tree's sidecar.
     pub list_timeout: Duration,
     /// The longest read of the bytes of one file.
@@ -82,6 +89,16 @@ pub(super) struct Settings {
 /// reads do not fit queues none, and its files are read when first opened
 /// (`local_cache/queued_reads.rs`).
 pub(super) const PREFETCH_QUEUE_BYTES: u64 = 256 << 20;
+
+/// The reason of every `Prepare` and `Mount` of a provider whose mount `mountpoint` no process of
+/// this release serves: the node's file has no `fs` interface.
+pub(super) fn no_fs(mountpoint: &std::path::Path) -> String {
+    format!(
+        "no file system serves {}: the node's file has no [[interface]] with type = \"fs\", and \
+         tierstore fs is no longer a process of its own",
+        mountpoint.display()
+    )
+}
 
 /// What the preparations share.
 pub(super) struct Shared {
@@ -140,6 +157,7 @@ impl Provider {
         tracing::info!("{}", mode_line(store.config().prepare_prefetch));
         let settings = Settings {
             mountpoint: flags.mountpoint.clone(),
+            served: flags.served,
             list_timeout: flags.fetch_timeout,
             fill_timeout: flags.fetch_timeout,
             mount_wait: MOUNT_WAIT,
@@ -166,6 +184,21 @@ impl Provider {
         }
     }
 
+    /// `UNAVAILABLE` for `reason`, which says `why`, counted once.
+    fn unavailable(&self, reason: Unavailable, why: String) -> ProviderError {
+        self.shared.cache.provider_unavailable(reason);
+        ProviderError::Unavailable(why)
+    }
+
+    /// `UNAVAILABLE` with [`no_fs`] if no process serves the mount.
+    fn served(&self) -> Result<(), ProviderError> {
+        if self.shared.settings.served {
+            return Ok(());
+        }
+        let why = no_fs(&self.shared.settings.mountpoint);
+        Err(self.unavailable(Unavailable::NoFs, why))
+    }
+
     fn lock(&self) -> MutexGuard<'_, BTreeMap<SourceId, Held>> {
         self.shared
             .sources
@@ -186,7 +219,7 @@ impl Provider {
     /// # Errors
     /// [`ProviderError::Invalid`] for a source or a ref that is not well formed;
     /// [`ProviderError::Refused`] for a mode other than read-only, or a source prepared with
-    /// another ref.
+    /// another ref; [`ProviderError::Unavailable`] ([`no_fs`]) if no process serves the mount.
     pub(super) fn prepare(
         &self,
         source: Option<Source>,
@@ -207,6 +240,7 @@ impl Provider {
             let why = "tierstore makes read-only trees: the mode must be READ_ONLY";
             return Err(ProviderError::Refused(why.to_owned()));
         }
+        self.served()?;
         // The first `Prepare` of the run stamps it; a later one keeps the stamp while the cache
         // keeps the run (until a release or a sweep of a source of it, or the cache's bound).
         self.shared.cache.run_requested(&id.run_dir());
@@ -255,7 +289,7 @@ impl Provider {
 
     /// Begins the preparation of `held` again if it failed.
     fn again_if_failed(&self, id: &SourceId, held: &Held) {
-        if matches!(*held.stage.borrow(), Stage::Failed(_)) {
+        if matches!(*held.stage.borrow(), Stage::Failed(_) | Stage::Unmade(_)) {
             self.start(id, held);
         }
     }
@@ -276,17 +310,22 @@ impl Provider {
     /// `Mount`: the directory of the source's tree, once it is placed.
     ///
     /// # Errors
-    /// [`ProviderError::Unavailable`] if the tree is not placed within the wait, or its
-    /// preparation failed (and is begun again), or the source was never prepared here;
+    /// [`ProviderError::Unavailable`] if no process serves the mount ([`no_fs`]), the tree is not
+    /// placed within the wait, or its preparation failed (and is begun again), or the source was
+    /// never prepared here, each counted under its reason;
     /// [`ProviderError::Refused`] if the ref cannot be used, or the source was released.
     pub(super) async fn mount(&self, source: Option<Source>) -> Result<PathBuf, ProviderError> {
         let id = SourceId::of(source)?;
+        self.served()?;
         let path = self.shared.settings.mountpoint.join(id.path());
         let mut stage = {
             let sources = self.lock();
             let Some(held) = sources.get(&id) else {
                 return self.placed_path(&id).ok_or_else(|| {
-                    ProviderError::Unavailable("the source is not prepared here".to_owned())
+                    self.unavailable(
+                        Unavailable::NotPreparedHere,
+                        "the source is not prepared here".to_owned(),
+                    )
                 });
             };
             self.again_if_failed(&id, held);
@@ -297,7 +336,7 @@ impl Provider {
             stage.wait_for(|stage| *stage != Stage::Preparing),
         )
         .await
-        .map_err(|_| ProviderError::Unavailable("not ready".to_owned()))?;
+        .map_err(|_| self.unavailable(Unavailable::NotReady, "not ready".to_owned()))?;
         // The sender is dropped only after the source's stage was set to released.
         let now = waited.map_or(Stage::Released, |now| (*now).clone());
         match now {
@@ -307,13 +346,15 @@ impl Provider {
                 if let Some(held) = self.lock().get(&id) {
                     self.start(&id, held);
                 }
-                Err(ProviderError::Unavailable(
+                Err(self.unavailable(
+                    Unavailable::TreeGone,
                     "the tree is gone: it is being prepared again".to_owned(),
                 ))
             }
             Stage::Preparing | Stage::Placed => Ok(path),
             Stage::Refused(why) => Err(ProviderError::Refused(why)),
-            Stage::Failed(why) => Err(ProviderError::Unavailable(why)),
+            Stage::Failed(why) => Err(self.unavailable(Unavailable::ReadFailed, why)),
+            Stage::Unmade(why) => Err(self.unavailable(Unavailable::StoreFailed, why)),
             Stage::Released => Err(ProviderError::Refused("the source was released".to_owned())),
         }
     }
@@ -371,9 +412,8 @@ impl Provider {
                 .err()
                 .filter(|why| *why != LifeError::UnknownPlacement);
             if let Some(why) = refused {
-                return Err(ProviderError::Unavailable(format!(
-                    "the placement was not released: {why}"
-                )));
+                let why = format!("the placement was not released: {why}");
+                return Err(self.unavailable(Unavailable::NotReleased, why));
             }
             released = true;
         }
