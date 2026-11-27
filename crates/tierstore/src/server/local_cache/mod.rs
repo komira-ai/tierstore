@@ -702,24 +702,6 @@ impl Inner {
         locked(&self.index).get(&name.hex).map(index::Entry::meta)
     }
 
-    /// Whether the object the index holds is the one on the disk. A read-only cache's index is
-    /// its scan, and the holder may have put the object again since, so the sidecar is read; a
-    /// read-write cache, and a key named by its content, need no check.
-    async fn unchanged(&self, name: &Name, meta: &Meta) -> bool {
-        if self.read_write() || name.content.is_some() {
-            return true;
-        }
-        let believed = stream::Believed {
-            size: meta.size,
-            tag: meta.tag.clone(),
-        };
-        let (root, hex) = (self.config.path.clone(), name.hex.clone());
-        let reading = tokio::task::spawn_blocking(move || {
-            stream::same_version_on_disk(&root, &hex, &believed)
-        });
-        reading.await.unwrap_or(false)
-    }
-
     /// Removes the object from the index and, if this cache may write to its directory, from the
     /// disk. A read-only cache forgets the object and leaves its files: they are the holder's.
     /// It notes the name, and removes the files when it takes the lock (see `hold`), so that the
@@ -798,6 +780,20 @@ impl Backend for LocalCache {
         Ok(())
     }
 
+    /// Create-only, sent as `put_stream` (or `put_stream_hot_only`) is; the answer is the
+    /// upstream's (see `put_through`, in `keep`).
+    async fn put_stream_answered(
+        &self,
+        key: &str,
+        len: Option<u64>,
+        body: PartBody<'_>,
+        hot_only: bool,
+    ) -> Result<Option<PutAnswer>, Error> {
+        let sent = Sent::creates(hot_only);
+        let put = self.inner.put_through(key, len, body, sent);
+        put.await.map(|(_, answer)| answer)
+    }
+
     /// Sent to the upstream's own call, through the cache as a create-only put is (see
     /// `put_through`, in `keep`).
     async fn put_stream_sha256(
@@ -808,11 +804,12 @@ impl Backend for LocalCache {
         sha256: TreeDigest,
     ) -> Result<PutOutcome, Error> {
         let sent = Sent::Checked(len, sha256);
-        self.inner.put_through(key, Some(len), body, sent).await
+        let put = self.inner.put_through(key, Some(len), body, sent);
+        put.await.map(|(outcome, _)| outcome)
     }
 
     /// A plain `PUT`: sent to the upstream as its plain put, and the cache keeps the new copy
-    /// and forgets the old one (see `put_through`, in `keep`).
+    /// and forgets the old one (see `put_through`, in `keep`). The answer is the upstream's.
     async fn put_stream_replacing(
         &self,
         key: &str,
@@ -821,8 +818,8 @@ impl Backend for LocalCache {
         claim: &PutClaim,
     ) -> Result<Option<PutAnswer>, Error> {
         let sent = Sent::Replaces(claim);
-        self.inner.put_through(key, len, body, sent).await?;
-        Ok(None)
+        let put = self.inner.put_through(key, len, body, sent);
+        put.await.map(|(_, answer)| answer)
     }
 
     async fn put_if_match(&self, _key: &str, _body: Bytes, _etag: &str) -> Result<String, Error> {

@@ -32,6 +32,7 @@ use super::xml::{
     self, Listing, ListingV1, NULL_VERSION, PartListing, UploadListing, VersionListing,
 };
 
+mod landed;
 pub(super) mod placed;
 #[cfg(test)]
 mod placed_tests;
@@ -625,7 +626,7 @@ impl Server {
     /// object visible only after the last piece. A body that is refused (a hash that does not match, a body
     /// over the limit, a stalled or cut one) ends the stream with an error, so the backend
     /// stores nothing, and `refused` has the answer to send. `len` is the `Content-Length` of
-    /// the request, if it has one.
+    /// the request, if it has one. The answer has the object's `ETag` (see [`landed`]).
     ///
     /// The backend's call runs on a task of its own, so that a client that goes away after
     /// the whole body was handed over leaves the put to be carried to its end, with its
@@ -657,14 +658,11 @@ impl Server {
         let (backend, name) = (Arc::clone(&self.backend), key.to_owned());
         let mut storing = tokio::spawn(async move {
             let _permit = permit;
-            match claim {
-                Some(claim) => backend
-                    .put_stream_replacing(&name, len, body, &claim)
-                    .await
-                    .map(drop),
-                None if hot_only => backend.put_stream_hot_only(&name, len, body).await,
-                None => backend.put_stream(&name, len, body).await,
-            }
+            let put = match &claim {
+                Some(claim) => backend.put_stream_replacing(&name, len, body, claim),
+                None => backend.put_stream_answered(&name, len, body, hot_only),
+            };
+            put.await
         });
         let early = tokio::select! {
             biased;
@@ -679,8 +677,9 @@ impl Server {
         if let Some(error) = refused.take() {
             return Err(error);
         }
-        stored.map_err(S3Error::from)?;
-        Ok(answer(StatusCode::OK, &[], Bytes::new()))
+        let answered = stored.map_err(S3Error::from)?;
+        let headers = landed::etag(self.backend.as_ref(), key, answered).await;
+        Ok(answer(StatusCode::OK, &headers, Bytes::new()))
     }
 
     /// `If-Match`: an object cannot be replaced, so the answer is that the condition does not

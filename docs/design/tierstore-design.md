@@ -868,7 +868,7 @@ tierstore answers none of that today. What a client sees on `main`, measured on 
 | PUT with `x-amz-checksum-crc64nvme` (the CLI default) | 501 `NotImplemented` on release 0.3.47, so that every upload of a default CLI or boto3 failed, and every part of a multipart upload; accepted and checked since PR #181 | accepts it, verifies it, stores it |
 | PUT with `Content-Type`, `Cache-Control`, `Content-Disposition`, `Content-Encoding`, `x-amz-meta-*` | 200, and the headers are dropped; HEAD and GET answer `application/octet-stream` and no meta | stores and returns all of them |
 | ETag of a `dir:` object | 64 hex digits, the SHA-256 the tier keeps as its tag; an `S3` tier gives whatever its store's ETag is | MD5 hex; multipart `md5-N` |
-| PUT answer | no ETag header | an ETag header |
+| PUT answer | no ETag header on release 0.3.47; since komira-ai/tierstore#525 the `ETag` a HEAD of the object then gives (the tier's tag, see the row above) | an ETag header |
 | Multipart completion | the tier's tag, no `-N` | `md5-N` and the object's checksum |
 | `x-amz-checksum-mode: ENABLED` on GET or HEAD | ignored; no checksum header | the stored checksum and its type |
 | `GET ?tagging`, `PUT ?tagging`, `x-amz-tagging` | `?tagging` is 501; the header is accepted and dropped | tag set read and written |
