@@ -1,6 +1,8 @@
 //! The service's socket, over plain HTTP or over HTTPS ([`FakeS3::start_tls`]), and a store that
 //! reaches the service by a host name ([`FakeS3::store_resolving`]): requests to a host under that
 //! name are taken in virtual-hosted style, the bucket in the host and the key the whole path.
+//! More fronts of one service, each a socket of its own over the same objects and uploads
+//! ([`FakeS3::start_front`]).
 
 use std::sync::{Arc, Mutex};
 
@@ -25,24 +27,53 @@ impl FakeS3 {
     }
 
     /// Starts the service on a free loopback port, serving plain HTTP, or HTTPS with `tls`.
+    pub(super) async fn listen(tls: Option<TlsAcceptor>) -> Self {
+        let state = Arc::new(Mutex::new(State::default()));
+        Self::listen_on(tls, state, Arc::new(Notify::new()), 0).await
+    }
+
+    /// Starts another front of this service, over plain HTTP on a free loopback port of its own,
+    /// on the current runtime: a request to it reads and changes the same objects and uploads as
+    /// one to this front, under the same settings and failures ([`FakeS3::fail`] fails the next
+    /// such request whichever front takes it), and [`FakeS3::requests`] of each front gives the
+    /// requests that front took. For a test of a store reached through several endpoints that
+    /// are front doors of one store.
+    ///
+    /// # Panics
+    /// No loopback port could be bound.
+    pub async fn start_front(&self) -> Self {
+        let front = {
+            let mut state = self.lock();
+            state.fronts += 1;
+            state.fronts
+        };
+        let (state, changed) = (Arc::clone(&self.state), Arc::clone(&self.changed));
+        Self::listen_on(None, state, changed, front).await
+    }
+
+    /// Serves `state` as front `front` on a free loopback port, plain HTTP or HTTPS with `tls`.
     #[expect(
         clippy::expect_used,
         reason = "a test double: a port that cannot be bound is the failure the test reports, as documented under Panics of its callers"
     )]
-    pub(super) async fn listen(tls: Option<TlsAcceptor>) -> Self {
+    async fn listen_on(
+        tls: Option<TlsAcceptor>,
+        state: Arc<Mutex<State>>,
+        changed: Arc<Notify>,
+        front: usize,
+    ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind loopback");
         let addr = listener.local_addr().expect("address");
         let scheme = if tls.is_some() { "https" } else { "http" };
-        let state = Arc::new(Mutex::new(State::default()));
-        let changed = Arc::new(Notify::new());
         let (shared, wake) = (Arc::clone(&state), Arc::clone(&changed));
         tokio::spawn(async move {
             loop {
                 let accepted = listener.accept().await;
                 let serving = accepted.map(|(sock, _)| {
-                    connection(sock, tls.clone(), Arc::clone(&shared), Arc::clone(&wake))
+                    let (shared, wake) = (Arc::clone(&shared), Arc::clone(&wake));
+                    connection(sock, tls.clone(), shared, wake, front)
                 });
                 serving.map(tokio::spawn).ok();
             }
@@ -52,6 +83,7 @@ impl FakeS3 {
             addr,
             state,
             changed,
+            front,
         }
     }
 
@@ -79,10 +111,11 @@ async fn connection(
     tls: Option<TlsAcceptor>,
     state: Arc<Mutex<State>>,
     changed: Arc<Notify>,
+    front: usize,
 ) -> Option<()> {
     match tls {
-        None => serve(sock, state, changed).await,
-        Some(tls) => serve(tls.accept(sock).await.ok()?, state, changed).await,
+        None => serve(sock, state, changed, front).await,
+        Some(tls) => serve(tls.accept(sock).await.ok()?, state, changed, front).await,
     }
 }
 

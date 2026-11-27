@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use tokio::sync::Notify;
 
-use super::super::PinAnswer;
 use super::super::evict::joined;
+use super::super::{PinAnswer, locked};
 use super::TreeStore;
 use super::files::{READY, placement_file, tree_dir};
 use super::location::{Location, PlacementId};
@@ -265,23 +265,36 @@ impl TreeStore {
     }
 
     /// One step of the loop: reads the directory again if the cache took the lock since the store
-    /// read it, and otherwise sweeps.
+    /// read it (as the take itself has the store do, [`refresh`](Self::refresh), unless that read
+    /// failed), and otherwise sweeps.
     pub(super) fn step(&self) {
         if !self.shared.config.enabled {
             return;
         }
+        if !self.refresh() {
+            let _ = self.sweep();
+        }
+    }
+
+    /// Reads the directory again if the cache took the lock since the store read it: whether it
+    /// did. One read at a time: a call that waited for another finds the directory read. The cache
+    /// has its take of the write role call this before it says read-write (`TreeStore::open`),
+    /// so a request that waits for the write role finds every tree and placement the holder
+    /// before it made, also those made after this store was opened.
+    pub(super) fn refresh(&self) -> bool {
+        let _one = locked(&self.shared.reading);
         let (owned, generation) = {
             let state = self.shared.lock();
             (state.owned, state.generation)
         };
         let cache = &self.shared.cache;
-        if cache.inner.read_write() && !(owned && generation == cache.inner.generation()) {
-            if let Err(why) = self.load() {
-                tracing::warn!("tierstore: trees: the directory was not read: {why}");
-            }
-        } else {
-            let _ = self.sweep();
+        if !cache.inner.read_write() || (owned && generation == cache.inner.generation()) {
+            return false;
         }
+        if let Err(why) = self.load() {
+            tracing::warn!("tierstore: trees: the directory was not read: {why}");
+        }
+        true
     }
 
     /// Runs a [`step`](Self::step) every `interval` until `halt` is notified. A store that is off

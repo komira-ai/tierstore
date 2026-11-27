@@ -12,6 +12,8 @@
 //!   demand sub-ranges (4.2, 4.5), the `LOCATE` step, the pinned generation and the lost path
 //!   (4.6, 10.6), and the attempts of a part: stall retries, hedges, `If-Match`, per-cell
 //!   verification failure with failover (4.6).
+//! - `pool` and `gate` (private): the pool of 1 MiB cell buffers parts are received into, and the
+//!   dirty-byte cap a cell waits on before its publish, both taken `demand` first (4.8).
 //! - [`timer`]: the injected clock the engine sleeps on.
 //! - [`stats`]: what it counts, and the progress events tests wait on.
 //!
@@ -29,8 +31,10 @@ pub mod baseline;
 pub mod config;
 mod engine;
 mod fill;
+mod gate;
 mod op;
 pub mod plan;
+mod pool;
 pub mod queue;
 mod resolve;
 pub mod route;

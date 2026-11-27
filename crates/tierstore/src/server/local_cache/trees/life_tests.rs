@@ -6,13 +6,14 @@ use std::time::Duration;
 
 use tokio::sync::Notify;
 
-use super::super::PinAnswer;
 use super::super::testing::{Rig, digest, pattern};
+use super::super::{Mode, PinAnswer, Tick};
 use super::files::placement_file;
 use super::testing::{Bench, built, fs_at, s3_at, tree_path};
 use super::{
     CreateRequest, LifeError, PlacementId, ReadError, SweepReport, TreeStore, TreesConfig,
 };
+use crate::server::lock::Received;
 use crate::{NewEntry, NewKind, TreeDigest};
 
 const HOUR: u64 = 3600 * 1000;
@@ -365,11 +366,11 @@ async fn a_store_without_the_lock_sweeps_nothing() {
     drop(holder);
 }
 
-/// Asserts what the loop does when the cache takes the lock after the store was opened without it:
-/// the store reads the directory again (a tree the holder made since is there), keeps the
-/// attachment it had, and is allowed to create; and that, once it holds the lock, a step sweeps.
+/// Asserts what a take of the lock does when the cache takes it after the store was opened without
+/// it: the take has the store read the directory again, so with no step the store keeps the
+/// attachment it had and is allowed to create; and that, once it holds the lock, a step sweeps.
 #[tokio::test]
-async fn a_step_reads_the_directory_when_the_cache_takes_the_lock_and_then_sweeps() {
+async fn a_take_of_the_lock_reads_the_directory_and_then_a_step_sweeps() {
     let bench = Bench::new("trees-step").await;
     bench.fill_all().await;
     let made = bench
@@ -390,9 +391,7 @@ async fn a_step_reads_the_directory_when_the_cache_takes_the_lock_and_then_sweep
     );
     drop(holder);
     assert!(waiting_cache.tick().unwrap() == super::super::Tick::Took);
-    // The cache has the lock, the store has not read the directory since: refused until the step.
-    assert!(store.create(bench.request(vec![fs_at("jobs/2")])).is_err());
-    store.step();
+    // The take read the directory before the cache said read-write: no step is needed.
     assert_eq!(store.placement(&made.placement).unwrap().attachments, 1);
     let second = store.create(bench.request(vec![fs_at("jobs/2")])).unwrap();
     store.step();
@@ -401,6 +400,43 @@ async fn a_step_reads_the_directory_when_the_cache_takes_the_lock_and_then_sweep
     // The attached placement stays; the other, with no holder, is gone.
     assert_eq!(store.sizes(), (1, 1));
     assert!(store.placement(&second.placement).is_none());
+}
+
+/// Asserts that a successor's take of a lock handed over to it reads the directory before the cache
+/// says read-write: a placement the holder made after the successor's store was opened is found by
+/// the successor's store, by id and as the tree of its mount location, as soon as the take
+/// returns, with no step of the loop, and the store is allowed to create. It would catch a
+/// successor whose mount answers a read of a file under such a placement (one the process before
+/// it opened for a job) with an error until the loop reads the directory, which a job that maps
+/// the file takes as SIGBUS.
+#[tokio::test]
+async fn a_handed_lock_is_taken_with_the_placements_the_holder_made_after_the_store_opened() {
+    let bench = Bench::new("trees-handed").await;
+    bench.fill_all().await;
+    let holder = bench.rig.locked();
+    let holder_store = Bench::reopen(holder.clone());
+    let before = holder_store
+        .create(bench.request(vec![fs_at("jobs/1")]))
+        .unwrap();
+    let waiting_cache = bench.rig.locked();
+    let store = Bench::reopen(waiting_cache.clone());
+    // Made after the successor's store read the directory, which knows nothing of it yet.
+    let after = holder_store
+        .create(bench.request(vec![fs_at("jobs/2")]))
+        .unwrap();
+    assert!(store.placement(&before.placement).is_some());
+    assert!(store.placement(&after.placement).is_none());
+    assert!(store.mount_tree(&after.placement).is_err());
+
+    let (path, fd) = holder.lock_to_hand().unwrap().unwrap();
+    let received = Received::of(fd, &path).unwrap();
+    holder.hand_writes();
+    assert_eq!(waiting_cache.take_handed(received).unwrap(), Tick::Took);
+    assert_eq!(waiting_cache.mode(), Mode::ReadWrite);
+    assert!(store.placement(&after.placement).is_some());
+    assert!(store.mount_tree(&after.placement).is_ok());
+    assert!(store.placement(&before.placement).is_some());
+    store.create(bench.request(vec![fs_at("jobs/3")])).unwrap();
 }
 
 /// Asserts that the loop sweeps every interval until it is told to stop, and that a store that is
@@ -497,6 +533,10 @@ async fn a_step_that_cannot_read_the_directory_leaves_the_store_read_only() {
             .unwrap_err(),
         super::CreateError::ReadOnly
     );
+    // The directory can be made again: the next step reads it, and the store creates.
+    std::fs::remove_file(&trees).unwrap();
+    store.step();
+    store.create(bench.request(vec![fs_at("jobs/1")])).unwrap();
 }
 
 /// Asserts that a placement held by an attachment and a read, whose lease is over when the
