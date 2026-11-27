@@ -4,13 +4,14 @@
 use std::sync::Arc;
 
 use super::mark_reads::Missed;
-use super::{Inner, Level};
+use super::{Inner, Level, refuse_reserved};
 use crate::metrics::{Read, Skipped, Tier};
 use crate::{Error, Opened, ReadBody, Span, Window};
 use futures::StreamExt;
 
 impl Inner {
-    /// Opens the read of `span` of the object `key` (all of it without one).
+    /// Opens the read of `span` of the object `key` (all of it without one). A key under a
+    /// reserved prefix is refused with [`Error::Reserved`] before any tier is asked, as a get is.
     ///
     /// The hot tier is asked once, with [`Backend::open_read`](crate::Backend::open_read), and a
     /// hit is the answer as it comes: its body is the hot tier's own stream, never collected, and
@@ -38,6 +39,7 @@ impl Inner {
         key: &str,
         span: Option<Span>,
     ) -> Result<Opened, Error> {
+        refuse_reserved(key)?;
         match self.hot.open_read(key, span).await {
             Ok(opened) => {
                 self.count_hot_open(&opened);
