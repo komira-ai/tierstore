@@ -95,9 +95,7 @@ fn blocks(page: &str) -> (Vec<(&str, String)>, bool) {
             }
             None => {}
             Some((fence, file, text)) if ticks >= fence && line.trim_end().len() == ticks => {
-                if let Some(file) = file {
-                    found.push((file, text));
-                }
+                found.extend(file.map(|file| (file, text)));
             }
             Some((fence, file, mut text)) => {
                 text.push_str(line);

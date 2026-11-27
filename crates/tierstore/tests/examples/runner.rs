@@ -549,6 +549,11 @@ fn a_generator_that_cannot_write_its_files_says_why() {
     }
 }
 
+/// The words of `args`, borrowed.
+fn words(args: &[String]) -> Vec<&str> {
+    args.iter().map(String::as_str).collect()
+}
+
 /// Runs the command line `args` and gives its status, standard output and standard error.
 fn cli(args: &[&str]) -> (u8, String, String) {
     let (mut out, mut err) = (Vec::new(), Vec::new());
@@ -580,7 +585,6 @@ fn the_command_line_runs_an_example_and_exits_with_its_verdict() {
             path(&options.work).to_owned(),
         ]
     };
-    let words = |args: &[String]| args.iter().map(String::as_str).collect::<Vec<_>>();
 
     let dir = scratch("cli-pass");
     let options = standin(&dir, &checks_spec(""), CONFIG, &expected);
