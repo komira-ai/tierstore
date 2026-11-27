@@ -163,8 +163,14 @@ async fn a_put_to_a_store_that_never_answers_gives_its_error_at_the_request_time
     let error = putting.await.unwrap().unwrap_err();
     let waited = paused.elapsed();
     assert!(matches!(error, ObjectStoreError::Transport(_)), "{error:?}");
-    assert!(waited <= REQUEST_TIMEOUT, "the put gave its error after {waited:?}");
-    assert_eq!(read.lock().unwrap()[0], "PUT /test-bucket/cas/hung HTTP/1.1");
+    assert!(
+        waited <= REQUEST_TIMEOUT,
+        "the put gave its error after {waited:?}"
+    );
+    assert_eq!(
+        read.lock().unwrap()[0],
+        "PUT /test-bucket/cas/hung HTTP/1.1"
+    );
     store.cleanups_idle().await;
     assert_eq!(
         store.cut_puts(),
@@ -234,7 +240,10 @@ async fn an_abort_that_fails_is_kept_and_sent_again_when_the_store_answers() {
     assert_eq!(store.cleanups(), kept);
     assert_eq!(s3.incomplete_uploads(), 1);
     let absent = store.head(&key("absent")).await;
-    assert!(matches!(absent, Err(ObjectStoreError::NotFound(_))), "{absent:?}");
+    assert!(
+        matches!(absent, Err(ObjectStoreError::NotFound(_))),
+        "{absent:?}"
+    );
     store.cleanups_idle().await;
     assert_eq!(store.cleanups(), Cleanups::default());
     assert_eq!(s3.incomplete_uploads(), 0);

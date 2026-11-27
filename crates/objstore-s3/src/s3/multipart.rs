@@ -417,7 +417,11 @@ pub(super) async fn complete_replacing(
 
 /// AbortMultipartUpload. An upload the store no longer knows (completed after all, or aborted
 /// already) needs nothing more.
-pub(super) async fn try_abort(conn: &Conn, key: &ObjectKey, id: &str) -> Result<(), ObjectStoreError> {
+pub(super) async fn try_abort(
+    conn: &Conn,
+    key: &ObjectKey,
+    id: &str,
+) -> Result<(), ObjectStoreError> {
     let query = [("uploadId", id.to_owned())];
     let resp = conn
         .send(Method::DELETE, Some(key), &query, Vec::new(), Bytes::new())

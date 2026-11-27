@@ -117,11 +117,11 @@ impl Kept {
             self.dropped += 1;
             return;
         }
-        if self.list.len() >= self.bound {
-            if let Some(oldest) = self.list.pop_front() {
-                tracing::warn!(key = %oldest.key, "too many failed aborts kept; the oldest is left to the bucket's lifecycle rule");
-                self.dropped += 1;
-            }
+        if self.list.len() >= self.bound
+            && let Some(oldest) = self.list.pop_front()
+        {
+            tracing::warn!(key = %oldest.key, "too many failed aborts kept; the oldest is left to the bucket's lifecycle rule");
+            self.dropped += 1;
         }
         self.list.push_back(upload);
     }
@@ -353,7 +353,10 @@ mod tests {
         store.look_after_cut(&k(), 4, "t".to_owned());
         cleaner.abort(k(), "u1".to_owned());
         cleaner.answered();
-        assert!(!cleaner.kept().passing, "a pass marked begun with no place for it");
+        assert!(
+            !cleaner.kept().passing,
+            "a pass marked begun with no place for it"
+        );
         let counted = Cleanups {
             looks_skipped: 1,
             failed_aborts: 1,
@@ -379,7 +382,9 @@ mod tests {
         };
         assert_eq!(store.cleanups(), counted);
         let orphan = Cleaner::new(Weak::new());
-        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
         runtime.block_on(async { orphan.abort(k(), "u2".to_owned()) });
         assert_eq!(orphan.read().failed_aborts, 1);
     }

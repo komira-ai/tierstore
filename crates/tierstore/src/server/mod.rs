@@ -463,6 +463,8 @@ mod server_tests;
 mod slow_reader_tests;
 mod stop_watcher;
 #[cfg(test)]
+mod stream_put_stall_tests;
+#[cfg(test)]
 mod stream_put_tests;
 #[cfg(test)]
 mod stream_wire_tests;

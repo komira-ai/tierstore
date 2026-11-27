@@ -144,6 +144,7 @@ async fn a_failed_part_aborts_the_upload() {
         matches!(wrote, Err(ObjectStoreError::Service { status: 500, .. })),
         "{wrote:?}"
     );
+    store.cleanups_idle().await;
     assert_eq!(s3.incomplete_uploads(), 0, "the upload was left behind");
     assert_eq!(s3.stats().aborted, 1);
     assert_eq!(s3.object_len(&k), None);
@@ -170,6 +171,7 @@ async fn a_broken_body_aborts_the_upload() {
             matches!(wrote, Err(ObjectStoreError::Body(_))),
             "{name}: {wrote:?}"
         );
+        store.cleanups_idle().await;
         assert_eq!(s3.incomplete_uploads(), 0, "{name}: left behind");
         assert_eq!(s3.object_len(&k), None, "{name}");
     }
@@ -193,6 +195,7 @@ async fn a_completion_that_fails_late_aborts_the_upload() {
         matches!(&wrote, Err(ObjectStoreError::Service { status: 200, code, .. }) if code == "InternalError"),
         "{wrote:?}"
     );
+    store.cleanups_idle().await;
     assert_eq!(s3.incomplete_uploads(), 0);
     assert_eq!(s3.object_len(&k), None);
 }
@@ -217,6 +220,7 @@ async fn a_conditional_completion_over_an_existing_key_is_refused_and_aborted() 
         matches!(wrote, Err(ObjectStoreError::AlreadyExists(_))),
         "{wrote:?}"
     );
+    store.cleanups_idle().await;
     assert_eq!(s3.incomplete_uploads(), 0);
     assert_eq!(s3.object_len(&k), Some(5));
     let condition = s3.requests();
@@ -252,15 +256,12 @@ async fn a_write_dropped_mid_upload_aborts_it() {
     assert_eq!(s3.stats().aborted, 1);
 }
 
-/// Catches: a write dropped while its own abort is still on the wire (the body failed,
-/// the abort began, and then the caller went away, as a gRPC handler is cancelled when
-/// its client resets the stream) leaving the upload behind: the guard was disarmed
-/// before the abort finished, so the cancelled abort was never sent again. The first
-/// AbortMultipartUpload is held at the service until the write is dropped, so the
-/// order is fixed: body fails, abort in flight, write dropped. The dropped write must
-/// abort the upload from a task of its own.
+/// Catches: a failed write that is held by its own abort (the body failed, the abort is on the
+/// wire and unanswered): the write gives its error at once, so it is not there to be dropped, and
+/// its abort, in a task of its own, is still held by the service and the upload still open.
+/// The first AbortMultipartUpload is held at the service.
 #[tokio::test]
-async fn a_write_dropped_while_its_abort_is_in_flight_aborts_the_upload_again() {
+async fn a_failed_write_is_not_held_by_its_abort_in_flight() {
     let s3 = FakeS3::start().await;
     let store = cut_at_a_part(&s3);
     s3.hold_next_abort();
@@ -271,10 +272,9 @@ async fn a_write_dropped_while_its_abort_is_in_flight_aborts_the_upload_again() 
     });
     s3.wait_for(|s3| s3.held_aborts() > 0).await;
     assert_eq!(s3.incomplete_uploads(), 1, "the upload is open");
-    writing.abort();
-    assert!(writing.await.is_err_and(|e| e.is_cancelled()));
-    s3.wait_for(|s3| s3.incomplete_uploads() == 0).await;
-    assert_eq!(s3.stats().aborted, 1);
+    writing.await.expect("the write ended with its error");
+    assert_eq!(s3.held_aborts(), 1, "the abort is still held");
+    assert_eq!(s3.incomplete_uploads(), 1);
 }
 
 /// Catches a failure of any other step taken for a stored object, or a failure that
@@ -303,6 +303,7 @@ async fn every_failed_step_fails_the_write_and_leaves_no_upload() {
             _ => matches!(&wrote, Err(ObjectStoreError::Service { status: 500, .. })),
         };
         assert!(expected, "{name}: {wrote:?}");
+        store.cleanups_idle().await;
         assert_eq!(s3.incomplete_uploads(), 0, "{name}: left behind");
         assert_eq!(s3.object_len(&k), None, "{name}");
     }
@@ -326,6 +327,7 @@ async fn an_abort_that_fails_leaves_the_write_failed_with_its_own_error() {
         matches!(wrote, Err(ObjectStoreError::Service { status: 500, .. })),
         "{wrote:?}"
     );
+    store.cleanups_idle().await;
     assert_eq!(s3.incomplete_uploads(), 1);
 }
 
