@@ -28,8 +28,10 @@
 //!   filling), or `UNAVAILABLE` "not ready" after [`MOUNT_WAIT`], and the agent asks again; a ref
 //!   the provider cannot use (a sidecar refused, no sidecar and no list or a list refused, a tree
 //!   the store refuses) is `FAILED_PRECONDITION` with the reason.
-//! - **`Release(source)`** stops the source's reads and removes its placement; the tree goes when
-//!   nothing else holds it, and its packs stay in the cache to be evicted in their turn.
+//! - **`Release(source)`** stops the source's reads and removes its placement at once, the hold
+//!   of `tierstore fs`'s mount on it included (only a read open on it keeps it, until the read
+//!   ends), so that it no longer counts toward `trees.max_placements`; the tree goes when no other
+//!   placement has it, and its packs stay in the cache to be evicted in their turn.
 //! - **`Sweep(agent, keep)`** releases every source of the agent whose run is not in `keep`, both
 //!   those this process prepared and the placements it finds under the agent's path.
 //!
@@ -69,6 +71,8 @@ mod prepare_list_tests;
 mod prepare_tests;
 #[cfg(test)]
 mod prepare_v2_tests;
+#[cfg(test)]
+mod release_tests;
 #[cfg(test)]
 mod serve_tests;
 #[cfg(test)]

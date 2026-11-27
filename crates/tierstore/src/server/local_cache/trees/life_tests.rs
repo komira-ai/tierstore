@@ -209,6 +209,40 @@ async fn release_removes_the_locations_and_the_placement_lasts_for_its_holders()
     assert!(store.create(bench.request(vec![fs_at("jobs/1")])).is_ok());
 }
 
+/// Asserts that `release_now` ends the attachments of the placement as it releases it: the
+/// placement goes at once with no read open, a read open keeps it until the read ends, a tree
+/// another placement has stays until that one goes too, and a second release, or one of a
+/// placement that is not there, is refused.
+#[tokio::test]
+async fn release_now_ends_the_attachments_and_the_placement_goes_with_its_last_read() {
+    let (bench, id) = placed("trees-release-now").await;
+    let store = &bench.store;
+    let other = store.create(bench.request(vec![fs_at("jobs/2")])).unwrap();
+    store.attach(&id, "mount").unwrap();
+    store.attach(&id, "run").unwrap();
+    store.attach(&other.placement, "mount").unwrap();
+    assert_eq!(store.sizes(), (2, 1));
+    store.release_now(&id).unwrap();
+    assert!(store.placement(&id).is_none());
+    assert!(!placement_file(&bench.rig.config.path, &id).exists());
+    assert_eq!(store.sizes(), (1, 1));
+    assert!(store.resolve(&other.placement, "bin/tool").is_ok());
+    assert_eq!(store.release_now(&id), Err(LifeError::UnknownPlacement));
+    assert_eq!(
+        store.release_now(&unknown()),
+        Err(LifeError::UnknownPlacement)
+    );
+    let read = store.open_read(&other.placement).unwrap();
+    store.release_now(&other.placement).unwrap();
+    assert!(store.locate_fs("jobs/2").is_none());
+    let info = store.placement(&other.placement).unwrap();
+    assert!(info.released);
+    assert_eq!((info.attachments, info.reads), (0, 1));
+    assert_eq!(store.sizes(), (1, 1));
+    drop(read);
+    assert_eq!(store.sizes(), (0, 0));
+}
+
 /// Asserts that a placement released while a run holds it is placed again by a create of the same
 /// tree and locations: the placement is new, appears again, keeps its holder and the time it was
 /// first made.
