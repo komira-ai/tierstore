@@ -35,7 +35,7 @@ fn a_good_expanded_pkg_passes_the_check() {
         Ok(vec![format!(
             "check-macos-pkg: {} is a product of the one component tierstore.pkg \
              (com.komira.tierstore 1.2.3), with the one script postinstall, which installs \
-             exactly /Library/Application Support/tierstore/bin/tierstore (755), \
+             exactly /Library/Application Support/tierstore/bin/tierstore (755) and \
              /Library/LaunchDaemons/tierstore.plist (644), owned by root",
             expanded.product().display()
         )])
