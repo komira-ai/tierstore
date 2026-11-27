@@ -1,6 +1,8 @@
 //! What the engine counts (the counters section 12 names for the fetch path, T9 registers them)
 //! and the progress events tests wait on instead of time.
 
+use crate::gate::Level;
+
 /// The kind of a GET (4.2: GETs are counted by kind).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum GetKind {
@@ -85,6 +87,25 @@ pub struct Stats {
     pub stall_retries: u64,
     /// Timers armed now, by [`TimerKind`].
     pub timers: [u32; TIMER_KINDS],
+    /// Bytes of cells handed to the entry's publish whose publish has not returned (4.8,
+    /// `dirty_bytes`).
+    pub dirty_bytes: u64,
+    /// The most of [`Stats::dirty_bytes`] at once.
+    pub dirty_bytes_peak: u64,
+    /// Bytes of cells let past the dirty-byte cap to their publish, in all (a cell that was never
+    /// published, a hedge's loser among them, is not).
+    pub dirty_bytes_admitted: u64,
+    /// Cells waiting now before their publish for the dirty-byte cap.
+    pub dirty_waiting: u64,
+    /// Cells that waited before their publish for the dirty-byte cap, in all (each is a sample of
+    /// `writeback_stall_seconds`).
+    pub dirty_stalls: u64,
+    /// Cell buffers of the pool in use now (4.8).
+    pub buffers: u64,
+    /// The most cell buffers in use at once.
+    pub buffers_peak: u64,
+    /// Attempts waiting now for a cell buffer.
+    pub buffers_waiting: u64,
 }
 
 impl Stats {
@@ -104,6 +125,18 @@ impl Stats {
     #[must_use]
     pub fn armed(&self, kind: TimerKind) -> u32 {
         self.timers[kind.index()]
+    }
+
+    /// Takes in the levels of the cell buffer pool and the dirty-byte cap.
+    pub(crate) fn memory(&mut self, pool: &Level, dirty: &Level) {
+        self.dirty_bytes = dirty.used;
+        self.dirty_bytes_peak = dirty.peak;
+        self.dirty_bytes_admitted = dirty.admitted;
+        self.dirty_waiting = dirty.waiting;
+        self.dirty_stalls = dirty.waits;
+        self.buffers = pool.used;
+        self.buffers_peak = pool.peak;
+        self.buffers_waiting = pool.waiting;
     }
 
     pub(crate) fn count_get(&mut self, kind: GetKind) {
