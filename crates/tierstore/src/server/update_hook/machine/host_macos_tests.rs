@@ -399,8 +399,8 @@ fn a_copy_that_cannot_be_removed_is_an_error_after_the_check() {
     let binary = package_release(&root, 0o755);
     let copy = at(&root, CHECK_BINARY);
     let dir = copy.parent().unwrap().to_path_buf();
-    let opened = |_: &Call| {
-        if dir.exists() {
+    let opened = |call: &Call| {
+        if call.program == SUDO_PROGRAM {
             mode(&dir, 0o757);
         }
     };

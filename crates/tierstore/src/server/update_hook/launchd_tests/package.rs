@@ -234,6 +234,8 @@ impl Mac {
         let root = dir.path().join("host");
         let work = dir.path().join("work");
         fs::create_dir_all(&work).expect("work");
+        fs::create_dir_all(&root).expect("root");
+        set_mode(&root, 0o755);
         let mac = Mac {
             _dir: dir,
             root,
@@ -250,6 +252,10 @@ impl Mac {
         let config = mac.at(macos_pkg::CONFIG_FILE);
         fs::create_dir_all(config.parent().expect("etc")).expect("etc");
         fs::write(&config, NODE_FILE).expect("node file");
+        // Searchable by others whatever the umask, as on a Mac.
+        for dir in ["/usr", "/usr/local"] {
+            set_mode(&mac.at(dir), 0o755);
+        }
         fs::create_dir_all(mac.at(MOUNT).join("trees")).expect("mount point");
         mac
     }
@@ -491,10 +497,9 @@ impl Mac {
             ["--capabilities"],
             "a root hook on a Mac runs a release's binary as itself only to ask its capabilities"
         );
-        match fs::read_to_string(program).ok().and_then(|t| image_of(&t)) {
-            Some(image) => exit(0, &format!("{}\n", image.capabilities.join("\n")), ""),
-            None => exit(126, "", "cannot execute binary file"),
-        }
+        let text = fs::read_to_string(program).expect("the release's binary is there");
+        let image = image_of(&text).expect("a stand-in binary");
+        exit(0, &format!("{}\n", image.capabilities.join("\n")), "")
     }
 }
 
@@ -522,15 +527,11 @@ impl Instances for Mac {
             .serving()
             .filter(|_| port == 9300)
             .ok_or_else(|| PortError::failed(PortKind::Instances, "connection refused"))?;
-        let body = match path {
-            "/readyz" => "ready read-write".to_owned(),
-            "/metricz" => gauge(&version, COMMIT, None),
-            _ => {
-                return Ok(Reply {
-                    status: 404,
-                    body: String::new(),
-                });
-            }
+        let body = if path == "/readyz" {
+            "ready read-write".to_owned()
+        } else {
+            assert_eq!(path, "/metricz");
+            gauge(&version, COMMIT, None)
         };
         Ok(Reply { status: 200, body })
     }
