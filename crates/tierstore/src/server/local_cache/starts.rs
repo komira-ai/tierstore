@@ -15,9 +15,10 @@
 //!
 //! A run is sampled once: a report of another source of it, or of the same tree read into the
 //! mount's memory again, adds nothing. A run is known by the directory its sources' paths are in,
-//! `mount-provider/<agent>/<run>` (the provider's module `names`); a report of a path in any other
-//! directory, such as that of a placement of the trees API, or of a run this process did not see
-//! a `Prepare` of (it started after the `Prepare`), adds nothing. A release or a sweep of a source
+//! `mount-provider/<agent>/<run>`, or `mount-provider/<agent>/<run>/a<attempt>` for an attempt
+//! the agent named, each attempt a run of its own (the provider's module `names`); a report of a
+//! path in any other directory, such as that of a placement of the trees API, or of a run this
+//! process did not see a `Prepare` of (it started after the `Prepare`), adds nothing. A release or a sweep of a source
 //! of the run forgets it ([`LocalCache::run_forgotten`]), so a run that ends before its command
 //! touches its trees is not sampled. At most [`MOST_RUNS`] runs are kept: a request beyond them
 //! forgets the run requested longest ago.

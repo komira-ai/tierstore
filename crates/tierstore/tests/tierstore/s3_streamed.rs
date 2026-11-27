@@ -76,16 +76,19 @@ async fn a_streamed_replace_of_more_than_one_put_is_completed_with_the_tag() {
 
     let wrong = backend.put_stream_if_match("k", Some(OVER_ONE_PUT), over_one_put(None), "no");
     assert_eq!(wrong.await, Err(Error::PreconditionFailed("k".to_owned())));
+    backend.cleanups_idle().await;
     assert_eq!(s3.incomplete_uploads(), 0);
 
     let cut = Error::Other("cut".to_owned());
     let failing = over_one_put(Some(&cut));
     let failed = backend.put_stream_if_match("k", Some(OVER_ONE_PUT), failing, &tag);
     assert_eq!(failed.await, Err(cut));
+    backend.cleanups_idle().await;
     assert_eq!(s3.incomplete_uploads(), 0);
 
     let absent = backend.put_stream_if_match("none", Some(OVER_ONE_PUT), over_one_put(None), &tag);
     assert_eq!(absent.await, Err(Error::NotFound("none".to_owned())));
+    backend.cleanups_idle().await;
     assert_eq!(s3.incomplete_uploads(), 0);
     assert_eq!(backend.get("k", None).await.unwrap(), body("old"));
     assert_eq!(s3.stats().completed, 0);
@@ -233,6 +236,7 @@ async fn a_tagged_streamed_put_of_more_than_one_put_is_completed_with_its_tag() 
     let failing = over_one_put(Some(&cut));
     let failed = backend.put_stream_tagged("k", Some(OVER_ONE_PUT), failing);
     assert_eq!(failed.await, Err(cut));
+    backend.cleanups_idle().await;
     assert_eq!(s3.incomplete_uploads(), 0);
     assert_eq!(
         backend.head("k").await.unwrap_err(),
@@ -247,5 +251,6 @@ async fn a_tagged_streamed_put_of_more_than_one_put_is_completed_with_its_tag() 
 
     let again = backend.put_stream_tagged("k", Some(OVER_ONE_PUT), over_one_put(None));
     assert_eq!(again.await, Err(Error::AlreadyExists("k".to_owned())));
+    backend.cleanups_idle().await;
     assert_eq!(s3.incomplete_uploads(), 0);
 }

@@ -52,6 +52,11 @@
 //!   the record directory, as they are.
 //! - `restore`, the boot step, puts the current release's binary in place and boots the job in
 //!   when it is not loaded, then boots the fs job in when there is one and it is not loaded.
+//!
+//! A record of another update, in flight and not committed, that returns the host to the params'
+//! previous release is one whose updater is gone: a `prepare` that finds it past its cutover, and
+//! a `rollback`, roll it back first with the params it was written under, then do their own step
+//! (`Record::stale`).
 
 mod exec;
 pub(super) mod fs;
@@ -64,7 +69,7 @@ use super::args::Step;
 use super::look::{Look, verified, writable};
 use super::params::Params;
 use super::ports::LaunchdPorts;
-use super::record::{Marker, Record};
+use super::record::{Marker, Record, Stale, Written};
 use super::report::{Done, Reason};
 
 /// What a step works with.
@@ -104,19 +109,88 @@ impl Ctx<'_, '_> {
 
 /// Refuses params that name another release or version than the update on record.
 fn same_update(record: &Record, params: &Params) -> Result<(), Done> {
-    let to = record.to.as_deref();
-    let version = record.version.as_deref();
-    if to == Some(params.staged_release.as_path()) && version == Some(&params.target_version) {
+    if record.is_of(params) {
         return Ok(());
     }
-    Err(Done::fail(
+    Err(another_update(record, params))
+}
+
+/// The refusal of params that name another update than the one on record.
+fn another_update(record: &Record, params: &Params) -> Done {
+    Done::fail(
         Reason::BadParams,
         format!(
-            "the params name {} {}, and the update on record is {to:?} {version:?}",
+            "the params name {} {}, and the update on record is {:?} {:?}",
             params.staged_release.display(),
             params.target_version,
+            record.to.as_deref(),
+            record.version.as_deref(),
         ),
-    ))
+    )
+}
+
+/// A `prepare` that finds another update past its cutover, or a `rollback` that finds another
+/// update in flight, neither committed, whose updater is gone ([`Stale::Own`]): that update is
+/// rolled back first with the params it was written under, then `step` runs on the record at
+/// rest. Both details are said, the rollback's first.
+fn roll_back_first(
+    c: &Ctx<'_, '_>,
+    step: Step,
+    params: &Params,
+    record: &mut Record,
+    own: &Written,
+) -> Result<Done, Done> {
+    let whose = format!(
+        "the record is of the update to {} {}, not {} {}",
+        own.params.staged_release.display(),
+        own.params.target_version,
+        params.staged_release.display(),
+        params.target_version
+    );
+    let back = roll_back_own(c, own, record).map_err(|done| {
+        led_by(
+            done,
+            &format!("{whose}, and its rollback with its own target and releases is not done"),
+        )
+    })?;
+    let note = format!(
+        "{whose}: rolled back with its own target and releases ({})",
+        back.report.detail.as_deref().unwrap_or_default()
+    );
+    let done = if step == Step::Prepare {
+        prepare(c, params, record)
+    } else {
+        rollback(c, params, record)
+    };
+    done.map(|done| led_by(done, &note))
+        .map_err(|done| led_by(done, &note))
+}
+
+/// The rollback of the update on record with the params it was written under. A job that is
+/// loaded and already serves the release that update started from (the boot step loaded it
+/// again, with the binary `current` names) has nothing of that update running: the binary is
+/// put back, the fs job is booted in when it is not loaded, and only the record changes. The
+/// staged release of that update is then not read, so a release directory that is gone does not
+/// matter. Any other state is `rollback`'s with those params.
+fn roll_back_own(c: &Ctx<'_, '_>, own: &Written, record: &mut Record) -> Result<Done, Done> {
+    let version = own.previous.version.as_str();
+    if c.ports.launchd.loaded(c.label)? && c.look().observed(version).is_ok() {
+        c.ports.host.install_binary(&own.previous.release)?;
+        c.start_fs()?;
+        c.save(record, Record::idle(None))?;
+        return Ok(Done::ok(format!(
+            "{} already serves {version}: nothing of that update runs",
+            c.label
+        )));
+    }
+    rollback(c, &own.params, record)
+}
+
+/// `done` with `first` and `; ` before its detail.
+fn led_by(mut done: Done, first: &str) -> Done {
+    let rest = done.report.detail.take().unwrap_or_default();
+    done.report.detail = Some(format!("{first}; {rest}"));
+    done
 }
 
 /// Refuses a record that names a systemd instance or a mode.
@@ -211,6 +285,9 @@ fn attempt(
 
 fn prepare(c: &Ctx<'_, '_>, params: &Params, record: &mut Record) -> Result<Done, Done> {
     if record.updating && !record.markers.is_empty() {
+        if let Stale::Own(own) = record.stale(params) {
+            return roll_back_first(c, Step::Prepare, params, record, &own);
+        }
         return Err(Done::fail(
             Reason::OutOfOrder,
             "an update is past its cutover: finish or roll it back first",
@@ -342,7 +419,16 @@ fn rollback(c: &Ctx<'_, '_>, params: &Params, record: &mut Record) -> Result<Don
     if !record.updating {
         return Ok(Done::ok("no update in flight: nothing to roll back"));
     }
-    same_update(record, params)?;
+    match record.stale(params) {
+        Stale::Not => same_update(record, params)?,
+        Stale::Own(own) => return roll_back_first(c, Step::Rollback, params, record, &own),
+        Stale::Kept(why) => {
+            let mut done = another_update(record, params);
+            let said = done.report.detail.take().unwrap_or_default();
+            done.report.detail = Some(format!("{said}: {why}"));
+            return Err(done);
+        }
+    }
     if record.from.is_none() {
         // A first install: what `cutover` started is stopped, and there is nothing to start in
         // its place; the copy of the binary goes too. The update stays on record, without

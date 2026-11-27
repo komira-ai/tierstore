@@ -275,7 +275,8 @@ impl S3Store {
     /// PUT's own token (`x-amz-meta-write-token`); a 412 is
     /// [`ObjectStoreError::AlreadyExists`] if `create_only` (the headers carry
     /// `If-None-Match: *`). A PUT that got no answer is followed by the look at the key of
-    /// `cut_put.rs` before its error is given.
+    /// `cut_put.rs`, in a task of its own: its error is given at once. A PUT that never reached
+    /// the store is not looked after.
     pub(super) async fn put_whole_with(
         &self,
         key: &ObjectKey,
@@ -289,9 +290,11 @@ impl S3Store {
         let sent = self.conn.send_streamed(key, &[], headers, len, body).await;
         let resp = match sent {
             Ok(resp) => resp,
-            Err(error) => {
-                self.look_after_cut(key, len, &token).await;
-                return Err(error);
+            // The store never saw it: nothing to look for.
+            Err(failed) if failed.unsent => return Err(failed.error),
+            Err(failed) => {
+                self.look_after_cut(key, len, token);
+                return Err(failed.error);
             }
         };
         match resp.status() {
