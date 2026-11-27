@@ -1100,7 +1100,7 @@ dependencies = [
  "sha2 0.11.0",
  "thiserror",
  "tierstore-testkit",
- "tsfuse",
+ "tsfuse 0.1.0",
 ]
 
 [[package]]
@@ -2193,6 +2193,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "objstore-s3"
+version = "0.1.0"
+source = "git+https://github.com/komira-ai/tierstore?rev=967ae437288a1dc52e442883e3887b6e3ad0fa69#967ae437288a1dc52e442883e3887b6e3ad0fa69"
+dependencies = [
+ "base64 0.23.1",
+ "bytes",
+ "futures",
+ "hex",
+ "hmac",
+ "http-body",
+ "md-5",
+ "reqwest",
+ "roxmltree",
+ "rustls",
+ "rustls-native-certs",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "oid-registry"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2486,10 +2510,10 @@ dependencies = [
  "tierstore-budget",
  "tierstore-entry",
  "tierstore-fetch",
- "tierstore-fetch-api",
- "tierstore-format",
+ "tierstore-fetch-api 0.1.0",
+ "tierstore-format 0.1.0",
  "tierstore-hashpool",
- "tierstore-list",
+ "tierstore-list 0.1.0",
  "tierstore-plan",
  "tierstore-testkit",
  "tokio",
@@ -3242,19 +3266,19 @@ dependencies = [
  "thiserror",
  "tierstore 0.3.0",
  "tierstore-fetch",
- "tierstore-fetch-api",
- "tierstore-format",
+ "tierstore-fetch-api 0.1.0",
+ "tierstore-format 0.1.0",
  "tierstore-hashpool",
- "tierstore-list",
+ "tierstore-list 0.1.0",
  "tierstore-testkit",
- "tierstore-tree",
- "tierstore-trees-api",
+ "tierstore-tree 0.1.0",
+ "tierstore-trees-api 0.1.0",
  "tokio",
  "tokio-rustls",
  "toml",
  "tonic",
  "tracing",
- "tsfuse",
+ "tsfuse 0.1.0",
  "vm-memory",
  "x509-parser",
 ]
@@ -3294,6 +3318,55 @@ dependencies = [
 ]
 
 [[package]]
+name = "tierstore"
+version = "0.3.0"
+source = "git+https://github.com/komira-ai/tierstore?rev=967ae437288a1dc52e442883e3887b6e3ad0fa69#967ae437288a1dc52e442883e3887b6e3ad0fa69"
+dependencies = [
+ "arc-swap",
+ "async-trait",
+ "base64 0.23.1",
+ "bytes",
+ "clap",
+ "crc",
+ "crc32c",
+ "crc32fast",
+ "fsevent",
+ "futures",
+ "hex",
+ "hmac",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "libc",
+ "md-5",
+ "nfsserve",
+ "nix",
+ "objstore-s3 0.1.0 (git+https://github.com/komira-ai/tierstore?rev=967ae437288a1dc52e442883e3887b6e3ad0fa69)",
+ "percent-encoding",
+ "ring",
+ "roxmltree",
+ "rustix",
+ "rustls",
+ "rustls-native-certs",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "thiserror",
+ "tierstore-fetch-api 0.1.0 (git+https://github.com/komira-ai/tierstore?rev=967ae437288a1dc52e442883e3887b6e3ad0fa69)",
+ "tierstore-format 0.1.0 (git+https://github.com/komira-ai/tierstore?rev=967ae437288a1dc52e442883e3887b6e3ad0fa69)",
+ "tierstore-tree 0.1.0 (git+https://github.com/komira-ai/tierstore?rev=967ae437288a1dc52e442883e3887b6e3ad0fa69)",
+ "tierstore-trees-api 0.1.0 (git+https://github.com/komira-ai/tierstore?rev=967ae437288a1dc52e442883e3887b6e3ad0fa69)",
+ "tokio",
+ "tokio-rustls",
+ "toml",
+ "tonic",
+ "tracing",
+ "tsfuse 0.1.0 (git+https://github.com/komira-ai/tierstore?rev=967ae437288a1dc52e442883e3887b6e3ad0fa69)",
+ "vm-memory",
+ "x509-parser",
+]
+
+[[package]]
 name = "tierstore-budget"
 version = "0.1.0"
 dependencies = [
@@ -3301,8 +3374,8 @@ dependencies = [
  "futures",
  "thiserror",
  "tierstore-fetch",
- "tierstore-fetch-api",
- "tierstore-format",
+ "tierstore-fetch-api 0.1.0",
+ "tierstore-format 0.1.0",
  "tierstore-metrics",
  "tokio",
 ]
@@ -3320,6 +3393,7 @@ dependencies = [
  "rustls",
  "tierstore 0.3.0",
  "tierstore 0.3.0 (git+https://github.com/komira-ai/tierstore?rev=6b60319efd148fba3d7fc0f7e6217d64b097642e)",
+ "tierstore 0.3.0 (git+https://github.com/komira-ai/tierstore?rev=967ae437288a1dc52e442883e3887b6e3ad0fa69)",
  "tierstore-testkit",
  "tokio",
 ]
@@ -3334,8 +3408,8 @@ dependencies = [
  "rustix",
  "sha2 0.11.0",
  "thiserror",
- "tierstore-fetch-api",
- "tierstore-format",
+ "tierstore-fetch-api 0.1.0",
+ "tierstore-format 0.1.0",
  "tierstore-harness",
  "tierstore-journal",
  "tierstore-testkit",
@@ -3350,7 +3424,7 @@ dependencies = [
  "rustix",
  "thiserror",
  "tierstore-entry",
- "tierstore-fetch-api",
+ "tierstore-fetch-api 0.1.0",
  "tierstore-journal",
  "tierstore-metrics",
  "tierstore-testkit",
@@ -3364,8 +3438,8 @@ dependencies = [
  "bytes",
  "futures",
  "ring",
- "tierstore-fetch-api",
- "tierstore-format",
+ "tierstore-fetch-api 0.1.0",
+ "tierstore-format 0.1.0",
  "tierstore-metrics",
  "tokio",
 ]
@@ -3378,8 +3452,20 @@ dependencies = [
  "bytes",
  "futures",
  "thiserror",
- "tierstore-format",
+ "tierstore-format 0.1.0",
  "tokio",
+]
+
+[[package]]
+name = "tierstore-fetch-api"
+version = "0.1.0"
+source = "git+https://github.com/komira-ai/tierstore?rev=967ae437288a1dc52e442883e3887b6e3ad0fa69#967ae437288a1dc52e442883e3887b6e3ad0fa69"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "futures",
+ "thiserror",
+ "tierstore-format 0.1.0 (git+https://github.com/komira-ai/tierstore?rev=967ae437288a1dc52e442883e3887b6e3ad0fa69)",
 ]
 
 [[package]]
@@ -3394,6 +3480,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tierstore-format"
+version = "0.1.0"
+source = "git+https://github.com/komira-ai/tierstore?rev=967ae437288a1dc52e442883e3887b6e3ad0fa69#967ae437288a1dc52e442883e3887b6e3ad0fa69"
+dependencies = [
+ "blake3",
+ "crc32c",
+ "serde",
+ "thiserror",
+]
+
+[[package]]
 name = "tierstore-harness"
 version = "0.1.0"
 dependencies = [
@@ -3403,8 +3500,8 @@ dependencies = [
  "futures",
  "loom",
  "thiserror",
- "tierstore-fetch-api",
- "tierstore-format",
+ "tierstore-fetch-api 0.1.0",
+ "tierstore-format 0.1.0",
  "tierstore-model",
  "tierstore-store-api",
  "tokio",
@@ -3420,7 +3517,7 @@ dependencies = [
  "ring",
  "sha2 0.11.0",
  "thiserror",
- "tierstore-fetch-api",
+ "tierstore-fetch-api 0.1.0",
  "tokio",
 ]
 
@@ -3431,7 +3528,7 @@ dependencies = [
  "fjall",
  "redb",
  "thiserror",
- "tierstore-format",
+ "tierstore-format 0.1.0",
  "tierstore-store-api",
  "tierstore-testkit",
 ]
@@ -3444,8 +3541,8 @@ dependencies = [
  "rustix",
  "sha2 0.11.0",
  "thiserror",
- "tierstore-fetch-api",
- "tierstore-format",
+ "tierstore-fetch-api 0.1.0",
+ "tierstore-format 0.1.0",
  "tierstore-testkit",
 ]
 
@@ -3458,8 +3555,19 @@ dependencies = [
  "sha2 0.11.0",
  "thiserror",
  "tierstore 0.3.0",
- "tierstore-fetch-api",
+ "tierstore-fetch-api 0.1.0",
  "tierstore-testkit",
+]
+
+[[package]]
+name = "tierstore-list"
+version = "0.1.0"
+source = "git+https://github.com/komira-ai/tierstore?rev=967ae437288a1dc52e442883e3887b6e3ad0fa69#967ae437288a1dc52e442883e3887b6e3ad0fa69"
+dependencies = [
+ "crc32c",
+ "ring",
+ "thiserror",
+ "tierstore-fetch-api 0.1.0 (git+https://github.com/komira-ai/tierstore?rev=967ae437288a1dc52e442883e3887b6e3ad0fa69)",
 ]
 
 [[package]]
@@ -3487,11 +3595,11 @@ name = "tierstore-metrics"
 version = "0.1.0"
 dependencies = [
  "thiserror",
- "tierstore-fetch-api",
- "tierstore-format",
+ "tierstore-fetch-api 0.1.0",
+ "tierstore-format 0.1.0",
  "tierstore-store-api",
  "tracing",
- "tsfuse",
+ "tsfuse 0.1.0",
 ]
 
 [[package]]
@@ -3509,9 +3617,26 @@ dependencies = [
  "rustix",
  "thiserror",
  "tierstore-entry",
- "tierstore-fetch-api",
+ "tierstore-fetch-api 0.1.0",
  "tierstore-mount-server",
  "tierstore-testkit",
+ "tokio",
+ "tracing",
+ "vm-memory",
+]
+
+[[package]]
+name = "tierstore-mount-client"
+version = "0.1.0"
+source = "git+https://github.com/komira-ai/tierstore?rev=967ae437288a1dc52e442883e3887b6e3ad0fa69#967ae437288a1dc52e442883e3887b6e3ad0fa69"
+dependencies = [
+ "arc-swap",
+ "async-trait",
+ "futures",
+ "libc",
+ "rustix",
+ "thiserror",
+ "tierstore-fetch-api 0.1.0 (git+https://github.com/komira-ai/tierstore?rev=967ae437288a1dc52e442883e3887b6e3ad0fa69)",
  "tokio",
  "tracing",
  "vm-memory",
@@ -3524,7 +3649,7 @@ dependencies = [
  "async-trait",
  "rustix",
  "thiserror",
- "tierstore-fetch-api",
+ "tierstore-fetch-api 0.1.0",
  "tierstore-testkit",
  "tokio",
  "tracing",
@@ -3535,8 +3660,8 @@ name = "tierstore-plan"
 version = "0.1.0"
 dependencies = [
  "thiserror",
- "tierstore-fetch-api",
- "tierstore-format",
+ "tierstore-fetch-api 0.1.0",
+ "tierstore-format 0.1.0",
 ]
 
 [[package]]
@@ -3550,8 +3675,8 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
- "tierstore-fetch-api",
- "tierstore-format",
+ "tierstore-fetch-api 0.1.0",
+ "tierstore-format 0.1.0",
  "tokio",
 ]
 
@@ -3577,12 +3702,28 @@ dependencies = [
  "thiserror",
  "tierstore 0.3.0",
  "tierstore-entry",
- "tierstore-fetch-api",
- "tierstore-list",
- "tierstore-mount-client",
+ "tierstore-fetch-api 0.1.0",
+ "tierstore-list 0.1.0",
+ "tierstore-mount-client 0.1.0",
  "tierstore-mount-server",
  "tierstore-testkit",
- "tierstore-tree",
+ "tierstore-tree 0.1.0",
+ "tokio",
+ "vm-memory",
+]
+
+[[package]]
+name = "tierstore-tree"
+version = "0.1.0"
+source = "git+https://github.com/komira-ai/tierstore?rev=967ae437288a1dc52e442883e3887b6e3ad0fa69#967ae437288a1dc52e442883e3887b6e3ad0fa69"
+dependencies = [
+ "futures",
+ "libc",
+ "rustix",
+ "thiserror",
+ "tierstore-fetch-api 0.1.0 (git+https://github.com/komira-ai/tierstore?rev=967ae437288a1dc52e442883e3887b6e3ad0fa69)",
+ "tierstore-list 0.1.0 (git+https://github.com/komira-ai/tierstore?rev=967ae437288a1dc52e442883e3887b6e3ad0fa69)",
+ "tierstore-mount-client 0.1.0 (git+https://github.com/komira-ai/tierstore?rev=967ae437288a1dc52e442883e3887b6e3ad0fa69)",
  "tokio",
  "vm-memory",
 ]
@@ -3594,7 +3735,19 @@ dependencies = [
  "prost",
  "prost-types",
  "protox",
- "tierstore-trees-api",
+ "tierstore-trees-api 0.1.0",
+ "tonic",
+ "tonic-prost",
+ "tonic-prost-build",
+]
+
+[[package]]
+name = "tierstore-trees-api"
+version = "0.1.0"
+source = "git+https://github.com/komira-ai/tierstore?rev=967ae437288a1dc52e442883e3887b6e3ad0fa69#967ae437288a1dc52e442883e3887b6e3ad0fa69"
+dependencies = [
+ "prost",
+ "protox",
  "tonic",
  "tonic-prost",
  "tonic-prost-build",
@@ -3937,6 +4090,18 @@ dependencies = [
  "sha2 0.11.0",
  "thiserror",
  "tierstore-testkit",
+ "tokio",
+ "zerocopy",
+]
+
+[[package]]
+name = "tsfuse"
+version = "0.1.0"
+source = "git+https://github.com/komira-ai/tierstore?rev=967ae437288a1dc52e442883e3887b6e3ad0fa69#967ae437288a1dc52e442883e3887b6e3ad0fa69"
+dependencies = [
+ "futures",
+ "rustix",
+ "thiserror",
  "tokio",
  "zerocopy",
 ]

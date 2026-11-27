@@ -373,20 +373,27 @@ async fn three_thousand_handles_of_the_files_of_a_pack_hold_one_real_descriptor(
     .await;
 }
 
-/// Asserts that an image file that is not in the tree's directory, one that is not a tree list, one
-/// that is cut short and one a byte over the largest tree list are each refused when the core
-/// reads the image from the file (`Core::image_of`, the read of a list that no holder has in
-/// memory), as a failed read of the tree, and that the read succeeds once the file is the image
-/// again.
+/// Asserts that an image file that is not in the tree's directory is a tree that is gone (its
+/// placement ended between the tree store's answer and the read: `ENOENT`, not `EIO`), that one
+/// that is not a tree list, one that is cut short and one a byte over the largest tree list are
+/// each refused when the core reads the image from the file (`Core::image_of`, the read of a list
+/// that no holder has in memory), as a failed read of the tree, and that the read succeeds once
+/// the file is the image again.
 #[test]
-fn a_missing_or_malformed_image_file_fails_the_read_of_the_tree() {
+fn a_missing_image_file_is_gone_and_a_malformed_one_fails_the_read_of_the_tree() {
     let rig = Rig::new("tfs-img-bad", Built::of(Vec::new()));
     let bytes = image_bytes();
     let tree = TreeDigest::of(&bytes);
     let file = image_path(&rig.cache, &tree);
     std::fs::create_dir_all(file.parent().unwrap()).unwrap();
     let read = || rig.core.image_of(&tree, "jobs".to_owned());
-    assert!(matches!(read(), Err(Unread::Failed(_))));
+    let Err(Unread::Gone(why)) = read() else {
+        panic!("a missing image file is a tree that is gone");
+    };
+    assert!(
+        why.starts_with(&format!("the image of {tree} at jobs: ")),
+        "{why}"
+    );
     std::fs::write(&file, b"not a tree list at all").unwrap();
     assert!(matches!(read(), Err(Unread::Failed(_))));
     std::fs::write(&file, &bytes[..bytes.len() / 2]).unwrap();

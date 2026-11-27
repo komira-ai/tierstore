@@ -409,3 +409,34 @@ async fn an_instance_that_cannot_bind_its_socket_again_goes_on_serving() {
     assert!(old.settings.handoff_socket.is_dir());
     assert!(!old.serving.is_finished());
 }
+
+/// Asserts, on an offer of its own, the two steps after a hand-over that did not complete when the
+/// socket cannot be made again: the resume serves the kernel again and leaves the offer with no
+/// listener, and the offer then waits, without ending, for a taker that cannot come. The test above
+/// shows the same from the outside, where it cannot wait for these steps.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_resume_whose_socket_cannot_be_made_again_leaves_no_listener_and_waits() {
+    let old = instance("tfs-ho-resume", Duration::from_secs(3600), None);
+    let path = old.settings.handoff_socket.with_extension("again");
+    let mut offer = Offer::bind(
+        &path,
+        &old.settings.mountpoint,
+        &old.settings.control_socket,
+        Duration::from_secs(3600),
+    )
+    .unwrap();
+    let quiescing = std::sync::Arc::clone(&old.running);
+    tokio::task::spawn_blocking(move || quiescing.quiesce())
+        .await
+        .unwrap();
+    // A directory in the socket's place keeps it from being made again.
+    std::fs::remove_file(&path).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    offer.resume(&old.running).await.unwrap();
+    assert!(offer.listener.is_none());
+    assert!(path.is_dir());
+    old.assert_serving(1);
+    let serving = offer.serve(std::sync::Arc::clone(&old.running));
+    let mut serving = std::pin::pin!(serving);
+    assert!(futures::poll!(serving.as_mut()).is_pending());
+}

@@ -457,6 +457,7 @@ fn each_style_signs_the_host_and_path_it_sends_to() {
             .conn
             .signed_payload(
                 &keys("a", None),
+                &store.conn.targets[0],
                 Method::GET,
                 key,
                 query,

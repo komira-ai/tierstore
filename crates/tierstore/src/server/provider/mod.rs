@@ -28,14 +28,27 @@
 //!   filling), or `UNAVAILABLE` "not ready" after [`MOUNT_WAIT`], and the agent asks again; a ref
 //!   the provider cannot use (a sidecar refused, no sidecar and no list or a list refused, a tree
 //!   the store refuses) is `FAILED_PRECONDITION` with the reason.
-//! - **`Release(source)`** stops the source's reads and removes its placement; the tree goes when
-//!   nothing else holds it, and its packs stay in the cache to be evicted in their turn.
+//! - **`Release(source)`** stops the source's reads and removes its placement at once, ending
+//!   the hold `tierstore fs`'s mount took on it at a lookup, so that it no longer counts toward
+//!   `trees.max_placements`. A tree in the mount's memory keeps serving its open files and
+//!   inodes; one the mount has to read again is `ENOENT`. The tree goes, and its packs are
+//!   unpinned and stay in the cache to be evicted in their turn, unless another source's placement
+//!   has it.
 //! - **`Sweep(agent, keep)`** releases every source of the agent whose run is not in `keep`, both
 //!   those this process prepared and the placements it finds under the agent's path.
 //!
 //! The first `Prepare` of a run stamps it in the cache, and a `Release` or a `Sweep` of a source of
 //! it forgets it: the request end of `tierstore_request_to_start_seconds`, whose other end is the
 //! first look of `tierstore fs` inside one of the run's trees (`local_cache/starts.rs`).
+//!
+//! The trees are served by the `fs` interface of the node's file, in this process. In a file with
+//! no `fs` interface no process of this release serves the mount (`tierstore fs` is no longer a
+//! process of its own, and a node of the earlier two-process layout keeps its `mountpoint` with
+//! nothing behind it): there every `Prepare` and `Mount` is `UNAVAILABLE` with
+//! the reason `sources::no_fs` gives, and no directory under the mount is answered, so the
+//! agent's start fails `input-unavailable` saying so instead of on a directory that is not there.
+//! Every answer `UNAVAILABLE` counts once under its reason in
+//! `tierstore_provider_unavailable_total{reason}` (`local_cache/provider_unavailable.rs`).
 //!
 //! Every call is idempotent by its source. Every read of the store has a bound,
 //! `params.fetch_timeout`; a read that passes it fails that file (an open reads it again) or, for
@@ -70,6 +83,8 @@ mod prepare_tests;
 #[cfg(test)]
 mod prepare_v2_tests;
 #[cfg(test)]
+mod release_tests;
+#[cfg(test)]
 mod serve_tests;
 #[cfg(test)]
 mod service_tests;
@@ -79,6 +94,8 @@ mod sources_tests;
 mod start_tests;
 #[cfg(test)]
 pub(in crate::server) mod testing;
+#[cfg(test)]
+mod unavailable_tests;
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -104,10 +121,14 @@ pub(super) const MAX_REASON_BYTES: usize = 256;
 pub(super) struct ProviderFlags {
     /// The path of the socket.
     pub socket: PathBuf,
-    /// The mount of `tierstore fs`, under which a source's directory is answered.
+    /// The mount of the node's file system, under which a source's directory is answered.
     pub mountpoint: PathBuf,
     /// How long one read of the store may take.
     pub fetch_timeout: Duration,
+    /// Whether this process serves the file system at `mountpoint`: the node's file has an `fs`
+    /// interface. Without one no process of this release serves it (`tierstore fs` is no longer a
+    /// process of its own), and every `Prepare` and `Mount` is `UNAVAILABLE`.
+    pub served: bool,
 }
 
 /// Why a call is not answered with success: the three other answers of the contract.
