@@ -56,7 +56,12 @@ fn one(name: &str) -> One {
     );
     let manager = FakeManager::start(&rig.dir.path().join("old-manager.sock"));
     let store = Manager::new(Some(manager.socket().as_os_str()));
-    let mount = offered(&running, &settings, store, |_| {});
+    let mount = offered(
+        &running,
+        &settings,
+        store,
+        (Arc::new(|_| {}), Arc::default()),
+    );
     let offer = Offer::bind(&settings.handoff_socket, Vec::new())
         .unwrap()
         .with_ready_wait(WAIT)
@@ -555,9 +560,9 @@ async fn a_failed_resume_is_told_and_an_unreachable_store_does_not_stop_the_give
     let note: fn(&std::io::Error) = |_| {
         let _ = STUCK.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     };
-    handover::stuck_on(Ok(()), note);
+    handover::stuck_on(Ok(()), &note);
     assert_eq!(STUCK.load(std::sync::atomic::Ordering::SeqCst), 0);
-    handover::stuck_on(Err(std::io::Error::other("no readers")), note);
+    handover::stuck_on(Err(std::io::Error::other("no readers")), &note);
     assert_eq!(STUCK.load(std::sync::atomic::Ordering::SeqCst), 1);
 
     let rig = Rig::new("tfs-svc-unreachable", sample());
@@ -573,7 +578,12 @@ async fn a_failed_resume_is_told_and_an_unreachable_store_does_not_stop_the_give
         Running::adopt((&settings, &Reach::Socket), prepared, device, (None, false)).unwrap(),
     );
     let nobody = Manager::new(Some(rig.dir.path().join("nobody-home").as_os_str()));
-    let mount = offered(&running, &settings, nobody, note);
+    let mount = offered(
+        &running,
+        &settings,
+        nobody,
+        (Arc::new(note), Arc::default()),
+    );
     (mount.quiesce)();
     (mount.give_up)();
     assert!(!running.reading());

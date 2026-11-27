@@ -25,7 +25,7 @@ pub(crate) struct Want<'a> {
     pub(crate) nfs: &'a [SocketAddr],
 }
 
-/// What a start of the one process asks for besides the sockets ([`take_service`]).
+/// What a start of the one process asks for besides the sockets ([`offered_with`]).
 pub(crate) struct Ask<'a> {
     /// The mount, when its file has an `fs` interface.
     pub(crate) mount: Option<MountWant<'a>>,
@@ -59,7 +59,7 @@ pub(crate) struct Inherited {
     /// running instance has not handed the sockets over: it ends when `ready` is sent, and goes
     /// on serving when the connection ends without it.
     pub(crate) ready: Option<Ready>,
-    /// The mount, when it was asked for ([`take_service`]) and the running instance held it. The
+    /// The mount, when it was asked for ([`offered_with`]) and the running instance held it. The
     /// device is not read before [`Ready::send_keeping`] has returned.
     pub(crate) mount: Option<TakenMount>,
     /// A descriptor of the running instance's cache lock, when it offered it and this taker asked
@@ -225,13 +225,7 @@ pub(crate) async fn take_with_ready(
 /// As [`take`], and: the offer of the mount or the lock names other paths
 /// ([`HandoffError::Mismatch`]), a descriptor is not of its kind or `prepare` failed
 /// ([`HandoffError::Io`]), or the offer is not what was asked for ([`HandoffError::Protocol`]).
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the start of the one process takes with it (one-service.md section 6, P3)"
-    )
-)]
+#[cfg(test)]
 pub(crate) async fn take_service(
     handoff: &Handoff,
     want: &Want<'_>,
@@ -401,11 +395,37 @@ pub(crate) struct Offered {
     request: Request,
     /// The control socket, for the error of a wait that ran out.
     socket: PathBuf,
-    /// The wait from `ack` to `done`.
+    /// The wait from `ack` to `done`: with the mount, its quiesce's too.
     wait: Duration,
 }
 
 impl Offered {
+    /// Whether the running instance offered its mount: it holds it, and this offer takes it.
+    pub(crate) fn has_mount(&self) -> bool {
+        self.inherited.mount.is_some()
+    }
+
+    /// [`accept`](Self::accept) of an offer with the mount ([`has_mount`](Self::has_mount)): the
+    /// sockets, the mount and the connection on which `ready` is said, apart.
+    ///
+    /// # Errors
+    /// As [`accept`](Self::accept), and an offer without the mount, which is not answered: the
+    /// connection ends, which the running instance takes for a `nak`.
+    pub(crate) async fn accept_with_mount(
+        self,
+    ) -> Result<(Inherited, TakenMount, Ready), HandoffError> {
+        if !self.has_mount() {
+            return Err(HandoffError::Protocol(
+                "an offer without the mount it was asked for",
+            ));
+        }
+        let mut inherited = self.accept().await?;
+        let taken = inherited.mount.take().zip(inherited.ready.take());
+        let (mount, ready) =
+            taken.ok_or(HandoffError::Protocol("an offer without the ready step"))?;
+        Ok((inherited, mount, ready))
+    }
+
     /// Says `ack`, and waits for the running instance's `done`, within the wait of the hand-off.
     ///
     /// # Errors
@@ -471,32 +491,38 @@ pub(crate) async fn offered(
 }
 
 /// Asks the instance that answers at `handoff.socket` for its listening sockets with the `ready`
-/// step (`take 1`, `ready`) and the cache lock at `lock`, and checks the offer whole without
-/// answering it, as `offered` does for `take 1` alone: what the start of a node whose file has an
-/// `fs` interface asks of the running instance on `server.handoff_socket`, so that its cache takes
-/// the write role at the running instance's `written` rather than after that instance's drain
-/// (`docs/design/one-service.md` section 3.2). The [`Inherited`] that [`Offered::accept`] gives
-/// then holds the connection for `ready` and the lock, where the running instance offered it.
+/// step, for the mount as well where `ask.mount` names it (`take 1`, `ready`, `mount`), and for the
+/// cache lock at `ask.lock`, and checks the offer whole without answering it, as `offered` does for
+/// `take 1` alone: what the start of a node whose file has an `fs` interface asks of the running
+/// instance on `server.handoff_socket` (`docs/design/one-service.md` sections 3.1 and 3.2). The
+/// [`Inherited`] that [`Offered::accept`] gives then holds the connection for `ready`, the mount
+/// where the running instance held it ([`Offered::has_mount`]; `ask.mount`'s `prepare` ran with its
+/// device before this returned), and the lock where it offered it, so that the cache takes the
+/// write role at the running instance's `written` rather than after that instance's drain.
 ///
-/// A running instance that does not know the step is asked with `take 1` alone, as by
-/// [`take_with_ready`]: no `ready`, no lock, today's behaviour. A lock it offers of another file
-/// (its file names another cache directory than this start's) is closed and left with it
-/// ([`Ask::leaves_another_lock`]): this start's own cache is another directory, which that lock
-/// does not hold.
+/// A running instance that holds no mount, or does not know the `mount` line, is asked again
+/// without it, and one that does not know the `ready` step with `take 1` alone, as by
+/// [`take_with_ready`]: no `ready`, no lock, the behaviour of a release before them. With
+/// [`Ask::leaves_another_lock`], a lock it offers of another file (its file names another cache
+/// directory than this start's) is closed and left with it: this start's own cache is another
+/// directory, which that lock does not hold.
 ///
 /// # Errors
-/// As [`take`], for what is found before `ack`; an offer found wrong was refused with `nak`.
-pub(crate) async fn offered_with_lock(
+/// As [`take`], for what is found before `ack`, and: the offer of the mount or the lock names
+/// other paths ([`HandoffError::Mismatch`]), a descriptor is not of its kind or `prepare` failed
+/// ([`HandoffError::Io`]), or the offer is not what was asked for ([`HandoffError::Protocol`]).
+/// An offer found wrong was refused with `nak`.
+pub(crate) async fn offered_with(
     handoff: &Handoff,
     want: &Want<'_>,
-    lock: &Path,
+    mut ask: Ask<'_>,
 ) -> Result<Option<Offered>, HandoffError> {
-    let mut ask = Ask {
-        mount: None,
-        lock: Some(lock),
-        leaves_another_lock: true,
+    let request = if ask.mount.is_some() {
+        Request::Mount
+    } else {
+        Request::Ready
     };
-    offer_of(handoff, want, (Request::Ready, &mut ask), Knobs::real()).await
+    offer_of(handoff, want, (request, &mut ask), Knobs::real()).await
 }
 
 /// The whole exchange with the running instance: `request`, and what `ask` adds to it; `knobs`
@@ -595,12 +621,16 @@ async fn offer_of(
         Err(why) => return nak(&stream, why).await,
     };
     inherited.lock = lock;
+    // The running instance quiesces the mount between `ack` and `done`.
+    let quiesce = (ask.mount.as_ref())
+        .filter(|_| inherited.mount.is_some())
+        .map_or(Duration::ZERO, |mount| mount.wait);
     Ok(Some(Offered {
         stream,
         inherited,
         request,
         socket: handoff.socket.clone(),
-        wait: handoff.wait,
+        wait: handoff.wait.saturating_add(quiesce),
     }))
 }
 

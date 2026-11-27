@@ -437,8 +437,12 @@ Where each step comes from:
   skips a front line it does not know and closes its descriptor, which is how `nfs` was added. The `mount` line is a third
   request line, as `ready` was a second: an instance that does not know it, or holds no mount, answers `refused`, and the
   taker asks again without it, which takes the sockets alone (section 4.2 uses that). An instance that holds the mount
-  refuses a taker that does not ask for it, so the mount is never left with an instance that is about to exit. The B8 tests
-  of P4 replay a previous release's taker against this offer and this taker against a previous release's offer.
+  refuses a taker that does not ask for it, so the mount is never left with an instance that is about to exit: a taker that
+  asks `take 1` alone at its request, and one that asked for the `ready` step at that `ready` (`refused` in place of `bye`),
+  unless the mount was taken meanwhile on the instance's `take-fs 1` (the two conversations share a claim of the mount, so
+  one taker at a time is at it). That is how the start of the previous release, which asks `take 1` / `ready` and takes the
+  mount on `take-fs 1` before its `ready`, still takes over from this one, so that an update back to it is a hand-over. The
+  B8 tests of P4 replay a previous release's taker against this offer and this taker against a previous release's offer.
 - **The lock line** is offered, by an instance that has a cache, to a taker that asked for the `ready` step; a taker that
   asks `take 1` alone gets the sockets as today and stays read-only until the old one exits (today's behaviour, which 4.2's
   rollback uses). A previous release's taker skips the line and closes the descriptor, which does not unlock (3.2).
@@ -466,6 +470,16 @@ Where each step comes from:
   restarted by systemd.
 - **Capability.** A release that speaks this lists `handoff-service-v1` in `tierstore --capabilities`. The hook hands a node
   with an `fs` interface over only when both releases list it (section 3.6).
+- **Built** (P3's wiring of P4, read in code): the running instance offers its mount on `server.handoff_socket`
+  (`Offer::with_mount` with `treefs::handover::offered`, from `cache_cli.rs`) beside its `take-fs 1` on the runtime directory's
+  socket, and its start asks `take 1` / `ready` / `mount` there (`cache_cli_mount.rs`): with an offer of the mount it takes
+  everything in this one conversation (`Mounted::take_handed`: the device stored before `ack`, the runtime state read again
+  after `done`, `ready` said before the device is read) and sends no `take-fs 1`; with an offer without it (the old layout's
+  S3 process, or an instance whose mount a `take-fs 1` took), it takes the mount on `take-fs 1` in the order of 4.2. Tests:
+  `a_running_one_process_instance_offers_sockets_mount_control_and_lock_on_the_handoff_socket`,
+  `a_successor_of_one_process_is_writer_at_written_not_at_the_old_exit`,
+  `a_taker_with_a_mount_and_a_cache_is_read_write_at_bye_without_the_old_process_exiting`,
+  `a_previous_release_start_takes_the_mount_on_take_fs_and_the_sockets_with_the_lock` (`treefs/interface_service_tests.rs`).
 
 ### 3.2 The cache lock
 
@@ -507,14 +521,16 @@ long. So the lock passes in the hand-over:
   bounded by its own deadline, or a put, bounded by the S3 request's), not its drain. Fills of the file system wait across
   it (1.5), up to `params.fetch_timeout`. The take of the write role does what a take does today (empty the stage, rescan,
   replace the index), at `written` instead of at the old process's exit; its cost is unchanged.
-- **Built so far** (read in code, `server/cache_cli.rs`, `server/cli_serve.rs`): the Linux start of a node whose file has an
-  `fs` interface takes the mount by `take-fs 1` on the runtime directory's socket, as in 4.2, and the sockets by `take 1` /
-  `ready` with the lock on `server.handoff_socket` (`handoff::offered_with_lock`). It says `ready` there after the mount's
-  `bye` and before it serves or binds its own control socket, and its cache becomes the writer at `written`
-  (`handoff::follow`). A lock the running instance offers of another file (a configuration that moves
+- **Built** (read in code, `server/cache_cli_mount.rs`, `server/cli_serve.rs`): the Linux start of a node whose file has an
+  `fs` interface takes the lock with the mount and the sockets in the one conversation of 3.1 on `server.handoff_socket`
+  (`handoff::offered_with`), holding the received descriptor in a type whose drop only closes it (`Received`); against an
+  instance that holds no mount it takes the sockets and the lock there and the mount by `take-fs 1`, as in 4.2, and says
+  `ready` on `server.handoff_socket` after the mount's `bye`. Either way it says `ready` before it serves or binds its own
+  control socket, and its cache becomes the writer at `written` or at the end of the connection (`handoff::follow`), and
+  binds the mount provider then. A lock the running instance offers of another file (a configuration that moves
   `local_cache.path`) is closed and left with it, not refused with `nak`: the two caches are two directories. One
   that does not answer `bye` serves on, with its lock: the start then fails before it serves anything, leaving the
-  mount it took to its descriptor store, and the restart adopts it and takes the sockets again. Still to build: the
+  mount it took to its descriptor store, and the restart adopts it and takes the sockets again. Left as it is: the
   successor's scan of the cache at `written` (`promote`) is as long as before, and the mount provider is bound only
   after it.
 
