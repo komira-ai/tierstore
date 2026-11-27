@@ -9,6 +9,7 @@
 //! fills are waited for before the level below is asked for. A read that asked the node to fill the
 //! tree's new manifests itself (`fill-tree`) keeps its answer and how long it took on the socket.
 //! The levels of the read and its rounds of fills over the socket go to the node too (`levels`).
+//! The end of its last fetch is kept for the attach of a run, which splits its time there.
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -29,6 +30,8 @@ pub(in crate::server::treefs) struct Fetched {
     levels: Mutex<Vec<Level>>,
     /// The `fill-tree` of the read, if it asked one.
     tree: Mutex<Option<TreeAsked>>,
+    /// When the last fetch of the read ended, on the core's clock: none before the first.
+    last: Mutex<Option<u64>>,
 }
 
 /// The fills of one level of a read.
@@ -56,6 +59,18 @@ fn spaced(of: impl Iterator<Item = u64>) -> String {
 }
 
 impl Fetched {
+    /// A fetch of the read ended at `now`, whatever it had.
+    pub(super) fn fetched_at(&self, now: u64) {
+        let mut last = locked(&self.last);
+        *last = Some(last.map_or(now, |last| last.max(now)));
+    }
+
+    /// When the last fetch of the read ended, if it made one: the end of the fetch of an attach of
+    /// a run (`core/runs.rs`).
+    pub(super) fn last_fetch(&self) -> Option<u64> {
+        *locked(&self.last)
+    }
+
     /// The level `level` of the read, made with those above it if it is the first fetch of it.
     fn at(&self, level: usize, change: impl FnOnce(&mut Level)) {
         let mut levels = locked(&self.levels);

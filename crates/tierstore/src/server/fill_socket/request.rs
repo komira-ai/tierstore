@@ -23,6 +23,9 @@
 //! descriptors <mount> <process> <held> <short> the cache files the mount holds open; its opens short of descriptors
 //! opens <mount> <process> <waiting> <n>..      how long the mount's opens took; how many wait now
 //! treelists <mount> <process> <mapped> <n>..   the tree lists the mount holds mapped, and its cap
+//! requests <mount> <process> <n>..            how long the requests of the mount's frontend took
+//! run-attached <outcome> <ms> <ms> <ms> <ms>   the mount attached a tree for a run, or did not
+//! run-detached <outcome> <ms>                  the mount ended the attachments of a run, or did not
 //! ```
 //!
 //! A digest is sixty-four lower-case hex digits; a number is decimal digits only; a mount and a
@@ -50,7 +53,13 @@
 //! pair of an outcome and a source the milliseconds and one number for each bucket of the
 //! histogram. The words of a `treelists` are those of
 //! [`TreeLists`](crate::server::local_cache::tree_lists::TreeLists): a mount name and seven
-//! numbers.
+//! numbers. The words of a `requests` are those of
+//! [`Requests`](crate::server::local_cache::requests::Requests): a mount name, a number, and for
+//! each kind of request the milliseconds and one number for each bucket of the histogram. The
+//! words of a `run-attached` and a `run-detached` are those of
+//! [`RunAttach`](crate::server::local_cache::runs::RunAttach) and
+//! [`RunDetach`](crate::server::local_cache::runs::RunDetach): an outcome (`ok`, `failed`) and
+//! four numbers, and an outcome and a number.
 
 use std::path::PathBuf;
 
@@ -60,6 +69,8 @@ use crate::server::local_cache::attaches::{Attach, Fetches, Levels};
 use crate::server::local_cache::descriptors::Descriptors;
 use crate::server::local_cache::layout::is_digest;
 use crate::server::local_cache::opens::Opens;
+use crate::server::local_cache::requests::Requests;
+use crate::server::local_cache::runs::{RunAttach, RunDetach};
 use crate::server::local_cache::tree_lists::TreeLists;
 use crate::server::local_cache::trees::{Location, PlacementId, placement_id};
 
@@ -127,6 +138,14 @@ pub(super) enum Request {
     /// The tree lists the mount holds mapped, its cap, and what it released and mapped past the
     /// cap since its process started (`local_cache/tree_lists.rs`).
     TreeLists(TreeLists),
+    /// How long the requests of the mount's frontend took, by kind, since its process started
+    /// (`local_cache/requests.rs`); boxed, as it is far larger than the other requests.
+    Requests(Box<Requests>),
+    /// The mount attached a tree for a run, or could not, and the parts of the attach
+    /// (`local_cache/runs.rs`).
+    RunAttached(RunAttach),
+    /// The mount ended the attachments of a run, or could not (`local_cache/runs.rs`).
+    RunDetached(RunDetach),
 }
 
 /// A request of the mount about the placements of the node (module `mount`).
@@ -295,6 +314,15 @@ pub(super) fn parse(line: &[u8]) -> Result<Request, Refusal> {
             .ok_or(Refusal::Malformed),
         "treelists" => TreeLists::parse(rest)
             .map(Request::TreeLists)
+            .ok_or(Refusal::Malformed),
+        "requests" => Requests::parse(rest)
+            .map(|requests| Request::Requests(Box::new(requests)))
+            .ok_or(Refusal::Malformed),
+        "run-attached" => RunAttach::parse(rest)
+            .map(Request::RunAttached)
+            .ok_or(Refusal::Malformed),
+        "run-detached" => RunDetach::parse(rest)
+            .map(Request::RunDetached)
             .ok_or(Refusal::Malformed),
         "mounted" => (text == "mounted")
             .then_some(Request::Mount(MountRequest::Mounted))

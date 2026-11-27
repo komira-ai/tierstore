@@ -19,6 +19,8 @@ use crate::server::local_cache::TreeFilled;
 use crate::server::local_cache::attaches::{Attach, Fetches, Levels};
 use crate::server::local_cache::descriptors::Descriptors;
 use crate::server::local_cache::opens::Opens;
+use crate::server::local_cache::requests::Requests;
+use crate::server::local_cache::runs::{RunAttach, RunDetach};
 use crate::server::local_cache::tree_lists::TreeLists;
 #[cfg(any(target_os = "linux", target_os = "macos", test))]
 use crate::server::local_cache::trees::{MappedLists, TreeStore};
@@ -108,6 +110,13 @@ pub(super) enum Report {
     Opens(Box<Opens>),
     /// The tree lists the mount holds mapped (`local_cache/tree_lists.rs`).
     TreeLists(TreeLists),
+    /// How long the requests of the mount's frontend took (`local_cache/requests.rs`); boxed, as
+    /// it is far larger than the others.
+    Requests(Box<Requests>),
+    /// An attach of a tree for a run, and its parts (`local_cache/runs.rs`).
+    RunAttached(RunAttach),
+    /// A detach of a run (`local_cache/runs.rs`).
+    RunDetached(RunDetach),
 }
 
 impl Report {
@@ -121,6 +130,9 @@ impl Report {
             Self::Descriptors(descriptors) => descriptors.line(),
             Self::Opens(opens) => opens.line(),
             Self::TreeLists(lists) => lists.line(),
+            Self::Requests(requests) => requests.line(),
+            Self::RunAttached(attach) => attach.line(),
+            Self::RunDetached(detach) => detach.line(),
         }
     }
 }

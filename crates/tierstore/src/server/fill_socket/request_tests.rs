@@ -7,6 +7,8 @@ use crate::TreeDigest;
 use crate::server::local_cache::attaches::{Attach, Fetches, Levels, Outcome};
 use crate::server::local_cache::descriptors::Descriptors;
 use crate::server::local_cache::opens::{Opens, Spans};
+use crate::server::local_cache::requests::{RequestKind, Requests};
+use crate::server::local_cache::runs::{RunAttach, RunDetach, RunOutcome};
 use crate::server::local_cache::tree_lists::{Totals, TreeLists};
 use crate::server::local_cache::trees::{PlacementId, placement_id};
 
@@ -567,6 +569,55 @@ fn an_opens_is_the_report_it_writes() {
     let more = format!("{written} 0");
     let unnamed = written.replacen("boot-1", "", 1);
     for text in ["opens", "opens boot-1 7 1", &fewer, &more, &unnamed] {
+        assert_eq!(line(text), Err(Refusal::Malformed), "{text:?}");
+    }
+}
+
+/// Asserts that a `requests` is the report it writes, and that one that is not, one of another
+/// number of buckets or with a bad mount name included, is refused as malformed.
+#[test]
+fn a_requests_is_the_report_it_writes() {
+    let mut spans = [Spans::default(); 8];
+    spans[RequestKind::Getattr.index()].ms = 3;
+    spans[RequestKind::Getattr.index()].buckets[2] = 1;
+    let report = Requests {
+        mount: "boot-1".to_owned(),
+        process: 77,
+        spans,
+    };
+    let written = report.line();
+    assert_eq!(line(&written), Ok(Request::Requests(Box::new(report))));
+    let fewer = written.rsplit_once(' ').unwrap().0.to_owned();
+    let more = format!("{written} 0");
+    let unnamed = written.replacen("boot-1", "", 1);
+    for text in ["requests", "requests boot-1 7", &fewer, &more, &unnamed] {
+        assert_eq!(line(text), Err(Refusal::Malformed), "{text:?}");
+    }
+}
+
+/// Asserts that a `run-attached` and a `run-detached` are the reports they write, and that one
+/// that is not, a word short or with an outcome that is not one, is refused as malformed.
+#[test]
+fn a_run_attached_and_a_run_detached_are_the_reports_they_write() {
+    let attach = RunAttach {
+        outcome: RunOutcome::Ok,
+        ms: 35,
+        parts: [25, 7, 3],
+    };
+    assert_eq!(line(&attach.line()), Ok(Request::RunAttached(attach)));
+    let detach = RunDetach {
+        outcome: RunOutcome::Failed,
+        ms: 0,
+    };
+    assert_eq!(line(&detach.line()), Ok(Request::RunDetached(detach)));
+    for text in [
+        "run-attached",
+        "run-attached ok 35 25 7",
+        "run-attached absent 35 25 7 3",
+        "run-detached",
+        "run-detached ok",
+        "run-detached ok 1 2",
+    ] {
         assert_eq!(line(text), Err(Refusal::Malformed), "{text:?}");
     }
 }
