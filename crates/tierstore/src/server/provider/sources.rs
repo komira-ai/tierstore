@@ -321,11 +321,11 @@ impl Provider {
         }
     }
 
-    /// `Release`: stops the source's preparation and removes its placement at once, and forgets the
-    /// request of its run. The hold the file system's mount took at a lookup of the source's path
-    /// does not keep the placement (`TreeStore::release_now`): only a read open on it does, until
-    /// it ends. The tree goes with it unless another source's placement has the tree. A source
-    /// that is not known is a success.
+    /// `Release`: stops the source's preparation and removes its placement at once, ending the
+    /// hold the file system's mount took at a lookup of the source's path
+    /// (`TreeStore::release_now`), and forgets the request of its run. A tree in the mount's
+    /// memory keeps serving; one it has to read again is gone. The tree goes with the placement
+    /// unless another source's placement has the tree. A source that is not known is a success.
     ///
     /// # Errors
     /// [`ProviderError::Invalid`] for a source that is not well formed;

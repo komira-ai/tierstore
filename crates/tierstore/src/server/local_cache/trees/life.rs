@@ -145,7 +145,8 @@ impl TreeStore {
     }
 
     /// Releases the placement as [`release`](Self::release) does, and ends its attachments too:
-    /// it goes at once, or when the last read open on it ends. The mount provider's release of a
+    /// it goes at once, or when the last read open on it ends (a [`ReadHold`], which the S3 front
+    /// takes and the file system's mount does not). The mount provider's release of a
     /// source, whose job has ended: the hold the file system's mount takes at a lookup of the
     /// source's path would otherwise keep the placement, counted toward `trees.max_placements`,
     /// until the mount found the tree idle (`fs.tree_idle_secs`). Another placement of the same
