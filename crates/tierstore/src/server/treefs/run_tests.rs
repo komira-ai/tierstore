@@ -10,13 +10,31 @@ use super::{
     ECRYPTFS, Kernel, OVERLAYFS, Prepared, Running, check_cache, refuse_stacked, stacked_name,
 };
 use crate::server::treefs::config::FsSettings;
-use crate::server::treefs::fills::Reach;
 use crate::server::treefs::start::StartError;
-use crate::server::treefs::testing::{Rig, sample, with_fuse};
+use crate::server::treefs::testing::{PACK, Rig, sample, sha, with_fuse};
 
 /// Settings over the scratch directories of a rig, with the sample tree to be served.
 fn settings(rig: &Rig) -> FsSettings {
     rig.settings()
+}
+
+/// Fills the blob `content` of the sample tree into the rig's cache, and pins it for `tree` of
+/// `mount`; the bytes the cache then holds pinned.
+fn pinned_for(rig: &Rig, (mount, tree): (&str, &str), content: &[u8]) -> u64 {
+    let digest = sha(content);
+    let offset = rig.upstream.built.lock().unwrap().offsets[&digest];
+    let asks = rig.asks();
+    asks.fill_blob(
+        (digest.as_str(), content.len() as u64),
+        (PACK, offset),
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        asks.pin(mount, tree, &[digest.as_str()]).unwrap(),
+        "ok 1 0 0"
+    );
+    rig.node.pinned_bytes()
 }
 
 fn mounted(mountpoint: &std::path::Path) -> bool {
@@ -51,7 +69,7 @@ fn start_and_stop() {
     // The backing table an earlier release kept for a mount that is gone belongs to a connection
     // that is gone; a fresh mount has no backing id and writes no table.
     std::fs::write(rig.runtime.join("backing"), "stale\n").unwrap();
-    let running = Running::start((&settings, &Reach::Socket), &Kernel::real()).unwrap();
+    let running = Running::start((&settings, &rig.calls()), &Kernel::real()).unwrap();
     assert!(mounted(&rig.mountpoint));
     assert!(!rig.runtime.join("backing").exists());
     let answer = ask(
@@ -76,7 +94,7 @@ fn start_and_stop() {
         format!("{kept}{gone} run-2\n"),
     )
     .unwrap();
-    let again = Running::start((&settings, &Reach::Socket), &Kernel::real()).unwrap();
+    let again = Running::start((&settings, &rig.calls()), &Kernel::real()).unwrap();
     let left: Vec<String> = again
         .core()
         .attachments()
@@ -85,16 +103,16 @@ fn start_and_stop() {
         .collect();
     assert_eq!(left, ["run-1"]);
     again.core().settled().unwrap();
-    assert_eq!(
-        rig.upstream
-            .asked("pins-live")
-            .last()
-            .unwrap()
-            .split(' ')
-            .next_back()
-            .unwrap(),
-        root
-    );
+    // The cache is told the mount's attached trees: what the mount pinned for the tree it holds
+    // stays pinned, and what it pinned for one it does not hold is taken away.
+    let mount = crate::server::treefs::init_record::read(&rig.runtime)
+        .unwrap()
+        .mount_id;
+    let kept = pinned_for(&rig, (&mount, &root), b"int a;");
+    let cc: Vec<u8> = (0..3000u32).map(|i| (i % 241) as u8).collect();
+    assert!(pinned_for(&rig, (&mount, "not-attached"), &cc) > kept);
+    again.core().tell_live().unwrap();
+    assert_eq!(rig.node.pinned_bytes(), kept);
     again.stop().unwrap();
 }
 
@@ -165,7 +183,7 @@ fn a_start_that_cannot_do_what_it_needs_says_what() {
         ),
     ];
     for (settings, what) in cases {
-        let error = Running::start((&settings, &Reach::Socket), &Kernel::real())
+        let error = Running::start((&settings, &rig.calls()), &Kernel::real())
             .err()
             .unwrap();
         assert!(error.to_string().contains(what), "{what}: {error}");
@@ -181,7 +199,7 @@ fn a_backing_table_that_cannot_be_removed_stops_the_start() {
     let rig = Rig::new("tfs-run-stale", sample());
     let stuck = rig.runtime.join("backing");
     std::fs::create_dir_all(stuck.join("inside")).unwrap();
-    let error = Running::start((&settings(&rig), &Reach::Socket), &Kernel::real())
+    let error = Running::start((&settings(&rig), &rig.calls()), &Kernel::real())
         .err()
         .unwrap();
     assert!(error.to_string().contains("removing"), "{error}");
@@ -226,7 +244,7 @@ fn a_start_records_the_handshake_for_the_process_that_takes_the_connection_over(
 fn records_the_handshake() {
     let rig = Rig::new("tfs-run-record", sample());
     let settings = settings(&rig);
-    let running = Running::start((&settings, &Reach::Socket), &Kernel::real()).unwrap();
+    let running = Running::start((&settings, &rig.calls()), &Kernel::real()).unwrap();
     let record = crate::server::treefs::init_record::read(&rig.runtime).unwrap();
     assert_eq!(record.generation, 1);
     assert_eq!(record.mount_id.len(), 32);
@@ -387,13 +405,13 @@ fn a_takeover_of_a_live_mount_serves_a_stat_of_the_mount_point() {
 fn takeover_of_live_mount() {
     let rig = Rig::new("tfs-run-live", sample());
     let settings = settings(&rig);
-    let first = Running::start((&settings, &Reach::Socket), &Kernel::real()).unwrap();
+    let first = Running::start((&settings, &rig.calls()), &Kernel::real()).unwrap();
     let device = first.device().unwrap();
     first.leave();
     assert!(mounted(&rig.mountpoint));
     let prepared = Prepared::load(&settings).unwrap();
     let second =
-        Running::adopt((&settings, &Reach::Socket), prepared, device, (None, false)).unwrap();
+        Running::adopt((&settings, &rig.calls()), prepared, device, (None, false)).unwrap();
     assert!(std::fs::metadata(&rig.mountpoint).unwrap().is_dir());
     assert!(
         std::fs::metadata(rig.mountpoint.join("trees"))

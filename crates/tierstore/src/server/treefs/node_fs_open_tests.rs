@@ -2,8 +2,8 @@
 //! makes them: an OPEN answered on the reader is `cached`, one parked that asked the node for its
 //! bytes `filled`, one refused `error`, each in the bucket of the time from its arrival to its
 //! answer on the core's clock; the opens parked are counted as waiting until each is answered,
-//! whatever its answer and whether or not the kernel took it; no open waits on the report of the
-//! counts, nor on a node that does not know it.
+//! whatever its answer and whether or not the kernel took it; the report of the counts reaches the
+//! node's cache, which renders them.
 
 use std::time::Duration;
 
@@ -12,10 +12,8 @@ use crate::server::local_cache::attaches::BUCKETS;
 use crate::server::local_cache::opens::{Opens, Spans};
 use crate::server::treefs::locked;
 
-/// The places of two kinds in a report, of the four: ok and cached, ok and filled, error and
-/// cached, error and filled (`local_cache/opens.rs`).
+/// The place of the kind `ok` and `cached` in a report (`local_cache/opens.rs`).
 const OK_CACHED: usize = 0;
-const OK_FILLED: usize = 1;
 
 /// A request as a reader hands it to the frontend, answered on `device`: how the frontend took it.
 fn hand(wire: &Wire, opcode: u32, nodeid: u64, device: &Arc<Recorder>) -> Handled {
@@ -107,7 +105,9 @@ fn opens_waiting_rise_with_parked_opens_and_fall_to_zero_when_they_are_answered(
         assert_eq!(hand(&wire, op::OPEN, node(TOOL), &device), Handled::Parked);
         assert_eq!(opens(&wire).waiting, n as u64);
     }
-    wire.rig.upstream.wait_for_verb("fill", FETCHERS.get());
+    // The cache keeps one fill of the blob, which the other fetches join.
+    wire.rig.upstream.wait_for_verb("fill", 1);
+    until(|| wire.joins() == FETCHERS.get() as u64 - 1);
     assert_eq!(opens(&wire).waiting, parked as u64);
     assert_eq!(counts(&wire), [0; 4]);
     wire.rig.upstream.permit_verb("fill", parked);
@@ -131,7 +131,9 @@ fn opens_waiting_fall_to_zero_when_the_fill_fails_and_when_the_open_is_interrupt
     for _ in 0..3 {
         assert_eq!(hand(&wire, op::OPEN, node(A_H), &device), Handled::Parked);
     }
-    wire.rig.upstream.wait_for_verb("fill", 3);
+    // The cache keeps one fill of the blob, which the other opens join.
+    wire.rig.upstream.wait_for_verb("fill", 1);
+    until(|| wire.joins() == 2);
     assert_eq!(opens(&wire).waiting, 3);
     wire.rig.upstream.permit_verb("fill", 3);
     until(|| wire.fs.parked() == 0);
@@ -148,11 +150,12 @@ fn opens_waiting_fall_to_zero_when_the_fill_fails_and_when_the_open_is_interrupt
     assert_eq!(wire.rig.core.open_files(), 0);
 }
 
-/// Asserts that no open waits on the report of the counts: with the thread that sends the reports
-/// held in the middle of one by the node, 1000 opens of a cached file from 16 threads at once are
-/// each answered on the reader, each counted once, and the next report carries every one of them.
+/// Asserts that 1000 opens of a cached file from 16 threads at once are each answered on the
+/// reader and each counted once, and that the report of the counts the core makes next reaches the
+/// node's cache with every one of them: its `/metricz` has them all, in the bucket of the shortest
+/// spans, as `ok` and `cached`.
 #[test]
-fn a_thousand_opens_from_sixteen_threads_are_counted_while_the_report_waits() {
+fn a_thousand_opens_from_sixteen_threads_are_each_counted_once_and_reported() {
     const THREADS: u64 = 16;
     const OPENS: u64 = 1000;
     let wire = Wire::new("nodefs-opens-lockfree");
@@ -160,9 +163,6 @@ fn a_thousand_opens_from_sixteen_threads_are_counted_while_the_report_waits() {
     let first = open_out(&wire.ask(op::OPEN, node(CC), &open_in(0))).fh;
     let _ = wire.ask(op::RELEASE, node(CC), &release_in(first));
     let before = counts(&wire);
-    wire.rig.upstream.gate_verb("opens");
-    wire.rig.core.report_opens();
-    wire.rig.upstream.wait_for_verb("opens", 1);
     let (fs, tokens) = (&wire.fs, &wire.tokens);
     let device = Arc::new(Recorder::default());
     std::thread::scope(|scope| {
@@ -189,35 +189,14 @@ fn a_thousand_opens_from_sixteen_threads_are_counted_while_the_report_waits() {
     want[OK_CACHED] += OPENS;
     assert_eq!(counts(&wire), want);
     assert_eq!(opens(&wire).waiting, 0);
-    assert_eq!(wire.rig.upstream.received("opens"), 1);
     wire.rig.core.report_opens();
-    wire.rig.upstream.permit_verb("opens", 2);
-    until(|| wire.rig.upstream.asked("opens").len() == 2);
-    let last = wire.rig.upstream.asked("opens").pop().unwrap();
-    let carried = Opens::parse(last.strip_prefix("opens ").unwrap()).unwrap();
-    assert_eq!(carried, opens(&wire));
-    assert_eq!(carried.spans[OK_CACHED].buckets[0], want[OK_CACHED]);
-}
-
-/// Asserts that a node of an earlier release, which answers the report `refused unknown request`,
-/// slows no open and stops no report: the opens are answered on the reader before and after it,
-/// and the next report is sent and carries them.
-#[test]
-fn a_node_that_refuses_the_report_slows_no_open() {
-    let wire = Wire::new("nodefs-opens-older");
-    let refused = "refused unknown request".to_owned();
-    let _ = locked(&wire.rig.upstream.answers).insert("opens".to_owned(), refused);
-    let device = Arc::new(Recorder::default());
-    assert_eq!(hand(&wire, op::OPEN, node(EMPTY), &device), Handled::Done);
-    wire.rig.core.report_opens();
-    until(|| wire.rig.upstream.asked("opens").len() == 1);
-    assert_eq!(hand(&wire, op::OPEN, node(EMPTY), &device), Handled::Done);
-    wire.rig.core.report_opens();
-    until(|| wire.rig.upstream.asked("opens").len() == 2);
-    let last = wire.rig.upstream.asked("opens").pop().unwrap();
-    let carried = Opens::parse(last.strip_prefix("opens ").unwrap()).unwrap();
-    assert_eq!(carried.spans[OK_CACHED].buckets[0], 2);
-    assert_eq!(locked(&device.0).len(), 2);
+    let ok_cached = "outcome=\"ok\",source=\"cached\"";
+    let series =
+        |name: &str, le: &str| format!("tierstore_fs_open_seconds_{name}{{{ok_cached}{le}}}");
+    assert_eq!(wire.metric(&series("count", "")), want[OK_CACHED]);
+    let first_bucket = series("bucket", ",le=\"0.001\"");
+    assert_eq!(wire.metric(&first_bucket), want[OK_CACHED]);
+    assert_eq!(wire.metric("tierstore_fs_opens_waiting"), 0);
 }
 
 /// Asserts that the stop of the readers (a hand-over, a restart) tells the node of the opens once
@@ -231,9 +210,9 @@ fn the_stop_of_the_readers_reports_the_opens_once_they_are_answered() {
     wire.rig.upstream.wait_for_verb("fill", 1);
     wire.rig.upstream.permit_verb("fill", 1);
     wire.fs.drain();
-    until(|| !wire.rig.upstream.asked("opens").is_empty());
-    let line = wire.rig.upstream.asked("opens").remove(0);
-    let told = Opens::parse(line.strip_prefix("opens ").unwrap()).unwrap();
-    assert_eq!(told.waiting, 0);
-    assert_eq!(told.spans[OK_FILLED].buckets.iter().sum::<u64>(), 1);
+    // The report was made as the readers stopped: the cache has the open, and none waiting.
+    assert_eq!(wire.metric("tierstore_fs_opens_waiting"), 0);
+    let filled = "outcome=\"ok\",source=\"filled\"";
+    let count = format!("tierstore_fs_open_seconds_count{{{filled}}}");
+    assert_eq!(wire.metric(&count), 1);
 }

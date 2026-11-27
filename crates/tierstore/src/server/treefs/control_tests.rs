@@ -1,4 +1,4 @@
-//! The control socket over a real Unix socket and a core on a fake fill socket.
+//! The control socket over a real Unix socket and a core over the node's cache.
 
 use std::io::{BufRead as _, BufReader, Write as _};
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
@@ -54,6 +54,16 @@ fn served_over(name: &str, built: Built) -> (Rig, Control) {
 
 fn root(rig: &Rig) -> String {
     rig.upstream.built.lock().unwrap().root.clone()
+}
+
+/// The value of the sample of the node's cache's `/metricz` text that begins with `series`.
+fn metric(rig: &Rig, series: &str) -> u64 {
+    let prefix = format!("{series} ");
+    let text = rig.node.metrics();
+    let found = text
+        .lines()
+        .find_map(|line| line.strip_prefix(&prefix).map(|n| n.parse().unwrap()));
+    found.unwrap_or_else(|| panic!("no sample {series} in the cache's metrics"))
 }
 
 /// Asserts the conversation: an attach is answered with the path, an attach again with the same;
@@ -114,12 +124,12 @@ fn a_detach_answers_the_failures_the_run_recorded() {
         .failing
         .lock()
         .unwrap()
-        .insert(cc.clone(), "no space".to_owned());
+        .insert(cc.clone(), "mismatch".to_owned());
     assert!(open_cached(&rig.core, crate::server::treefs::ino::of(1, 3), false).is_err());
     let answer = client.ask("detach run-1");
     assert_eq!(
         answer["failures"],
-        json!([{"path": "/bin/cc", "digest": cc, "reason": "no space"}])
+        json!([{"path": "/bin/cc", "digest": cc, "reason": "mismatch"}])
     );
 }
 
@@ -199,7 +209,11 @@ fn an_attach_that_asks_for_prefetch_has_the_tree_filled() {
     let root = root(&rig);
     let answer = client.ask(&format!("attach {root} for run-1 prefetch all"));
     assert_eq!(answer["ok"], json!(true));
-    crate::server::treefs::testing::until(|| !rig.upstream.asked("pin").is_empty());
+    let total: u64 = {
+        let built = rig.upstream.built.lock().unwrap();
+        built.blobs.values().map(|blob| blob.len() as u64).sum()
+    };
+    crate::server::treefs::testing::until(|| rig.node.pinned_bytes() == total);
     crate::server::treefs::testing::until(|| rig.core.prefetching() == 0);
     let blobs = rig.upstream.asked("fill");
     assert_eq!(
@@ -315,24 +329,33 @@ fn a_group_the_process_is_not_in_is_an_error_unless_it_is_root() {
 
 /// Asserts that `set tree_list_ram_bytes` makes the cap of the lists mapped what it names, from
 /// the least the file allows (4096) to the most a number of bytes holds, answers it with the id
-/// of the mount, and has the node told each cap at once (`treelists`), with no look for idle
-/// trees. Catches a set that the node's gauge `tierstore_fs_tree_list_ram_bytes` never shows.
+/// of the mount, and has the node's cache told each cap at once, with no look for idle trees: its
+/// gauge for the mount shows the cap, with nothing mapped and nothing released. Catches a set that
+/// the node's gauge `tierstore_fs_tree_list_ram_bytes` never shows.
 #[test]
 fn a_set_of_the_tree_list_cap_is_answered_with_the_mount_and_told_to_the_node() {
     let (rig, _control) = served("tfs-control-set");
     let mut client = Client::connect(&rig.dir.path().join("control.sock"));
-    let process = std::process::id();
-    let mut told = Vec::new();
     for bytes in [4096, 1 << 30, u64::MAX] {
         assert_eq!(
             client.ask(&format!("set tree_list_ram_bytes {bytes}")),
             json!({"ok": true, "tree_list_ram_bytes": bytes, "mount": "mount-1"})
         );
-        told.push(format!("treelists mount-1 {process} 0 0 {bytes} 0 0 0"));
-        crate::server::treefs::testing::until(|| {
-            rig.upstream.asked("treelists").len() == told.len()
-        });
-        assert_eq!(rig.upstream.asked("treelists"), told);
+        let gauge = |name: &str| {
+            let series = format!("tierstore_fs_{name}{{mount=\"mount-1\"}}");
+            metric(&rig, &series)
+        };
+        assert_eq!(gauge("tree_list_ram_bytes"), bytes);
+        assert_eq!(gauge("tree_lists_mapped"), 0);
+        assert_eq!(gauge("tree_list_mapped_bytes"), 0);
+        let counter = |name: &str, why: &str| {
+            let labels = format!("mount=\"mount-1\"{why}");
+            let series = format!("tierstore_fs_{name}{{{labels}}}");
+            metric(&rig, &series)
+        };
+        assert_eq!(counter("tree_list_releases_total", ",why=\"cap\""), 0);
+        assert_eq!(counter("tree_list_releases_total", ",why=\"idle\""), 0);
+        assert_eq!(counter("tree_list_over_cap_total", ""), 0);
     }
 }
 
@@ -470,9 +493,9 @@ fn cc_bytes() -> Vec<u8> {
     (0..3000u32).map(|i| (i % 241) as u8).collect()
 }
 
-/// Opens `ino` on a thread of its own while every request of `verb` is held at the fake fill
-/// socket, moves the rig's clock on by `waited` once one is received, lets it go, and gives the
-/// open's handle or error.
+/// Opens `ino` on a thread of its own while every fill (`verb`) is held at the rig's upstream,
+/// moves the rig's clock on by `waited` once one is received, lets it go, and gives the open's
+/// handle or error.
 fn open_while_held(
     rig: &Rig,
     ino: u64,
@@ -488,7 +511,7 @@ fn open_while_held(
     opening.join().unwrap()
 }
 
-/// Opens `ino` through a fill the fake fill socket holds while the rig's clock moves on by
+/// Opens `ino` through a fill the rig's upstream holds while the rig's clock moves on by
 /// `waited`.
 fn open_through_a_held_fill(rig: &Rig, ino: u64, waited: Duration) {
     assert!(open_while_held(rig, ino, "fill", waited).is_ok());
@@ -500,7 +523,7 @@ fn stalled(ms: u64) -> Value {
 }
 
 /// Asserts that a detach answers, as `stall_ms`, the time the run's open of a blob waited on its
-/// fill: 1500 ms on the rig's clock, which moved while the fake fill socket held the fill.
+/// fill: 1500 ms on the rig's clock, which moved while the upstream held the fill.
 #[test]
 fn detach_answers_the_fill_wait_of_the_runs_opens_as_stall_ms() {
     let (rig, _control) = served("tfs-control-stall");
@@ -534,7 +557,8 @@ fn a_run_whose_opens_were_all_cached_answers_stall_ms_0() {
 
 /// Asserts that two runs that attach one tree each get the wait of their own opens only: the
 /// first run's open of `bin/cc` waits 1500 ms on its fill; the second run's open of the same blob
-/// in a tree of its own is answered from the cache, and the 700 ms its pin is held add to neither.
+/// in a tree of its own is answered from the cache, and the 700 ms the clock moves on after it add
+/// to neither.
 #[test]
 fn two_runs_of_a_tree_each_get_the_wait_of_their_own_opens_only() {
     let mut built = sample();
@@ -546,8 +570,8 @@ fn two_runs_of_a_tree_each_get_the_wait_of_their_own_opens_only() {
     assert_eq!(client.ask(&format!("attach {other} for r2"))["ok"], true);
     open_through_a_held_fill(&rig, cc_ino(), Duration::from_millis(1500));
     let other_cc = crate::server::treefs::ino::of(2, 1);
-    let pinned = open_while_held(&rig, other_cc, "pin", Duration::from_millis(700));
-    assert!(pinned.is_ok());
+    assert!(open_cached(&rig.core, other_cc, false).is_ok());
+    rig.clock.advance(Duration::from_millis(700));
     let cc = crate::server::treefs::testing::sha(&cc_bytes());
     let blob_fills = rig.upstream.asked("fill");
     let blob_fills = blob_fills

@@ -18,8 +18,8 @@
 //! for the release of its file ends at once, `EBUSY`, when the hand-over holds the space
 //! ([`PutSpace::hold`]): the release goes to the successor and would never reach it. The uploads
 //! that run when a hand-over begins are waited for first, while the readers still serve
-//! ([`PutSpace::drain_uploads`]): an upload asks the node's tierstore over the fill socket until
-//! its deadline, and while that socket does not answer (the tierstore restarting) a mount whose
+//! ([`PutSpace::drain_uploads`]): an upload asks the node's cache until
+//! its deadline, and while it does not answer (the tierstore restarting) a mount whose
 //! readers had stopped would answer nothing until then.
 
 use std::collections::BTreeSet;
@@ -271,7 +271,7 @@ impl PutSpace {
 
     /// Waits until every upload that runs now has ended, and not for one that begins later: a
     /// hand-over calls it before the readers stop, so that a request the mount is sent while an
-    /// upload waits on the fill socket is answered. A commit that waits for the release of its file
+    /// upload waits on the cache is answered. A commit that waits for the release of its file
     /// or for another commit is not waited for here, nor is the rest of a commit after its upload:
     /// [`PutSpace::drain_commits`] waits for those after the stop. Each upload ends by its deadline.
     pub(in crate::server) fn drain_uploads(&self) {

@@ -22,6 +22,7 @@ use std::thread::JoinHandle;
 use vm_memory::{FileOffset, MmapRegion, VolatileMemory as _};
 
 use super::config::FsSettings;
+use super::fills::Calls;
 use super::handover::{self, HandoverError, Paths};
 use super::init_record;
 use super::launch::{Platform, serve_with};
@@ -147,9 +148,13 @@ fn platform(manager: Option<&Path>) -> Platform {
 }
 
 /// An instance serving on a thread of its own.
-fn serving(settings: &FsSettings, manager: &FakeManager) -> JoinHandle<Result<(), StartError>> {
+fn serving(
+    (settings, reach): (&FsSettings, &Calls),
+    manager: &FakeManager,
+) -> JoinHandle<Result<(), StartError>> {
     let (settings, platform) = (settings.clone(), platform(Some(manager.socket())));
-    std::thread::spawn(move || serve_with(&settings, platform))
+    let reach = reach.clone();
+    std::thread::spawn(move || serve_with((&settings, &reach), platform))
 }
 
 /// Waits until the manager is told the unit is ready; a serve thread that ended first fails the
@@ -202,7 +207,7 @@ fn hand_over_under_read() {
     let mount = Mount(rig.mountpoint.clone());
     let settings = rig.settings();
     let old_manager = FakeManager::start(&rig.dir.path().join("old.sock"));
-    let old = serving(&settings, &old_manager);
+    let old = serving((&settings, &rig.calls()), &old_manager);
     until_ready(&old_manager, &old);
     assert!(mount.present());
     let at = tree_at(&rig);
@@ -218,7 +223,7 @@ fn hand_over_under_read() {
     let reader = Reader::start(at);
     reader.after(2);
     let new_manager = FakeManager::start(&rig.dir.path().join("new.sock"));
-    let new = serving(&settings, &new_manager);
+    let new = serving((&settings, &rig.calls()), &new_manager);
     until_ready(&new_manager, &new);
     // The old instance ends by itself, with success, once the new one serves.
     old.join().unwrap().unwrap();
@@ -273,7 +278,7 @@ fn mapped_across_the_hand_over() {
     let mount = Mount(rig.mountpoint.clone());
     let settings = rig.settings();
     let old_manager = FakeManager::start(&rig.dir.path().join("old.sock"));
-    let old = serving(&settings, &old_manager);
+    let old = serving((&settings, &rig.calls()), &old_manager);
     until_ready(&old_manager, &old);
     let at = tree_at(&rig);
 
@@ -297,7 +302,7 @@ fn mapped_across_the_hand_over() {
         .collect();
 
     let new_manager = FakeManager::start(&rig.dir.path().join("new.sock"));
-    let new = serving(&settings, &new_manager);
+    let new = serving((&settings, &rig.calls()), &new_manager);
     until_ready(&new_manager, &new);
     old.join().unwrap().unwrap();
     for (name, map, bytes) in &mapped {
@@ -332,7 +337,7 @@ fn refused_take_over() {
     let mount = Mount(rig.mountpoint.clone());
     let settings = rig.settings();
     let old_manager = FakeManager::start(&rig.dir.path().join("old.sock"));
-    let old = serving(&settings, &old_manager);
+    let old = serving((&settings, &rig.calls()), &old_manager);
     until_ready(&old_manager, &old);
     let reader = Reader::start(tree_at(&rig));
     reader.after(2);
@@ -343,7 +348,8 @@ fn refused_take_over() {
         ..settings.clone()
     };
     let refused_manager = FakeManager::start(&rig.dir.path().join("refused.sock"));
-    let error = serve_with(&other, platform(Some(refused_manager.socket()))).unwrap_err();
+    let refused = platform(Some(refused_manager.socket()));
+    let error = serve_with((&other, &rig.calls()), refused).unwrap_err();
     match &error {
         StartError::Handover(HandoverError::Mismatch { .. }) => {}
         other => panic!("{other}"),
@@ -359,7 +365,7 @@ fn refused_take_over() {
 
     // A manager that cannot be reached cannot store the descriptor.
     let nobody = rig.dir.path().join("nobody-home");
-    let error = serve_with(&settings, platform(Some(&nobody))).unwrap_err();
+    let error = serve_with((&settings, &rig.calls()), platform(Some(&nobody))).unwrap_err();
     match &error {
         StartError::Handover(HandoverError::Unprepared(_)) => {}
         other => panic!("{other}"),
@@ -398,7 +404,7 @@ fn taker_gone() {
     let mount = Mount(rig.mountpoint.clone());
     let settings = rig.settings();
     let old_manager = FakeManager::start(&rig.dir.path().join("old.sock"));
-    let old = serving(&settings, &old_manager);
+    let old = serving((&settings, &rig.calls()), &old_manager);
     until_ready(&old_manager, &old);
     let at = tree_at(&rig);
     let (name, whole) = expected().remove(0);

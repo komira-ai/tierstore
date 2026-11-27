@@ -44,6 +44,7 @@ mod listener;
 mod names;
 mod prepare;
 mod service;
+mod socket;
 mod sources;
 
 #[cfg(test)]

@@ -1,7 +1,6 @@
-//! What the mounts report of their attaches, as the cache counts and renders it: the words of the
-//! three reports, read back as written and every other form refused; the bucket of a span at each
-//! bound; the families at zero; and the reports added up, rendered line for line. And the node's
-//! own fills of manifests by the way they were asked, rendered the same way.
+//! What the core reports of its attaches, as the cache counts and renders it: the bucket of a span
+//! at each bound; the families at zero; and the reports added up, rendered line for line. And the
+//! node's own fills of manifests by the way they were asked, rendered the same way.
 
 use super::{Attach, BOUNDS_MS, BUCKETS, Fetches, Levels, Outcome, Via, bucket_of};
 use crate::server::local_cache::testing::Rig;
@@ -80,53 +79,17 @@ fn cumulated(per: [u64; BUCKETS]) -> [u64; BUCKETS] {
     })
 }
 
-/// Asserts that each report reads back as it is written, an outcome of each kind and counts in
-/// every bucket, and that every other form is refused: no words, an unknown outcome, a missing or
-/// extra word, a number with a sign or not decimal, one bucket too few or too many.
+/// Asserts that the manifests a read asked for are those read from the cache directory, those
+/// filled and those not had, added.
 #[test]
-fn a_report_reads_back_as_written_and_any_other_form_is_refused() {
-    for (outcome, word) in [
-        (Outcome::Ok, "ok"),
-        (Outcome::Absent, "absent"),
-        (Outcome::Failed, "failed"),
-    ] {
-        let attach = Attach { outcome, ms: 245 };
-        assert_eq!(attach.line(), format!("attached {word} 245"));
-        let rest = attach.line().replacen("attached ", "", 1);
-        assert_eq!(Attach::parse(&rest), Some(attach));
-    }
-    for refused in [
-        "", "ok", "ok ", "done 1", "ok +1", "ok -1", "ok 1 2", "ok 1x", "OK 1",
-    ] {
-        assert_eq!(Attach::parse(refused), None, "{refused:?}");
-    }
+fn a_reads_manifests_are_those_of_the_cache_the_fills_and_the_failures() {
     let fetches = Fetches {
         cache: 38,
         filled: 2,
         failed: 1,
-        fill_ms: 61,
-        fills: std::array::from_fn(|bucket| bucket as u64),
+        ..Fetches::default()
     };
-    let line = fetches.line();
-    assert_eq!(
-        line,
-        "fetched 38 2 1 61 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16"
-    );
-    let rest = line.replacen("fetched ", "", 1);
-    assert_eq!(Fetches::parse(&rest), Some(fetches));
     assert_eq!(fetches.manifests(), 41);
-    let short = rest.rsplit_once(' ').unwrap().0.to_owned();
-    for refused in [
-        String::new(),
-        "1 2 3".to_owned(),
-        short,
-        format!("{rest} 17"),
-        rest.replacen("38", "+38", 1),
-        rest.replacen("38", "3.8", 1),
-        rest.replacen(' ', "  ", 1),
-    ] {
-        assert_eq!(Fetches::parse(&refused), None, "{refused:?}");
-    }
 }
 
 /// Asserts that a span falls in the bucket of the first bound at or over it: 0 and 1 ms in the
@@ -236,23 +199,6 @@ fn levels_expected(levels: Levels, by_way: [([u64; BUCKETS], &str); 2]) -> Vec<S
         lines.extend(histogram(node, &format!("via=\"{via}\","), below, sum));
     }
     lines
-}
-
-/// Asserts that a `levels` report reads back as it is written, and that every other form is
-/// refused: no words, one number, three, a sign, a number that is not decimal, two spaces.
-#[test]
-fn a_levels_report_reads_back_as_written_and_any_other_form_is_refused() {
-    let levels = Levels {
-        levels: 9,
-        rounds: 1,
-    };
-    assert_eq!(levels.line(), "levels 9 1");
-    assert_eq!(Levels::parse("9 1"), Some(levels));
-    for refused in [
-        "", "9", "9 ", "9 1 2", "+9 1", "9 -1", "9 1x", "9  1", "nine 1",
-    ] {
-        assert_eq!(Levels::parse(refused), None, "{refused:?}");
-    }
 }
 
 /// Asserts that the levels of the reads and the node's own fills add up and are rendered with

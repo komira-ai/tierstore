@@ -1,36 +1,33 @@
-//! What `tierstore fs` tells the node of the version 2 tree lists it holds mapped, for the cache's
-//! `/metricz`: how many and how many bytes, the cap `fs.tree_list_ram_bytes`, and the lists it
-//! released and mapped past the cap (`server/treefs/core/lists.rs`).
+//! What the file system's core tells the cache of the version 2 tree lists it holds mapped, for
+//! the cache's `/metricz`: how many and how many bytes, the cap `fs.tree_list_ram_bytes`, and the
+//! lists it released and mapped past the cap (`server/treefs/core/lists.rs`).
 //!
 //! At each look for idle trees (every quarter of `fs.tree_idle_secs`, at most a minute apart)
-//! the mount sends, from the thread that sends `started` (`fill_client.rs`),
-//! `treelists <mount> <process> <mapped> <bytes> <cap> <cap-releases> <idle-releases> <over-cap>`:
+//! the core reports, by calling the cache in this process (`treefs/in_process.rs`), a
+//! [`TreeLists`]:
 //!
-//! - `<mount>`: the id of the mount, the name it uses in `pin <mount> ...`;
-//! - `<process>`: the id of the mount process (its pid);
-//! - `<mapped>` and `<bytes>`: the lists mapped in the mount's process now, each once however many
+//! - `mount`: the id of the mount, the name it uses in its pins;
+//! - `process`: the id of the mount process (its pid);
+//! - `mapped` and `bytes`: the lists mapped in the mount's process now, each once however many
 //!   trees show it, and the bytes their mappings take in whole pages;
-//! - `<cap>`: `fs.tree_list_ram_bytes`;
-//! - `<cap-releases>`, `<idle-releases>` and `<over-cap>`: since that process started, the lists
-//!   the mount released to make room under the cap, those the sweep for idle trees released,
-//!   and those mapped past the cap: running totals, so that a report lost loses nothing the next
-//!   one carries.
+//! - `cap`: `fs.tree_list_ram_bytes`;
+//! - `totals`: since that process started, the lists the mount released to make room under the
+//!   cap, those the sweep for idle trees released, and those mapped past the cap: running totals,
+//!   so that a report lost loses nothing the next one carries.
 //!
 //! The node keeps, for each mount, the three gauges of the last report and the three counters,
 //! each grown by what the process's total grew by since its report before, and by the whole
 //! total of a process it has not seen (or whose total went down), as `descriptors` are
 //! (`local_cache/descriptors.rs`), with the same bounds: [`PROCESSES`] processes a mount and
-//! [`MOST_MOUNTS`] mounts. The report is advice: a node of a release before this one answers
-//! `refused unknown request`, which the mount ignores, and a report this node cannot read is
-//! refused and adds nothing.
+//! [`MOST_MOUNTS`] mounts. The report is advice: it reaches the cache's counts at once, on the
+//! caller's thread, and a lost one loses nothing the next carries.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::sync::Mutex;
 
-use super::descriptors::{MOST_MOUNTS, PROCESSES, number};
+use super::descriptors::{MOST_MOUNTS, PROCESSES};
 use super::{LocalCache, locked};
-use crate::server::fill_socket::request::is_name;
 
 /// The families, each with a `# TYPE` line, written out for `docs/metrics.md`.
 const MAPPED: &str = "tierstore_fs_tree_lists_mapped";
@@ -39,7 +36,7 @@ pub(in crate::server) const CAP: &str = "tierstore_fs_tree_list_ram_bytes";
 const RELEASES: &str = "tierstore_fs_tree_list_releases_total";
 const OVER_CAP: &str = "tierstore_fs_tree_list_over_cap_total";
 
-/// The tree lists a mount holds mapped. The report `treelists`.
+/// The tree lists a mount holds mapped.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(in crate::server) struct TreeLists {
     /// The id of the mount.
@@ -57,7 +54,7 @@ pub(in crate::server) struct TreeLists {
     pub totals: Totals,
 }
 
-/// The running totals of a `treelists` report.
+/// The running totals of a report of tree lists.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(in crate::server) struct Totals {
     /// The lists released to make room under the cap.
@@ -71,39 +68,6 @@ pub(in crate::server) struct Totals {
 impl Totals {
     fn words(self) -> [u64; 3] {
         [self.cap, self.idle, self.over_cap]
-    }
-}
-
-impl TreeLists {
-    /// The line of the report.
-    pub(in crate::server) fn line(&self) -> String {
-        let [cap, idle, over] = self.totals.words();
-        format!(
-            "treelists {} {} {} {} {} {cap} {idle} {over}",
-            self.mount, self.process, self.mapped, self.bytes, self.cap
-        )
-    }
-
-    /// The report whose words after `treelists` are `rest`: a mount name and seven numbers; none
-    /// for anything else.
-    pub(in crate::server) fn parse(rest: &str) -> Option<Self> {
-        let (mount, numbers) = rest.split_once(' ')?;
-        let numbers: Vec<u64> = numbers.split(' ').map(number).collect::<Option<_>>()?;
-        let [process, mapped, bytes, cap, released, idle, over_cap] = numbers.as_slice() else {
-            return None;
-        };
-        is_name(mount).then(|| Self {
-            mount: mount.to_owned(),
-            process: *process,
-            mapped: *mapped,
-            bytes: *bytes,
-            cap: *cap,
-            totals: Totals {
-                cap: *released,
-                idle: *idle,
-                over_cap: *over_cap,
-            },
-        })
     }
 }
 

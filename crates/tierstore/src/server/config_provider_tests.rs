@@ -250,17 +250,11 @@ fn a_mount_provider_interface_needs_a_build_node() {
     );
 }
 
-/// Asserts the provider's socket is not another socket of the node (not the fill socket, and not
-/// the hand-off socket) and not inside the cache directory.
+/// Asserts the provider's socket is not the hand-off socket and not inside the cache directory,
+/// and that a `local_cache.fill_socket` line, read and ignored, is no socket of the node for it to
+/// clash with.
 #[test]
 fn the_providers_socket_is_not_another_socket_of_the_node() {
-    let fill = build_node("", &format!("fill_socket = \"{SOCKET}\""));
-    assert_eq!(
-        refusal(&fill, &[s3(), with_socket("")]),
-        format!(
-            "mount-provider interface params.socket: \"{SOCKET}\" is local_cache.fill_socket too; the two sockets are two files"
-        )
-    );
     let handoff = build_node(&format!("handoff_socket = \"{SOCKET}\""), "");
     assert_eq!(
         refusal(&handoff, &[s3(), with_socket("")]),
@@ -275,5 +269,8 @@ fn the_providers_socket_is_not_another_socket_of_the_node() {
     );
     let apart = build_node("", "fill_socket = \"/var/lib/tierstore/fill.sock\"");
     let text = format!("{}{}{apart}", s3(), with_socket(""));
+    assert!(settings_from_text(&text, DEFAULTS).is_ok());
+    let same = build_node("", &format!("fill_socket = \"{SOCKET}\""));
+    let text = format!("{}{}{same}", s3(), with_socket(""));
     assert!(settings_from_text(&text, DEFAULTS).is_ok());
 }

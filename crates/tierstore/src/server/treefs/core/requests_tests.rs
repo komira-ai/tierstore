@@ -7,7 +7,7 @@ use std::time::Duration;
 use crate::server::local_cache::attaches::BUCKETS;
 use crate::server::local_cache::opens::Spans;
 use crate::server::local_cache::opens::requests::{RequestKind, Requests};
-use crate::server::treefs::testing::{Rig, sample, until};
+use crate::server::treefs::testing::{Rig, sample};
 
 /// Times one request of `kind` that takes `ms` milliseconds on the core's clock of `rig`.
 fn timed(rig: &Rig, kind: RequestKind, ms: u64) {
@@ -68,40 +68,54 @@ fn a_request_never_answered_is_not_counted() {
     assert_eq!(rig.core.requests_report().spans, want);
 }
 
+/// What the node's metrics hold of the lookups: the count and the sum, as the text gives them.
+fn lookups(rig: &Rig) -> (String, String) {
+    let text = rig.node.metrics();
+    let of = |series: &str| {
+        let prefix = format!("tierstore_fs_request_seconds_{series}{{kind=\"lookup\"}} ");
+        text.lines()
+            .find_map(|line| line.strip_prefix(&prefix))
+            .map(str::to_owned)
+            .unwrap_or_default()
+    };
+    (of("count"), of("sum"))
+}
+
+/// Tells the node, as a process of the core's own mount and id, totals ahead of the core's in
+/// every kind but lookups. The node counts a report whose totals went down as a process that
+/// started anew and adds all of them, so a report the core sends after this one adds its totals
+/// to the lookups of the node, where one that grew only adds the growth, nothing for the same
+/// totals again: what the core sends then shows in the node's lookups.
+fn put_node_ahead(rig: &Rig) {
+    let mut spans = [Spans::default(); 8];
+    spans[RequestKind::Other.index()] = one(1_000, 0);
+    let ahead = Requests {
+        spans,
+        ..rig.core.requests_report()
+    };
+    rig.node.requests_reported(ahead);
+}
+
 /// Asserts that the report is sent only when a request was answered since the report before: a
-/// core that answered none sends none; one request, and the report carries it; no request
-/// since, and nothing more is sent; one more, and the next report carries both, the totals since
-/// the process started. Each look sends `treelists` after `requests`, in order on the same thread,
-/// so once its `treelists` is there a `requests` it sent is too.
+/// core that answered none tells the node none; one request, and the node counts it; no request
+/// since, and the core tells the node nothing more (the node, put ahead, would count the same
+/// totals again if it were told them); one more, and the next report carries both, the totals
+/// since the process started. A look reports in process, so the node has what it was told when
+/// the look returns.
 #[test]
 fn the_report_is_sent_only_when_a_request_was_answered_since_the_last() {
     let rig = Rig::new("tfs-requests-report", sample());
     let core = &rig.core;
-    let told = || rig.upstream.asked("requests");
-    let looked = |looks: usize| {
-        core.look_around();
-        until(|| rig.upstream.asked("treelists").len() == looks);
-    };
-    looked(1);
-    assert_eq!(told(), Vec::<String>::new());
+    core.look_around();
+    assert_eq!(lookups(&rig), ("0".to_owned(), "0".to_owned()));
     timed(&rig, RequestKind::Lookup, 4);
-    looked(2);
-    assert_eq!(told(), [core.requests_report().line()]);
-    looked(3);
-    assert_eq!(told().len(), 1);
+    core.look_around();
+    assert_eq!(lookups(&rig), ("1".to_owned(), "0.004".to_owned()));
+    put_node_ahead(&rig);
+    core.look_around();
+    assert_eq!(lookups(&rig), ("1".to_owned(), "0.004".to_owned()));
     timed(&rig, RequestKind::Lookup, 1);
-    looked(4);
-    let told = told();
-    assert_eq!(told.len(), 2);
-    let last = Requests::parse(told[1].strip_prefix("requests ").unwrap()).unwrap();
-    let mut both = [0; BUCKETS];
-    both[0] = 1;
-    both[2] = 1;
-    assert_eq!(
-        last.spans[RequestKind::Lookup.index()],
-        Spans {
-            ms: 5,
-            buckets: both
-        }
-    );
+    core.look_around();
+    // The report of the totals since the start: two lookups of 5 ms, added to the one before.
+    assert_eq!(lookups(&rig), ("3".to_owned(), "0.009".to_owned()));
 }

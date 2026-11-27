@@ -8,7 +8,7 @@
 //! ([`Inner::queue_blob`](super::Inner::queue_blob)), so that the blobs are
 //! filled before the job opens them, and a job that opens one while it fills joins that fill.
 //!
-//! A manifest is an ordinary cache entry, filled by the fill the fill socket asks for, so an attach
+//! A manifest is an ordinary cache entry, filled by the fill the core asks the cache for, so an attach
 //! of the same tree that comes while it is fetched joins the fetch and the reverse, and once read it
 //! is present for the attach that follows. (A manifest therefore draws on the permits of
 //! `fill_socket_concurrency`, one at a time per tree being expanded, as an attach's does; the blobs

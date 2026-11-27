@@ -370,41 +370,6 @@ async fn a_fill_that_does_not_end_in_its_time_is_spent() {
     until("the root kept", || path.exists()).await;
 }
 
-/// Asserts that the answer of a fill reads back as written, with one level or many, and that every
-/// other answer is not taken for one: the words of a failure, a missing or extra space, a number
-/// with a sign or not decimal, `ok` alone.
-#[test]
-fn the_answer_of_a_fill_reads_back_and_no_other_answer_does() {
-    let filled = TreeFilled {
-        ms: 31,
-        levels: vec![1, 0, 2],
-    };
-    assert_eq!(filled.answer(), "ok 31 1 0 2");
-    assert_eq!(TreeFilled::parse(&filled.answer()), Some(filled));
-    let alone = TreeFilled {
-        ms: 0,
-        levels: Vec::new(),
-    };
-    assert_eq!(alone.answer(), "ok 0");
-    assert_eq!(TreeFilled::parse("ok 0"), Some(alone));
-    for other in [
-        "",
-        "ok",
-        "ok ",
-        "ok 31 ",
-        "ok  31",
-        "ok -1",
-        "ok +1 2",
-        "ok 1 x",
-        "ok 1.5",
-        "upstream 404 at abc",
-        "refused unknown request",
-        "spent",
-    ] {
-        assert_eq!(TreeFilled::parse(other), None, "{other:?}");
-    }
-}
-
 /// The bytes of a version 2 tree list of one empty file, `name`.
 fn tree_list(name: &str) -> Vec<u8> {
     crate::TreeList {
