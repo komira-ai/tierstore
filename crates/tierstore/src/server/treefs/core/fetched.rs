@@ -140,7 +140,6 @@ impl Fetched {
                     filled.ms,
                     spaced(filled.levels.iter().copied()),
                 ),
-                TreeAnswer::Unknown => format!("; fill-tree unknown to the node in {ms} ms"),
                 TreeAnswer::Failed(why) => format!("; fill-tree failed in {ms} ms: {why}"),
             });
         }

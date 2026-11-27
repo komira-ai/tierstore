@@ -37,9 +37,5 @@ mod wire_client;
 #[cfg(test)]
 mod wire_tests;
 
-#[cfg(not(target_os = "linux"))]
-pub(in crate::server) use error::NfsError;
 #[cfg(any(target_os = "macos", test))]
 pub(in crate::server) use interface::{NfsServed, NfsService};
-#[cfg(not(target_os = "linux"))]
-pub(in crate::server) use run::serve;

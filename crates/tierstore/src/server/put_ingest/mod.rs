@@ -41,6 +41,7 @@
 //! first scan, and refuses those whose declaration it did not see. At the halt the puts that are
 //! running are let finish; none is started.
 
+pub(in crate::server) mod chunks;
 pub(in crate::server) mod config;
 mod ledger;
 mod names;

@@ -53,7 +53,7 @@ use crate::server::local_cache::LocalCache;
 use crate::server::local_cache::trees::TreeStore;
 
 use super::config::FsSettings;
-use super::fills::{Calls, Reach};
+use super::fills::Calls;
 use super::handover::Offer;
 use super::launch::{self, End, Platform, Started, ended, hang, leave_to_kernel};
 use super::run::Running;
@@ -109,11 +109,11 @@ impl Service {
             });
         };
         let runtime = Handle::current();
-        let reach = Reach::Calls(Calls {
+        let reach = Calls {
             cache,
             trees,
             runtime: runtime.clone(),
-        });
+        };
         let mine = settings.clone();
         // The start waits for the cache's answers (the attachments are made again through it),
         // which are worked out on the runtime: it runs on a thread of its own.

@@ -49,7 +49,7 @@ use crate::server::local_cache::opens::Source;
 use crate::tree_manifest::{BlobSource, EntryKind, TreeDigest, TreeEntry};
 
 use super::super::attach::Failure;
-use super::super::fill_client::{NO_DESCRIPTOR, Until, lacks_descriptors};
+use super::super::fills::{NO_DESCRIPTOR, Until, lacks_descriptors};
 use super::super::ino;
 use super::super::locked;
 use super::super::tree::Tree;
@@ -84,9 +84,9 @@ const PASSING: [&str; 8] = [
     "the filled range is no longer in the cache",
 ];
 
-/// The words of the fill client when an answer did not come in time (`fill_client.rs`): the
-/// node's fill goes on, and a fill asked again joins it.
-const NO_ANSWER: &str = "the fill socket gave no answer in time";
+/// The words of a fill the cache gave no answer to in time (`AskError::TimedOut`): the cache's
+/// fill goes on, and a fill asked again joins it.
+const NO_ANSWER: &str = "the cache gave no answer in time";
 
 /// Whether a fill that ended with `reason` may succeed if it is asked again: see [`PASSING`];
 /// an upstream that answered a status of 500 or above but 501 (which is not implemented, and

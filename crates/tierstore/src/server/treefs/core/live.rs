@@ -25,7 +25,7 @@ use std::sync::{Arc, Condvar, Mutex, Weak};
 
 use crate::TreeDigest;
 
-use super::super::fill_client::AskError;
+use super::super::fills::AskError;
 use super::super::locked;
 use super::Core;
 use super::placed::placement_of;

@@ -1,5 +1,5 @@
-//! The `put` request of the fill socket: the answer for each outcome of the put, what the staged
-//! file must be, and what the cache keeps.
+//! The put of a staged file: the answer for each outcome of the put, what the staged file must be,
+//! and what the cache keeps.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -12,7 +12,8 @@ use tokio::io::{AsyncRead, ReadBuf};
 use tracing::Level;
 use tracing::subscriber::{DefaultGuard, set_default};
 
-use super::{answer, chunks, send};
+use super::{answer, send};
+use crate::server::put_ingest::chunks::chunks;
 use crate::server::build_info::stderr_log::LineLog;
 use crate::server::local_cache::blob_path;
 use crate::server::local_cache::pack_testing::Pack;

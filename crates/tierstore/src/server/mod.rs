@@ -281,8 +281,6 @@ mod cache_cli;
 #[cfg(test)]
 mod cache_cli_tests;
 #[cfg(test)]
-mod cache_fill_socket_tests;
-#[cfg(test)]
 mod cache_handoff_lock_tests;
 #[cfg(test)]
 mod cache_handoff_sockets_tests;
@@ -362,7 +360,6 @@ mod drain_contract_tests;
 mod drain_switch_tests;
 #[cfg(test)]
 mod drain_tests;
-mod fill_socket;
 mod first_beat;
 mod first_format;
 mod front;

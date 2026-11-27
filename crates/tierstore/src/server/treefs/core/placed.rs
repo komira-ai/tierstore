@@ -39,8 +39,7 @@ use crate::tree_manifest::{
     BlobSource, EntryKind, MAX_MANIFEST_BYTES, TreeDigest, TreeEntry, TreeError, flatten_in_waves,
 };
 
-use super::super::fill_client::{AskError, Place, PlacedTree, Until};
-use super::super::fills::Report;
+use super::super::fills::{AskError, Place, PlacedTree, Report, Until};
 use super::super::ino;
 use super::super::tree::Tree;
 use super::fetched::{Fetched, TreeAsked};

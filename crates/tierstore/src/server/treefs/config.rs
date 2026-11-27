@@ -8,9 +8,9 @@
 //! | `fs.control_socket` | the socket clients attach on | `<runtime_dir>/control.sock` |
 //! | `fs.client_group` | the group (a name of this system, or a number) that may use that socket | needed |
 //! | `fs.owner` | `user:group` every entry of every tree reports, each side a name of this system or a number | needed |
-//! | `fs.fill_socket` | the fill socket of the node's tierstore | needed |
+//! | `fs.fill_socket` | read and ignored: no process serves a fill socket any more | |
 //! | `fs.cache_path` | the node's `local_cache.path` | needed |
-//! | `fs.fetch_timeout` | how long a fill, or a closed fill socket, is waited for | `60s` |
+//! | `fs.fetch_timeout` | how long a fill, or the write role of the node's cache, is waited for | `60s` |
 //! | `fs.threads` | threads that serve the kernel's requests, and as many that make the opens that wait on a fill (`fetches.rs`), at most 252 | `16` |
 //! | `[fs.nfs]` | the settings of the NFS frontend (macOS), see `nfs/config.rs` | its defaults |
 //! | `fs.handoff_socket` | the socket a new instance asks the running one for the mount on (`handoff-fs-v1`) | `<runtime_dir>/handoff.sock` |
@@ -165,10 +165,6 @@ pub(in crate::server) struct FsSettings {
     pub client_group: u32,
     /// The user and group id every entry reports.
     pub owner: (u32, u32),
-    /// The fill socket the core asks for fills on: `fs.fill_socket` of `tierstore fs`; for an
-    /// `fs` interface, the node's own `local_cache.fill_socket` (or the one in its state
-    /// directory), none when the node has none, as a client whose socket is not there.
-    pub fill_socket: Option<PathBuf>,
     /// The node's cache directory: `fs.cache_path`, or `local_cache.path` of an `fs` interface's
     /// file.
     pub cache_path: PathBuf,
@@ -269,13 +265,6 @@ fn not_two_parts(key: &str, text: &str) -> ConfigError {
     )
 }
 
-/// What the node gives the file system beside its table: the fill socket it asks for fills on,
-/// if any, and the cache directory it reads.
-struct Node {
-    fill_socket: Option<PathBuf>,
-    cache_path: PathBuf,
-}
-
 impl FsSettings {
     /// The settings of `table`, the `[fs]` table of the file of `tierstore fs`; `lookup` looks a
     /// group or user name up.
@@ -284,41 +273,29 @@ impl FsSettings {
     /// A [`ConfigError`] that names the key: one needed and left out, a path that is not
     /// absolute, an owner or a group that is not one, a value out of its range.
     pub(super) fn of(mut table: FsTable, lookup: Lookup<'_>) -> Result<Self, ConfigError> {
-        let (fill_socket, cache_path) = (table.fill_socket.take(), table.cache_path.take());
+        let cache_path = table.cache_path.take();
         let node = move || {
-            let fill_socket = require("fs", "fill_socket", fill_socket)?;
-            let fill_socket = Some(absolute("fs.fill_socket", fill_socket)?);
             let cache_path = require("fs", "cache_path", cache_path)?;
-            let cache_path = absolute("fs.cache_path", cache_path)?;
-            Ok(Node {
-                fill_socket,
-                cache_path,
-            })
+            absolute("fs.cache_path", cache_path)
         };
         Self::made("fs", table, node, lookup)
     }
 
     /// The settings of `table`, the params at `place` (`interface[2].params`) of an `fs`
-    /// interface of a build node whose cache directory is `cache_path` and whose own fill socket
-    /// is `fill_socket`; `lookup` looks a group or user name up. The table has no `fill_socket`,
-    /// `cache_path` or `handoff_socket` (the interface refuses them as params), so the hand-over
-    /// socket is `handoff.sock` in the runtime directory.
+    /// interface of a build node whose cache directory is `cache_path`; `lookup` looks a group or
+    /// user name up. The table has no `fill_socket`, `cache_path` or `handoff_socket` (the
+    /// interface refuses them as params), so the hand-over socket is `handoff.sock` in the runtime
+    /// directory.
     ///
     /// # Errors
     /// Those of [`FsSettings::of`] but the keys the node gives, each naming the param.
     pub(in crate::server) fn of_interface(
         place: &str,
         table: FsTable,
-        (cache_path, fill_socket): (PathBuf, Option<PathBuf>),
+        cache_path: PathBuf,
         lookup: Lookup<'_>,
     ) -> Result<Self, ConfigError> {
-        let node = || {
-            Ok(Node {
-                fill_socket,
-                cache_path,
-            })
-        };
-        Self::made(place, table, node, lookup)
+        Self::made(place, table, || Ok(cache_path), lookup)
     }
 
     /// The settings of `table`, whose keys are named under `place` (`fs`, or the params of an
@@ -327,7 +304,7 @@ impl FsSettings {
     fn made(
         place: &str,
         table: FsTable,
-        node: impl FnOnce() -> Result<Node, ConfigError>,
+        node: impl FnOnce() -> Result<PathBuf, ConfigError>,
         lookup: Lookup<'_>,
     ) -> Result<Self, ConfigError> {
         let key = |name: &str| format!("{place}.{name}");
@@ -409,15 +386,14 @@ impl FsSettings {
         let control_socket = absolute(&key("control_socket"), control_socket)?;
         let client_group = id_of(&key("client_group"), Database::Group, &group, lookup)?;
         let owner = owner_of(&key("owner"), &owner, lookup)?;
-        let node = node()?;
+        let cache_path = node()?;
         Ok(Self {
             mountpoint,
             runtime_dir,
             control_socket,
             client_group,
             owner,
-            fill_socket: node.fill_socket,
-            cache_path: node.cache_path,
+            cache_path,
             fetch_timeout: timeout,
             threads: threads as usize,
             handoff_socket: absolute(&key("handoff_socket"), handoff_socket)?,

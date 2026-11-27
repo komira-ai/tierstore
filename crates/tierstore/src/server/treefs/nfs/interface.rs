@@ -40,7 +40,7 @@ use crate::server::handoff::{Handed, Handing};
 use crate::server::local_cache::LocalCache;
 use crate::server::local_cache::trees::TreeStore;
 use crate::server::treefs::config::FsSettings;
-use crate::server::treefs::fills::{Calls, Reach};
+use crate::server::treefs::fills::Calls;
 
 /// The `fs` interface of a build node's file, and what its NFS front runs on: the commands of the
 /// mount, the user of the process, the boot, and the server of the protocol.
@@ -111,11 +111,11 @@ impl NfsService {
             serve,
         } = self;
         let runtime = Handle::current();
-        let reach = Reach::Calls(Calls {
+        let reach = Calls {
             cache,
             trees,
             runtime: runtime.clone(),
-        });
+        };
         // The start waits for the cache's answers (the attachments are made again through it),
         // which are worked out on the runtime: it runs on a thread of its own.
         let started = tokio::task::spawn_blocking(move || {

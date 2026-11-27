@@ -106,9 +106,9 @@ pub const HANDOFF_FS_CAPABILITY: &str = "handoff-fs-v1";
 /// for its sockets (`take 1`) and the instance on `handoff.sock` in the runtime directory for the
 /// mount (`take-fs 1`), checks both offers before it accepts either, and accepts the mount's first.
 /// While it holds the mount it answers `take-fs 1` there, for a successor of either layout, and
-/// goes on serving S3 and OCI until a successor takes their sockets; it binds the fill socket
-/// (`local_cache.fill_socket`) while its cache is the writer, as every build node does. The hook
-/// updates a node whose file has an `fs` interface only between releases that both list it.
+/// goes on serving S3 and OCI until a successor takes their sockets. Its file system calls its
+/// cache in the process: it binds no fill socket. The hook updates a node whose file has an `fs`
+/// interface only between releases that both list it.
 pub const HANDOFF_SERVICE_CAPABILITY: &str = "handoff-service-v1";
 
 /// `handoff-exec-v1` (macOS builds only): a build node sent SIGUSR2 hands over to the next image of

@@ -24,7 +24,7 @@ use serde::Deserialize;
 use super::commit::PutOutcome;
 use super::names::Sha256Digest;
 use crate::Clock;
-use crate::server::treefs::fills::Fills;
+use crate::server::treefs::in_process::InProcess;
 
 /// The first pause before a put is asked again.
 const FIRST_PAUSE: Duration = Duration::from_millis(100);
@@ -93,7 +93,7 @@ pub(super) fn pause_before(tries: u32, sha256: &Sha256Digest) -> Duration {
 pub(in crate::server) struct Uploader {
     /// What puts the file: a client of the fill socket that does not wait for it itself (the
     /// waits are this one's), or the cache of this process.
-    client: Arc<dyn Fills>,
+    client: Arc<InProcess>,
     /// The longest a try waits for its answer.
     most: Duration,
     /// The time the deadlines are told by, in milliseconds.
@@ -107,7 +107,7 @@ impl Uploader {
     /// cache of this process); each try waits for its answer until the deadline of its commit, and
     /// no longer than `answer_timeout`.
     pub(in crate::server) fn new(
-        client: Arc<dyn Fills>,
+        client: Arc<InProcess>,
         answer_timeout: Duration,
         clock: Arc<dyn Clock>,
         pause: Arc<dyn Fn(Duration) + Send + Sync>,

@@ -28,7 +28,7 @@ use super::backing;
 use super::config::FsSettings;
 use super::control::Control;
 use super::core::{self, Core};
-use super::fills::Reach;
+use super::fills::Calls;
 use super::steps::Steps;
 use super::table::{TableError, TreeTable};
 
@@ -79,7 +79,9 @@ pub(in crate::server) enum StartError {
 
 impl StartError {
     /// The exit status of a start that this refused: 3 for a cache on a stacked file system, as
-    /// for a cache directory whose file system fails the check of the cache, else 1.
+    /// for a cache directory whose file system fails the check of the cache, else 1: the exit
+    /// status of the one process whose mount did not start (`cli.rs`, Linux).
+    #[cfg(any(target_os = "linux", test))]
     pub(in crate::server) fn status(&self) -> u8 {
         #[cfg(target_os = "linux")]
         if matches!(self, Self::Stacked { .. }) {
@@ -154,9 +156,9 @@ pub(super) fn create_mount_point(settings: &FsSettings) -> Result<(), StartError
 /// only on Linux (and in tests), since only the FUSE frontend has file handles.
 /// `count_lookups` is whether the core counts the lookups of its inodes (a frontend that is told
 /// when they are forgotten, FUSE), or drops a tree when it is detached (one that is not told).
-/// `reach` is how the core asks the node's cache and tree store.
+/// `reach` is the node's cache and tree store, which the core calls.
 pub(super) fn core_of(
-    (settings, reach): (&FsSettings, &Reach),
+    (settings, reach): (&FsSettings, &Calls),
     table: TreeTable,
     mount_id: String,
     #[cfg(any(target_os = "linux", test))] generation: u32,
@@ -258,7 +260,7 @@ impl Setup {
     /// # Errors
     /// [`StartError`]: why nothing was made.
     pub(super) fn start(
-        (settings, reach): (&FsSettings, &Reach),
+        (settings, reach): (&FsSettings, &Calls),
         count_lookups: bool,
         identity: Identity,
         control: Option<std::os::unix::net::UnixListener>,
@@ -309,12 +311,15 @@ impl Setup {
     }
 }
 
-/// The signals that end the process, caught.
+/// The signals that end the process, caught: what the tests' loops of a mount served alone
+/// (`launch.rs`, `nfs/run.rs`) wait on.
+#[cfg(test)]
 pub(super) struct Signals {
     term: tokio::signal::unix::Signal,
     int: tokio::signal::unix::Signal,
 }
 
+#[cfg(test)]
 impl Signals {
     /// Catches SIGTERM and SIGINT from now on: one that comes before [`Signals::wait`] is kept.
     /// This must run inside a Tokio runtime.

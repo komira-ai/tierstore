@@ -29,7 +29,7 @@ use super::backing::{self, Saved};
 use super::config::FsSettings;
 use super::control::Control;
 use super::core::Core;
-use super::fills::Reach;
+use super::fills::Calls;
 use super::init_record::{self, Record};
 use super::locked;
 use super::put::carry;
@@ -53,7 +53,7 @@ use crate::{MonotonicClock, SystemClock};
 /// # Errors
 /// [`StartError::Put`] for a stage that cannot be used, [`StartError::Io`] for the sweep's thread.
 fn serve_put(
-    (settings, reach): (&FsSettings, &Reach),
+    (settings, reach): (&FsSettings, &Calls),
     core: &Core,
     generation: u32,
     handed: Option<Option<carry::Handed>>,
@@ -71,7 +71,7 @@ fn serve_put(
     tracing::info!(?replayed, "tierstore fs: the put directory's stage is open");
     let clock = Arc::new(MonotonicClock::new());
     let uploader = Uploader::new(
-        reach.puts(settings, put.commit_deadline),
+        reach.puts(put.commit_deadline),
         put.commit_deadline,
         clock.clone(),
         Arc::new(std::thread::sleep),
@@ -223,7 +223,7 @@ impl Running {
     /// # Errors
     /// [`StartError`]: why nothing was mounted.
     pub(super) fn start(
-        (settings, reach): (&FsSettings, &Reach),
+        (settings, reach): (&FsSettings, &Calls),
         kernel: &Kernel,
     ) -> Result<Self, StartError> {
         let mut steps = Steps::new(Arc::new(MonotonicClock::new()));
@@ -259,7 +259,7 @@ impl Running {
     /// # Errors
     /// [`StartError`]: why the connection is not served.
     pub(super) fn adopt(
-        (settings, reach): (&FsSettings, &Reach),
+        (settings, reach): (&FsSettings, &Calls),
         prepared: Prepared,
         device: OwnedFd,
         (control, resend): (Option<std::os::unix::net::UnixListener>, bool),
@@ -276,7 +276,7 @@ impl Running {
     /// # Errors
     /// As [`Running::adopt`].
     pub(super) fn take_over(
-        (settings, reach): (&FsSettings, &Reach),
+        (settings, reach): (&FsSettings, &Calls),
         prepared: Prepared,
         device: OwnedFd,
         control: std::os::unix::net::UnixListener,
@@ -292,7 +292,7 @@ impl Running {
 
     /// [`Running::adopt`], with the readers and the control socket started when `reading`.
     fn adopt_as(
-        (settings, reach): (&FsSettings, &Reach),
+        (settings, reach): (&FsSettings, &Calls),
         prepared: Prepared,
         device: OwnedFd,
         (control, resend): (Option<std::os::unix::net::UnixListener>, bool),

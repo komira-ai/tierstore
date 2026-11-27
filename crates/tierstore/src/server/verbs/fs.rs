@@ -1,15 +1,17 @@
-//! The verb `tierstore fs`: the virtual build file system's process, and the operator's list of
-//! what is attached.
+//! The verb `tierstore fs`: the operator's list of what is attached, and the check of an `[fs]`
+//! file. It serves nothing: the file system is the `fs` interface of the node's file, served by the
+//! node's own process, so a start of the verb (a unit of the two-process layout left behind) exits
+//! 2 and says so ([`NOT_A_PROCESS`]), and its `RestartPreventExitStatus=2` stops it from looping.
 //!
 //! ```text
-//! tierstore fs --config <file>                serve the mount (FUSE on Linux, NFS on macOS), until SIGTERM or SIGINT
-//! tierstore fs --config <file> --check-config load the file as a start does and say nothing: status 0 if it loads, 2 and the reason if not
+//! tierstore fs --config <file>                exit 2: the file system is the fs interface of the node's file
+//! tierstore fs --config <file> --check-config load the file and say nothing: status 0 if it loads, 2 and the reason if not
 //! tierstore fs attachments --config <file>    list the attachments: `<tree digest> <run>`
 //! ```
 //!
 //! `--check-config` serves nothing, mounts nothing and touches no socket; names in `fs.owner` and
-//! `fs.client_group` are looked up through the system, as a start does. It does not go with
-//! `attachments`: that is status 2.
+//! `fs.client_group` are looked up through the system. It does not go with `attachments`: that is
+//! status 2.
 //!
 //! The file has an `[fs]` table (see the `treefs` module); it is not the file of the S3 instance.
 
@@ -22,11 +24,11 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 
 use super::parsed;
-#[cfg(not(target_os = "linux"))]
-use crate::server::treefs::NfsError;
-#[cfg(target_os = "linux")]
-use crate::server::treefs::StartError;
 use crate::server::treefs::{FsSettings, load};
+
+/// What a start of the verb says before it exits 2.
+pub(super) const NOT_A_PROCESS: &str = "tierstore fs is no longer a process of its own: the file \
+     system is the [[interface]] with type = \"fs\" of the node's file";
 
 /// The arguments of the verb.
 #[derive(Debug, Parser)]
@@ -82,36 +84,6 @@ fn attachments(settings: &FsSettings, out: &mut dyn Write) -> Result<(), String>
     list(&answer, out).map_err(|why| format!("writing the output: {why}"))
 }
 
-/// The exit status of a serve that ended with `result`.
-#[cfg(target_os = "linux")]
-fn finished(result: Result<(), StartError>, err: &mut dyn Write) -> ExitCode {
-    match result {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(why) => {
-            let _ = writeln!(err, "tierstore fs: {why}");
-            ExitCode::from(why.status())
-        }
-    }
-}
-
-/// Serves the mount.
-#[cfg(target_os = "linux")]
-fn serve(settings: &FsSettings, err: &mut dyn Write) -> ExitCode {
-    finished(crate::server::treefs::serve(settings), err)
-}
-
-/// Serves the NFS export and mounts it.
-#[cfg(not(target_os = "linux"))]
-fn serve(settings: &FsSettings, err: &mut dyn Write) -> ExitCode {
-    match crate::server::treefs::serve(settings) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(why) => {
-            let _ = writeln!(err, "tierstore fs: {why}");
-            ExitCode::from(NfsError::status(&why))
-        }
-    }
-}
-
 /// The exit status of `tierstore fs <args>`.
 pub(super) fn run(args: &[OsString], out: &mut dyn Write, err: &mut dyn Write) -> ExitCode {
     let args = match parsed::<Args>("fs", args, out, err) {
@@ -122,6 +94,10 @@ pub(super) fn run(args: &[OsString], out: &mut dyn Write, err: &mut dyn Write) -
         let _ = writeln!(err, "tierstore fs: --config is needed");
         return ExitCode::from(2);
     };
+    if !args.check_config && args.command.is_none() {
+        let _ = writeln!(err, "{NOT_A_PROCESS}");
+        return ExitCode::from(2);
+    }
     if args.check_config && args.command.is_some() {
         let _ = writeln!(
             err,
@@ -137,8 +113,7 @@ pub(super) fn run(args: &[OsString], out: &mut dyn Write, err: &mut dyn Write) -
         }
     };
     match args.command {
-        None if args.check_config => ExitCode::SUCCESS,
-        None => serve(&settings, err),
+        None => ExitCode::SUCCESS,
         Some(Command::Attachments) => match attachments(&settings, out) {
             Ok(()) => ExitCode::SUCCESS,
             Err(why) => {

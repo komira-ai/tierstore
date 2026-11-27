@@ -278,11 +278,11 @@ pub(in crate::server) fn provider_mountpoint(
 
 /// The other sockets of a build node, by key, which the file system's control socket must not be:
 /// each replaces the file at its path when it is bound.
-pub(in crate::server) type Sockets<'a> = [(&'a str, Option<&'a Path>); 3];
+pub(in crate::server) type Sockets<'a> = [(&'a str, Option<&'a Path>); 2];
 
 /// The settings of the `fs` interface `fs`, if the file has one, on a build node whose cache
-/// directory is `cache` and whose fill socket is `fill_socket`; `sockets` are the node's other
-/// sockets, and `host` looks names and file systems up.
+/// directory is `cache`; `sockets` are the node's other sockets, and `host` looks names and file
+/// systems up.
 ///
 /// # Errors
 /// Those of [`FsSettings::of_interface`]; those of an owner given as the job user's subordinate
@@ -291,7 +291,7 @@ pub(in crate::server) type Sockets<'a> = [(&'a str, Option<&'a Path>); 3];
 /// cannot be looked at; a control socket that is another socket of the node.
 pub(in crate::server) fn fs_settings(
     fs: Option<FsInterface>,
-    (cache, fill_socket): (&Path, Option<&Path>),
+    cache: &Path,
     sockets: &Sockets<'_>,
     host: Host,
 ) -> Result<Option<FsSettings>, ConfigError> {
@@ -311,9 +311,8 @@ pub(in crate::server) fn fs_settings(
         let why = "must be an absolute path in a file with an fs interface: the file system reads the cache's files by it";
         return Err(invalid("local_cache.path", why));
     };
-    let node = (cache.to_owned(), fill_socket.map(Path::to_owned));
     let lookup: Lookup<'_> = &host.names;
-    let settings = FsSettings::of_interface(&place, table, node, lookup)?;
+    let settings = FsSettings::of_interface(&place, table, cache.to_owned(), lookup)?;
     if normalised(&settings.runtime_dir).is_some_and(|dir| dir.starts_with(&normal_cache)) {
         let why = format!(
             "{:?} is inside local_cache.path: it is not a place for the cache's files",

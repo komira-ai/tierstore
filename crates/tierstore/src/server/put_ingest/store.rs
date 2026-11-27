@@ -1,7 +1,7 @@
 //! The put of one committed file: opened without following a link, checked to be a regular file
 //! with one link, read once in chunks and hashed as it passes to the cache's create-only put that
 //! names its SHA-256 ([`put_stream_sha256`](crate::Backend::put_stream_sha256)), the put the
-//! fill socket makes for a commit of the put directory. A body that is not the declared digest
+//! file system's put directory makes for a commit (`treefs/in_process/put.rs`). A body that is not the declared digest
 //! (a truncated or a changed file) ends with an error before its last byte, and the upstream
 //! stores nothing of it.
 
@@ -15,7 +15,7 @@ use rustix::fs::{CWD, Mode, OFlags, openat};
 use rustix::io::Errno;
 use tokio::io::AsyncRead;
 
-use crate::server::fill_socket::put::chunks;
+use super::chunks::chunks;
 use crate::server::local_cache::LocalCache;
 use crate::{Backend as _, Error, PutOutcome, TreeDigest};
 

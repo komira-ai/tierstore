@@ -1,10 +1,17 @@
-//! Fixtures of the tests of `tierstore fs`: trees written as manifests, a fill socket that
-//! answers from them, and a core over both.
+//! Fixtures of the tests of the file system: trees written as manifests and a pack, an upstream
+//! that holds them, the node's cache over that upstream, and a core that calls the cache in the
+//! process, as the `fs` interface's does.
+//!
+//! The core's fills reach the [`Upstream`] as the cache's reads of it: a fill of a manifest is the
+//! cache's HEAD of `cas/l/<sha256>` (then its GET), and a fill of a blob the cache's GET of the
+//! blob's bytes in the pack (or of `cas/l/<sha256>`, for a file that is not packed). The upstream
+//! keeps each in the words the core asks it with ([`Upstream::asked`]), paces them where a test
+//! asks it to, and fails those a test names. What the core asks of the cache alone (pins,
+//! placements, reports) is the cache's, and a test looks at the cache ([`Rig::node`]).
 
 use std::collections::HashMap;
 #[cfg(target_os = "linux")]
 use std::io::IoSliceMut;
-use std::io::{BufRead as _, BufReader, Write as _};
 #[cfg(target_os = "linux")]
 use std::mem::MaybeUninit;
 #[cfg(target_os = "linux")]
@@ -12,27 +19,32 @@ use std::os::fd::OwnedFd;
 use std::os::unix::fs::MetadataExt as _;
 #[cfg(target_os = "linux")]
 use std::os::unix::net::UnixDatagram;
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
+use async_trait::async_trait;
+use bytes::Bytes;
 #[cfg(target_os = "linux")]
 use rustix::net::{RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags, recvmsg};
 use sha2::{Digest as _, Sha256};
 use tierstore_testkit::dir::TestDir;
+use tokio::runtime::Runtime;
 
-use crate::{Clock, Mono};
+use crate::{
+    Backend, ByteRange, Clock, Error, Listed, MemoryBackend, Meta, Mono, OpenUpload, PartBody,
+    PutAnswer, TestClock, UploadedPart, UploadsAfter,
+};
 
 use super::backing::Guard;
 use super::config::FsSettings;
 use super::core::{Core, Errno, Opened, Settings};
-use super::fill_client::FillClient;
+use super::fills::Calls;
+use super::in_process::InProcess;
 use super::locked;
-use super::put::fake::FakePuts;
 use super::table::TreeTable;
-use crate::server::local_cache::{blob_path, manifest_path};
+use crate::server::local_cache::testing::FakeDisk;
+use crate::server::local_cache::{CacheConfig, LocalCache};
 
 pub(in crate::server::treefs) use super::testing_image::{image_bytes, image_named};
 
@@ -41,10 +53,17 @@ pub(in crate::server) fn sha(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 
+/// The key of the pack the packed files of a [`Built`] are in.
+pub(in crate::server) const PACK: &str = "packs/one";
+
+/// Where the first file of the pack begins: what comes before it is no file's.
+pub(in crate::server) const PACK_START: u64 = 4096;
+
 /// A tree to write.
 #[derive(Clone)]
 pub(in crate::server) enum Node {
-    /// A file; `packed` gives it a source inside a pack, else it is the object `cas/l/<sha256>`.
+    /// A file; `packed` gives it a source inside the pack [`PACK`], else it is the object
+    /// `cas/l/<sha256>`.
     File {
         content: Vec<u8>,
         exec: bool,
@@ -73,13 +92,18 @@ pub(in crate::server) fn dir(children: Vec<(&str, Node)>) -> Node {
     )
 }
 
-/// The manifests and blobs a tree is made of.
+/// The manifests, blobs and pack a tree is made of.
 #[derive(Default)]
 pub(in crate::server) struct Built {
     /// The digest of the root manifest.
     pub root: String,
     pub manifests: HashMap<String, Vec<u8>>,
     pub blobs: HashMap<String, Vec<u8>>,
+    /// The bytes of the pack [`PACK`]: [`PACK_START`] bytes of no file, then each packed blob
+    /// once, in the order they were first written.
+    pub pack: Vec<u8>,
+    /// Where each packed blob begins in the pack, by digest.
+    pub offsets: HashMap<String, u64>,
 }
 
 impl Built {
@@ -101,6 +125,21 @@ impl Built {
             .map(|(n, c)| (n.to_owned(), c))
             .collect();
         self.manifest(&children)
+    }
+
+    /// Where the blob `content`, of the digest `digest`, is in the pack: put at its end the first
+    /// time.
+    fn packed(&mut self, digest: &str, content: &[u8]) -> u64 {
+        if let Some(offset) = self.offsets.get(digest) {
+            return *offset;
+        }
+        if self.pack.is_empty() {
+            self.pack = vec![0; usize::try_from(PACK_START).unwrap()];
+        }
+        let offset = self.pack.len() as u64;
+        self.pack.extend_from_slice(content);
+        let _ = self.offsets.insert(digest.to_owned(), offset);
+        offset
     }
 
     fn manifest(&mut self, children: &[(String, Node)]) -> String {
@@ -126,7 +165,8 @@ impl Built {
                         "exec": exec,
                     });
                     if *packed && !content.is_empty() {
-                        item["source"] = serde_json::json!({"key": "packs/one", "offset": 4096});
+                        let offset = self.packed(&digest, content);
+                        item["source"] = serde_json::json!({"key": PACK, "offset": offset});
                     }
                     item
                 }
@@ -141,45 +181,52 @@ impl Built {
         let _ = self.manifests.insert(digest.clone(), bytes);
         digest
     }
+
+    /// The objects the upstream holds for these: each manifest and each file as
+    /// `cas/l/<sha256>`, and the pack.
+    fn objects(&self) -> Vec<(String, &[u8])> {
+        let mut objects: Vec<(String, &[u8])> = Vec::new();
+        for (digest, bytes) in self.manifests.iter().chain(&self.blobs) {
+            objects.push((format!("cas/l/{digest}"), bytes.as_slice()));
+        }
+        if !self.pack.is_empty() {
+            objects.push((PACK.to_owned(), self.pack.as_slice()));
+        }
+        objects
+    }
 }
 
-/// What the fake fill socket knows and does.
+/// The upstream of the node's cache: it holds the objects of a [`Built`], which a test may change
+/// at any time, and keeps the fills the cache made of them in the words of the core's requests.
 pub(in crate::server) struct Upstream {
-    cache: PathBuf,
     pub built: Mutex<Built>,
-    /// The digests whose fill is answered with these words.
+    /// The digests whose fill fails with these words: `upstream <status>` (an answer of that
+    /// status), or `mismatch` (bytes that are not the digest's).
     pub failing: Mutex<HashMap<String, String>>,
-    /// When set, the answer to every `pin` instead of `ok`.
-    pub pin_answer: Mutex<Option<String>>,
-    /// The requests received, in order.
+    /// The fills received, in order, each in the words of the core's request: `fill <sha256>` for
+    /// a manifest, `fill <sha256> <size> from <key> @ <offset>` for a blob.
     pub requests: Mutex<Vec<String>>,
-    /// The answer to every request of a verb, by verb, instead of the usual one.
-    pub answers: Mutex<HashMap<String, String>>,
-    /// When set, the pack file that answers every `span`: the file's bytes are at the record's
-    /// offset in it, as in the pack the node holds.
-    pub pack: Mutex<Option<PathBuf>>,
-    /// What answers the `put` requests.
-    pub puts: Arc<FakePuts>,
+    /// The objects, as the cache reads and writes them.
+    store: MemoryBackend,
+    /// What of the built objects is in `store`, by key.
+    published: Mutex<HashMap<String, Bytes>>,
     /// Whether the fills of blobs wait (see [`Upstream::hold_fills`]).
     holding: Mutex<bool>,
     released: Condvar,
     /// The fills of manifests in flight (see [`Upstream::gate_manifests`]).
     gate: Mutex<Gate>,
     gate_changed: Condvar,
-    /// The pins in flight (see [`Upstream::gate_pins`]).
-    pins: Mutex<Gate>,
-    pins_changed: Condvar,
-    /// The requests of a verb in flight (see [`Upstream::gate_verb`]), by verb.
-    verbs: Mutex<HashMap<String, Arc<VerbGate>>>,
+    /// The fills in flight, once a test closes their gate ([`Upstream::gate_verb`]).
+    fills: Mutex<Option<Arc<VerbGate>>>,
 }
 
-/// The gate of the requests of one verb, and what wakes the requests that wait at it.
+/// The gate of the fills, and what wakes the fills that wait at it.
 type VerbGate = (Mutex<Gate>, Condvar);
 
-/// The progress of the fills of manifests, or of the pins, which a test may pace.
+/// The progress of the fills, which a test may pace.
 #[derive(Default)]
 struct Gate {
-    /// Whether a fill of a manifest waits for a permit.
+    /// Whether a fill waits for a permit.
     gating: bool,
     /// The fills received.
     started: usize,
@@ -189,106 +236,120 @@ struct Gate {
     /// The permits given and the permits used.
     given: usize,
     used: usize,
-    /// Whether the permits go to the requests in the order they were received (the gates of
-    /// verbs), and not to whichever asks first.
+    /// Whether the permits go to the fills in the order they were received (the gate of
+    /// [`Upstream::gate_verb`]), and not to whichever asks first.
     ordered: bool,
 }
 
+/// What a read of the upstream is a fill of.
+enum Fill {
+    /// The manifest of this digest.
+    Manifest(String),
+    /// The blob of this digest, whose bytes begin at the read.
+    Blob(String),
+}
+
+impl Default for Upstream {
+    fn default() -> Self {
+        Self::new(Built::default())
+    }
+}
+
 impl Upstream {
-    /// Writes `bytes` at `path` by a rename of a file written beside it, so that a reader never
-    /// sees a part of them, as the cache links a whole file into place.
-    fn put(path: &Path, bytes: &[u8]) {
-        static NEXT: AtomicU32 = AtomicU32::new(0);
-        // A node keeps the file it holds: a fill of it again is answered from it.
-        if path.exists() {
-            return;
+    /// An upstream that holds `built`.
+    pub(in crate::server) fn new(built: Built) -> Self {
+        Self {
+            built: Mutex::new(built),
+            failing: Mutex::new(HashMap::new()),
+            requests: Mutex::new(Vec::new()),
+            store: MemoryBackend::new(),
+            published: Mutex::new(HashMap::new()),
+            holding: Mutex::new(false),
+            released: Condvar::new(),
+            gate: Mutex::new(Gate::default()),
+            gate_changed: Condvar::new(),
+            fills: Mutex::new(None),
         }
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let mut beside = path.as_os_str().to_owned();
-        beside.push(format!(".part-{}", NEXT.fetch_add(1, Ordering::Relaxed)));
-        std::fs::write(&beside, bytes).unwrap();
-        std::fs::rename(&beside, path).unwrap();
     }
 
-    /// The answer to a line, or none for a request that is not answered: after the gate of its
-    /// verb, if a test has closed one.
-    pub(in crate::server) fn answer(&self, line: &str) -> Option<String> {
-        locked(&self.requests).push(line.to_owned());
-        let verb = line.split(' ').next().unwrap_or_default();
-        let gate = locked(&self.verbs).get(verb).cloned();
-        if let Some(gate) = &gate {
-            Self::enter(&gate.0, &gate.1);
+    /// Puts what `built` holds now in the store, where it is not there as it is.
+    async fn publish(&self) {
+        let objects: Vec<(String, Bytes)> = locked(&self.built)
+            .objects()
+            .into_iter()
+            .map(|(key, bytes)| (key, Bytes::copy_from_slice(bytes)))
+            .collect();
+        for (key, bytes) in objects {
+            if locked(&self.published).get(&key) == Some(&bytes) {
+                continue;
+            }
+            let _ = self.store.delete(&key).await;
+            self.store.put(&key, bytes.clone()).await.unwrap();
+            let _ = locked(&self.published).insert(key, bytes);
         }
-        let answer = self.respond(line);
+    }
+
+    /// What a HEAD of `key` (`head`) or a read of `range` of it is a fill of: a HEAD of a
+    /// manifest, or the read of a blob's first bytes. Other reads (the chunks after a blob's
+    /// first, the GET of a manifest after its HEAD) are of no fill.
+    fn fill_of(&self, key: &str, range: Option<ByteRange>) -> Option<(Fill, String)> {
+        let built = locked(&self.built);
+        let offset = range.map_or(0, |range| range.offset());
+        if let Some(digest) = key.strip_prefix("cas/l/") {
+            let manifest = built.manifests.contains_key(digest) || !built.blobs.contains_key(digest);
+            return match (manifest, range) {
+                (true, None) => Some((Fill::Manifest(digest.to_owned()), format!("fill {digest}"))),
+                (false, Some(range)) if range.offset() == 0 => {
+                    let size = built.blobs[digest].len();
+                    let line = format!("fill {digest} {size} from {key} @ 0");
+                    Some((Fill::Blob(digest.to_owned()), line))
+                }
+                _ => None,
+            };
+        }
+        if key != PACK {
+            return None;
+        }
+        let (digest, _) = built.offsets.iter().find(|(_, at)| **at == offset)?;
+        let size = built.blobs[digest].len();
+        let line = format!("fill {digest} {size} from {key} @ {offset}");
+        Some((Fill::Blob(digest.clone()), line))
+    }
+
+    /// Takes the fill of a read: keeps its words, and waits at the gates a test closed. The
+    /// failure the test named for its digest, if any.
+    fn take(&self, fill: &Fill, line: String) -> Option<String> {
+        locked(&self.requests).push(line);
+        let gate = locked(&self.fills).clone();
+        if let Some(gate) = &gate {
+            tokio::task::block_in_place(|| Self::enter(&gate.0, &gate.1));
+        }
+        let digest = match fill {
+            Fill::Manifest(digest) => {
+                tokio::task::block_in_place(|| {
+                    self.enter_manifest();
+                    self.leave_manifest();
+                });
+                digest
+            }
+            Fill::Blob(digest) => {
+                tokio::task::block_in_place(|| self.wait_while_held());
+                digest
+            }
+        };
         if let Some(gate) = &gate {
             Self::leave(&gate.0, &gate.1);
         }
-        answer
+        locked(&self.failing).get(digest).cloned()
     }
 
-    /// The answer to a line, as the fake gives it.
-    fn respond(&self, line: &str) -> Option<String> {
-        let words: Vec<&str> = line.split(' ').collect();
-        // An answer to the whole line comes before an answer to its verb.
-        let answers = locked(&self.answers);
-        if let Some(answer) = answers.get(line).or_else(|| answers.get(words[0])) {
-            return Some(answer.clone());
+    /// The error of a fill that fails with `why`.
+    fn failure(key: &str, why: &str) -> Error {
+        match why {
+            "upstream 404" => Error::NotFound(key.to_owned()),
+            "upstream 503" => Error::Unavailable(format!("{key}: the test says so")),
+            other => panic!("the upstream cannot make a fill fail with {other:?}"),
         }
-        drop(answers);
-        if let (Some(pack), "span") = (&*locked(&self.pack), words[0]) {
-            let offset = words.last().copied().unwrap_or_default();
-            return Some(format!("ok {offset} {}", pack.display()));
-        }
-        match words[0] {
-            "fill" if words.len() == 2 => {
-                self.enter_manifest();
-                let answer = self.answer_fill(words[1], 2);
-                self.leave_manifest();
-                answer
-            }
-            "fill" => {
-                self.wait_while_held();
-                self.answer_fill(words[1], words.len())
-            }
-            "touch" => None,
-            "put" => Some(self.puts.answer(line)),
-            // This upstream has no placements.
-            "place" => Some("none".to_owned()),
-            // Nor images, nor fills of trees: it answers as a node of the release before them, and
-            // the mount asks `flat` instead, or fills the manifests of a tree one at a time.
-            "image" | "fill-tree" => Some("refused unknown request".to_owned()),
-            "mounted" => Some("[]".to_owned()),
-            "pin" => {
-                Self::enter(&self.pins, &self.pins_changed);
-                let answer = locked(&self.pin_answer)
-                    .clone()
-                    .unwrap_or_else(|| format!("ok {} 0 0", words.len() - 3));
-                Self::leave(&self.pins, &self.pins_changed);
-                Some(answer)
-            }
-            _ => Some("ok 0".to_owned()),
-        }
-    }
-
-    /// The answer to a fill of `sha`: a manifest when `words` is 2, else a blob.
-    fn answer_fill(&self, sha: &str, words: usize) -> Option<String> {
-        if let Some(why) = locked(&self.failing).get(sha) {
-            // `ok` is an answer that leaves no file.
-            return Some(why.clone());
-        }
-        let built = locked(&self.built);
-        if words == 2 {
-            let Some(bytes) = built.manifests.get(sha) else {
-                return Some("upstream 404".to_owned());
-            };
-            Self::put(&manifest_path(&self.cache, sha), bytes);
-        } else {
-            let Some(bytes) = built.blobs.get(sha) else {
-                return Some("upstream 404".to_owned());
-            };
-            Self::put(&blob_path(&self.cache, sha), bytes);
-        }
-        Some("ok".to_owned())
     }
 
     /// Makes every fill of a manifest wait, once it is received, for a permit of
@@ -325,59 +386,33 @@ impl Upstream {
         Self::leave(&self.gate, &self.gate_changed);
     }
 
-    /// Makes every pin received from now on wait for a permit of [`Upstream::permit_pins`].
-    pub(in crate::server) fn gate_pins(&self) {
-        let mut pins = locked(&self.pins);
-        pins.gating = true;
-        pins.given = pins.used;
-    }
-
-    /// Lets `count` more pins go on.
-    pub(in crate::server) fn permit_pins(&self, count: usize) {
-        locked(&self.pins).given += count;
-        self.pins_changed.notify_all();
-    }
-
-    /// The pins received in all.
-    pub(in crate::server) fn pins_received(&self) -> usize {
-        locked(&self.pins).started
-    }
-
-    /// The most pins that were in flight at once.
-    pub(in crate::server) fn most_pins(&self) -> usize {
-        locked(&self.pins).most
-    }
-
-    /// Makes every request of `verb` received from now on wait for a permit of
-    /// [`Upstream::permit_verb`], once received: for a test that needs a round trip in flight.
+    /// Makes every fill received from now on (`verb` is `fill`: the upstream sees no other
+    /// request) wait for a permit of [`Upstream::permit_verb`], once received: for a test that
+    /// needs a fill in flight.
     pub(in crate::server) fn gate_verb(&self, verb: &str) {
+        assert_eq!(verb, "fill", "the upstream sees the fills alone");
         let gate = Gate {
             gating: true,
             ordered: true,
             ..Gate::default()
         };
-        let _ = locked(&self.verbs).insert(
-            verb.to_owned(),
-            Arc::new((Mutex::new(gate), Condvar::new())),
-        );
+        *locked(&self.fills) = Some(Arc::new((Mutex::new(gate), Condvar::new())));
     }
 
-    /// The gate of `verb`.
+    /// The gate of the fills.
     fn verb(&self, verb: &str) -> Arc<VerbGate> {
-        locked(&self.verbs)
-            .get(verb)
-            .cloned()
-            .expect("a verb with a gate")
+        assert_eq!(verb, "fill", "the upstream sees the fills alone");
+        locked(&self.fills).clone().expect("a gate of the fills")
     }
 
-    /// Lets `count` more requests of `verb` go on: the next ones in the order they were received.
+    /// Lets `count` more fills go on: the next ones in the order they were received.
     pub(in crate::server) fn permit_verb(&self, verb: &str, count: usize) {
         let gate = self.verb(verb);
         locked(&gate.0).given += count;
         gate.1.notify_all();
     }
 
-    /// Waits until `count` requests of `verb` have been received in all.
+    /// Waits until `count` fills have been received in all, since the gate was closed.
     pub(in crate::server) fn wait_for_verb(&self, verb: &str, count: usize) {
         let gate = self.verb(verb);
         let _gate = gate
@@ -386,17 +421,17 @@ impl Upstream {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
     }
 
-    /// The requests of `verb` received in all.
+    /// The fills received in all, since the gate was closed.
     pub(in crate::server) fn received(&self, verb: &str) -> usize {
         locked(&self.verb(verb).0).started
     }
 
-    /// The requests of `verb` received and not answered now.
+    /// The fills received and not answered now.
     pub(in crate::server) fn in_flight(&self, verb: &str) -> usize {
         locked(&self.verb(verb).0).in_flight
     }
 
-    /// Counts a request received on `gate`, and waits for a permit if the gate is closed.
+    /// Counts a fill received on `gate`, and waits for a permit if the gate is closed.
     fn enter(gate: &Mutex<Gate>, changed: &Condvar) {
         let mut gate = locked(gate);
         gate.started += 1;
@@ -418,7 +453,7 @@ impl Upstream {
         gate.used += 1;
     }
 
-    /// Counts a request of `gate` answered.
+    /// Counts a fill of `gate` answered.
     fn leave(gate: &Mutex<Gate>, changed: &Condvar) {
         locked(gate).in_flight -= 1;
         changed.notify_all();
@@ -446,81 +481,224 @@ impl Upstream {
         }
     }
 
-    /// The requests that begin with `verb`.
+    /// The requests that begin with `verb` (`fill`: the upstream sees no other).
     pub(in crate::server) fn asked(&self, verb: &str) -> Vec<String> {
-        locked(&self.requests)
-            .iter()
-            .filter(|line| line.split(' ').next() == Some(verb))
-            .cloned()
-            .collect()
+        assert_eq!(verb, "fill", "the upstream sees the fills alone");
+        locked(&self.requests).clone()
+    }
+
+    /// The objects the cache put, by key: what the put directory's puts made.
+    pub(in crate::server) async fn put_objects(&self) -> Vec<(String, Bytes)> {
+        let built: Vec<String> = locked(&self.published).keys().cloned().collect();
+        let mut objects = Vec::new();
+        for listed in self.store.list("").await.unwrap() {
+            if !built.contains(&listed.key) {
+                let bytes = self.store.get(&listed.key, None).await.unwrap();
+                objects.push((listed.key, bytes));
+            }
+        }
+        objects
     }
 }
 
-/// A Unix socket that answers the lines of the fill socket from an [`Upstream`].
-pub(in crate::server) struct FakeFill {
-    path: PathBuf,
-    stop: Arc<AtomicBool>,
-    thread: Option<std::thread::JoinHandle<()>>,
+#[async_trait]
+impl Backend for Upstream {
+    async fn put(&self, key: &str, body: Bytes) -> Result<(), Error> {
+        self.store.put(key, body).await
+    }
+
+    async fn put_tagged(&self, key: &str, body: Bytes) -> Result<String, Error> {
+        self.store.put_tagged(key, body).await
+    }
+
+    async fn put_stream_answered(
+        &self,
+        key: &str,
+        len: Option<u64>,
+        body: PartBody<'_>,
+        hot_only: bool,
+    ) -> Result<Option<PutAnswer>, Error> {
+        self.store
+            .put_stream_answered(key, len, body, hot_only)
+            .await
+    }
+
+    async fn put_if_match(&self, key: &str, body: Bytes, etag: &str) -> Result<String, Error> {
+        self.store.put_if_match(key, body, etag).await
+    }
+
+    async fn put_stream_if_match(
+        &self,
+        key: &str,
+        len: Option<u64>,
+        body: PartBody<'_>,
+        etag: &str,
+    ) -> Result<String, Error> {
+        self.store.put_stream_if_match(key, len, body, etag).await
+    }
+
+    async fn delete_if_match(&self, key: &str, etag: &str) -> Result<(), Error> {
+        self.store.delete_if_match(key, etag).await
+    }
+
+    async fn get(&self, key: &str, range: Option<ByteRange>) -> Result<Bytes, Error> {
+        self.publish().await;
+        let why = match self.fill_of(key, range) {
+            Some((fill, line)) => self.take(&fill, line),
+            None => None,
+        };
+        // A manifest's fill fails at its HEAD; its bytes, read after, are the digest's or not.
+        let why = why.or_else(|| {
+            let digest = key.strip_prefix("cas/l/")?;
+            let why = locked(&self.failing).get(digest).cloned()?;
+            (why == "mismatch").then_some(why)
+        });
+        match why.as_deref() {
+            Some("mismatch") => {
+                let size = range.map_or(1, ByteRange::size);
+                Ok(Bytes::from(vec![0xa5; usize::try_from(size).unwrap()]))
+            }
+            Some(why) => Err(Self::failure(key, why)),
+            None => self.store.get(key, range).await,
+        }
+    }
+
+    async fn head(&self, key: &str) -> Result<Meta, Error> {
+        self.publish().await;
+        if let Some((fill @ Fill::Manifest(_), line)) = self.fill_of(key, None)
+            && let Some(why) = self.take(&fill, line)
+            && why != "mismatch"
+        {
+            return Err(Self::failure(key, &why));
+        }
+        self.store.head(key).await
+    }
+
+    async fn delete(&self, key: &str) -> Result<(), Error> {
+        self.store.delete(key).await
+    }
+
+    async fn list(&self, prefix: &str) -> Result<Vec<Listed>, Error> {
+        self.publish().await;
+        self.store.list(prefix).await
+    }
+
+    async fn create_upload(&self, key: &str) -> Result<String, Error> {
+        self.store.create_upload(key).await
+    }
+
+    async fn upload_part(
+        &self,
+        key: &str,
+        id: &str,
+        number: u32,
+        body: PartBody<'_>,
+    ) -> Result<String, Error> {
+        self.store.upload_part(key, id, number, body).await
+    }
+
+    async fn complete_upload(
+        &self,
+        key: &str,
+        id: &str,
+        parts: &[(u32, String)],
+    ) -> Result<String, Error> {
+        self.store.complete_upload(key, id, parts).await
+    }
+
+    async fn complete_upload_if_match(
+        &self,
+        key: &str,
+        id: &str,
+        parts: &[(u32, String)],
+        etag: &str,
+    ) -> Result<String, Error> {
+        self.store
+            .complete_upload_if_match(key, id, parts, etag)
+            .await
+    }
+
+    async fn abort_upload(&self, key: &str, id: &str) -> Result<(), Error> {
+        self.store.abort_upload(key, id).await
+    }
+
+    async fn list_uploads(
+        &self,
+        prefix: &str,
+        after: Option<UploadsAfter<'_>>,
+        max_uploads: usize,
+    ) -> Result<Vec<OpenUpload>, Error> {
+        self.store.list_uploads(prefix, after, max_uploads).await
+    }
+
+    async fn list_parts(&self, key: &str, id: &str) -> Result<Vec<UploadedPart>, Error> {
+        self.store.list_parts(key, id).await
+    }
 }
 
-impl FakeFill {
-    /// Serves `upstream` at `path`.
-    pub(in crate::server) fn start(path: &Path, upstream: Arc<Upstream>) -> Self {
-        let listener = UnixListener::bind(path).unwrap();
-        let stop = Arc::new(AtomicBool::new(false));
-        let stopping = Arc::clone(&stop);
-        let thread = std::thread::spawn(move || {
-            for stream in listener.incoming().flatten() {
-                if stopping.load(Ordering::Acquire) {
-                    return;
-                }
-                let upstream = Arc::clone(&upstream);
-                let _ = std::thread::spawn(move || {
-                    let mut reader = BufReader::new(&stream);
-                    let mut writer = &stream;
-                    let mut line = String::new();
-                    while reader.read_line(&mut line).unwrap_or(0) > 0 {
-                        if let Some(answer) = upstream.answer(line.trim_end_matches('\n')) {
-                            let _ = writer.write_all(format!("{answer}\n").as_bytes());
-                        }
-                        line.clear();
-                    }
-                });
-            }
-        });
-        Self {
-            path: path.to_owned(),
-            stop,
-            thread: Some(thread),
+/// A runtime the cache's work runs on, shut down without waiting when dropped, so that a rig made
+/// in a test that is itself async may be dropped there.
+pub(in crate::server) struct Work(Option<Runtime>);
+
+impl Work {
+    fn new() -> Self {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
+            .enable_all()
+            .build()
+            .unwrap();
+        Self(Some(runtime))
+    }
+
+    /// The handle of the runtime.
+    pub(in crate::server) fn handle(&self) -> tokio::runtime::Handle {
+        self.0.as_ref().unwrap().handle().clone()
+    }
+}
+
+impl Drop for Work {
+    fn drop(&mut self) {
+        if let Some(runtime) = self.0.take() {
+            runtime.shutdown_background();
         }
     }
 }
 
-impl Drop for FakeFill {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::Release);
-        let _ = UnixStream::connect(&self.path);
-        let _ = self.thread.take().map(std::thread::JoinHandle::join);
-        let _ = std::fs::remove_file(&self.path);
-    }
+/// The node's cache, over an [`Upstream`], in the directory `cache` of `dir`, opened on `work`.
+fn node_cache(cache: &Path, upstream: &Arc<Upstream>, work: &Work) -> LocalCache {
+    let mut config = CacheConfig::new(cache, 1 << 30, vec![("cas/".to_owned(), true)]);
+    crate::server::local_cache::testing::never_expires(&mut config);
+    let backend: Arc<dyn Backend> = upstream.clone();
+    let handle = work.handle();
+    let _entered = handle.enter();
+    LocalCache::open(
+        config,
+        backend,
+        Arc::new(FakeDisk::new()),
+        Arc::new(TestClock::new()),
+    )
+    .unwrap()
 }
 
-/// A core over a fake fill socket, in scratch directories.
+/// A core over the node's cache, called in the process, in scratch directories.
 pub(in crate::server) struct Rig {
     pub core: Arc<Core>,
     pub upstream: Arc<Upstream>,
+    /// The node's cache, which the core calls.
+    pub node: LocalCache,
     /// The clock of the core, which only the test moves.
     pub clock: Arc<Mono>,
-    _fill: FakeFill,
     pub cache: PathBuf,
     pub runtime: PathBuf,
     pub mountpoint: PathBuf,
-    /// Last: the directories go after the socket that is in them is closed.
+    /// The runtime the work of the cache runs on.
+    pub work: Work,
+    /// Last: the directories go after everything that is in them.
     pub dir: TestDir,
 }
 
 impl Rig {
-    /// Settings of `tierstore fs` over the scratch directories of the rig: the mount point, the
+    /// Settings of the file system over the scratch directories of the rig: the mount point, the
     /// runtime directory, the sockets and the cache.
     pub(in crate::server::treefs) fn settings(&self) -> FsSettings {
         FsSettings {
@@ -532,7 +710,6 @@ impl Rig {
                 rustix::process::geteuid().as_raw(),
                 rustix::process::getegid().as_raw(),
             ),
-            fill_socket: Some(self.dir.path().join("fill.sock")),
             cache_path: self.cache.clone(),
             fetch_timeout: Duration::from_secs(5),
             threads: 4,
@@ -548,20 +725,42 @@ impl Rig {
         }
     }
 
-    /// The core of the process that takes over from the one of this rig: the generation after
-    /// it, over the same table, runtime directory, cache and fill socket.
-    pub(in crate::server::treefs) fn successor(&self) -> Arc<Core> {
-        let fills = Arc::new(FillClient::pausing(
-            self.dir.path().join("fill.sock"),
-            3,
+    /// The node's cache, and no tree store, as a start of the file system calls them.
+    pub(in crate::server::treefs) fn calls(&self) -> Calls {
+        Calls {
+            cache: self.node.clone(),
+            trees: None,
+            runtime: self.work.handle(),
+        }
+    }
+
+    /// What a core of the rig calls: the node's cache, each request waiting at most 30 seconds,
+    /// with no pause between the core's tries.
+    pub(in crate::server::treefs) fn asks(&self) -> Arc<InProcess> {
+        self.asks_pausing(Arc::new(|_| {}))
+    }
+
+    /// [`Rig::asks`], with the pauses between the core's tries taken by `pause`.
+    pub(in crate::server::treefs) fn asks_pausing(
+        &self,
+        pause: Arc<dyn Fn(Duration) + Send + Sync>,
+    ) -> Arc<InProcess> {
+        Arc::new(InProcess::new(
+            (self.node.clone(), None),
+            self.work.handle(),
             Duration::from_secs(30),
-            Arc::new(|_| {}),
-        ));
+            pause,
+        ))
+    }
+
+    /// The core of the process that takes over from the one of this rig: the generation after
+    /// it, over the same table, runtime directory and cache.
+    pub(in crate::server::treefs) fn successor(&self) -> Arc<Core> {
         let mut settings = self.core.settings().clone();
         settings.generation += 1;
         Arc::new(Core::new(
             settings,
-            fills,
+            self.asks(),
             TreeTable::open(&self.runtime).unwrap(),
             &self.runtime,
         ))
@@ -601,18 +800,11 @@ impl Rig {
         Self::made(name, built, (OWNER, TREE_LIST_RAM), false)
     }
 
-    /// A second core over the same cache and fill socket, with a table of tree numbers and a
-    /// runtime directory of its own: what a restart makes, before it attaches anything.
+    /// A second core over the same cache, with a table of tree numbers and a runtime directory of
+    /// its own: what a restart makes, before it attaches anything.
     pub(in crate::server) fn second_core(&self) -> Arc<Core> {
         let runtime = self.dir.path().join("run2");
         std::fs::create_dir_all(&runtime).unwrap();
-        let socket = self.dir.path().join("fill.sock");
-        let fills = Arc::new(FillClient::pausing(
-            socket,
-            3,
-            Duration::from_secs(30),
-            Arc::new(|_| {}),
-        ));
         Arc::new(Core::new(
             Settings {
                 owner: OWNER,
@@ -625,7 +817,7 @@ impl Rig {
                 tree_list_ram_bytes: TREE_LIST_RAM,
                 clock: Arc::clone(&self.clock) as Arc<dyn Clock>,
             },
-            fills,
+            self.asks(),
             TreeTable::create(&runtime).unwrap(),
             &runtime,
         ))
@@ -644,32 +836,16 @@ impl Rig {
         for path in [&cache, &runtime, &mountpoint] {
             std::fs::create_dir_all(path).unwrap();
         }
-        let upstream = Arc::new(Upstream {
-            cache: cache.clone(),
-            built: Mutex::new(built),
-            failing: Mutex::new(HashMap::new()),
-            pin_answer: Mutex::new(None),
-            requests: Mutex::new(Vec::new()),
-            answers: Mutex::new(HashMap::new()),
-            pack: Mutex::new(None),
-            puts: Arc::new(FakePuts::default()),
-            holding: Mutex::new(false),
-            released: Condvar::new(),
-            gate: Mutex::new(Gate::default()),
-            gate_changed: Condvar::new(),
-            pins: Mutex::new(Gate::default()),
-            pins_changed: Condvar::new(),
-            verbs: Mutex::new(HashMap::new()),
-        });
-        let socket = dir.path().join("fill.sock");
-        let fill = FakeFill::start(&socket, Arc::clone(&upstream));
-        let fills = Arc::new(FillClient::pausing(
-            socket,
-            3,
+        let upstream = Arc::new(Upstream::new(built));
+        let work = Work::new();
+        let node = node_cache(&cache, &upstream, &work);
+        let clock = Arc::new(Mono::new());
+        let asks = Arc::new(InProcess::new(
+            (node.clone(), None),
+            work.handle(),
             Duration::from_secs(30),
             Arc::new(|_| {}),
         ));
-        let clock = Arc::new(Mono::new());
         let core = Arc::new(Core::new(
             Settings {
                 owner,
@@ -682,19 +858,20 @@ impl Rig {
                 tree_list_ram_bytes: cap,
                 clock: Arc::clone(&clock) as Arc<dyn Clock>,
             },
-            fills,
+            asks,
             TreeTable::create(&runtime).unwrap(),
             &runtime,
         ));
         Self {
-            dir,
+            core,
+            upstream,
+            node,
+            clock,
             cache,
             runtime,
             mountpoint,
-            upstream,
-            clock,
-            _fill: fill,
-            core,
+            work,
+            dir,
         }
     }
 }
