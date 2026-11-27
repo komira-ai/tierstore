@@ -846,9 +846,13 @@ impl FakeManager {
 #[cfg(target_os = "linux")]
 impl Drop for FakeManager {
     fn drop(&mut self) {
-        let _ =
+        let told =
             UnixDatagram::unbound().and_then(|socket| socket.send_to(STOP.as_bytes(), &self.path));
-        let _ = self.thread.take().map(std::thread::JoinHandle::join);
+        // A manager whose socket is gone (its directory was removed before it) cannot be told to
+        // stop: its thread is left to the end of the process rather than waited for forever.
+        if told.is_ok() {
+            let _ = self.thread.take().map(std::thread::JoinHandle::join);
+        }
     }
 }
 

@@ -1,11 +1,9 @@
-//! Planner ranks (section 6 step 2, 4.5): a needed cell's rank is its first touch in the profile,
-//! else its place in tree order after every profiled cell; the plan's ensures are in rank order.
+//! Planner ranks (section 6 step 2, 4.5): with no shared pack, a needed cell's rank is its place
+//! in tree order; the plan's ensures are in rank order. Shared packs first is in `shared.rs`.
 //!
 //! Catches:
-//! - a plan that ignores the profile, or lets it add cells the job does not need;
-//! - a stale profile (an unknown key, a range past the pack, an empty range) that fails the plan;
 //! - a cell shared by two files that takes the later file's rank;
-//! - one rank for a whole run, so a profiled cell in its middle waits for the run's head;
+//! - one rank for a whole run, so a cell an earlier range needs in its middle waits for its head;
 //! - the tail of a large pack ensured before a small pack the job touches earlier;
 //! - ensures out of rank order, or a plan that depends on anything but its input.
 
@@ -16,14 +14,12 @@
 
 mod support;
 
-use support::{Case, MIB, bytes, cells, list_mib, pack, per_cell, shape, touch};
-use tierstore_fetch_api::ids::ByteRange;
-use tierstore_fetch_api::ids::PackKey;
+use support::{Case, MIB, bytes, cells, list_mib, pack, per_cell, shape};
 use tierstore_plan::config::Medium;
-use tierstore_plan::plan::{Fetch, PackPlan, Plan, Touch};
+use tierstore_plan::plan::{Fetch, PackPlan, Plan};
 
 #[test]
-fn without_a_profile_ranks_follow_tree_order() {
+fn without_a_shared_pack_ranks_follow_tree_order() {
     let list = list_mib(&[100, 100, 100]);
     let plan = Case::new(
         &list,
@@ -38,69 +34,6 @@ fn without_a_profile_ranks_follow_tree_order() {
             (1, 2, vec![(0, 1)]),
         ]
     );
-}
-
-#[test]
-fn profiled_cells_come_first_and_the_rest_follow_in_tree_order() {
-    let list = list_mib(&[100, 100, 100]);
-    let mut case = Case::new(
-        &list,
-        vec![cells(2, 10, 1), cells(0, 50, 1), cells(1, 0, 1)],
-    );
-    case.profile = vec![touch("p1", 0, 1)];
-    // One touch: it has rank 0 and the tree's ranges have 1, 2 and 3.
-    assert_eq!(
-        shape(&case.plan()),
-        vec![
-            (1, 0, vec![(0, 1)]),
-            (2, 1, vec![(10, 1)]),
-            (0, 2, vec![(50, 1)]),
-        ]
-    );
-}
-
-#[test]
-fn a_profile_touch_of_a_cell_the_job_does_not_need_adds_nothing() {
-    let list = list_mib(&[100]);
-    let mut case = Case::new(&list, vec![cells(0, 50, 1)]);
-    case.profile = vec![touch("p0", 70, 1), touch("p0", 50, 1)];
-    let plan = case.plan();
-    assert_eq!(shape(&plan), vec![(0, 1, vec![(50, 1)])]);
-    assert_eq!(per_cell(&plan).len(), 1);
-}
-
-#[test]
-fn a_stale_profile_is_ignored_and_never_fails_the_plan() {
-    let list = list_mib(&[100]);
-    let mut case = Case::new(&list, vec![cells(0, 5, 1)]);
-    case.profile = vec![
-        touch("not-in-this-list", 5, 1),
-        touch("p0", 200, 1),
-        Touch {
-            key: PackKey("p0".to_owned()),
-            range: ByteRange {
-                offset: 5 * MIB,
-                len: 0,
-            },
-        },
-        Touch {
-            key: PackKey("p0".to_owned()),
-            range: ByteRange {
-                offset: u64::MAX,
-                len: 2,
-            },
-        },
-    ];
-    // Four touches, none usable: the needed cell keeps its tree rank, 4 + 0.
-    assert_eq!(shape(&case.plan()), vec![(0, 4, vec![(5, 1)])]);
-}
-
-#[test]
-fn a_touch_running_past_the_pack_end_still_ranks_the_cells_it_covers() {
-    let list = list_mib(&[100]);
-    let mut case = Case::new(&list, vec![cells(0, 99, 1)]);
-    case.profile = vec![touch("p0", 98, 50)];
-    assert_eq!(shape(&case.plan()), vec![(0, 0, vec![(99, 1)])]);
 }
 
 #[test]
@@ -119,12 +52,13 @@ fn a_cell_two_ranges_share_takes_the_lower_rank() {
 }
 
 #[test]
-fn a_profiled_cell_inside_a_run_is_ensured_ahead_of_the_rest_of_the_run() {
+fn a_cell_an_earlier_range_needs_inside_a_later_run_is_ensured_ahead_of_the_rest_of_the_run() {
     let list = list_mib(&[100]);
-    let mut case = Case::new(&list, vec![cells(0, 10, 4)]);
-    case.profile = vec![touch("p0", 12, 1)];
+    // Cell 12 at rank 0, then cells 10 to 13 at rank 1: one rank per run would hold cell 12 back
+    // until cell 10 is read.
+    let plan = Case::new(&list, vec![cells(0, 12, 1), cells(0, 10, 4)]).plan();
     assert_eq!(
-        shape(&case.plan()),
+        shape(&plan),
         vec![(0, 0, vec![(12, 1)]), (0, 1, vec![(10, 2), (13, 1)])]
     );
 }
@@ -149,32 +83,6 @@ fn a_small_early_pack_is_ensured_before_the_tail_of_a_4_gib_pack() {
 }
 
 #[test]
-fn packs_sharing_a_key_each_take_the_profiles_touches() {
-    let list = support::FakeList {
-        packs: vec![pack("a", 100 * MIB), pack("a", 100 * MIB)],
-    };
-    let mut case = Case::new(&list, vec![cells(0, 3, 1), cells(1, 7, 1)]);
-    case.profile = vec![touch("a", 7, 1), touch("a", 3, 1)];
-    assert_eq!(
-        shape(&case.plan()),
-        vec![(1, 0, vec![(7, 1)]), (0, 1, vec![(3, 1)])]
-    );
-}
-
-#[test]
-fn ensures_of_one_rank_are_in_pack_order() {
-    let list = support::FakeList {
-        packs: vec![pack("a", 100 * MIB), pack("a", 100 * MIB)],
-    };
-    let mut case = Case::new(&list, vec![cells(1, 7, 1), cells(0, 3, 1)]);
-    case.profile = vec![touch("a", 0, 10)];
-    assert_eq!(
-        shape(&case.plan()),
-        vec![(0, 0, vec![(3, 1)]), (1, 0, vec![(7, 1)])]
-    );
-}
-
-#[test]
 fn the_last_short_cell_is_a_cell() {
     // 100.5 MiB: 101 cells, the last one half a MiB.
     let list = support::FakeList {
@@ -189,9 +97,8 @@ fn the_last_short_cell_is_a_cell() {
 fn nothing_needed_is_an_empty_plan() {
     let list = list_mib(&[100]);
     assert_eq!(Case::new(&list, vec![]).plan(), Plan::default());
-    // An empty range needs no cell, and a profile alone fetches nothing.
-    let mut case = Case::new(&list, vec![bytes(0, 5 * MIB, 0)]);
-    case.profile = vec![touch("p0", 0, 100)];
+    // An empty range needs no cell.
+    let case = Case::new(&list, vec![bytes(0, 5 * MIB, 0)]);
     assert_eq!(case.plan(), Plan::default());
 }
 
@@ -241,7 +148,6 @@ fn the_same_input_gives_the_same_plan_and_tree_order_only_moves_ranks() {
         cells(0, 60, 1),
     ];
     let mut case = Case::new(&list, needed.clone());
-    case.profile = vec![touch("p1", 40, 1)];
     let first = case.plan();
     assert_eq!(first, case.plan());
 
@@ -263,7 +169,6 @@ fn the_input_debug_names_what_it_plans_from() {
     let input = tierstore_plan::plan::PlanInput {
         list: &list,
         needed: &needed,
-        profile: &[],
         media: &media,
         backlog: tierstore_plan::plan::Backlog::default(),
     };

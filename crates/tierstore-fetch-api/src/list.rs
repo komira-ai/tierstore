@@ -13,6 +13,11 @@ pub type CellDigest = [u8; 32];
 /// The bit of `pack_flags` that says the pack is fully covered by spans.
 pub const PACK_FULLY_COVERED: u8 = 1;
 
+/// The bit of `pack_flags` the CAS service sets on a pack that at least `shared_min` trees name
+/// (6.1): Prepare ranks the needed cells of shared packs before the rest. A reader ignores the
+/// bits it does not know.
+pub const PACK_SHARED: u8 = 2;
+
 /// A pack of the list (the 48-byte PACKS record of 3.1, decoded). The record's
 /// `upload_part_size` bytes stay in the format and are read by nothing: they only cut the parts of
 /// a fill from the retired silo (4.4).
@@ -28,7 +33,7 @@ pub struct PackRecord {
     pub cell_count: u32,
     /// `log2` of the cell size: 20.
     pub cell_shift: u8,
-    /// `pack_flags` ([`PACK_FULLY_COVERED`]).
+    /// `pack_flags` ([`PACK_FULLY_COVERED`], [`PACK_SHARED`]; other bits are ignored).
     pub pack_flags: u8,
 }
 

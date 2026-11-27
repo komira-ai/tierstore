@@ -48,6 +48,8 @@ mod lint;
 mod macos_farm;
 mod macos_farm_skip_tests;
 mod macos_farm_tests;
+mod merge_queue;
+mod merge_queue_tests;
 mod pkg;
 mod pkg_tests;
 mod platforms;

@@ -9,7 +9,13 @@
 //! The fill socket is bound only while the cache holds the lock of its directory, and a client
 //! that finds no socket asks again for `fetch_timeout`. So here: a request made while the cache
 //! is read-only waits for the write role (`LocalCache::watch_mode`), up to `fs.fetch_timeout`, or
-//! to the end the request was given where that is sooner. A request still waiting then fails: a
+//! to the end the request was given where that is sooner. The mode says read-write only after
+//! the tree store has read its directory again (`LocalCache::before_read_write`), so a request
+//! that waited finds every placement the process before this one made, also those made after
+//! this process opened its store: a read of a file the process before opened is answered from
+//! it, not with `EIO` (a job that maps the file would take that as SIGBUS). A read of the
+//! directory that fails is said on stderr, and the store's next pass reads it again. A request
+//! still waiting for the write role at the end fails: a
 //! fill or a span with the words `read-only`, which the core asks again while its open has time
 //! and then fails with `EIO`; any other with [`AskError::ReadOnly`], or [`AskError::Spent`] where
 //! the request's own end came first. A touch and the reports do not wait: the cache passes over a
@@ -345,6 +351,23 @@ impl Fills for InProcess {
             Ok(Err(why)) => Err(why.to_string()),
             Err(missed) => Err(unfilled(&missed, late)),
         }
+    }
+
+    /// The span from the node's tree store, if the cache is read-write now and holds it; never
+    /// waited for. A read-only cache's index is its holder's as of the last time this process
+    /// read it, so a span it names is not taken: the open asks [`Fills::span`], which waits for
+    /// the write role.
+    fn span_held(
+        &self,
+        (_, size): (&str, u64),
+        (pack, offset): (&str, u64),
+    ) -> Option<(u64, PathBuf)> {
+        let trees = self.trees.as_ref()?;
+        if *self.cache.watch_mode().borrow() != Mode::ReadWrite {
+            return None;
+        }
+        let held = trees.held_span(pack, offset, size)?;
+        Some((held.offset, held.path))
     }
 
     /// Ends the hold, once the cache is read-write; nothing is lost if it does not become so.

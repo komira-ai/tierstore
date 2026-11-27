@@ -436,3 +436,79 @@ fn a_list_released_for_the_cap_says_the_opens_that_failed_under_it() {
         )]
     );
 }
+
+/// The `treelists` reports the node was told, once there is one.
+fn reports(rig: &Rig) -> Vec<String> {
+    until(|| !rig.upstream.asked("treelists").is_empty());
+    rig.upstream.asked("treelists")
+}
+
+/// Asserts that a cap lowered while the mount serves releases at once the lists over it that
+/// nothing holds, the one no request has named for longest first (`a`, then `b`), counts each as
+/// released for the cap, and tells the node the new cap with what stays mapped, `c` alone.
+/// Catches a lowered cap that waits for the next list to be mapped, or that the node is not told.
+#[test]
+fn a_lowered_cap_releases_at_once_the_lists_over_it_and_tells_the_node() {
+    let (rig, _) = placed("tfs-lists-lowered", 3, &["a", "b", "c"]);
+    for location in ["a", "b", "c"] {
+        let _ = found(&rig, location);
+        later(&rig);
+    }
+    rig.core.set_tree_list_ram_bytes(page());
+    assert!(!in_memory(&rig, number(&rig, 0, "a")));
+    assert!(!in_memory(&rig, number(&rig, 1, "b")));
+    assert!(in_memory(&rig, number(&rig, 2, "c")));
+    assert_eq!(counted(&rig), [2, 0, 0]);
+    let process = std::process::id();
+    let cap = page();
+    assert_eq!(
+        reports(&rig),
+        [format!("treelists mount-1 {process} 1 {cap} {cap} 2 0 0")]
+    );
+}
+
+/// Asserts that a cap raised while the mount serves releases nothing and lets in a list the cap
+/// before had no room for: `a` stays mapped beside `b`, nothing is counted, and the node is told
+/// the new cap.
+#[test]
+fn a_raised_cap_releases_nothing_and_lets_another_list_in() {
+    let (rig, _) = placed("tfs-lists-raised", 1, &["a", "b"]);
+    let _ = found(&rig, "a");
+    later(&rig);
+    rig.core.set_tree_list_ram_bytes(2 * page());
+    let _ = found(&rig, "b");
+    assert!(in_memory(&rig, number(&rig, 0, "a")));
+    assert!(in_memory(&rig, number(&rig, 1, "b")));
+    assert_eq!(counted(&rig), [0, 0, 0]);
+    let process = std::process::id();
+    let page = page();
+    assert_eq!(
+        reports(&rig),
+        [format!(
+            "treelists mount-1 {process} 1 {page} {} 0 0 0",
+            2 * page
+        )]
+    );
+}
+
+/// Asserts that a lowered cap leaves a list a run attached mapped, however long no request has
+/// named it, and releases the one nothing holds in its place; and that a cap under the one held
+/// list (a byte: the core takes any cap, its caller holds it to the file's bound) releases
+/// nothing more, and counts nothing mapped past the cap, as no list was mapped.
+#[test]
+fn a_lowered_cap_leaves_the_lists_that_are_held() {
+    let (rig, _) = placed("tfs-lists-lowered-held", 2, &["a", "b"]);
+    let _ = found(&rig, "a");
+    later(&rig);
+    let _ = found(&rig, "b");
+    let a = number(&rig, 0, "a");
+    let key = key_of(&id(0), "a").unwrap();
+    let _ = locked(&rig.core.state).attachments.add("run-1", a, key);
+    rig.core.set_tree_list_ram_bytes(page());
+    assert!(in_memory(&rig, a));
+    assert!(!in_memory(&rig, number(&rig, 1, "b")));
+    assert_eq!(counted(&rig), [1, 0, 0]);
+    rig.core.set_tree_list_ram_bytes(1);
+    assert!(in_memory(&rig, a));
+    assert_eq!(counted(&rig), [1, 0, 0]);
+}

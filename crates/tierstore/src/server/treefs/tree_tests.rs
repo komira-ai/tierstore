@@ -92,7 +92,7 @@ fn a_placed_tree_has_modes_and_a_location_and_a_tree_of_manifests_has_neither() 
 /// The image tree of [`image_bytes`] placed at `jobs/1`.
 fn image_tree() -> Tree {
     let image = TreeImage::checked(image_bytes().into()).unwrap();
-    Tree::image(Arc::new(ListImage::heap(&image)), "jobs/1".to_owned())
+    Tree::image(Arc::new(ListImage::heap(&image)), Some("jobs/1".to_owned()))
 }
 
 /// Asserts that a tree over an image counts its entries, reports its location, and makes each
@@ -271,7 +271,7 @@ fn an_image_tree_estimates_its_keys_and_location_and_not_its_list() {
         .map(|key| size_of::<Arc<str>>() + key.len() + ARC_HEADER)
         .sum();
     assert_eq!(image.keys().len(), 1);
-    let tree = Tree::image(Arc::clone(&image), "jobs/1".to_owned());
+    let tree = Tree::image(Arc::clone(&image), Some("jobs/1".to_owned()));
     assert_eq!(tree.heap_bytes(), (keys + "jobs/1".len()) as u64);
     assert!(Arc::ptr_eq(tree.list().unwrap(), &image));
     assert!(Tree::new(Vec::new()).list().is_none());

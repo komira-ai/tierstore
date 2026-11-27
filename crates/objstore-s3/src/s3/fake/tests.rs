@@ -94,6 +94,7 @@ fn request(
         owned.collect::<BTreeMap<String, String>>()
     };
     Request {
+        front: 0,
         method: method.to_owned(),
         path: format!("/bucket/{key}"),
         query: pairs(query),

@@ -8,6 +8,8 @@
     reason = "each test binary uses the part of the rig it needs"
 )]
 
+pub mod gated;
+
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
@@ -30,6 +32,7 @@ use tierstore_fetch_api::upstream::{
 };
 use tierstore_fetch_api::verify::{CellJob, Verdict, Verifier};
 use tierstore_format::ids::{BlockId, DriveId, Generation, NodeId};
+use tierstore_metrics::{Cache, Metrics};
 use tokio::sync::{Notify, Semaphore};
 
 pub const MIB: u64 = 1 << 20;
@@ -565,6 +568,8 @@ pub struct Rig {
     pub store: Arc<MemEntryStore>,
     pub upstream: Arc<TestUpstream>,
     pub budget: Arc<TestBudget>,
+    /// The node cache's families the engine counts into.
+    pub cache: Arc<Cache>,
     pub engine: FetchEngine,
 }
 
@@ -572,16 +577,30 @@ impl Rig {
     /// A rig with `permits` budget permits and `config`.
     #[must_use]
     pub fn new(permits: usize, config: EngineConfig) -> Self {
-        let clock = ManualClock::new();
         let store = Arc::new(MemEntryStore::new());
+        Self::with_store(permits, config, store.clone(), store)
+    }
+
+    /// A rig whose engine opens its entries in `entries`, which keeps them in `store` (a store
+    /// that wraps the in-memory one, for a test that holds or fails publishes).
+    #[must_use]
+    pub fn with_store(
+        permits: usize,
+        config: EngineConfig,
+        entries: Arc<dyn EntryStore>,
+        store: Arc<MemEntryStore>,
+    ) -> Self {
+        let clock = ManualClock::new();
         let upstream = Arc::new(TestUpstream::new());
         let budget = Arc::new(TestBudget::new(permits));
+        let cache = Metrics::new("test").node_cache().cache;
         let parts = EngineParts {
-            store: store.clone(),
+            store: entries,
             upstream: upstream.clone(),
             budget: budget.clone(),
             verifier: Arc::new(Sha256Verifier),
             timer: Arc::new(ManualTimer::new(clock.clone())),
+            cache_metrics: Some(cache.clone()),
         };
         let engine = FetchEngine::new(parts, config, &tokio::runtime::Handle::current());
         Self {
@@ -589,8 +608,24 @@ impl Rig {
             store,
             upstream,
             budget,
+            cache,
             engine,
         }
+    }
+
+    /// The `dirty_bytes` gauge now.
+    #[must_use]
+    pub fn dirty_gauge(&self) -> f64 {
+        self.cache.dirty_bytes.get(()).map_or(-1.0, |g| g.get())
+    }
+
+    /// The samples of `writeback_stall_seconds`.
+    #[must_use]
+    pub fn writeback_stalls(&self) -> u64 {
+        self.cache
+            .writeback_stall_seconds
+            .get(())
+            .map_or(0, |h| h.count())
     }
 
     #[must_use]

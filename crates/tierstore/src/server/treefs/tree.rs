@@ -2,7 +2,8 @@
 //! each directory the indices of its children), or an image read in place (below). A tree a placement shows at an fs location also has the
 //! mode of each entry, as stored, and the path of the location.
 //!
-//! A placed tree that is a version 2 tree list is held as its image ([`ListImage`]), mapped from
+//! A tree that is a version 2 tree list (a placement's, or one of `trees/` named by the list's
+//! digest, which has no location) is held as its image ([`ListImage`]), mapped from
 //! the list's file and shared with every other holder of the list in the process (the tree store
 //! among them, `server/local_cache/trees/mapped.rs`), and read in place: an entry's index is its
 //! place in the image, a directory's children are a range of indices sorted by name, and an entry
@@ -142,17 +143,18 @@ impl Tree {
         Self::listed(entries, modes, Some(location))
     }
 
-    /// The tree a placement shows at the fs location `location` that is the image `image`.
-    pub(super) fn image(image: Arc<ListImage>, location: String) -> Self {
+    /// The tree that is the image `image`: one a placement shows at the fs location `location`,
+    /// or, with none, the tree of `trees/` the list is.
+    pub(super) fn image(image: Arc<ListImage>, location: Option<String>) -> Self {
         let keys: usize = image
             .keys()
             .iter()
             .map(|key| size_of::<Arc<str>>() + key.len() + ARC_HEADER)
             .sum();
-        let heap = keys + location.capacity();
+        let heap = keys + location.as_ref().map_or(0, String::capacity);
         Self {
             body: Body::Image(image),
-            location: Some(location),
+            location,
             heap: heap as u64,
         }
     }

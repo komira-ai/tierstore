@@ -1,7 +1,8 @@
-//! What the hook reads off the answers of an instance: `/readyz` and the build gauge of
-//! `/metricz`.
+//! What the hook reads off the answers of an instance: `/readyz`, and the build gauge and the cap
+//! of the tree lists of a mount of `/metricz`.
 
 use super::ports::{PortError, Reply};
+use crate::server::local_cache::tree_lists::CAP;
 
 /// The mode a build node's cache says it is in, or none for a node that has no such mode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -69,5 +70,17 @@ pub fn build_of(metrics: &str) -> Option<Build> {
         version: label(labels, "version")?,
         commit: label(labels, "commit"),
         slot: label(labels, "slot").and_then(|s| s.parse().ok()),
+    })
+}
+
+/// The gauge `tierstore_fs_tree_list_ram_bytes` of the mount `mount` in the text of `/metricz`
+/// (the cap `fs.tree_list_ram_bytes` the mount last told the node); `None` if there is no such
+/// sample, or its value is not a whole number.
+#[must_use]
+pub fn tree_list_ram_bytes_of(metrics: &str, mount: &str) -> Option<u64> {
+    metrics.lines().find_map(|line| {
+        let (labels, value) = line.strip_prefix(CAP)?.strip_prefix('{')?.split_once('}')?;
+        (label(labels, "mount")? == mount).then_some(())?;
+        value.trim().parse().ok()
     })
 }

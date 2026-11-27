@@ -35,7 +35,7 @@ use crate::server::fill_socket::request::is_name;
 /// The families, each with a `# TYPE` line, written out for `docs/metrics.md`.
 const MAPPED: &str = "tierstore_fs_tree_lists_mapped";
 const BYTES: &str = "tierstore_fs_tree_list_mapped_bytes";
-const CAP: &str = "tierstore_fs_tree_list_ram_bytes";
+pub(in crate::server) const CAP: &str = "tierstore_fs_tree_list_ram_bytes";
 const RELEASES: &str = "tierstore_fs_tree_list_releases_total";
 const OVER_CAP: &str = "tierstore_fs_tree_list_over_cap_total";
 

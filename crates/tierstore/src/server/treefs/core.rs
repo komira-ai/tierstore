@@ -36,7 +36,7 @@ use crate::Clock;
 
 use crate::tree_manifest::{EntryKind, TreeDigest, TreeEntry};
 
-use super::attach::{Attachments, Failure, Snapshot, is_run};
+use super::attach::{Attachments, Detached, Snapshot, is_run};
 #[cfg(any(target_os = "linux", test))]
 use super::backing::{Adopted, Guard};
 use super::fills::Fills;
@@ -211,7 +211,7 @@ pub(super) struct Settings {
     /// How long a tree a lookup attached stays attached with no request naming it
     /// (`fs.tree_idle_secs`).
     pub tree_idle: Duration,
-    /// The most bytes of tree lists kept mapped (`fs.tree_list_ram_bytes`, `core/lists.rs`).
+    /// The most bytes of tree lists kept mapped, at start (`fs.tree_list_ram_bytes`, `lists.rs`).
     pub tree_list_ram_bytes: u64,
     /// The clock the use of a tree is told by, in milliseconds: only its differences count.
     pub clock: Arc<dyn Clock>,
@@ -318,9 +318,10 @@ impl Core {
         table: TreeTable,
         runtime_dir: &Path,
     ) -> Self {
+        let ram = settings.tree_list_ram_bytes;
         Self {
             settings,
-            lists: lists::Lists::new(fills.lists().unwrap_or_default()),
+            lists: lists::Lists::new(fills.lists().unwrap_or_default(), ram),
             fills,
             table,
             state: Mutex::new(State {
@@ -428,7 +429,7 @@ impl Core {
             ino: ino::of(number, entry.index),
             kind,
             size,
-            // A placed tree's modes are served as stored.
+            // A placed tree's modes, and a tree list's, are served as stored.
             perm: tree.mode(entry.index).unwrap_or(perm),
             nlink,
             uid: self.settings.owner.0,
@@ -519,40 +520,41 @@ impl Core {
             .map_err(|why| AttachError::Tree(why.to_string()))
     }
 
-    /// Ends every attachment of `run`: the failures its attachments recorded, or none if it
+    /// Ends every attachment of `run`: what its attachments recorded (`Detached`), or none if it
     /// attached nothing. A tree no run has now and no lookup attached is unpinned, with no lock of
     /// the core's held but that of its pins (`Core::free_tree`), and leaves memory when the kernel
     /// forgets its inodes, or at the sweep once no request has named it for `fs.tree_idle_secs`.
-    pub(super) fn detach(&self, run: &str) -> Option<Vec<Failure>> {
-        let (freed, failures, _freeing) = {
+    pub(super) fn detach(&self, run: &str) -> Option<Detached> {
+        let (freed, detached, _freeing) = {
             let _lifecycle = locked(&self.lifecycle);
             if self.is_held() {
                 return None;
             }
             let freeing = self.freeing();
-            let (freed, failures, snapshot) = {
+            let (freed, detached, snapshot) = {
                 let mut state = self.state();
+                let stall_ms = state.attachments.stall_of(run);
                 let trees = state.attachments.remove(run)?;
-                let mut failures = Vec::new();
-                let mut freed = Vec::new();
+                let (mut failures, mut freed) = (Vec::new(), Vec::new());
                 for (number, digest, mut failed) in trees {
                     failures.append(&mut failed);
                     if !state.attachments.is_attached(number) {
                         freed.push((number, digest));
                     }
                 }
-                (freed, failures, state.attachments.snapshot())
+                let detached = Detached { failures, stall_ms };
+                (freed, detached, state.attachments.snapshot())
             };
             let _ = self.write_attachments(&snapshot);
             for (number, _) in &freed {
                 let _ = locked(&self.prefetching).remove(number);
             }
-            (freed, failures, freeing)
+            (freed, detached, freeing)
         };
         for (number, digest) in freed {
             self.free_tree(number, &digest);
         }
-        Some(failures)
+        Some(detached)
     }
 
     /// Unpins the tree `number`, `digest`, which a detach has found that nothing attaches, and
@@ -577,14 +579,14 @@ impl Core {
     /// Stops this process from changing the table of tree numbers and the attachments file
     /// (`on`), or lets it do so again. A successor that takes over reads both once it has taken
     /// the sockets, and this process must have written its last by then: the call waits for the
-    /// attach or detach that is changing them, and for the unpins of the detaches decided
-    /// before it, and every later one is refused (`AttachError::Replaced`, and, for a detach, an
-    /// answer of none; ask `Core::is_held`). A hold also waits, with the lifecycle lock released,
-    /// for the announcement of the mount's pins that is being sent, and none is sent after it
-    /// (`core/live.rs`).
+    /// attach or detach that is changing them, writes the runs' stall (`Core::hand_stall_over`),
+    /// waits for the unpins of the detaches decided before it, and every later one is refused
+    /// (`AttachError::Replaced`; for a detach, none: ask `Core::is_held`). It also waits, the
+    /// lifecycle lock released, for the mount's pins being announced (`core/live.rs`); none after.
     pub(super) fn hold(&self, on: bool) {
         {
             let _lifecycle = locked(&self.lifecycle);
+            self.hand_stall_over(on);
             self.held.store(on, Ordering::SeqCst);
             // The unpins of the detaches decided before, which run with the lifecycle lock
             // released.

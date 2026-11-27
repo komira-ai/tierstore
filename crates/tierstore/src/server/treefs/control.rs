@@ -1,4 +1,5 @@
-//! The control socket: how a client attaches a tree for a run, and ends the attachments of a run.
+//! The control socket: how a client attaches a tree for a run, and ends the attachments of a run;
+//! and how the config hook sets the cap of the tree lists mapped while the mount serves.
 //! A Unix socket in the runtime directory, mode 0660, group `fs.client_group`; one line out, one
 //! line of JSON back, in the order of the requests of a connection.
 //!
@@ -7,15 +8,24 @@
 //! attach <sha256> for <run> prefetch all   the same; every blob of the tree is also filled in the
 //!                                  background, in manifest order, and pinned, without delaying
 //!                                  the answer
-//! detach <run>                     {"ok":true,"failures":[{"path":..,"digest":..,"reason":..}]}
+//! detach <run>                     {"ok":true,"failures":[{"path":..,"digest":..,"reason":..}],
+//!                                  "stall_ms":<ms>}
 //! detach-all-except [<run> ...]    {"ok":true,"detached":<number of runs>}
 //! attachments                      {"ok":true,"attachments":[{"tree":..,"run":..}]}
+//! set tree_list_ram_bytes <bytes>  {"ok":true,"tree_list_ram_bytes":<bytes>,"mount":"<id>"}
 //! ```
 //!
 //! A request that is refused is answered `{"ok":false,"error":"<why>"}`. `attach` is answered when
 //! the tree's manifests are read and flattened. `detach` of a run that attached nothing is
-//! answered `not attached`. These are the attachments of runs: a tree a lookup attached with no run
-//! (`core/implicit.rs`) is not listed, and no request here ends it.
+//! answered `not attached`. `stall_ms` is the time, in milliseconds, the opens under the run's
+//! attachments waited on fills (`attach.rs`): 0 for a run whose opens the cache answered. These
+//! are the attachments of runs: a tree a lookup attached with no run (`core/implicit.rs`) is not
+//! listed, and no request here ends it.
+//!
+//! `set tree_list_ram_bytes` makes `<bytes>`, a whole number of at least 4096 as in the file, the
+//! cap `fs.tree_list_ram_bytes` from now on (`core/lists.rs`), once the lists over it that nothing
+//! holds are released, and names the mount whose `tierstore_fs_tree_list_ram_bytes` gauge shows
+//! it; the file is not read.
 
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
 use std::os::fd::{AsFd as _, OwnedFd};
@@ -27,6 +37,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use rustix::event::{PollFd, PollFlags, poll};
 
 use super::attach::Failure;
+use super::config::LEAST_TREE_LIST_RAM_BYTES;
 use super::core::{AttachError, Core};
 
 /// The longest request, in bytes: a `detach-all-except` of about a thousand runs.
@@ -51,7 +62,11 @@ pub(super) fn handle(core: &Arc<Core>, line: &str) -> serde_json::Value {
             attached(core.attach_asking(digest, run, true))
         }
         (Some("detach"), [run]) => match core.detach(run) {
-            Some(failures) => serde_json::json!({"ok": true, "failures": failures_of(&failures)}),
+            Some(detached) => serde_json::json!({
+                "ok": true,
+                "failures": failures_of(&detached.failures),
+                "stall_ms": detached.stall_ms,
+            }),
             None if core.is_held() => refused(&AttachError::Replaced.to_string()),
             None => refused("not attached"),
         },
@@ -71,7 +86,24 @@ pub(super) fn handle(core: &Arc<Core>, line: &str) -> serde_json::Value {
                 .collect();
             serde_json::json!({"ok": true, "attachments": listed})
         }
+        (Some("set"), ["tree_list_ram_bytes", bytes]) => set_tree_list_ram_bytes(core, bytes),
         _ => refused("unknown request"),
+    }
+}
+
+/// The answer to `set tree_list_ram_bytes <bytes>`.
+fn set_tree_list_ram_bytes(core: &Core, bytes: &str) -> serde_json::Value {
+    match bytes.parse::<u64>() {
+        Ok(bytes) if bytes >= LEAST_TREE_LIST_RAM_BYTES => {
+            core.set_tree_list_ram_bytes(bytes);
+            serde_json::json!({"ok": true, "tree_list_ram_bytes": bytes, "mount": core.mount_id()})
+        }
+        Ok(bytes) => refused(&format!(
+            "tree_list_ram_bytes {bytes} is less than {LEAST_TREE_LIST_RAM_BYTES}"
+        )),
+        Err(_) => refused(&format!(
+            "tree_list_ram_bytes {bytes:?} is not a whole number of bytes"
+        )),
     }
 }
 

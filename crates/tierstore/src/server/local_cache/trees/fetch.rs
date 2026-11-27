@@ -139,6 +139,15 @@ impl TreeStore {
     /// Whether the `size` bytes (above 0) at `offset` of `pack` are in the cache.
     #[must_use]
     pub fn span_held(&self, pack: &str, offset: u64, size: u64) -> bool {
-        self.shared.cache.span_of(pack, offset, size).is_some()
+        self.held_span(pack, offset, size).is_some()
+    }
+
+    /// The file of the cache that holds the `size` bytes (above 0) at `offset` of `pack`, and
+    /// where they start in it, if the cache holds them now, counted as used: what
+    /// [`TreeStore::fetch_span`] answers for a span held, with nothing filled and nothing waited
+    /// for.
+    #[must_use]
+    pub(in crate::server) fn held_span(&self, pack: &str, offset: u64, size: u64) -> Option<Span> {
+        self.shared.cache.span_of(pack, offset, size)
     }
 }

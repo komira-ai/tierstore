@@ -1,5 +1,6 @@
-//! The reader's tests: the listing, the passes and their digest for any thread count, the node it reads from a `proc` directory, the
-//! report, and its arguments. `proc` is a directory the tests make, never the system's.
+//! The reader's tests: the listing, the passes and their digest for any thread count, their per-file times, the node and the pressure
+//! it reads from a `proc` directory, the report, and its arguments. `proc` is a directory the tests make, never the system's; a test
+//! that does not look at the pressure gives the tree's own directory, which has no `pressure/`.
 const std = @import("std");
 const t = std.testing;
 const reader = @import("tree_read.zig");
@@ -69,7 +70,7 @@ test "a pass reads every file whole, and its digest is the same for any number o
     const l = try reader.list(a, root);
     const want = std.fmt.bytesToHex(expectedDigest(big), .lower);
     for ([_]u32{ 1, 2, 5, 64 }) |threads| {
-        const p = try reader.readPass(a, root, l.files, threads);
+        const p = try reader.readPass(a, root, l.files, threads, root);
         try t.expectEqualStrings(&want, p.tree_sha256);
         try t.expectEqual(@as(u64, 5), p.files);
         try t.expectEqual(@as(u64, 1), p.empty);
@@ -77,7 +78,69 @@ test "a pass reads every file whole, and its digest is the same for any number o
         try t.expectEqual(@as(u64, 12 + 17 + 0 + 12 + big.len), p.bytes);
         // At most one thread per file.
         try t.expectEqual(@as(usize, @min(threads, 5)), p.threads);
+        // The per-file times: the percentiles in order, each file's open and reads within its whole time, the largest file
+        // within the most of one file, and no pressure where `proc` has none.
+        try t.expect(p.open_p50_ns <= p.open_p90_ns and p.open_p90_ns <= p.open_p99_ns and p.open_p99_ns <= p.open_max_ns);
+        try t.expect(p.file_p50_ns <= p.file_p99_ns and p.file_p99_ns <= p.file_max_ns);
+        try t.expect(p.open_max_ns <= p.file_max_ns);
+        try t.expect(p.open_sum_ns + p.read_sum_ns <= p.file_sum_ns);
+        try t.expect(p.largest_ns > 0 and p.largest_ns <= p.file_max_ns);
+        try t.expect(p.file_max_ns <= p.file_sum_ns);
+        try t.expectEqualDeep(reader.Pressure{ .cpu = null, .io = null, .memory = null }, p.pressure_start);
+        try t.expectEqualDeep(reader.Pressure{ .cpu = null, .io = null, .memory = null }, p.pressure_end);
     }
+}
+
+test "the rank of a percentile is the least value that at least that share of the values are at or below" {
+    const sorted = [_]u64{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 };
+    try t.expectEqual(@as(u64, 1), reader.rank(&sorted, 0));
+    try t.expectEqual(@as(u64, 1), reader.rank(&sorted, 1));
+    try t.expectEqual(@as(u64, 1), reader.rank(&sorted, 10));
+    try t.expectEqual(@as(u64, 2), reader.rank(&sorted, 11));
+    try t.expectEqual(@as(u64, 5), reader.rank(&sorted, 50));
+    try t.expectEqual(@as(u64, 9), reader.rank(&sorted, 90));
+    try t.expectEqual(@as(u64, 10), reader.rank(&sorted, 91));
+    try t.expectEqual(@as(u64, 10), reader.rank(&sorted, 99));
+    try t.expectEqual(@as(u64, 10), reader.rank(&sorted, 100));
+    // One value is every percentile; no value is 0.
+    try t.expectEqual(@as(u64, 7), reader.rank(&.{7}, 1));
+    try t.expectEqual(@as(u64, 7), reader.rank(&.{7}, 100));
+    try t.expectEqual(@as(u64, 0), reader.rank(&.{}, 50));
+}
+
+test "a pass's per-file sums count every file once: the empty tree sums to nothing" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makePath("d");
+    const root = try pathOf(a, tmp.dir);
+    const p = try reader.readPass(a, root, &.{}, 4, root);
+    const times = [_]u64{ p.open_sum_ns, p.read_sum_ns, p.file_sum_ns, p.open_p50_ns, p.open_max_ns, p.file_p99_ns, p.file_max_ns, p.largest_ns };
+    for (times) |v| try t.expectEqual(@as(u64, 0), v);
+}
+
+test "a pass reads the node's pressure from the proc directory given, before and after it" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    var proc = t.tmpDir(.{});
+    defer proc.cleanup();
+    _ = try tree(a, tmp.dir);
+    const root = try pathOf(a, tmp.dir);
+    const cpu = "some avg10=1.00 avg60=0.50 avg300=0.25 total=123456\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0";
+    try write(proc.dir, "pressure/cpu", cpu ++ "\n");
+    try write(proc.dir, "pressure/io", "some avg10=0.00 avg60=0.00 avg300=0.00 total=7\n");
+    const l = try reader.list(a, root);
+    const p = try reader.readPass(a, root, l.files, 2, try pathOf(a, proc.dir));
+    // A kernel without one of the files (here `memory`) has it null.
+    const want = reader.Pressure{ .cpu = cpu, .io = "some avg10=0.00 avg60=0.00 avg300=0.00 total=7", .memory = null };
+    try t.expectEqualDeep(want, p.pressure_start);
+    try t.expectEqualDeep(want, p.pressure_end);
+    try t.expectEqualDeep(want, reader.pressure(a, try pathOf(a, proc.dir)));
 }
 
 test "one changed byte changes the tree's digest" {
@@ -89,9 +152,9 @@ test "one changed byte changes the tree's digest" {
     _ = try tree(a, tmp.dir);
     const root = try pathOf(a, tmp.dir);
     const l = try reader.list(a, root);
-    const before = try reader.readPass(a, root, l.files, 4);
+    const before = try reader.readPass(a, root, l.files, 4, root);
     try write(tmp.dir, "lib/c/x.h", "#define X 2\n");
-    const after = try reader.readPass(a, root, l.files, 4);
+    const after = try reader.readPass(a, root, l.files, 4, root);
     try t.expectEqual(before.bytes, after.bytes);
     try t.expect(!std.mem.eql(u8, before.tree_sha256, after.tree_sha256));
 }
@@ -106,7 +169,7 @@ test "a tree with no file: a pass of nothing, whose digest is that of no input" 
     const root = try pathOf(a, tmp.dir);
     const l = try reader.list(a, root);
     try t.expectEqual(@as(usize, 0), l.files.len);
-    const p = try reader.readPass(a, root, l.files, 16);
+    const p = try reader.readPass(a, root, l.files, 16, root);
     var none: [32]u8 = undefined;
     Sha256.hash("", &none, .{});
     try t.expectEqualStrings(&std.fmt.bytesToHex(none, .lower), p.tree_sha256);
@@ -123,8 +186,8 @@ test "a file that cannot be opened fails the pass" {
     defer tmp.cleanup();
     try write(tmp.dir, "here", "x");
     const root = try pathOf(a, tmp.dir);
-    try t.expectError(error.FileNotFound, reader.readPass(a, root, &.{ "here", "gone" }, 2));
-    try t.expectError(error.FileNotFound, reader.readPass(a, root, &.{ "gone", "here" }, 1));
+    try t.expectError(error.FileNotFound, reader.readPass(a, root, &.{ "here", "gone" }, 2, root));
+    try t.expectError(error.FileNotFound, reader.readPass(a, root, &.{ "gone", "here" }, 1, root));
 }
 
 test "of two mounts on one point, the later line is the one reported" {
@@ -224,6 +287,7 @@ test "the program writes one JSON report to its output and to the report stream"
     defer proc.cleanup();
     const big = try tree(a, data.dir);
     try write(proc.dir, "sys/kernel/random/boot_id", "b00710\n");
+    try write(proc.dir, "pressure/io", "some avg10=0.00 avg60=0.00 avg300=0.00 total=42\n");
     const out = try std.fs.path.join(a, &.{ try pathOf(a, work.dir), "read.json" });
     var report = std.ArrayList(u8).init(t.allocator);
     defer report.deinit();
@@ -245,7 +309,15 @@ test "the program writes one JSON report to its output and to the report stream"
     for (passes) |p| {
         try t.expectEqualStrings(&want, p.object.get("tree_sha256").?.string);
         try t.expectEqual(@as(i64, 5), p.object.get("files").?.integer);
+        const fields = [_][]const u8{ "open_sum_ns", "read_sum_ns", "file_sum_ns", "open_p50_ns", "open_p90_ns", "open_p99_ns", "open_max_ns", "file_p50_ns", "file_p99_ns", "file_max_ns", "largest_ns" };
+        for (fields) |f| try t.expect(p.object.get(f).?.integer >= 0);
+        try t.expect(p.object.get("largest_ns").?.integer > 0);
+        const start = p.object.get("pressure_start").?.object;
+        try t.expectEqualStrings("some avg10=0.00 avg60=0.00 avg300=0.00 total=42", start.get("io").?.string);
+        try t.expect(start.get("cpu").? == .null);
+        try t.expectEqualStrings("some avg10=0.00 avg60=0.00 avg300=0.00 total=42", p.object.get("pressure_end").?.object.get("io").?.string);
     }
+    try t.expect(o.get("cpus").?.integer >= 1);
     const n = o.get("node").?.object;
     try t.expectEqualStrings("b00710", n.get("boot_id").?.string);
     try t.expect(n.get("hostname").? == .null);

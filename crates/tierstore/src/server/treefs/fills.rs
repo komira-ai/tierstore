@@ -233,6 +233,18 @@ pub(super) trait Fills: Send + Sync {
         until: Option<Until<'_>>,
     ) -> Result<(u64, PathBuf), String>;
 
+    /// The file of the cache that holds the `size` bytes at `offset` of the pack `pack`, and the
+    /// offset of their first byte in it, if the cache holds them now: answered at once, with
+    /// nothing filled and nothing waited for, so that the open of a file of a placed tree whose
+    /// bytes the node holds is answered by the reader that took it (`Core::open_now`) and does not
+    /// wait in the queue of the fetches behind the opens that do wait for fills. Only a core in
+    /// the node's process can answer so (`InProcess`); over the fill socket the question would
+    /// cost a round trip on the reader, so the answer is none and the open is parked and asks
+    /// [`Fills::span`].
+    fn span_held(&self, _blob: (&str, u64), _source: (&str, u64)) -> Option<(u64, PathBuf)> {
+        None
+    }
+
     /// Ends the hold of `mount` on the placement `id`.
     fn unplace(&self, mount: &str, id: &str);
 

@@ -117,7 +117,14 @@ taker goes before `ready`, and gives it up at `ready` (its store entry removed) 
 none refuses the line (`this instance holds no mount`) and the taker asks again without it, and an instance that holds one
 refuses a taker that does not ask for it. A cache instance offers its lock (`lock <path>`, a descriptor of `<cache>/.lock`) to a
 taker that asked for `ready`, starts no cache write from `ready` on, and says `written` after `bye` once its writes in flight
-have ended; the taker takes the write role then, or when the connection ends (`handoff/written.rs`). The taker checks that
+have ended; the taker takes the write role then, or when the connection ends (`handoff/written.rs`). Its cache tells
+the requests that wait for the write role that it is read-write only after its tree store has read the cache directory again
+(`LocalCache::before_read_write`; a read that fails is said, and the store's next pass reads it again), so the placements
+the old instance made after the taker opened its store are there for the first request that waited for the write role: a
+read of a file the old instance opened for a job under one of them is answered with its bytes, not `EIO`, which a job that
+maps the file would take as SIGBUS
+(`a_handed_lock_is_taken_with_the_placements_the_holder_made_after_the_store_opened`,
+`a_file_opened_before_the_hand_over_under_a_newer_placement_is_read_by_the_successor`). The taker checks that
 the running instance is its own user and the kind of each descriptor (the sockets listen, the lock is the regular file at
 its path) before `ack`. A build node's instance takes part in all but the mount today (`serve_front`); the start of the one
 process asks for the mount and the lock (P3 of the design's build plan). The frames are read one at a time
@@ -167,7 +174,8 @@ is there (`ConditionPathExists=`), so at boot only the recorded one runs.
 - `cutover` sets the marker of the idle instance and starts it; in a hand-over it takes the sockets and the old instance drains and
   exits 0, which the template does not restart. In a restart the old instance is stopped first. It then waits for `/readyz` and for
   the build gauge of 9300 to name the target version.
-- `verify` observes the same and says `promotion_pending` while a build node still serves read-only. `cleanup` is the commit: it
+- `verify` observes the same and says `promotion_pending` while a build node still serves read-only (built since: before the
+  commit it defers with `not_ready` instead, `crates/tierstore/docs/update-hook.md`). `cleanup` is the commit: it
   confirms afresh (it waits for `/readyz` as `cutover` does: the old instance still drains on the same sockets and answers 503 until
   it exits), records `stopping`, removes the old instance's marker and records the new one as live, in the same run: it does
   not wait for the old instance's drain, which ends by itself (see `crates/tierstore/docs/update-hook.md`). `rollback` starts the previous release
@@ -301,7 +309,10 @@ handover mode the old unit is started first. In both modes no unit is stopped wh
 
 **`verify`** (the gate; run again and again). Before `cleanup`: v-next is ready, a counted series of probes through 9300
 is answered by v-next with the staged version, the redirect names v-next, and v-current still serves. It exits `0` with
-`"promotion_pending":true`: v-current holds the lock, so v-next is read-only by design (the updater protocol, 3.8). After
+`"promotion_pending":true`: v-current holds the lock, so v-next is read-only by design (the updater protocol, 3.8).
+Built since, and what the hook does now: a build node that answers read-only before `cleanup` defers with `not_ready`
+and `verify_retry_secs`, records nothing, and is verified once it is the cache's writer
+(`crates/tierstore/docs/update-hook.md`). After
 `cleanup` has stopped v-current (the `stopping` marker): wait for `/readyz` to say `read-write` for
 `promotion_bound_secs` (900, from the params file); if it does, `0` with no pending flag; if the bound passes, `0` with
 `"promotion_pending":true`, and `detail` says the promotion is pending (it does not name who holds the lock: no instance
@@ -528,7 +539,8 @@ real hook binary against a fake service and a fake `nft` and `systemctl`):
   deferral removes a guard it placed and leaves one that was there, and a failed removal is `1`.
 - **C2 `cutover`**: twice leaves one rule naming the idle port; killed between apply and `swapped` converges; a failing
   probe swaps back and exits `1`; the swap is one `nft -f` (a recording fake sees one call).
-- **C3 `verify`**: twice changes nothing; the marker holds the boot id; with the lock held it exits `0` with `promotion_pending`; with `read-write` it
+- **C3 `verify`**: twice changes nothing; the marker holds the boot id; with the lock held it exits `0` with `promotion_pending` (built
+  since: before the commit it defers `not_ready` and records nothing, after it as here); with `read-write` it
   clears the flag; a wrong version or slot through 9300 is `1`; with `updater.promotion_ceiling_secs` in the params file
   and the lock never taken it still exits `0` (red: a hook that exits `1` at the ceiling).
 - **C4 `rollback`**: after `cutover` it returns the fake to its earlier state, with the idle slot's link absent; after

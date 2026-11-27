@@ -229,17 +229,38 @@ fn verify_after_cleanup_defers_past_the_draining_503() {
     assert!(again.report.promotion_pending);
 }
 
-/// Asserts that `verify` before the commit records `verified` and passes the pending promotion
-/// on, and run again writes nothing more.
+/// Asserts that `verify` before the commit defers while the new instance serves read-only (its
+/// cache has not taken the write role from the old instance yet): `not_ready` with
+/// `verify_retry_secs`, reversible, the detail naming the unit, and nothing recorded, run after run;
+/// once it serves read-write, `verify` records `verified` with no pending promotion, and run again
+/// writes nothing more. Catches a verify that passes a node whose jobs cannot yet fill their trees
+/// or reach the mount provider, so that hostkeeper commits it and moves on to the next node.
 #[test]
-fn verify_records_verified_and_run_again_writes_nothing() {
+fn verify_before_the_commit_defers_while_read_only_then_records_verified_once() {
     let fake = SystemdFake::installed();
     let p = params(NEW, Some(OLD));
     fake.drive(&p, &[Prepare, Cutover]);
     fake.set_read_only(true);
+    let before = fake.record();
+    for _ in 0..2 {
+        let done = fake.run(Verify, &p);
+        assert_deferred(&done, Reason::NotReady, 5);
+        assert_eq!(
+            detail(&done),
+            "tierstore@b serves read-only: its cache has not taken the write role yet",
+            "{done:?}"
+        );
+        assert!(done.report.reversible);
+        assert!(!done.report.promotion_pending);
+        assert_eq!(fake.record(), before);
+    }
+    let tuned = params_with(NEW, Some(OLD), "verify_retry_secs = 9\n");
+    assert_deferred(&fake.run(Verify, &tuned), Reason::NotReady, 9);
+
+    fake.set_read_only(false);
     let done = fake.run(Verify, &p);
     assert_ok(&done);
-    assert!(done.report.promotion_pending);
+    assert!(!done.report.promotion_pending);
     assert!(fake.record().has(Marker::Verified));
     assert!(detail(&done).contains(&version_of(NEW)));
 

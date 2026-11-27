@@ -46,6 +46,19 @@
 //!   no instance, and the key says the fs job was booted out and disabled. The key is set
 //!   only with an update in flight or committed, and never with `fs_next`. A hook that does not
 //!   know it ignores it.
+//! - `reload` (optional, written only when set; the config hook's record): the configuration
+//!   update in flight, or the last one when it is committed, is applied in place by the instance
+//!   that serves, `live`, and starts no other: the staged file differs from the one that served
+//!   in nothing but the keys a running process takes, or in nothing at all. `guard` says the
+//!   package changes the guard's file; `tree_list_ram_bytes`, when the package changes that param
+//!   of the `fs` interface, holds the value of the file that served (`from`), of the staged one
+//!   (`to`), the control socket that sets it, and, once `cutover` has set it, the `mount` whose
+//!   gauge shows it:
+//!   `{"guard":false,"tree_list_ram_bytes":{"from":536870912,"to":1073741824,"control_socket":"/run/tierstore-fs/control.sock","mount":"..."}}`.
+//!   The key is set only with an update in flight or committed, and never with `next`, `mode`,
+//!   `fs_next` or `fs_switch`. A hook that does not know it ignores it: it reads a record at rest
+//!   as it is, and one with a reload in flight as an update that names no instance to start,
+//!   which its steps refuse (`state_invalid`) rather than act on.
 //!
 //! An absent `live` with no update in flight means no instance is known to serve: launchd's one
 //! job has no letter, and a systemd host that was never installed has none.
@@ -165,6 +178,36 @@ pub enum Invalid {
     /// `fs_switch` and `fs_next` are both set: the switch hands no fs process over.
     #[error("fs_switch and fs_next are both set")]
     FsSwitchNext,
+    /// `reload` is set with a key of an update that starts an instance: a reload starts none.
+    #[error("reload is set with next, mode, fs_next or fs_switch: a reload starts no instance")]
+    ReloadStarts,
+}
+
+/// A configuration update that the instance that serves applies in place: see the key `reload`
+/// in the module docs.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+pub struct Reload {
+    /// Whether the package changes the guard's file, which `cutover` and `rollback` then reload.
+    #[serde(default)]
+    pub guard: bool,
+    /// `tree_list_ram_bytes` of the `fs` interface, when the package changes it.
+    #[serde(default)]
+    pub tree_list_ram_bytes: Option<ListCap>,
+}
+
+/// The change of the cap of the tree lists a mount keeps mapped (`fs.tree_list_ram_bytes`).
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub struct ListCap {
+    /// The value of the file that served: what `rollback` sets again.
+    pub from: u64,
+    /// The value of the staged file: what `cutover` sets.
+    pub to: u64,
+    /// The control socket of the `fs` interface, as both files name it.
+    pub control_socket: PathBuf,
+    /// The id of the mount the control socket named when `cutover` set the cap: the `mount`
+    /// label of the gauge `verify` reads back.
+    #[serde(default)]
+    pub mount: Option<String>,
 }
 
 /// Only the schema of a record, read before the rest is trusted.
@@ -213,6 +256,10 @@ pub struct Record {
     /// key `fs_switch` above.
     #[serde(default)]
     pub fs_switch: bool,
+    /// The update in flight, or the last committed one, is applied in place: see the key
+    /// `reload` above.
+    #[serde(default)]
+    pub reload: Option<Reload>,
 }
 
 impl Record {
@@ -234,6 +281,7 @@ impl Record {
             fs_live: None,
             fs_next: None,
             fs_switch: false,
+            reload: None,
         }
     }
 
@@ -348,6 +396,20 @@ impl Record {
         if self.fs_switch {
             value["fs_switch"] = json!(true);
         }
+        if let Some(reload) = &self.reload {
+            value["reload"] = json!({"guard": reload.guard});
+            if let Some(cap) = &reload.tree_list_ram_bytes {
+                let mut list = json!({
+                    "from": cap.from,
+                    "to": cap.to,
+                    "control_socket": cap.control_socket.to_string_lossy(),
+                });
+                if let Some(mount) = &cap.mount {
+                    list["mount"] = json!(mount);
+                }
+                value["reload"]["tree_list_ram_bytes"] = list;
+            }
+        }
         let mut text = format!("{value:#}");
         text.push('\n');
         text.into_bytes()
@@ -378,8 +440,9 @@ impl Record {
 
     /// Holds the record to the order of its markers and to what it must name: an update in
     /// flight names `to` and `version`; a committed one too; a record at rest names neither,
-    /// nor `from`, `next`, `mode` or `fs_next`; `fs_switch` is held to an update in flight or a
-    /// commit, and never goes with `fs_next`.
+    /// nor `from`, `next`, `mode` or `fs_next`; `fs_switch` and `reload` are held to an update in
+    /// flight or a commit, `fs_switch` never goes with `fs_next`, and `reload` never with a key
+    /// of an update that starts an instance.
     ///
     /// # Errors
     /// The first [`Invalid`] rule the record breaks.
@@ -418,6 +481,17 @@ impl Record {
         }
         if self.fs_switch && self.fs_next.is_some() {
             return Err(Invalid::FsSwitchNext);
+        }
+        if self.reload.is_some() && !self.updating && !self.committed() {
+            return marks("reload", "updating or stopping");
+        }
+        if self.reload.is_some()
+            && (self.next.is_some()
+                || self.mode.is_some()
+                || self.fs_next.is_some()
+                || self.fs_switch)
+        {
+            return Err(Invalid::ReloadStarts);
         }
         if self.fs_next.is_some() && self.fs_live.is_none() {
             return marks("fs_next", "fs_live");

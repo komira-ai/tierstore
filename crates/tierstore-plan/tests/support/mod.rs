@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use tierstore_fetch_api::ids::{ByteRange, PackKey, PackRoot};
 use tierstore_fetch_api::list::{CellDigest, ListL2, NodeIndex, PackRecord};
 use tierstore_plan::config::{Medium, PlanConfig};
-use tierstore_plan::plan::{Backlog, Needed, Plan, PlanError, PlanInput, Touch, plan};
+use tierstore_plan::plan::{Backlog, Needed, Plan, PlanError, PlanInput, plan};
 
 /// One MiB, the cell of every pack here unless a test says otherwise.
 pub const MIB: u64 = 1 << 20;
@@ -55,7 +55,7 @@ pub fn pack(key: &str, size: u64) -> PackRecord {
     }
 }
 
-/// A list of packs `p0`, `p1`, ... of these sizes in MiB.
+/// A list of packs `p0`, `p1`, ... of these sizes in MiB, every `pack_flags` 0.
 pub fn list_mib(sizes: &[u64]) -> FakeList {
     FakeList {
         packs: sizes
@@ -64,6 +64,15 @@ pub fn list_mib(sizes: &[u64]) -> FakeList {
             .map(|(i, &mib)| pack(&format!("p{i}"), mib * MIB))
             .collect(),
     }
+}
+
+/// A list of packs `p0`, `p1`, ... of these sizes in MiB and these `pack_flags`.
+pub fn list_flagged(packs: &[(u64, u8)]) -> FakeList {
+    let mut list = list_mib(&packs.iter().map(|&(mib, _)| mib).collect::<Vec<_>>());
+    for (record, &(_, flags)) in list.packs.iter_mut().zip(packs) {
+        record.pack_flags = flags;
+    }
+    list
 }
 
 /// Bytes `[offset, offset + len)` of `pack`.
@@ -79,34 +88,21 @@ pub fn cells(pack: u32, first: u64, count: u64) -> Needed {
     bytes(pack, first * MIB, count * MIB)
 }
 
-/// A profile touch of cells `[first, first + count)` of the pack keyed `key`.
-pub fn touch(key: &str, first: u64, count: u64) -> Touch {
-    Touch {
-        key: PackKey(key.to_owned()),
-        range: ByteRange {
-            offset: first * MIB,
-            len: count * MIB,
-        },
-    }
-}
-
 /// The inputs of one plan.
 pub struct Case<'a> {
     pub list: &'a FakeList,
     pub needed: Vec<Needed>,
-    pub profile: Vec<Touch>,
     pub media: BTreeMap<u32, Medium>,
     pub backlog: Backlog,
     pub config: PlanConfig,
 }
 
 impl<'a> Case<'a> {
-    /// No profile, every pack cold, no backlog, the default configuration.
+    /// Every pack cold, no backlog, the default configuration.
     pub fn new(list: &'a FakeList, needed: Vec<Needed>) -> Self {
         Self {
             list,
             needed,
-            profile: Vec::new(),
             media: BTreeMap::new(),
             backlog: Backlog::default(),
             config: PlanConfig::default(),
@@ -118,7 +114,6 @@ impl<'a> Case<'a> {
             &PlanInput {
                 list: self.list,
                 needed: &self.needed,
-                profile: &self.profile,
                 media: &self.media,
                 backlog: self.backlog,
             },

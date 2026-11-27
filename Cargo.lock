@@ -3366,6 +3366,7 @@ dependencies = [
  "ring",
  "tierstore-fetch-api",
  "tierstore-format",
+ "tierstore-metrics",
  "tokio",
 ]
 

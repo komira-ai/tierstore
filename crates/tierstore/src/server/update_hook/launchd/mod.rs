@@ -34,8 +34,9 @@
 //!   or nothing, is taken over as an update would take it over. A run that finds the job loaded
 //!   and serving the target only records `swapped`. A failure is reported; hostkeeper then runs
 //!   `rollback`.
-//! - `verify` observes the target version served by the loaded job and records `verified`. After
-//!   the commit it only observes.
+//! - `verify` observes the target version served by the loaded job and records `verified`; a job
+//!   that serves read-only (its cache has not taken the write role yet) defers with `not_ready`
+//!   and records nothing. After the commit it only observes.
 //! - `rollback` boots the fs job out first when there is one, then, for an update, puts the
 //!   previous binary in place and boots the job out and in again (a hand-over of a loaded job
 //!   sends `SIGUSR2` instead), waits for the previous version and boots the fs job in; a first
@@ -60,7 +61,7 @@ use std::path::Path;
 
 use super::LAUNCHD_PLIST;
 use super::args::Step;
-use super::look::{Look, verified};
+use super::look::{Look, verified, writable};
 use super::params::Params;
 use super::ports::LaunchdPorts;
 use super::record::{Marker, Record};
@@ -318,7 +319,8 @@ fn verify(c: &Ctx<'_, '_>, params: &Params, record: &mut Record) -> Result<Done,
             format!("{} is not loaded", c.label),
         ));
     }
-    let mode = c.look().observed(target)?;
+    let observed = c.look().observed(target)?;
+    let mode = writable(observed, c.label, params.verify_retry_secs)?;
     // `verified` follows its act: everything above was observed.
     if !record.has(Marker::Verified) {
         let marked = record.with(Marker::Verified);

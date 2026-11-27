@@ -3,7 +3,9 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-use super::{Instance, Invalid, Kind, Marker, Mode, RECORD_MAX, Record, RecordError, SCHEMA};
+use super::{
+    Instance, Invalid, Kind, ListCap, Marker, Mode, RECORD_MAX, Record, RecordError, Reload, SCHEMA,
+};
 
 fn release(name: &str) -> PathBuf {
     PathBuf::from(format!("/var/lib/hostkeeper/packages/tierstore/{name}"))
@@ -456,5 +458,134 @@ fn fs_switch_holds_to_its_rules() {
     assert_eq!(
         Invalid::FsSwitchNext.to_string(),
         "fs_switch and fs_next are both set"
+    );
+}
+
+/// A config update applied in place by `a`, of the cap `from` to `to`, set on the mount `m1`.
+fn reloading() -> Record {
+    Record {
+        updating: true,
+        to: Some(PathBuf::from(
+            "/var/lib/hostkeeper/packages/tierstore-config/1.1.0",
+        )),
+        version: Some("0.5.0+0123456789ab".to_owned()),
+        reload: Some(Reload {
+            guard: true,
+            tree_list_ram_bytes: Some(ListCap {
+                from: 536_870_912,
+                to: 1 << 30,
+                control_socket: PathBuf::from("/run/tierstore-fs/control.sock"),
+                mount: Some("m1".to_owned()),
+            }),
+        }),
+        ..Record::idle(Some(Instance::A))
+    }
+}
+
+/// Asserts the exact text of the record of an update applied in place (the key `reload`, its cap
+/// with the mount, and none of `next` or `mode`), that it reads back, and that a reload with no
+/// cap, or a cap not set yet, is written with no such key and reads back. Catches a change of the
+/// stored format the hook of the next release could not read.
+#[test]
+fn reload_is_written_and_reads_back() {
+    let text = String::from_utf8(reloading().encode()).unwrap();
+    let want = "{\n  \"kind\": \"single\",\n  \"live\": \"a\",\n  \"markers\": [],\n  \"reload\": {\n    \"guard\": true,\n    \"tree_list_ram_bytes\": {\n      \"control_socket\": \"/run/tierstore-fs/control.sock\",\n      \"from\": 536870912,\n      \"mount\": \"m1\",\n      \"to\": 1073741824\n    }\n  },\n  \"schema\": 1,\n  \"to\": \"/var/lib/hostkeeper/packages/tierstore-config/1.1.0\",\n  \"updating\": true,\n  \"version\": \"0.5.0+0123456789ab\"\n}\n";
+    assert_eq!(text, want);
+    assert_eq!(Record::decode(text.as_bytes()), Ok(reloading()));
+    for reload in [
+        Reload::default(),
+        Reload {
+            guard: false,
+            tree_list_ram_bytes: Some(ListCap {
+                mount: None,
+                ..reloading().reload.unwrap().tree_list_ram_bytes.unwrap()
+            }),
+        },
+    ] {
+        let record = Record {
+            reload: Some(reload),
+            ..reloading()
+        };
+        let text = String::from_utf8(record.encode()).unwrap();
+        assert!(!text.contains("mount"), "{text}");
+        assert_eq!(Record::decode(text.as_bytes()), Ok(record));
+    }
+    let bare = "{\"schema\":1,\"kind\":\"single\",\"updating\":false,\"markers\":[],\"reload\":{}}";
+    assert_eq!(
+        Record::decode(bare.as_bytes()).unwrap().reload,
+        Some(Reload::default())
+    );
+}
+
+/// Asserts the compatibility of the key both ways: a record of this hook with no reload has no
+/// key `reload`, byte for byte the record of the hook before it, which a record of that hook (no
+/// such key) reads as none; and a record with the key, read by a hook that does not know it, is
+/// the same record without it (`a_key_added_later_is_ignored` reads an unknown key the same way).
+#[test]
+fn reload_is_additive_both_ways() {
+    let plain = updating();
+    let text = String::from_utf8(plain.encode()).unwrap();
+    assert!(!text.contains("reload"), "{text}");
+    assert_eq!(Record::decode(text.as_bytes()).unwrap().reload, None);
+    let with = String::from_utf8(reloading().encode()).unwrap();
+    let mut value: serde_json::Value = serde_json::from_str(&with).unwrap();
+    let _ = value.as_object_mut().unwrap().remove("reload");
+    let before = Record {
+        reload: None,
+        ..reloading()
+    };
+    assert_eq!(Record::decode(value.to_string().as_bytes()), Ok(before));
+}
+
+/// Asserts that `reload` passes `check` with an update in flight and after its commit, and breaks
+/// the rules it must: not at rest with no commit, and not beside a key of an update that starts an
+/// instance. Catches a reload noted on a record no update owns, and one that also starts the other
+/// instance.
+#[test]
+fn reload_holds_to_its_rules() {
+    assert_eq!(reloading().check(), Ok(()));
+    let committed = with_markers(
+        Record {
+            updating: false,
+            ..reloading()
+        },
+        &[Marker::Swapped, Marker::Verified, Marker::Stopping],
+    );
+    assert_eq!(committed.check(), Ok(()));
+    assert_eq!(
+        Record {
+            updating: false,
+            to: None,
+            version: None,
+            ..reloading()
+        }
+        .check(),
+        marks("reload", "updating or stopping")
+    );
+    for starts in [
+        Record {
+            next: Some(Instance::B),
+            ..reloading()
+        },
+        Record {
+            mode: Some(Mode::Restart),
+            ..reloading()
+        },
+        Record {
+            fs_live: Some(Instance::A),
+            fs_next: Some(Instance::B),
+            ..reloading()
+        },
+        Record {
+            fs_live: Some(Instance::A),
+            fs_switch: true,
+            ..reloading()
+        },
+    ] {
+        assert_eq!(starts.check(), Err(Invalid::ReloadStarts));
+    }
+    assert_eq!(
+        Invalid::ReloadStarts.to_string(),
+        "reload is set with next, mode, fs_next or fs_switch: a reload starts no instance"
     );
 }

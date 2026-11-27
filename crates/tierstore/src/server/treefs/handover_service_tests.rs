@@ -93,6 +93,7 @@ async fn take_one(old: &One, prepare: Prepare<'_>) -> crate::server::handoff::In
             prepare,
         }),
         lock: None,
+        leaves_another_lock: false,
     };
     let taken = within("the take", take_service(&handoff, &want, ask)).await;
     taken.unwrap().expect("an instance answers")

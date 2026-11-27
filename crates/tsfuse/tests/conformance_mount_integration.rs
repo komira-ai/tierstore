@@ -11,7 +11,10 @@
 //!   directory of the FUSE control file system while mounted, and the unmount removes it: a file
 //!   of it opened while mounted reads nothing after the unmount. The check does not look the name
 //!   up again: the kernel gives the number to the next mount made on the host, so a directory of
-//!   that name may by then be another mount's.
+//!   that name may by then be another mount's. One check makes that order itself: after the
+//!   unmount it mounts and holds unanswered mounts until one has the old number (or a higher
+//!   one, when another mount took it); with the old number held, that name is a live
+//!   connection's, and in every case the old connection's file still reads nothing.
 //! - **Unmount while busy.** With a file of the mount held open, an unmount fails and leaves the
 //!   mount: `EBUSY` from `umount2` (`MountError::Unmount`), a failed helper
 //!   (`MountError::Helper`) through `fusermount3`; a lazy unmount then detaches it, the held file
@@ -322,6 +325,109 @@ fn the_connection_of_a_mount_is_a_directory_of_the_control_file_system_until_it_
         directory.display()
     );
     assert_eq!(served.join(), vec![ReaderEnd::Unmounted; READERS]);
+}
+
+/// A FUSE mount made only to hold a connection number: its INIT is never answered, so nothing
+/// touches it but [`Mount::connection`], which sends no request. Dropped (a failed check
+/// included), it closes the device, which ends the connection, and detaches the mount.
+struct Held {
+    id: ConnectionId,
+    device: Option<tsfuse::DevFd>,
+    mount: Option<Mount>,
+    _dir: TestDir,
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        drop(self.device.take());
+        if let Some(mount) = self.mount.take() {
+            let _ = one_at_a_time(|| mount.unmount(true));
+        }
+    }
+}
+
+/// Mounts and holds unanswered mounts until one has a number of at least `old`'s; the last one
+/// held is that one. The kernel gives each new mount the lowest free number, and every mount made
+/// here stays held, so no two have the same number; numbers start at 1, so fewer than `old.0` of
+/// them can be below `old`, and the loop ends on its count, never on a retry.
+fn hold_up_to(old: ConnectionId) -> Vec<Held> {
+    let mut held = Vec::new();
+    for i in 0..old.0.max(1) {
+        let dir = TestDir::under(env!("CARGO_TARGET_TMPDIR"), &format!("t-f7-hold-{i}"));
+        let mp = dir.path().join("mnt");
+        std::fs::create_dir(&mp).unwrap();
+        let options = tree_options("tsfuse-conformance-held");
+        let (device, mount) = one_at_a_time(|| Mounter::default().mount(&mp, &options)).unwrap();
+        // Held before its number is read, so that a failed read still detaches it.
+        let id = mount.connection();
+        held.push(Held {
+            id: ConnectionId(0),
+            device: Some(device),
+            mount: Some(mount),
+            _dir: dir,
+        });
+        let id = id.unwrap();
+        if let Some(last) = held.last_mut() {
+            last.id = id;
+        }
+        if id.0 >= old.0 {
+            return held;
+        }
+    }
+    let ids: Vec<u32> = held.iter().map(|h| h.id.0).collect();
+    panic!("{} held mounts all below {}: {ids:?}", held.len(), old.0);
+}
+
+/// The order that made the by-name check fail: after the unmount, another connection takes the
+/// old number, so a directory of that name is there again. Here the test takes the number itself
+/// with [`hold_up_to`] instead of waiting for another test's mount to. The name then shows a live
+/// connection (its `waiting` file reads a count, and a check that the name is absent fails), and
+/// the old connection's file opened while mounted still reads nothing.
+#[test]
+fn a_new_mount_on_the_old_number_does_not_make_the_old_connection_read_as_there() {
+    let Some((mounted, session)) = Mounted::new("t-f7-reuse", READERS) else {
+        return;
+    };
+    let (tree, _) = tree();
+    let served = serve_inline(session, tree);
+    if let Some(why) = no_control_file_system() {
+        skip(&why);
+        mounted.unmount();
+        served.join();
+        return;
+    }
+    let old = mounted.mount().connection().unwrap();
+    let control = ControlEntry::open(old);
+    mounted.unmount();
+    assert_eq!(served.join(), vec![ReaderEnd::Unmounted; READERS]);
+
+    let held = hold_up_to(old);
+    let directory = Path::new(CONNECTIONS).join(old.0.to_string());
+    let last = held.last().map(|h| h.id);
+    if last == Some(old) {
+        assert!(
+            directory.is_dir(),
+            "{} is the held mount's while the old connection is gone",
+            directory.display()
+        );
+        // Asserts that it reads a count: the name is a live connection's.
+        drop(ControlEntry::open(old));
+    } else {
+        // A mount of another test or process held the number when the held mount was made: the
+        // order is there, but its holder may not be a FUSE mount, so only its name check is
+        // skipped; the read below still runs.
+        skip(&format!(
+            "the check of the old number's directory: {} was another mount's (held: {:?})",
+            old.0,
+            held.iter().map(|h| h.id.0).collect::<Vec<_>>()
+        ));
+    }
+    assert_eq!(
+        control.waiting(),
+        None,
+        "{} opened while mounted reads nothing after the unmount, whoever has the name now",
+        directory.display()
+    );
 }
 
 /// A mount with a file of it held open: the unmount fails and leaves the mount; the lazy one

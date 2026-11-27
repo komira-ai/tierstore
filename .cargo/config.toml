@@ -2,3 +2,12 @@
 # step is one command and the logic behind it is Rust with tests.
 [alias]
 xtask = "run -p xtask --locked --"
+
+# Every build of the workspace fetches the git dependencies of the root `Cargo.toml` from GitHub,
+# and GitHub sometimes answers one runner's fetch with HTTP 403 for a few seconds while it serves
+# the same commit to others. Cargo counts that as a spurious network error and tries again; its
+# default of 3 more tries waits about 11 seconds in all, which such a refusal can outlast. With 10,
+# cargo waits longer between the later tries (up to 10 seconds each) and gives up only after a
+# minute or more. A fetch that keeps failing still fails, naming the error.
+[net]
+retry = 10

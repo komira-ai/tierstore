@@ -233,25 +233,37 @@ fn a_cutover_whose_job_runs_another_build_fails_probe_failed() {
     assert!(!fake.record().has(Marker::Swapped));
 }
 
-/// Asserts that `verify` on a node that still serves read-only succeeds with `promotion_pending`
-/// and records `verified` once; a later `verify` that sees it read-write clears the flag and
-/// writes nothing. Catches a verify that fails on a pending promotion, or one that rewrites
-/// the record on every look.
+/// Asserts that `verify` before the commit on a node that still serves read-only (its cache has
+/// not taken the write role yet) defers `not_ready` with `verify_retry_secs`, reversible, naming
+/// the job, and records nothing; a later `verify` that sees it read-write succeeds with no pending
+/// promotion and records `verified` once. Catches a verify that passes a node whose jobs cannot
+/// yet fill their trees, or one that rewrites the record on every look.
 #[test]
-fn verify_reports_a_pending_promotion_and_records_verified_once() {
+fn verify_defers_while_read_only_and_records_verified_once_read_write() {
     let fake = Fake::new();
     fake.advance(&[Prepare, Cutover]);
     fake.set_read_only(true);
-    let pending = fake.host_run(Verify);
-    assert_ok(&pending);
-    assert!(pending.report.promotion_pending);
-    assert!(fake.record().has(Marker::Verified));
-    let saves = |fake: &Fake| fake.log().iter().filter(|c| *c == "state.save").count();
-    let before = saves(&fake);
+    let deferred = fake.host_run(Verify);
+    assert_eq!(deferred.outcome, Outcome::Deferred, "{deferred:?}");
+    assert_eq!(deferred.report.reason, Some(Reason::NotReady));
+    assert_eq!(deferred.report.retry_after_secs, Some(5));
+    assert_eq!(
+        deferred.report.detail.as_deref(),
+        Some(
+            format!("{LABEL} serves read-only: its cache has not taken the write role yet")
+                .as_str()
+        )
+    );
+    assert!(deferred.report.reversible);
+    assert!(!fake.record().has(Marker::Verified));
     fake.set_read_only(false);
     let done = fake.host_run(Verify);
     assert_ok(&done);
     assert!(!done.report.promotion_pending);
+    assert!(fake.record().has(Marker::Verified));
+    let saves = |fake: &Fake| fake.log().iter().filter(|c| *c == "state.save").count();
+    let before = saves(&fake);
+    assert_ok(&fake.host_run(Verify));
     assert_eq!(saves(&fake), before);
 }
 

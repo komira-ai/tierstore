@@ -2,7 +2,8 @@
 //!
 //! Each port of [`super::ports`] has one implementation here, over the real thing: programs
 //! run through a [`Runner`] (an argument vector, never a shell), files under a root that tests
-//! point at a scratch directory, and a loopback socket. Nothing here reads an environment
+//! point at a scratch directory, a loopback socket, and the Unix control socket of the instance
+//! that serves. Nothing here reads an environment
 //! variable. [`super::Machine::system`] builds the ports of an arm from these.
 //!
 //! Programs are called by absolute path (`/usr/bin/systemctl`, the Debian and Ubuntu location;
@@ -10,6 +11,7 @@
 //! on every system, so that Linux runs the tests of the macOS ones.
 
 mod clock;
+mod control;
 mod host;
 mod instances;
 mod launchd;
@@ -24,6 +26,7 @@ use std::fmt;
 use std::io;
 
 pub use clock::MonotonicClock;
+pub use control::ControlSocket;
 // The config hook's tests answer the `dscl` call by its program.
 pub use host::{CONFIG_MAX, SystemHost};
 #[cfg(test)]
@@ -72,6 +75,8 @@ impl From<String> for Fault {
 
 #[cfg(test)]
 mod clock_tests;
+#[cfg(test)]
+mod control_tests;
 #[cfg(test)]
 mod host_tests;
 #[cfg(test)]

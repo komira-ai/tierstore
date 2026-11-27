@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish.workspace = true
-description = "The Prepare planner of the tierstore read path (docs/design/fetch-cache-serve.md, section 6): a pure function of a tree list, the ranges a job needs and a first-touch profile, giving the cell runs to ensure with their ranks under the per-drive gap rule and the whole-pack rule."
+description = "The Prepare planner of the tierstore read path (docs/design/fetch-cache-serve.md, section 6): a pure function of a tree list and the ranges a job needs, ranked shared packs first and then in tree order, giving the cell runs to ensure with their ranks under the per-drive gap rule and the whole-pack rule."
 
 # Pure: no I/O, no clock, no async, no hash maps. Data in, plan out.
 [dependencies]

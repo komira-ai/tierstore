@@ -507,6 +507,16 @@ long. So the lock passes in the hand-over:
   bounded by its own deadline, or a put, bounded by the S3 request's), not its drain. Fills of the file system wait across
   it (1.5), up to `params.fetch_timeout`. The take of the write role does what a take does today (empty the stage, rescan,
   replace the index), at `written` instead of at the old process's exit; its cost is unchanged.
+- **Built so far** (read in code, `server/cache_cli.rs`, `server/cli_serve.rs`): the Linux start of a node whose file has an
+  `fs` interface takes the mount by `take-fs 1` on the runtime directory's socket, as in 4.2, and the sockets by `take 1` /
+  `ready` with the lock on `server.handoff_socket` (`handoff::offered_with_lock`). It says `ready` there after the mount's
+  `bye` and before it serves or binds its own control socket, and its cache becomes the writer at `written`
+  (`handoff::follow`). A lock the running instance offers of another file (a configuration that moves
+  `local_cache.path`) is closed and left with it, not refused with `nak`: the two caches are two directories. One
+  that does not answer `bye` serves on, with its lock: the start then fails before it serves anything, leaving the
+  mount it took to its descriptor store, and the restart adopts it and takes the sockets again. Still to build: the
+  successor's scan of the cache at `written` (`promote`) is as long as before, and the mount provider is bound only
+  after it.
 
 ### 3.3 What jobs see
 

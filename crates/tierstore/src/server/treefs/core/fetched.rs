@@ -71,6 +71,12 @@ impl Fetched {
         self.at(level, |_| {});
     }
 
+    /// The root was read from the cache directory and is a tree list, not a manifest: its level
+    /// is counted, and no manifest.
+    pub(super) fn listed(&self) {
+        self.at(0, |_| {});
+    }
+
     /// A manifest of the level `level` was asked of the fill socket, which took `ms` milliseconds
     /// to answer; `had` says whether the manifest was then read from the cache directory.
     pub(super) fn filled(&self, level: usize, ms: u64, had: bool) {

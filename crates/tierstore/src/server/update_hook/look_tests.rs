@@ -4,7 +4,7 @@ use std::cell::{Cell, RefCell};
 use std::path::Path;
 use std::time::Duration;
 
-use super::look::{Look, READ_WRITE_ATTEMPTS, verified};
+use super::look::{Look, READ_WRITE_ATTEMPTS, verified, writable};
 use super::{
     CacheMode, Clock, Instances, Outcome, POLL_INTERVAL, PROBE_ATTEMPTS, PROBE_HITS, PUBLIC_PORT,
     PortError, PortKind, READY_ATTEMPTS, Reason, Reply,
@@ -513,4 +513,23 @@ fn the_manifests_cutover_bound_covers_the_wait_for_the_cache_lock() {
     let secs = cutover_bound();
     assert!(above_the_cutover_looks(secs), "cutover = {secs} s");
     assert!(!above_the_cutover_looks(1500));
+}
+
+/// Asserts that before the commit a node whose cache is read-only is no verdict: `writable` defers
+/// it, `not_ready` with the retry it is given and a detail that names what serves, while a node that
+/// is read-write, or has no cache lock (a storage node), passes with its mode. It would catch a
+/// verify that lets a node be committed while its jobs cannot fill their trees.
+#[test]
+fn a_read_only_node_is_deferred_before_the_commit_and_the_others_pass() {
+    let deferred = writable(CacheMode::ReadOnly, "tierstore@b", 7).unwrap_err();
+    assert_eq!(deferred.outcome, Outcome::Deferred);
+    assert_eq!(deferred.report.reason, Some(Reason::NotReady));
+    assert_eq!(deferred.report.retry_after_secs, Some(7));
+    assert_eq!(
+        deferred.report.detail.as_deref(),
+        Some("tierstore@b serves read-only: its cache has not taken the write role yet")
+    );
+    for mode in [CacheMode::ReadWrite, CacheMode::Plain] {
+        assert_eq!(writable(mode, "tierstore@b", 7).unwrap(), mode);
+    }
 }
