@@ -263,11 +263,13 @@ async fn a_write_prefix_without_a_read_prefix_cannot_be_read() {
 /// Asserts the create-only put: inside a write prefix a put with `If-None-Match: *`, and one with
 /// no condition, create the object; a put over an object that exists is 412 `PreconditionFailed`
 /// and leaves it as it was; `If-Match` (a replace) and any other `If-None-Match` are 403, also
-/// for a key that does not exist, and so is a copy; a put outside the write prefixes (a read
-/// prefix, a delete prefix, another) is 403 and creates nothing.
+/// for a key that does not exist, and so is a copy whose source the key cannot read; a copy whose
+/// source it reads onto a key that exists is 412 and leaves it as it was; a put outside the write
+/// prefixes (a read prefix, a delete prefix, another) is 403 and creates nothing.
 #[tokio::test(start_paused = true)]
 async fn a_scoped_put_creates_under_a_write_prefix_and_never_replaces() {
     let rig = rig().await;
+    rig.put("r/a", b"readable").await;
     let star = [("if-none-match", "*")];
     let first = scoped(&rig, "PUT", &uri("w/x"), &star, b"first").await;
     assert_eq!(first.status, StatusCode::OK);
@@ -287,11 +289,13 @@ async fn a_scoped_put_creates_under_a_write_prefix_and_never_replaces() {
         ("w/fresh", [("if-match", "\"abc\"")]),
         ("w/x", [("if-none-match", "\"abc\"")]),
         ("w/fresh", [("x-amz-copy-source", "/tier-bucket/w/x")]),
-        ("w/x", [("x-amz-copy-source", "/tier-bucket/r/a")]),
     ] {
         let reply = scoped(&rig, "PUT", &uri(key), &extra, b"second").await;
         assert_eq!(denied(&reply), access_denied(), "{key} {extra:?}");
     }
+    let copy = [("x-amz-copy-source", "/tier-bucket/r/a")];
+    let onto = scoped(&rig, "PUT", &uri("w/x"), &copy, b"").await;
+    assert_eq!(denied(&onto), (412, "PreconditionFailed".to_owned()));
     assert_eq!(rig.get("w/x", None).await.body, "first");
     assert!(!exists(&rig, "w/fresh").await);
     for key in [
@@ -349,8 +353,7 @@ async fn a_scoped_key_runs_a_multipart_upload_under_a_write_prefix() {
 /// Asserts that a multipart call outside the write prefixes is 403 at every step: the start for a
 /// key under a read prefix, a delete prefix or another prefix; and, for an upload the full key
 /// began at a key outside, the part, the completion and the abort (a delete prefix does not
-/// allow an abort); each leaves the upload in place, so the full key completes it after, and a
-/// part that copies is 403 inside the prefix.
+/// allow an abort); each leaves the upload in place, so the full key completes it after.
 #[tokio::test(start_paused = true)]
 async fn a_multipart_call_outside_the_write_prefixes_is_refused_at_every_step() {
     let rig = rig().await;
@@ -381,12 +384,6 @@ async fn a_multipart_call_outside_the_write_prefixes_is_refused_at_every_step() 
         assert_eq!(ended.status, StatusCode::OK, "{key}: {}", ended.body);
         assert!(exists(&rig, key).await, "{key}");
     }
-    let started = scoped(&rig, "POST", &uri("w/copy?uploads"), &[], b"").await;
-    let id = texts(&started.body, "UploadId").concat();
-    let part = uri(&format!("w/copy?partNumber=1&uploadId={id}"));
-    let copy = [("x-amz-copy-source", "/tier-bucket/r/a")];
-    let refused = scoped(&rig, "PUT", &part, &copy, b"").await;
-    assert_eq!(denied(&refused), access_denied());
 }
 
 /// Asserts that an upload id belongs to the key it was created for: an upload of `w/a` is

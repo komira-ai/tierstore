@@ -162,6 +162,8 @@ pub mod trees;
 mod write;
 
 #[cfg(test)]
+mod copy_through_tests;
+#[cfg(test)]
 mod evict_tests;
 #[cfg(test)]
 mod fill_tests;
@@ -250,15 +252,14 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use bytes::{Bytes, BytesMut};
-use futures::StreamExt as _;
+use bytes::Bytes;
 use tokio::sync::Semaphore;
 
 use crate::journal::is_reserved;
 use crate::server::lock;
 use crate::{
     Backend, ByteRange, Clock, Error, Listed, Meta, OpenUpload, Opened, PartBody, PutAnswer,
-    PutClaim, PutOutcome, ReadBody, TreeDigest, UploadedPart, UploadsAfter,
+    PutClaim, PutOutcome, ReadBody, StoreCopy, TreeDigest, UploadedPart, UploadsAfter,
 };
 
 pub use disk::{Disk, Space, SystemDisk};
@@ -825,6 +826,11 @@ impl Backend for LocalCache {
         Ok(None)
     }
 
+    /// Sent to the upstream's own copy; the key the copy writes is forgotten (`write`).
+    async fn copy_in_store(&self, copy: &StoreCopy<'_>) -> Result<Option<PutAnswer>, Error> {
+        self.inner.copy_through(copy).await
+    }
+
     async fn put_if_match(&self, _key: &str, _body: Bytes, _etag: &str) -> Result<String, Error> {
         Err(Error::Unsupported(READ_ONLY.to_owned()))
     }
@@ -844,8 +850,7 @@ impl Backend for LocalCache {
         number: u32,
         body: PartBody<'_>,
     ) -> Result<String, Error> {
-        let sent = self.inner.part_through(key, id, number, None, body);
-        sent.await
+        self.inner.part_through(key, id, number, None, body).await
     }
 
     async fn upload_part_with_len(
@@ -856,8 +861,7 @@ impl Backend for LocalCache {
         len: Option<u64>,
         body: PartBody<'_>,
     ) -> Result<String, Error> {
-        let sent = self.inner.part_through(key, id, number, len, body);
-        sent.await
+        self.inner.part_through(key, id, number, len, body).await
     }
 
     async fn complete_upload(
@@ -874,12 +878,7 @@ impl Backend for LocalCache {
     }
 
     async fn get(&self, key: &str, range: Option<ByteRange>) -> Result<Bytes, Error> {
-        let mut body = self.get_stream(key, range).await?;
-        let mut whole = BytesMut::new();
-        while let Some(chunk) = body.next().await {
-            whole.extend_from_slice(&chunk?);
-        }
-        Ok(whole.freeze())
+        stream::whole(self.get_stream(key, range).await?).await
     }
 
     async fn get_stream(&self, key: &str, range: Option<ByteRange>) -> Result<ReadBody, Error> {

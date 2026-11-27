@@ -31,9 +31,13 @@
 //! A create-only write can name the SHA-256 of its body for the store to check, and a HEAD reads
 //! the digest an object was written with back (`checksum.rs`):
 //! [`S3Store::put_stream_new_sha256`] and [`S3Store::head_sha256`].
+//!
+//! A copy within the bucket is the store's own (`copy.rs`): [`S3Store::copy_object`] and
+//! [`S3Store::upload_part_copy`], with the source's conditions sent for the store to test.
 
 mod bound;
 mod checksum;
+mod copy;
 mod credentials;
 mod endpoint;
 #[cfg(feature = "testkit")]
@@ -50,6 +54,7 @@ mod tuning;
 mod xml;
 
 pub use checksum::StoredSha256;
+pub use copy::{CopyAnswer, CopyConditions, CopySource};
 pub use credentials::{AwsEnv, CredentialSource, Credentials, CredentialsError};
 pub use endpoint::Addressing;
 pub use multipart::{

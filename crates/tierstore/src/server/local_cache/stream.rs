@@ -20,7 +20,7 @@ use std::io;
 use std::os::unix::fs::FileExt as _;
 use std::sync::Arc;
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use futures::StreamExt as _;
 use futures::stream;
 use tokio::sync::watch;
@@ -122,6 +122,15 @@ pub(super) fn same_version_on_disk(root: &std::path::Path, hex: &str, believed: 
         .ok()
         .and_then(|text| serde_json::from_slice::<Sidecar>(&text).ok())
         .is_some_and(|sidecar| sidecar.size == believed.size && sidecar.tag == believed.tag)
+}
+
+/// The bytes of `body`, collected: a read held whole.
+pub(super) async fn whole(mut body: ReadBody) -> Result<Bytes, Error> {
+    let mut whole = BytesMut::new();
+    while let Some(chunk) = body.next().await {
+        whole.extend_from_slice(&chunk?);
+    }
+    Ok(whole.freeze())
 }
 
 /// `body` with its first chunk taken, so that a read that fails at once (the object is not

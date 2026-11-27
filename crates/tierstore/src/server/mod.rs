@@ -100,8 +100,8 @@
 //!   and the rest of the table in `bucket`), each as S3 answers a bucket with none set: an empty
 //!   document, the owner's `FULL_CONTROL`, or S3's 404 code. Their writes are `NotImplemented`.
 //!
-//! Every other call, a copy (`x-amz-copy-source`), and a query parameter this front does not
-//! know, is answered `NotImplemented`.
+//! A copy (`x-amz-copy-source`, CopyObject and UploadPartCopy) is a put whose body is another
+//! object (`ops/copy.rs`). Every other call and an unknown query parameter is `NotImplemented`.
 //! A request with a key under `_journal/`, `_tiering/` or `_entries/` is refused with `AccessDenied` by each supported call
 //! before the operation's own processing, including the parsing of the XML body of an upload
 //! completion; a request refused as unsupported (see above) is answered so first.

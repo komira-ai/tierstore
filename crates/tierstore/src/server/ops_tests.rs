@@ -642,25 +642,37 @@ async fn a_read_with_conditions_is_served_or_refused_as_s3_does() {
     }
 }
 
-/// Asserts that a copy is refused and creates nothing: a put and an upload of a part with
-/// `x-amz-copy-source` are `NotImplemented`, and the key is not taken.
+/// Asserts that a copy header on a call that is not a `PUT` of an object is `NotImplemented` and
+/// changes nothing: the start of an upload (`POST ?uploads`) and a delete that carry
+/// `x-amz-copy-source` are refused with the text that says a copy is a `PUT` of an object, no
+/// upload is begun, the key is not taken, and an object that exists is not deleted.
 #[tokio::test(start_paused = true)]
-async fn a_copy_is_not_implemented_and_creates_nothing() {
+async fn a_copy_header_on_a_call_that_is_not_a_put_is_not_implemented_and_changes_nothing() {
     let rig = Rig::new(MEBIBYTE).await;
     rig.put("from", b"one").await;
+    rig.put("kept", b"two").await;
     let from = format!("/{BUCKET}/from");
     let source = [("x-amz-copy-source", from.as_str())];
-    let uri = format!("/{BUCKET}/to");
-    let copy = rig.send("PUT", &uri, &source, b"").await;
-    assert_eq!(copy.status, StatusCode::NOT_IMPLEMENTED);
-    assert_eq!(copy.code(), "NotImplemented");
-    let id = start(&rig, "to").await;
-    let part_uri = format!("{uri}?partNumber=1&uploadId={id}");
-    let part = rig.send("PUT", &part_uri, &source, b"").await;
-    assert_eq!(part.status, StatusCode::NOT_IMPLEMENTED);
-    assert_eq!(rig.cold.calls(Op::UploadPart), 0);
+    let start = rig
+        .send("POST", &format!("/{BUCKET}/to?uploads"), &source, b"")
+        .await;
+    assert_eq!(start.status, StatusCode::NOT_IMPLEMENTED);
+    assert_eq!(start.code(), "NotImplemented");
+    assert!(
+        start.body.contains("a copy is a PUT of an object"),
+        "{}",
+        start.body
+    );
+    let delete = rig
+        .send("DELETE", &format!("/{BUCKET}/kept"), &source, b"")
+        .await;
+    assert_eq!(delete.status, StatusCode::NOT_IMPLEMENTED);
+    assert_eq!(delete.code(), "NotImplemented");
+    assert_eq!(rig.hot.calls(Op::CreateUpload), 0);
+    assert_eq!(rig.cold.calls(Op::CreateUpload), 0);
     let absent = rig.call("HEAD", "to", b"").await;
     assert_eq!(absent.status, StatusCode::NOT_FOUND);
+    assert_eq!(rig.get("kept", None).await.body, "two");
 }
 
 /// Sends a signed request for an object of the bucket and drops it after a second, as the

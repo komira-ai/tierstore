@@ -9,7 +9,6 @@ use hyper::header::{HeaderMap, HeaderName, HeaderValue};
 use hyper::http::request::Parts;
 use hyper::{Method, StatusCode};
 use objstore_s3::key_rules;
-use tokio::sync::OwnedSemaphorePermit;
 use tokio::task::JoinError;
 
 use crate::journal::is_reserved;
@@ -32,6 +31,14 @@ use super::xml::{
     self, Listing, ListingV1, NULL_VERSION, PartListing, UploadListing, VersionListing,
 };
 
+mod admit;
+pub(super) mod copy;
+#[cfg(test)]
+mod copy_cache_tests;
+#[cfg(test)]
+mod copy_scoped_tests;
+#[cfg(test)]
+mod copy_tests;
 pub(super) mod placed;
 #[cfg(test)]
 mod placed_tests;
@@ -214,8 +221,10 @@ fn encoded(query: &Query) -> Result<bool, S3Error> {
 }
 
 /// Refuses what this front does not do whatever the call is: a query parameter it does not
-/// know, and a copy.
-fn refuse_unsupported(parts: &Parts, query: &Query, presigned: bool) -> Result<(), S3Error> {
+/// know, and a copy that is not a `PUT` of an object signed with a key (a presigned URL has no
+/// right to read the source; see `copy`). A request with no `Authorization` header is presigned.
+fn refuse_unsupported(parts: &Parts, query: &Query, target: &Target) -> Result<(), S3Error> {
+    let presigned = !parts.headers.contains_key("authorization");
     let extra: &[&str] = if presigned { &PRESIGN_PARAMS } else { &[] };
     let overrides = RESPONSE_OVERRIDES.iter().map(|(param, _)| param);
     let allowed: Vec<&str> = SUPPORTED
@@ -229,8 +238,11 @@ fn refuse_unsupported(parts: &Parts, query: &Query, presigned: bool) -> Result<(
             "this query parameter is not supported",
         ));
     }
-    if header(&parts.headers, "x-amz-copy-source").is_some() {
-        return Err(S3Error::unsupported("copying an object is not supported"));
+    let copies = parts.method == Method::PUT && matches!(target, Target::Object(_)) && !presigned;
+    if header(&parts.headers, "x-amz-copy-source").is_some() && !copies {
+        return Err(S3Error::unsupported(
+            "a copy is a PUT of an object, signed with a key",
+        ));
     }
     Ok(())
 }
@@ -449,13 +461,11 @@ impl Server {
         B::Data: Send,
         B::Error: Into<BoxError>,
     {
-        // A request with no `Authorization` header is a presigned URL: its SigV4 parameters are
-        // not parameters of the call.
         let method = parts.method.as_str();
         let setting = bucket::asks_setting(method, &target, query);
         let buckets = bucket::asks_buckets(method, &target);
         if setting.is_none() && !buckets {
-            refuse_unsupported(parts, query, !parts.headers.contains_key("authorization"))?;
+            refuse_unsupported(parts, query, &target)?;
         }
         self.refuse_placed_write(method, &target, query)?;
         let deleting = deletes_many(&parts.method, &target, query);
@@ -468,6 +478,15 @@ impl Server {
         let multipart = query.has_any(&MULTIPART);
         if let Some(id) = query.get("versionId") {
             named_version(method, &target, multipart, id)?;
+        }
+        if let ("PUT", Target::Object(key)) = (method, &target)
+            && let Some(source) = header(&parts.headers, "x-amz-copy-source")
+        {
+            // A copy has no body; it is read, so that its signed hash is checked.
+            reader.read_all(check).await?;
+            return self
+                .copy(parts, query, key, source, multipart, writes)
+                .await;
         }
         if let ("PUT", Target::Object(key), true) = (method, &target, multipart) {
             let len = body_len(parts, &check);
@@ -581,40 +600,6 @@ impl Server {
         match header(&parts.headers, "if-match") {
             Some(tag) => self.replace_object(key, tag).await,
             None => Err(S3Error::unsupported("only If-None-Match: * is supported")),
-        }
-    }
-
-    /// Lets a streamed body in, before any byte of it is read: refuses a body of unknown length
-    /// where the backend needs the length (411), one that says it is longer than the limit
-    /// (413, so that nothing is stored and no upload is begun), and one that comes when the
-    /// server is taking as many as it may and none ends within
-    /// [`put_permit_wait`](super::ServerConfig::put_permit_wait) (503 `SlowDown`, with
-    /// `Retry-After`). The checks of the head come first, so a request that is refused for them
-    /// does not wait; the wait is on the permit alone and no byte of the body is read during it.
-    /// Gives the permit that is held until the body is stored or refused.
-    async fn admit(
-        &self,
-        len: Option<u64>,
-        presign: Option<&Grant>,
-    ) -> Result<OwnedSemaphorePermit, S3Error> {
-        let limit = self.config.max_request_bytes;
-        let cap = presign.map_or(u64::MAX, |grant| grant.max_object_bytes);
-        let limit = limit.min(usize::try_from(cap).unwrap_or(usize::MAX));
-        match len {
-            None if self.backend.needs_length() => return Err(S3Error::length_required()),
-            Some(declared) if declared > limit as u64 => return Err(S3Error::too_large(limit)),
-            _ => {}
-        }
-        if let Ok(permit) = Arc::clone(&self.puts).try_acquire_owned() {
-            return Ok(permit);
-        }
-        let wait = self.config.put_permit_wait;
-        if wait.is_zero() {
-            return Err(S3Error::busy());
-        }
-        match tokio::time::timeout(wait, Arc::clone(&self.puts).acquire_owned()).await {
-            Ok(Ok(permit)) => Ok(permit),
-            _ => Err(S3Error::busy()),
         }
     }
 
@@ -922,17 +907,7 @@ impl Server {
         B::Error: Into<BoxError>,
     {
         refuse_reserved(key)?;
-        let id = query.get("uploadId");
-        let parse = |text: &str| text.parse::<u32>().ok();
-        let number = query.get("partNumber").and_then(parse);
-        let (Some(id), Some(number)) = (id, number) else {
-            return Err(S3Error::invalid(
-                "an upload id and a part number are needed",
-            ));
-        };
-        if !(1..=PART_LIMIT).contains(&number) {
-            return Err(S3Error::invalid("a part number is from 1 to 10000"));
-        }
+        let (id, number) = copy::part_of(query)?;
         let _permit = self.admit(len, None).await?;
         let refused = Refused::default();
         let body = pieces(reader, check, refused.clone());

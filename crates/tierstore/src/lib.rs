@@ -215,6 +215,9 @@ pub mod server;
 mod sleeper;
 #[cfg(test)]
 mod sleeper_tests;
+mod store_copy;
+#[cfg(test)]
+mod store_copy_tests;
 mod tiered;
 mod tree_image;
 #[cfg(feature = "server")]
@@ -274,6 +277,7 @@ pub use reconciler::ReconcilerConfig;
 #[cfg(feature = "s3")]
 pub use s3::S3Backend;
 pub use sleeper::{RecordingSleeper, Sleeper, TokioSleeper};
+pub use store_copy::{CopyTarget, SourceConditions, StoreCopy};
 pub use tiered::{
     DeleteWait, MarkReads, MarkedPutConfig, PlainPut, Proxy, ProxyConfig, PutBody, PutClaim,
     StepRetry,

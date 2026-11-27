@@ -195,8 +195,9 @@ is plain data); the command line does, and exits 2.
   exists) and the calls of a multipart upload (create, part, complete, abort);
 - `delete_prefixes`: DeleteObject (not AbortMultipartUpload: a delete prefix cannot cancel an upload).
 
-A scoped key never replaces (`If-Match`) and never copies (`x-amz-copy-source`). Everything else is
-`403 AccessDenied`. Two uses:
+A scoped key never replaces (`If-Match`). It copies (`x-amz-copy-source`, CopyObject create-only
+and UploadPartCopy) only from a key a `read_prefixes` entry covers into one a `write_prefixes` entry
+covers. Everything else is `403 AccessDenied`. Two uses:
 
 - the frontend's pack store: `read_prefixes: ["cas/"]`, `write_prefixes: ["cas/f/<writer>/"]`,
   `delete_prefixes: []` (add the writer prefix to the delete list to let the frontend remove its
