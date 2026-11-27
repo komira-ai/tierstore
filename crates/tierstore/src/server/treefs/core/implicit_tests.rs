@@ -612,7 +612,7 @@ fn a_runs_detach_answers_a_failure_that_the_implicit_attachment_also_says() {
     assert_eq!(open_cached(&rig.core, cc, false), Err(Errno::Io));
     let log = Logged::default();
     let guard = logged(&log, tracing::Level::WARN);
-    let failures = rig.core.detach("run-1").unwrap();
+    let failures = rig.core.detach("run-1").unwrap().failures;
     drop(guard);
     assert_eq!(failures.len(), 1);
     assert_eq!(

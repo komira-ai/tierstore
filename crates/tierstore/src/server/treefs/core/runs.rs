@@ -18,7 +18,7 @@ use std::sync::Arc;
 use crate::server::local_cache::attaches::runs::{RunAttach, RunDetach, RunOutcome};
 use crate::tree_manifest::TreeDigest;
 
-use super::super::attach::{Failure, is_run};
+use super::super::attach::{Detached, is_run};
 use super::super::fills::Report;
 use super::super::locked;
 use super::fetched::Fetched;
@@ -128,12 +128,12 @@ impl Core {
             .join(digest.to_string()))
     }
 
-    /// Ends every attachment of `run`: the failures its attachments recorded, or none if it
+    /// Ends every attachment of `run`: what its attachments recorded (`Detached`), or none if it
     /// attached nothing. A tree no run has now and no lookup attached is unpinned, with no lock of
     /// the core's held but that of its pins (`Core::free_tree`), and leaves memory when the kernel
     /// forgets its inodes, or at the sweep once no request has named it for `fs.tree_idle_secs`.
     /// The node is told how long it took, and whether it ended any.
-    pub(in crate::server::treefs) fn detach(&self, run: &str) -> Option<Vec<Failure>> {
+    pub(in crate::server::treefs) fn detach(&self, run: &str) -> Option<Detached> {
         let start = self.now();
         let detached = self.detach_run(run);
         let outcome = match detached {
@@ -147,36 +147,37 @@ impl Core {
     }
 
     /// [`Core::detach`] but for its report.
-    fn detach_run(&self, run: &str) -> Option<Vec<Failure>> {
-        let (freed, failures, _freeing) = {
+    fn detach_run(&self, run: &str) -> Option<Detached> {
+        let (freed, detached, _freeing) = {
             let _lifecycle = locked(&self.lifecycle);
             if self.is_held() {
                 return None;
             }
             let freeing = self.freeing();
-            let (freed, failures, snapshot) = {
+            let (freed, detached, snapshot) = {
                 let mut state = self.state();
+                let stall_ms = state.attachments.stall_of(run);
                 let trees = state.attachments.remove(run)?;
-                let mut failures = Vec::new();
-                let mut freed = Vec::new();
+                let (mut failures, mut freed) = (Vec::new(), Vec::new());
                 for (number, digest, mut failed) in trees {
                     failures.append(&mut failed);
                     if !state.attachments.is_attached(number) {
                         freed.push((number, digest));
                     }
                 }
-                (freed, failures, state.attachments.snapshot())
+                let detached = Detached { failures, stall_ms };
+                (freed, detached, state.attachments.snapshot())
             };
             let _ = self.write_attachments(&snapshot);
             for (number, _) in &freed {
                 let _ = locked(&self.prefetching).remove(number);
             }
-            (freed, failures, freeing)
+            (freed, detached, freeing)
         };
         for (number, digest) in freed {
             self.free_tree(number, &digest);
         }
-        Some(failures)
+        Some(detached)
     }
 }
 

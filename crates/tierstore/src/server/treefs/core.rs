@@ -483,14 +483,14 @@ impl Core {
     /// Stops this process from changing the table of tree numbers and the attachments file
     /// (`on`), or lets it do so again. A successor that takes over reads both once it has taken
     /// the sockets, and this process must have written its last by then: the call waits for the
-    /// attach or detach that is changing them, and for the unpins of the detaches decided
-    /// before it, and every later one is refused (`AttachError::Replaced`, and, for a detach, an
-    /// answer of none; ask `Core::is_held`). A hold also waits, with the lifecycle lock released,
-    /// for the announcement of the mount's pins that is being sent, and none is sent after it
-    /// (`core/live.rs`).
+    /// attach or detach that is changing them, writes the runs' stall (`Core::hand_stall_over`),
+    /// waits for the unpins of the detaches decided before it, and every later one is refused
+    /// (`AttachError::Replaced`; for a detach, none: ask `Core::is_held`). It also waits, the
+    /// lifecycle lock released, for the mount's pins being announced (`core/live.rs`); none after.
     pub(super) fn hold(&self, on: bool) {
         {
             let _lifecycle = locked(&self.lifecycle);
+            self.hand_stall_over(on);
             self.held.store(on, Ordering::SeqCst);
             // The unpins of the detaches decided before, which run with the lifecycle lock
             // released.

@@ -12,8 +12,8 @@ use crate::layout::{
 };
 
 /// The bit of `pack_flags` the CAS service sets on a pack that at least `shared_min` trees name
-/// (design 6.1). A reader ignores the bits it does not know.
-pub const PACK_SHARED: u8 = 2;
+/// (design 6.1), defined beside the other bits of the record in `tierstore-fetch-api`.
+pub use tierstore_fetch_api::list::PACK_SHARED;
 
 /// The prefix of the key of a tree's L2 sidecar: `cas/l2/<id>`, where `cas/l/<id>` is the key of
 /// the version 2 list the tree is named by.

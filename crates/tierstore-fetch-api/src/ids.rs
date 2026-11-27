@@ -35,7 +35,7 @@ pub struct HolderId(pub u64);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct JobId(pub u64);
 
-/// The first-touch rank of a cell within a job (profile order, else tree order; 4.5), the
+/// The rank of a cell within a job (shared packs first, then tree order; 4.5, 6.1), the
 /// `x-ts-rank` header. Lower is sooner.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct Rank(pub u32);

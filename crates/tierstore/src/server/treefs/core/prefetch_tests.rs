@@ -108,7 +108,7 @@ fn a_blob_that_fails_is_recorded_and_the_others_go_on() {
     assert_eq!(blob_fills(&rig).len(), 4);
     assert!(!pinned(&rig).contains(&tool));
     assert_eq!(pinned(&rig).len(), 3);
-    let failures = rig.core.detach(RUN).unwrap();
+    let failures = rig.core.detach(RUN).unwrap().failures;
     assert_eq!(failures.len(), 1);
     assert_eq!(
         (failures[0].path.as_str(), failures[0].digest.as_str()),
