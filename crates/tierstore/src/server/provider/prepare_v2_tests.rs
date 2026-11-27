@@ -101,7 +101,8 @@ fn break_entry(bytes: &mut [u8], index: usize) {
 /// span in the cache from one grouped read of the pack (its three files are one range: one GET),
 /// and the tree marked ready; that the tree is the sidecar's version 2 projection, named by the
 /// tree id, the digest of the key the job names; that the sidecar is read once and the list
-/// `cas/l/<id>` never; and that nothing is counted as refused.
+/// `cas/l/<id>` never; and that nothing is counted as refused, as a missing sidecar or as a tree
+/// placed from its list.
 #[tokio::test]
 async fn a_tree_run_to_its_end_from_its_sidecar_is_placed_as_its_list_and_reads_every_file() {
     let rig = Rig::new("prov-v2-ready").await;
@@ -119,10 +120,12 @@ async fn a_tree_run_to_its_end_from_its_sidecar_is_placed_as_its_list_and_reads_
     assert_eq!(rig.bench.rig.calls_on(Op::Get, &key), 0);
     assert_eq!(rig.bench.rig.calls_on(Op::Get, &sidecar_key_of(&key)), 1);
     let metricz = rig.bench.rig.cache.metrics();
-    assert!(
-        metricz.contains("tierstore_l2_sidecar_missing_total 0\n"),
-        "{metricz}"
-    );
+    for line in [
+        "tierstore_l2_sidecar_missing_total 0\n",
+        "tierstore_l2_sidecar_fallback_total 0\n",
+    ] {
+        assert!(metricz.contains(line), "{line} in {metricz}");
+    }
 }
 
 /// A tree of the pack's files and one more, whose version 2 list is stored with no sidecar, for a
@@ -147,8 +150,9 @@ async fn prepared(rig: &Rig, run_id: &str, key: &str) -> Stage {
     seen.borrow().clone()
 }
 
-/// Asserts that nothing is placed at the source `run`/0, no file of the pack was read, and no
-/// refusal of a version was counted.
+/// Asserts that nothing is placed at the source `run`/0, no file of the pack was read, no refusal
+/// of a version was counted, and no missing sidecar or tree placed from its list: a sidecar that
+/// is there and refused is never answered with the list.
 fn nothing_placed_or_counted(rig: &Rig, run_id: &str) {
     assert!(rig.bench.store.mount_paths().is_empty());
     assert!(
@@ -167,6 +171,12 @@ fn nothing_placed_or_counted(rig: &Rig, run_id: &str) {
     ] {
         let line = format!("tierstore_list_refused_total{{reason=\"{reason}\"}} 0\n");
         assert!(metricz.contains(&line), "{line} in {metricz}");
+    }
+    for line in [
+        "tierstore_l2_sidecar_missing_total 0\n",
+        "tierstore_l2_sidecar_fallback_total 0\n",
+    ] {
+        assert!(metricz.contains(line), "{line} in {metricz}");
     }
 }
 
@@ -237,6 +247,7 @@ async fn a_list_of_the_old_version_at_the_sidecar_key_is_refused_v1_list_and_cou
         "tierstore_list_refused_total{reason=\"v1_list\"} 1\n",
         "tierstore_list_refused_total{reason=\"missing_sidecar\"} 0\n",
         "tierstore_l2_sidecar_missing_total 0\n",
+        "tierstore_l2_sidecar_fallback_total 0\n",
     ] {
         assert!(metricz.contains(line), "{line} in {metricz}");
     }

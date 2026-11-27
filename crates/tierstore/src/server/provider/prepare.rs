@@ -2,18 +2,24 @@
 //! the tree built from it and placed at the source's path, and the bytes of its files read into
 //! the cache.
 //!
-//! The one object of the tree read is its L2 sidecar, `cas/l2/<id>` (`docs/design/fetch-cache-serve.md`,
-//! 3.5), never the list `cas/l/<id>` the ref names: a reader of this release parses no version 1
-//! list and does not take a version 2 list for the tree. The sidecar is opened by the reader of
+//! The object of the tree read first is its L2 sidecar, `cas/l2/<id>`
+//! (`docs/design/fetch-cache-serve.md`, 3.5). The sidecar is opened by the reader of
 //! `tierstore-list` ([`TreeListL2::open_sidecar`]), which refuses it whole unless its header names
 //! the tree and its version 2 projection (its entries, digests, keys, names and ranges) hashes to
 //! the id, so every path, mode, size, file digest, pack key, offset and range placed is the one the
-//! id names. A tree whose sidecar is not there, or is a list of another version or digest function,
-//! is refused with the distinct `ListVersionUnsupported`, whose text (`tree list not supported:
-//! <reason>`) is the reason the `Mount` answers with and the CAS service takes its miss path on,
-//! and is counted (`tierstore_list_refused_total{reason}`, and
-//! `tierstore_l2_sidecar_missing_total` for a missing one); a sidecar that is there and malformed
-//! is refused as such and never placed.
+//! id names. A sidecar that is a list of another version or digest function is refused with the
+//! distinct `ListVersionUnsupported` (`tree list not supported: <reason>`, the reason the `Mount`
+//! answers with) and counted (`tierstore_list_refused_total{reason}`); a sidecar that is there and
+//! malformed is refused as such and never placed.
+//!
+//! A tree whose sidecar is not there (the store answers it has no such object) is placed from the
+//! list `cas/l/<id>` the ref names, as the release before the sidecar placed every tree: the list
+//! is read through the cache within the same bounds, and a version 1 list
+//! ([`parse_tree_list`], which checks that its bytes hash to the id) is built into records and
+//! placed with [`TreeStore::create`], its spans queued each alone once the tree is placed; a
+//! version 2 list is placed as the projection of a sidecar is, once its bytes hash to the id. Each
+//! such preparation counts once in `tierstore_l2_sidecar_missing_total`, and each tree so placed
+//! once in `tierstore_l2_sidecar_fallback_total`.
 //!
 //! The reads are made unless `trees.prepare_prefetch` is `none` ([`PreparePrefetch::None`]): the
 //! queue of reads is then closed before the sidecar is read, so no read is queued or made, and the
@@ -44,6 +50,7 @@
 //! each distinct span of the digest.
 //!
 //! [`TreeListL2::open_sidecar`]: tierstore_list::TreeListL2::open_sidecar
+//! [`TreeStore::create`]: crate::server::local_cache::trees::TreeStore::create
 //! [`TreeStore::fetch_span`]: crate::server::local_cache::trees::TreeStore::fetch_span
 //! [`TreeStore::fetch_parts`]: crate::server::local_cache::trees::TreeStore::fetch_parts
 //! [`TreeStore::create_image`]: crate::server::local_cache::trees::TreeStore::create_image
@@ -56,16 +63,19 @@ use futures::{Stream, StreamExt as _, stream};
 use tierstore_list::{OpenError, TreeListL2, sidecar_key};
 use tokio::sync::watch;
 
-use super::groups::{Group, groups};
+use super::groups::{Group, alone, groups};
 use super::names::SourceId;
 use super::queued::{Queued, admit};
 use super::sources::{Owner, Shared, Stage};
 use crate::server::local_cache::trees::{
-    CreateError, Created, FetchError, FileSpan, ImageRequest, PreparePrefetch, StagedImage,
-    TreeStore,
+    CreateError, CreateRequest, Created, FetchError, FileSpan, ImageRequest, PreparePrefetch,
+    StagedImage, TreeStore,
 };
 use crate::server::local_cache::{LocalCache, QueuedReads};
-use crate::{Backend as _, Error, TreeDigest, TreeImage, TreeLimits};
+use crate::{
+    Backend as _, BuiltFile, BuiltTree, Error, TreeDigest, TreeImage, TreeLimits, TreeListError,
+    build_tree, is_tree_list_v2, parse_tree_list,
+};
 
 /// A preparation: the source, the tree list it names, and what it reports to.
 pub(super) struct Job {
@@ -163,55 +173,84 @@ pub(super) async fn run(shared: Arc<Shared>, job: Job) {
     }
 }
 
-/// Reads the tree's L2 sidecar, and checks it, builds its tree and places it at the source's path
-/// on a blocking thread, queueing on `reads` what to read once the list is walked. A refusal or a
+/// Reads the tree's L2 sidecar, or its list if it has none, and checks it, builds its tree and
+/// places it at the source's path on a blocking thread, queueing on `reads` what to read: a
+/// version 2 list's once it is walked, a version 1 list's once its tree is placed. A refusal or a
 /// failure is the stage it leaves the source at. If the source is no longer this preparation's
 /// when the tree is placed, the placement is left to the preparation that holds the source now,
 /// or, if none does, removed here, since the release may have looked for it before it was made.
 async fn place(shared: &Shared, job: &Job, reads: UnboundedSender<Queued>) -> Result<Made, Stage> {
-    let fetched = read_sidecar(shared, &job.digest).await?;
+    let read = read_tree(shared, job).await?;
+    let from_list = matches!(read, Read::List(_));
     let (digest, at) = (job.digest, job.id.location());
     let (ttl, store, cache) = (
         shared.settings.ttl,
         shared.store.clone(),
         shared.cache.clone(),
     );
-    let reads = Queue {
+    let queue = Queue {
         reads,
         room: (Arc::clone(&shared.queued), shared.settings.max_queued_bytes),
     };
-    let made = tokio::task::spawn_blocking(move || -> Result<(Created, bool), Stage> {
-        let limits = store.config().limits();
-        let list = projection(&cache, fetched, &digest)?;
-        let (image, staged, unqueued) = image_v2(&store, list.into(), &limits, &reads)?;
-        let request = ImageRequest {
-            image: Arc::new(image),
-            digest,
-            at: vec![at],
-            ttl: Some(ttl),
-            ready: false,
-            staged,
-        };
-        let created = store.create_image(request).map_err(stage_of)?;
-        Ok((created, unqueued))
-    });
-    let (created, unqueued) = made
+    let walked = queue.clone();
+    let made =
+        tokio::task::spawn_blocking(move || -> Result<(Created, Vec<BuiltFile>, bool), Stage> {
+            let limits = store.config().limits();
+            let list = match read {
+                Read::Sidecar(fetched) => projection(&cache, Some(fetched), &digest)?,
+                Read::List(bytes) if is_tree_list_v2(&bytes) => list_v2(bytes, &digest)?,
+                Read::List(bytes) => {
+                    let built = built_v1(&bytes, &digest, &limits)?;
+                    let files = built.files.clone();
+                    let request = CreateRequest {
+                        built,
+                        at: vec![at],
+                        ttl: Some(ttl),
+                        ready: false,
+                    };
+                    let created = store.create(request).map_err(stage_of)?;
+                    return Ok((created, files, false));
+                }
+            };
+            let (image, staged, unqueued) = image_v2(&store, list.into(), &limits, &walked)?;
+            let request = ImageRequest {
+                image: Arc::new(image),
+                digest,
+                at: vec![at],
+                ttl: Some(ttl),
+                ready: false,
+                staged,
+            };
+            let created = store.create_image(request).map_err(stage_of)?;
+            Ok((created, Vec::new(), unqueued))
+        });
+    let (created, files, unqueued) = made
         .await
         .map_err(|why| Stage::Failed(format!("the tree was not made: {why}")))??;
     match shared.owner(&job.id, &job.released) {
-        Owner::Ours => Ok(Made {
-            tree: created.tree,
-            unqueued,
-        }),
+        Owner::Ours => {
+            if from_list {
+                shared.cache.sidecar_fallback();
+            }
+            // A version 1 list's reads, each alone, once its tree is placed: queued only if they
+            // fit under the node's bound, as a version 2 list's are.
+            let unqueued =
+                unqueued || (!files.is_empty() && !queue.is_closed() && !queue.send(alone(&files)));
+            Ok(Made {
+                tree: created.tree,
+                unqueued,
+            })
+        }
         Owner::Newer => Err(Stage::Released),
         Owner::Gone => {
-            let _ = shared.store.release(&created.placement);
+            let _ = shared.store.release_now(&created.placement);
             Err(Stage::Released)
         }
     }
 }
 
 /// Where a preparation queues its reads, and the node's room for them.
+#[derive(Clone)]
 struct Queue {
     reads: UnboundedSender<Queued>,
     room: (Arc<QueuedReads>, u64),
@@ -263,11 +302,54 @@ fn projection(
     }
 }
 
-/// The version 2 list in `bytes`, the projection of a sidecar checked against its tree id, opened
-/// as the tree it is, and its file written ahead in `store` if it could be. The bytes are written
-/// on a thread of their own beside the walk; as soon as the walk has checked the list, its spans
-/// are grouped and queued on `reads` if they fit under the node's bound (the flag it gives says
-/// they did not). A list the walk refuses (a tree over the store's limits) is
+/// What a preparation read of its tree: the L2 sidecar, or, when the store has none, the list
+/// `cas/l/<id>` the ref names.
+enum Read {
+    Sidecar(Vec<u8>),
+    List(Vec<u8>),
+}
+
+/// The tree's L2 sidecar, or, if the store has none (counted in the cache), its list `job.key`.
+async fn read_tree(shared: &Shared, job: &Job) -> Result<Read, Stage> {
+    if let Some(sidecar) = read_sidecar(shared, &job.digest).await? {
+        return Ok(Read::Sidecar(sidecar));
+    }
+    shared.cache.sidecar_missing();
+    read_list(shared, &job.key).await.map(Read::List)
+}
+
+/// The tree of the version 1 list in `bytes`, which must hash to `digest`.
+fn built_v1(bytes: &[u8], digest: &TreeDigest, limits: &TreeLimits) -> Result<BuiltTree, Stage> {
+    let list = parse_tree_list(bytes, digest).map_err(|why| Stage::Refused(why.to_string()))?;
+    let entries = list
+        .into_entries()
+        .map_err(|why| Stage::Refused(why.to_string()))?;
+    build_tree(None, entries, limits)
+        .map_err(|why| Stage::Refused(format!("the tree is refused: {why}")))
+}
+
+/// The version 2 list in `bytes`, read at the ref for want of a sidecar, once it hashes to
+/// `digest`, the tree id; a list that does not is refused, and nothing of it is walked or read.
+/// The cache fails a read of `cas/l/` bytes that do not hash to their key before this sees them,
+/// so this repeats that check here, where the tree is made, as `parse_tree_list` does.
+pub(super) fn list_v2(bytes: Vec<u8>, digest: &TreeDigest) -> Result<Vec<u8>, Stage> {
+    let actual = TreeDigest::of(&bytes);
+    if actual != *digest {
+        let why = TreeListError::DigestMismatch {
+            expected: *digest,
+            actual,
+        };
+        return Err(Stage::Refused(why.to_string()));
+    }
+    Ok(bytes)
+}
+
+/// The version 2 list in `bytes`, the projection of a sidecar checked against its tree id (or a
+/// list read for want of one, checked the same way), opened as the tree it is, and its file
+/// written ahead in `store` if it could be. The bytes are written on a thread of their own beside
+/// the walk; as soon as the walk has checked the list, its spans are grouped and queued on
+/// `reads` if they fit under the node's bound (the flag it gives says they did not). A list the
+/// walk refuses (a tree over the store's limits) is
 /// the refusal, and the reads still queued are not made. A file that could not be written ahead
 /// is written by the create, which says why if it cannot either.
 fn image_v2(
@@ -310,18 +392,29 @@ fn stage_of(why: CreateError) -> Stage {
 /// or none if the store has no such object.
 async fn read_sidecar(shared: &Shared, digest: &TreeDigest) -> Result<Option<Vec<u8>>, Stage> {
     let key = sidecar_key(digest.as_bytes());
+    read_bounded(shared, &key, &format!("the L2 sidecar {key}")).await
+}
+
+/// The bytes of the tree list `key`, read through the cache within the list's bound.
+async fn read_list(shared: &Shared, key: &str) -> Result<Vec<u8>, Stage> {
+    read_bounded(shared, key, "the tree list")
+        .await?
+        .ok_or_else(|| Stage::Refused(format!("no tree list at {key}")))
+}
+
+/// The bytes of the object `key`, which a refusal or a failure calls `what`, read through the
+/// cache within the list's bound, or none if the store has no such object.
+async fn read_bounded(shared: &Shared, key: &str, what: &str) -> Result<Option<Vec<u8>>, Stage> {
     let bound = shared.settings.list_timeout;
-    match tokio::time::timeout(bound, read_whole(shared, &key)).await {
+    match tokio::time::timeout(bound, read_whole(shared, key)).await {
         Err(_) => Err(Stage::Failed(format!(
-            "the L2 sidecar {key} was not read within {bound:?}"
+            "{what} was not read within {bound:?}"
         ))),
         Ok(Err(Error::NotFound(_))) => Ok(None),
-        Ok(Err(why)) => Err(Stage::Failed(format!(
-            "the L2 sidecar {key} was not read: {why}"
-        ))),
+        Ok(Err(why)) => Err(Stage::Failed(format!("{what} was not read: {why}"))),
         Ok(Ok(Some(bytes))) => Ok(Some(bytes)),
         Ok(Ok(None)) => Err(Stage::Refused(format!(
-            "the L2 sidecar {key} is over {} bytes",
+            "{what} is over {} bytes",
             shared.settings.max_list_bytes
         ))),
     }
