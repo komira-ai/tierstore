@@ -213,7 +213,7 @@ async fn a_v2_list_over_a_store_with_trees_disabled_fails_and_stages_nothing() {
     let key = rig.key.clone();
     assert_eq!(
         prepared(&rig, "js.1", &key).await,
-        Stage::Failed("the tree was not made: trees are off on this node".to_owned())
+        Stage::Unmade("the tree was not made: trees are off on this node".to_owned())
     );
     assert_eq!(staging(&rig), Vec::<String>::new());
     assert_eq!(trees(&rig), Vec::<String>::new());
@@ -231,7 +231,7 @@ async fn a_v2_list_over_a_read_only_store_fails_and_stages_nothing() {
     let key = rig.key.clone();
     assert_eq!(
         prepared(&rig, "js.1", &key).await,
-        Stage::Failed(
+        Stage::Unmade(
             "the tree was not made: this node does not hold the lock of its cache directory"
                 .to_owned()
         )

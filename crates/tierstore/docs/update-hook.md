@@ -135,7 +135,7 @@ The outcomes are:
   - a placement that outlives its release.
 
   The detail names the tree, its directory and the first difference. A file that differs is described by its size, never its bytes.
-- **Deferral, `not_ready`.** A provider that does not answer (its socket not bound yet), or that answers `UNAVAILABLE` (a tree not placed within the call's wait), defers `verify` with `not_ready` and `verify_retry_secs`. hostkeeper ends the deferrals itself at `verify_deadline_secs`.
+- **Deferral, `not_ready`.** A provider that does not answer (its socket not bound yet), or that answers `UNAVAILABLE` (a tree not placed within the call's wait), defers `verify` with `not_ready` and `verify_retry_secs`. hostkeeper ends the deferrals itself at `verify_deadline_secs`. A node whose file has a `mount-provider` interface and no `fs` interface has no file system that serves its trees, and its provider answers every `Prepare` `UNAVAILABLE` saying so: such a node cannot run a job from the provider, and its `verify` defers until that deadline, after which hostkeeper rolls the update back.
 
 Before a check that got as far as `Prepare` ends with a failure or a deferral, it asks for the release of both sources, each even when the other's release is not answered. A placement the provider cannot release then is released by the first step of the next check, or ends at `trees.ttl_max`. A node whose file has no `mount-provider` interface, or whose params name no `config_file`, has no check. An interface with no absolute `socket` or `mountpoint` is `config_refused`. After the commit, `verify` does not run the check again.
 
