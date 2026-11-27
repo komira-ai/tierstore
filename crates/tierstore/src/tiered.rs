@@ -336,8 +336,9 @@ fn refuse_reserved(key: &str) -> Result<(), Error> {
 ///   `_tiering/` and `_entries/` (whichever tier holds them). [`Backend::list_page`] pages through
 ///   the merged listing: the last key of a page is the continuation token, and `max_keys` is kept
 ///   to (a page of a tier that the filter of the reserved prefixes cut short is made up from the
-///   next). A get, a head, a put, a delete and every
-///   multipart call of a key under a reserved prefix is refused with [`Error::Reserved`]. The S3
+///   next). A get (also an open or streamed read), a head, a put, a delete and every
+///   multipart call of a key under a reserved prefix is refused with [`Error::Reserved`]; any
+///   other key, `_uploads/x` or `_entries` (no slash) for one, is an ordinary key. The S3
 ///   front and the local cache of a build node refuse those keys as well, each for itself.
 /// - **Multipart uploads** (`create_upload`, `upload_part`, `complete_upload`, `abort_upload`)
 ///   are made in the hot tier whenever it has room and in the cold tier only when it is full

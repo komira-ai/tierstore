@@ -1,13 +1,15 @@
 //! The Prepare planner of the read path (`docs/design/fetch-cache-serve.md`, section 6; section
-//! 18 row T7): a pure function of a tree list, the byte ranges a job needs and a first-touch
-//! profile. It says which cells of which packs Prepare ensures, at what rank, so that the fetch
-//! engine (section 4) reads them as few streams as the drives serve best.
+//! 18 row T7): a pure function of a tree list and the byte ranges a job needs, with no learned or
+//! recorded input (6.1). It says which cells of which packs Prepare ensures, at what rank, so that
+//! the fetch engine (section 4) reads them as few streams as the drives serve best.
 //!
 //! What it does, in the order of section 6:
-//! 1. **Needed cells and ranks.** A needed range covers the cells it touches (1 MiB cells, 2). A
-//!    cell's rank (4.5) is its first-touch rank: the position of the first profile touch that
-//!    covers it, else, after every profiled cell, the position of the first needed range that
-//!    covers it (tree order). Lower is sooner.
+//! 1. **Needed cells and ranks.** A needed range covers the cells it touches (1 MiB cells, 2). The
+//!    ranges are ranked shared packs first (6.1): the ranges of the packs whose PACKS record has
+//!    `pack_flags` bit 1 set (`PACK_SHARED`, which the CAS service sets on a pack many trees name),
+//!    in tree order, then every other range, in tree order. A reader ignores the flag bits it does
+//!    not know, so no other bit moves a rank. A cell's rank (4.5) is the lowest rank of the needed
+//!    ranges that cover it. Lower is sooner.
 //! 2. **The gap rule, per drive.** Needed runs of one pack are merged across a gap of at most
 //!    `gap_cells` absent cells, `gap_cells = ceil(positioning x media rate / cell bytes)` of the
 //!    device the pack is read from ([`config::DriveModel`]): about 3 on a cold hard drive and 0 on

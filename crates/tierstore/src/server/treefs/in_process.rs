@@ -7,7 +7,13 @@
 //!
 //! Only the process that holds the lock of the cache directory writes the cache. A request made
 //! while the cache is read-only waits for the write role (`LocalCache::watch_mode`), up to
-//! `fs.fetch_timeout`, or to the end the request was given where that is sooner. A request still waiting then fails: a
+//! `fs.fetch_timeout`, or to the end the request was given where that is sooner. The mode says
+//! read-write only after the tree store has read its directory again
+//! (`LocalCache::before_read_write`), so a request that waited finds every placement the process
+//! before this one made, also those made after this process opened its store: a read of a file
+//! the process before opened is answered from it, not with `EIO` (a job that maps the file would
+//! take that as SIGBUS). A read of the directory that fails is said on stderr, and the store's
+//! next pass reads it again. A request still waiting for the write role at the end fails: a
 //! fill or a span with the words `read-only`, which the core asks again while its open has time
 //! and then fails with `EIO`; any other with [`AskError::ReadOnly`], or [`AskError::Spent`] where
 //! the request's own end came first. A touch and the reports do not wait: the cache passes over a

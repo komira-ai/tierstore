@@ -1,9 +1,12 @@
 //! The planner against a reference written cell by cell, over generated inputs: random packs (with
-//! short last cells and packs on both sides of 64 MiB), needed ranges, stale and current profile
-//! touches, media, gap rules from 0 to 6 cells, and backlogs on both sides of the bound.
+//! short last cells, packs on both sides of 64 MiB, and every `pack_flags` byte, shared or not,
+//! with bits the reader does not know), needed ranges, media, gap rules from 0 to 6 cells, and
+//! backlogs on both sides of the bound.
 //!
-//! The reference states section 6 directly: a cell is needed when a range covers it; its rank is
-//! the lowest of the profile touches and needed ranges covering it; a stretch of at most
+//! The reference states section 6 directly: a needed range's rank is its place among the ranges of
+//! shared packs (`pack_flags` bit 1) in tree order, or, after all of them, its place among the
+//! other ranges in tree order (6.1); a cell is needed when a range covers it; its rank is the
+//! lowest of the needed ranges covering it; a stretch of at most
 //! `gap_cells` absent cells between two needed cells is read, at the rank of the needed cell
 //! before it; the pack is whole at the coverage thresholds unless the backlog downgrades it, and
 //! every unneeded cell of a whole pack takes the rank of the needed cell before it, or after it at
@@ -23,9 +26,9 @@ mod support;
 use std::collections::BTreeMap;
 
 use support::{Case, FakeList, MIB, pack, per_cell};
-use tierstore_fetch_api::ids::{ByteRange, PackKey};
+use tierstore_fetch_api::ids::ByteRange;
 use tierstore_plan::config::{DriveModel, Medium, PlanConfig};
-use tierstore_plan::plan::{Backlog, Fetch, Needed, Plan, Touch};
+use tierstore_plan::plan::{Backlog, Fetch, Needed, Plan};
 
 /// A small deterministic generator (a 64-bit LCG): the cases are the same on every run.
 struct Gen(u64);
@@ -47,7 +50,6 @@ impl Gen {
 struct Generated {
     list: FakeList,
     needed: Vec<Needed>,
-    profile: Vec<Touch>,
     media: BTreeMap<u32, Medium>,
     backlog: Backlog,
     config: PlanConfig,
@@ -62,7 +64,10 @@ fn generate(seed: u64) -> Generated {
                 // 1 to 100 cells, the last one short half of the time.
                 let cells = 1 + g.below(100);
                 let short = if g.below(2) == 0 { g.below(MIB) } else { 0 };
-                pack(&format!("k{i}"), cells * MIB - short)
+                let mut record = pack(&format!("k{i}"), cells * MIB - short);
+                // Any flag byte: bit 1 half of the time, beside bits that do not order.
+                record.pack_flags = u8::try_from(g.below(256)).unwrap();
+                record
             })
             .collect(),
     };
@@ -74,18 +79,6 @@ fn generate(seed: u64) -> Generated {
             let len = g.below((size - offset).min(12 * MIB) + 1);
             Needed {
                 pack: u32::try_from(p).unwrap(),
-                range: ByteRange { offset, len },
-            }
-        })
-        .collect();
-    let profile = (0..g.below(5))
-        .map(|_| {
-            // A key of this list, or one it does not have; a range anywhere, past the end too.
-            let key = format!("k{}", g.below(packs + 1));
-            let offset = g.below(120 * MIB);
-            let len = g.below(8 * MIB);
-            Touch {
-                key: PackKey(key),
                 range: ByteRange { offset, len },
             }
         })
@@ -114,7 +107,6 @@ fn generate(seed: u64) -> Generated {
     Generated {
         list,
         needed,
-        profile,
         media,
         backlog,
         config,
@@ -141,8 +133,22 @@ fn cell_range(range: ByteRange, cell_count: u32) -> std::ops::Range<u32> {
     u32::try_from(first).unwrap()..u32::try_from(last).unwrap()
 }
 
+/// The rank of each needed range: the ranges of shared packs in tree order, then the others.
+fn range_ranks(case: &Generated) -> Vec<u32> {
+    let shared = |n: &Needed| case.list.packs[n.pack as usize].pack_flags & 2 != 0;
+    let order: Vec<usize> = (0..case.needed.len())
+        .filter(|&i| shared(&case.needed[i]))
+        .chain((0..case.needed.len()).filter(|&i| !shared(&case.needed[i])))
+        .collect();
+    let mut ranks = vec![0; case.needed.len()];
+    for (rank, i) in order.into_iter().enumerate() {
+        ranks[i] = u32::try_from(rank).unwrap();
+    }
+    ranks
+}
+
 fn reference(case: &Generated) -> BTreeMap<u32, RefPack> {
-    let p_len = u32::try_from(case.profile.len()).unwrap();
+    let range_rank = range_ranks(case);
     let mut out = BTreeMap::new();
     for (index, record) in case.list.packs.iter().enumerate() {
         let index = u32::try_from(index).unwrap();
@@ -153,7 +159,7 @@ fn reference(case: &Generated) -> BTreeMap<u32, RefPack> {
                 continue;
             }
             for c in cell_range(n.range, record.cell_count) {
-                let r = p_len + u32::try_from(i).unwrap();
+                let r = range_rank[i];
                 let slot = &mut needed[c as usize];
                 *slot = Some(slot.map_or(r, |old| old.min(r)));
             }
@@ -161,16 +167,6 @@ fn reference(case: &Generated) -> BTreeMap<u32, RefPack> {
         let needed_cells = u32::try_from(needed.iter().flatten().count()).unwrap();
         if needed_cells == 0 {
             continue;
-        }
-        for (j, t) in case.profile.iter().enumerate() {
-            if t.key != record.key {
-                continue;
-            }
-            for c in cell_range(t.range, record.cell_count) {
-                if let Some(r) = needed[c as usize].as_mut() {
-                    *r = (*r).min(u32::try_from(j).unwrap());
-                }
-            }
         }
         let medium = case.media.get(&index).copied().unwrap_or(Medium::Cold);
         let gap = case.config.gap_cells(medium, 20) as usize;
@@ -249,12 +245,15 @@ fn the_plan_equals_the_cell_by_cell_reference() {
     let mut whole = 0;
     let mut downgraded = 0;
     let mut runs = 0;
+    let mut reordered = 0;
     for seed in 0..2_000 {
         let case = generate(seed);
+        // A case where shared packs first moves a range ahead of an earlier one.
+        let ranks = range_ranks(&case);
+        reordered += usize::from(ranks.iter().enumerate().any(|(i, &r)| r as usize != i));
         let plan = Case {
             list: &case.list,
             needed: case.needed.clone(),
-            profile: case.profile.clone(),
             media: case.media.clone(),
             backlog: case.backlog,
             config: case.config,
@@ -302,9 +301,10 @@ fn the_plan_equals_the_cell_by_cell_reference() {
             }
         }
     }
-    // The generated cases reach every decision often, so the comparison covers each.
+    // The generated cases reach every decision often, and reorder ranges by shared packs often,
+    // so the comparison covers each.
     assert!(
-        whole > 100 && downgraded > 100 && runs > 100,
-        "{whole} {downgraded} {runs}"
+        whole > 100 && downgraded > 100 && runs > 100 && reordered > 100,
+        "{whole} {downgraded} {runs} {reordered}"
     );
 }
