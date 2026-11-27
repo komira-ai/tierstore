@@ -201,7 +201,6 @@ pub(in crate::server) fn fs_of(at: &str, params: &Params) -> Result<FsInterface,
         tree_idle_secs: params.tree_idle_secs,
         tree_list_ram_bytes: params.tree_list_ram_bytes,
         put: params.put.clone().map(|strict| strict.0),
-        ..FsTable::default()
     };
     Ok(FsInterface {
         at: at.to_owned(),

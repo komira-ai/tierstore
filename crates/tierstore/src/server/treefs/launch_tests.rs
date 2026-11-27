@@ -275,8 +275,8 @@ fn a_restart_without_resend_aborts_a_connection_that_stays_hung() {
     std::fs::write(kernel.connections.join("77/waiting"), "2\n").unwrap();
     let manager = FakeManager::start(&rig.dir.path().join("notify.sock"));
     let (device, _kernel) = fakedev::pair();
-    let platform = platform(&manager, Some(device.as_raw_fd()), kernel.clone());
-    let error = serve_with((&settings, &rig.calls()), platform).unwrap_err();
+    let aborting = platform(&manager, Some(device.as_raw_fd()), kernel.clone());
+    let error = serve_with((&settings, &rig.calls()), aborting).unwrap_err();
     assert!(matches!(error, StartError::Aborted));
     assert_eq!(error.status(), 1);
     assert_eq!(
