@@ -256,6 +256,7 @@ async fn a_request_that_reached_a_server_is_not_sent_again() {
     assert_eq!(count.load(Ordering::SeqCst), 1, "streamed put");
     // The PUT got no answer, so the store looks at the key once (`s3/cut_put.rs`): that HEAD is
     // the next request, and goes to the next endpoint; the PUT itself is not sent there.
+    s.cleanups_idle().await;
     let seen = fake.requests();
     assert_eq!(seen.len(), 1, "{seen:?}");
     assert!(seen[0].starts_with("HEAD "), "{seen:?}");

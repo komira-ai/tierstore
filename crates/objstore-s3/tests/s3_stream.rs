@@ -394,6 +394,7 @@ async fn big_replace(
     let s = store_cut_at_a_part(endpoint);
     let put = s.put_stream_if_match(key(), OVER_ONE_PUT, zeros(OVER_ONE_PUT, None), "\"old\"");
     let outcome = put.await;
+    s.cleanups_idle().await;
     let requests = seen.lock().unwrap().clone();
     (outcome, requests)
 }
@@ -580,6 +581,7 @@ async fn an_unsized_streamed_replace_whose_body_fails_replaces_nothing() {
     let failing: BodyStream = stream::iter(vec![Ok(first), Err(cut.clone())]).boxed();
     let failed = s.put_stream_if_match_unsized(key(), failing, "\"old\"");
     assert_eq!(failed.await.unwrap_err().to_string(), cut.to_string());
+    s.cleanups_idle().await;
     let seen = seen.lock().unwrap().clone();
     assert_eq!(seen.len(), 3, "{seen:?}");
     assert!(seen[2].starts_with("DELETE "), "{seen:?}");
@@ -603,6 +605,7 @@ async fn an_unsized_streamed_replace_refused_at_completion_is_typed_and_aborted(
         matches!(err, ObjectStoreError::Service { status: 412, .. }),
         "{err}"
     );
+    s.cleanups_idle().await;
     assert!(seen.lock().unwrap()[4].starts_with("DELETE "));
 
     let unnamed = "<CompleteMultipartUploadResult></CompleteMultipartUploadResult>";
@@ -698,6 +701,7 @@ async fn a_large_streamed_create_is_completed_create_only_and_gives_its_tag() {
     let put = s.put_stream_new_tagged(key(), OVER_ONE_PUT, zeros(OVER_ONE_PUT, None));
     let err = put.await.unwrap_err();
     assert!(matches!(err, ObjectStoreError::AlreadyExists(_)), "{err}");
+    s.cleanups_idle().await;
     assert!(seen.lock().unwrap()[4].starts_with("DELETE "));
 }
 
@@ -862,5 +866,6 @@ async fn a_large_plain_streamed_write_is_completed_with_no_condition_and_aborted
         matches!(err, ObjectStoreError::Service { status: 403, .. }),
         "{err}"
     );
+    s.cleanups_idle().await;
     assert!(seen.lock().unwrap()[4].starts_with("DELETE "));
 }
