@@ -1,18 +1,20 @@
-//! One preparation of a version 2 tree list run to its end: the list placed as its own tree, named
-//! by its digest, whose every path resolves as in the tree a version 1 list of the same entries
-//! gives, the spans read as the walk queues them, a list that
-//! does not hash to its key, a record or a header the reader refuses, a tree the store refuses, a
-//! release before or during the placement, and a file whose pack is not there.
+//! One preparation of a tree from its L2 sidecar run to its end: its version 2 projection placed as
+//! its own tree, named by the tree id, the spans read as the walk queues them; a sidecar whose
+//! projection is not the tree, one of another tree, a list of the old version or a major version
+//! at the sidecar's key, a cell shift other than 20, a record the reader refuses, a pack flag it
+//! does not know; a tree the store refuses, a release before or during the placement, and a file
+//! whose pack is not there.
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
+use tierstore_list::{ENTRY_LEN, Section, TreeListL2};
 use tokio::sync::watch;
 
 use super::names::SourceId;
 use super::prepare::{Job, run};
 use super::sources::Stage;
-use super::testing::{AGENT, READ_ONLY, Rig, list_of, member, source};
+use super::testing::{AGENT, READ_ONLY, Rig, list_of, member, sidecar_key_of, sidecar_of, source};
 use crate::server::local_cache::trees::TreesConfig;
 use crate::{BlobSource, ListEntry, ListKind, Mode, Op, TreeDigest, TreeList, tree_list_digest};
 
@@ -77,8 +79,6 @@ fn list_of_missing_pack(rig: &Rig) -> TreeList {
     }
 }
 
-/// The offset in a version 2 list's header of the major version.
-const VERSION_AT: usize = 8;
 /// The offset in a version 2 list's header of the entries section's offset, then its count.
 const ENTRIES_AT: usize = 16;
 
@@ -97,168 +97,259 @@ fn break_entry(bytes: &mut [u8], index: usize) {
     bytes[at..at + 2].copy_from_slice(&broken.to_le_bytes());
 }
 
-/// Asserts that a version 2 list run to its end leaves the source placed, every file's span in the
-/// cache from one grouped read of the pack (its three files are one range: one GET), and the tree
-/// marked ready; that the tree is the list itself, named by the list's own digest and not by the
-/// records a version 1 list makes; and that every path of it (the root, the directories the paths
-/// imply, each entry, and a name that is not there) resolves as it does in the tree of the
-/// version 1 list of the same entries.
+/// Asserts that a tree run to its end from its L2 sidecar leaves the source placed, every file's
+/// span in the cache from one grouped read of the pack (its three files are one range: one GET),
+/// and the tree marked ready; that the tree is the sidecar's version 2 projection, named by the
+/// tree id, the digest of the key the job names; that the sidecar is read once and the list
+/// `cas/l/<id>` never; and that nothing is counted as refused.
 #[tokio::test]
-async fn a_v2_list_run_to_its_end_places_the_list_as_its_tree_and_reads_every_file() {
+async fn a_tree_run_to_its_end_from_its_sidecar_is_placed_as_its_list_and_reads_every_file() {
     let rig = Rig::new("prov-v2-ready").await;
-    let key = rig.put_list_v2(&list_of(&rig.bench.pack)).await;
-    assert_ne!(key, rig.key);
-    let (job2, seen2) = held(&rig, "js.2", &key);
-    run(Arc::clone(&rig.provider.shared), job2).await;
-    assert_eq!(*seen2.borrow(), Stage::Placed);
+    let key = rig.key.clone();
+    let (job, seen) = held(&rig, "js.2", &key);
+    run(Arc::clone(&rig.provider.shared), job).await;
+    assert_eq!(*seen.borrow(), Stage::Placed);
     let store = &rig.bench.store;
     let located = store.locate_fs(&Rig::place_of("js.2", 0)).unwrap();
     assert!(store.placement(&located.placement).unwrap().ready);
     assert!((0..3).all(|blob| rig.holds(blob)));
     assert_eq!(pack_reads(&rig), 1);
     assert_eq!(located.tree, tree_list_digest(&key).unwrap());
+    assert_eq!(located.tree, TreeDigest::of(&v2_bytes(&rig)));
+    assert_eq!(rig.bench.rig.calls_on(Op::Get, &key), 0);
+    assert_eq!(rig.bench.rig.calls_on(Op::Get, &sidecar_key_of(&key)), 1);
+    let metricz = rig.bench.rig.cache.metrics();
+    assert!(
+        metricz.contains("tierstore_l2_sidecar_missing_total 0\n"),
+        "{metricz}"
+    );
+}
 
-    let (job1, seen1) = held(&rig, "js.1", &rig.key);
-    run(Arc::clone(&rig.provider.shared), job1).await;
-    assert_eq!(*seen1.borrow(), Stage::Placed);
-    let v1 = store.locate_fs(&Rig::place_of("js.1", 0)).unwrap();
-    assert_ne!(located.tree, v1.tree);
-    let paths = [
-        "",
-        "bin",
-        "bin/other",
-        "bin/tool",
-        "empty",
-        "lib",
-        "lib/deep",
-        "lib/deep/data",
-        "link",
-        "zero",
-        "absent",
-        "bin/tool/below",
-    ];
-    for path in paths {
-        assert_eq!(
-            store.resolve(&located.placement, path),
-            store.resolve(&v1.placement, path),
-            "{path}"
-        );
+/// A tree of the pack's files and one more, whose version 2 list is stored with no sidecar, for a
+/// test to store the object at the sidecar's key: the list's key and bytes.
+async fn bare_tree(rig: &Rig) -> (String, Vec<u8>) {
+    let mut list = list_of(&rig.bench.pack);
+    list.entries.push(member(&rig.bench.pack, "more", 1, 0o644));
+    let v2 = list.encode_v2().unwrap();
+    (rig.put_bytes(&v2).await, v2)
+}
+
+/// The first byte of `section` in the L2 list `l2`.
+fn section_at(l2: &[u8], section: Section) -> usize {
+    let list = TreeListL2::open(l2.to_vec()).expect("an L2 list");
+    usize::try_from(list.section_range(section).start).unwrap()
+}
+
+/// Runs the preparation of the source `run`/0 with `key` to its end; the stage it left.
+async fn prepared(rig: &Rig, run_id: &str, key: &str) -> Stage {
+    let (job, seen) = held(rig, run_id, key);
+    run(Arc::clone(&rig.provider.shared), job).await;
+    seen.borrow().clone()
+}
+
+/// Asserts that nothing is placed at the source `run`/0, no file of the pack was read, and no
+/// refusal of a version was counted.
+fn nothing_placed_or_counted(rig: &Rig, run_id: &str) {
+    assert!(rig.bench.store.mount_paths().is_empty());
+    assert!(
+        rig.bench
+            .store
+            .locate_fs(&Rig::place_of(run_id, 0))
+            .is_none()
+    );
+    assert_eq!(pack_reads(rig), 0);
+    let metricz = rig.bench.rig.cache.metrics();
+    for reason in [
+        "v1_list",
+        "missing_sidecar",
+        "unknown_cell_digest",
+        "unknown_version",
+    ] {
+        let line = format!("tierstore_list_refused_total{{reason=\"{reason}\"}} 0\n");
+        assert!(metricz.contains(&line), "{line} in {metricz}");
     }
 }
 
-/// Asserts that a version 2 list whose bytes do not hash to the digest the job names is refused
-/// with the message that names both digests and is not placed (the hash gates the placement, not
-/// the reads). The cache checks a `cas/l/` object against its key as it reads it, so the job here is
-/// one whose digest is not its key's: the check of the preparation itself.
+/// Asserts that a sidecar whose version 2 projection does not hash to the tree id (a mode of an
+/// entry edited, which the header's CRC does not cover) is refused as corrupt, with the digest the
+/// projection has, is never placed, and is not counted as a refusal of the version.
 #[tokio::test]
-async fn a_v2_list_that_does_not_hash_to_its_digest_is_refused_and_not_placed() {
-    let rig = Rig::new("prov-v2-digest").await;
-    let bytes = v2_bytes(&rig);
-    let key = rig.put_bytes(&bytes).await;
-    let (mut job, seen) = held(&rig, "js.1", &key);
-    let expected = TreeDigest::of(b"other bytes");
-    job.digest = expected;
-    run(Arc::clone(&rig.provider.shared), job).await;
-    let actual = TreeDigest::of(&bytes);
+async fn a_sidecar_whose_projection_is_not_the_tree_is_refused_as_corrupt_and_not_placed() {
+    let rig = Rig::new("prov-l2-projection").await;
+    let (key, v2) = bare_tree(&rig).await;
+    let mut l2 = sidecar_of(&rig.bench.pack, &v2);
+    // The mode of entry 1 is the low 12 bits of the u16 at byte 12 of its record.
+    let at = section_at(&l2, Section::Entries) + ENTRY_LEN + 12;
+    l2[at] ^= 0o004;
+    let found = TreeListL2::open(l2.clone()).unwrap().projection_digest();
+    rig.put_sidecar(&key, &l2).await;
+    let sidecar = sidecar_key_of(&key);
     assert_eq!(
-        *seen.borrow(),
+        prepared(&rig, "js.1", &key).await,
         Stage::Refused(format!(
-            "tree list digest mismatch: expected {expected}, the bytes hash to {actual}"
+            "the L2 sidecar {sidecar} is refused: the version 2 list it holds hashes to {}, \
+             not to its tree id",
+            hex::encode(found)
         ))
     );
+    nothing_placed_or_counted(&rig, "js.1");
+}
+
+/// Asserts that the sidecar of another tree stored at a tree's sidecar key is refused as the list
+/// of that other tree, and not placed.
+#[tokio::test]
+async fn a_sidecar_of_another_tree_is_refused_and_not_placed() {
+    let rig = Rig::new("prov-l2-other").await;
+    let (key, _) = bare_tree(&rig).await;
+    let other = TreeList {
+        entries: vec![member(&rig.bench.pack, "other", 2, 0o644)],
+    };
+    let other_v2 = other.encode_v2().unwrap();
+    rig.put_sidecar(&key, &sidecar_of(&rig.bench.pack, &other_v2))
+        .await;
+    let sidecar = sidecar_key_of(&key);
+    let ours = tree_list_digest(&key).unwrap();
+    assert_eq!(
+        prepared(&rig, "js.1", &key).await,
+        Stage::Refused(format!(
+            "the L2 sidecar {sidecar} is refused: the list is of tree {}, not {ours}",
+            TreeDigest::of(&other_v2)
+        ))
+    );
+    nothing_placed_or_counted(&rig, "js.1");
+}
+
+/// Asserts that a version 2 list stored where the sidecar belongs is refused with its own reason,
+/// `tree list not supported: v1_list` (the design's "v1" is the version 2 list), and counted under
+/// it alone: it is not a missing sidecar.
+#[tokio::test]
+async fn a_list_of_the_old_version_at_the_sidecar_key_is_refused_v1_list_and_counted() {
+    let rig = Rig::new("prov-l2-v1").await;
+    let (key, v2) = bare_tree(&rig).await;
+    rig.put_sidecar(&key, &v2).await;
+    assert_eq!(
+        prepared(&rig, "js.1", &key).await,
+        Stage::Refused("tree list not supported: v1_list".to_owned())
+    );
     assert!(rig.bench.store.mount_paths().is_empty());
+    let metricz = rig.bench.rig.cache.metrics();
+    for line in [
+        "tierstore_list_refused_total{reason=\"v1_list\"} 1\n",
+        "tierstore_list_refused_total{reason=\"missing_sidecar\"} 0\n",
+        "tierstore_l2_sidecar_missing_total 0\n",
+    ] {
+        assert!(metricz.contains(line), "{line} in {metricz}");
+    }
+}
+
+/// Asserts that an L2 sidecar of a major version this release does not read is refused with its
+/// reason, `unknown_version`, and counted under it.
+#[tokio::test]
+async fn a_sidecar_of_another_major_version_is_refused_unknown_version_and_counted() {
+    let rig = Rig::new("prov-l2-version").await;
+    let (key, v2) = bare_tree(&rig).await;
+    let mut l2 = sidecar_of(&rig.bench.pack, &v2);
+    l2[8..10].copy_from_slice(&2u16.to_le_bytes());
+    rig.put_sidecar(&key, &l2).await;
+    assert_eq!(
+        prepared(&rig, "js.1", &key).await,
+        Stage::Refused("tree list not supported: unknown_version".to_owned())
+    );
+    assert!(rig.bench.store.mount_paths().is_empty());
+    let metricz = rig.bench.rig.cache.metrics();
     assert!(
-        rig.bench
-            .store
-            .locate_fs(&Rig::place_of("js.1", 0))
-            .is_none()
+        metricz.contains("tierstore_list_refused_total{reason=\"unknown_version\"} 1\n"),
+        "{metricz}"
     );
 }
 
-/// Asserts that a version 2 list with an entry of kind 3 is refused with the reader's message
-/// naming the entry, and that no tree is placed.
+/// Asserts that an object at the sidecar's key that is no list at all (bytes of no known magic, and
+/// none) is refused as a malformed sidecar, never placed, and not counted as a refusal of the
+/// version.
 #[tokio::test]
-async fn a_v2_list_with_a_bad_entry_is_refused_and_not_placed() {
+async fn a_sidecar_that_is_no_list_is_refused_bad_magic_and_not_placed() {
+    let rig = Rig::new("prov-l2-garbage").await;
+    let (key, _) = bare_tree(&rig).await;
+    rig.put_sidecar(&key, b"not a tree list").await;
+    let sidecar = sidecar_key_of(&key);
+    assert_eq!(
+        prepared(&rig, "js.1", &key).await,
+        Stage::Refused(format!("the L2 sidecar {sidecar} is refused: bad magic"))
+    );
+    nothing_placed_or_counted(&rig, "js.1");
+}
+
+/// Asserts that a sidecar naming a pack of a cell shift other than 20 is refused, never placed,
+/// and not counted as a refusal of the version.
+#[tokio::test]
+async fn a_sidecar_with_a_cell_shift_other_than_20_is_refused() {
+    let rig = Rig::new("prov-l2-shift").await;
+    let (key, v2) = bare_tree(&rig).await;
+    let mut l2 = sidecar_of(&rig.bench.pack, &v2);
+    // The cell shift of pack 0 is byte 28 of its 48-byte record.
+    let shift = section_at(&l2, Section::Packs) + 28;
+    l2[shift] = 21;
+    rig.put_sidecar(&key, &l2).await;
+    let sidecar = sidecar_key_of(&key);
+    assert_eq!(
+        prepared(&rig, "js.1", &key).await,
+        Stage::Refused(format!(
+            "the L2 sidecar {sidecar} is refused: pack 0: cell shift 21, not 20"
+        ))
+    );
+    nothing_placed_or_counted(&rig, "js.1");
+}
+
+/// Asserts that a pack flag this release does not know (bit 7 of `pack_flags`, byte 29 of the
+/// pack's record) is ignored: the tree is placed and every file read.
+#[tokio::test]
+async fn an_unknown_pack_flags_bit_is_ignored_and_the_tree_placed() {
+    let rig = Rig::new("prov-l2-flags").await;
+    let (key, v2) = bare_tree(&rig).await;
+    let mut l2 = sidecar_of(&rig.bench.pack, &v2);
+    let flags = section_at(&l2, Section::Packs) + 29;
+    l2[flags] |= 0x80;
+    rig.put_sidecar(&key, &l2).await;
+    assert_eq!(prepared(&rig, "js.1", &key).await, Stage::Placed);
+    assert!((0..3).all(|blob| rig.holds(blob)));
+}
+
+/// Asserts that a tree whose list has an entry of kind 3 is refused by the sidecar's reader with
+/// its message naming the entry, and that no tree is placed.
+#[tokio::test]
+async fn a_sidecar_with_a_bad_entry_is_refused_and_not_placed() {
     let rig = Rig::new("prov-v2-record").await;
     let mut bytes = v2_bytes(&rig);
     break_entry(&mut bytes, 1);
-    let key = rig.put_bytes(&bytes).await;
-    let (job, seen) = held(&rig, "js.1", &key);
-    run(Arc::clone(&rig.provider.shared), job).await;
+    let key = rig.put_tree_bytes(&bytes).await;
+    let sidecar = sidecar_key_of(&key);
     assert_eq!(
-        *seen.borrow(),
-        Stage::Refused("tree list entry 1: unknown kind 3".to_owned())
+        prepared(&rig, "js.1", &key).await,
+        Stage::Refused(format!(
+            "the L2 sidecar {sidecar} is refused: entry 1: unknown kind 3"
+        ))
     );
-    assert!(rig.bench.store.mount_paths().is_empty());
-    assert!(
-        rig.bench
-            .store
-            .locate_fs(&Rig::place_of("js.1", 0))
-            .is_none()
-    );
+    nothing_placed_or_counted(&rig, "js.1");
 }
 
-/// Asserts that a version 2 list with a bad entry after its first file spans (so spans were
-/// queued before the fault) is refused with the reader's message and has no placement.
+/// Asserts that a tree whose list has a bad entry after its files is refused with the reader's
+/// message, has no placement and reads no file: the sidecar is checked whole before a span is
+/// queued.
 #[tokio::test]
-async fn a_v2_list_with_a_bad_entry_after_its_first_spans_is_not_placed() {
+async fn a_sidecar_with_a_bad_entry_after_its_files_is_not_placed() {
     let rig = Rig::new("prov-v2-late-record").await;
     let mut bytes = v2_bytes(&rig);
     let last = entry_count(&bytes) - 1;
     break_entry(&mut bytes, last);
-    let key = rig.put_bytes(&bytes).await;
-    let (job, seen) = held(&rig, "js.1", &key);
-    run(Arc::clone(&rig.provider.shared), job).await;
+    let key = rig.put_tree_bytes(&bytes).await;
+    let sidecar = sidecar_key_of(&key);
     assert_eq!(
-        *seen.borrow(),
-        Stage::Refused(format!("tree list entry {last}: unknown kind 3"))
-    );
-    assert!(rig.bench.store.mount_paths().is_empty());
-    assert!(
-        rig.bench
-            .store
-            .locate_fs(&Rig::place_of("js.1", 0))
-            .is_none()
-    );
-}
-
-/// Asserts that a version 2 list with both a bad entry and bytes that do not hash to the job's
-/// digest reports the digest mismatch, not the entry.
-#[tokio::test]
-async fn a_v2_list_with_a_bad_entry_and_the_wrong_digest_reports_the_digest() {
-    let rig = Rig::new("prov-v2-both").await;
-    let mut bytes = v2_bytes(&rig);
-    break_entry(&mut bytes, 1);
-    let key = rig.put_bytes(&bytes).await;
-    let (mut job, seen) = held(&rig, "js.1", &key);
-    let expected = TreeDigest::of(b"other bytes");
-    job.digest = expected;
-    run(Arc::clone(&rig.provider.shared), job).await;
-    let actual = TreeDigest::of(&bytes);
-    assert_eq!(
-        *seen.borrow(),
+        prepared(&rig, "js.1", &key).await,
         Stage::Refused(format!(
-            "tree list digest mismatch: expected {expected}, the bytes hash to {actual}"
+            "the L2 sidecar {sidecar} is refused: entry {last}: unknown kind 3"
         ))
     );
-    assert!(rig.bench.store.mount_paths().is_empty());
-}
-
-/// Asserts that a version 2 list of a version this node does not read is refused with the
-/// header's message, by the open before any walk.
-#[tokio::test]
-async fn a_v2_list_of_another_version_is_refused() {
-    let rig = Rig::new("prov-v2-version").await;
-    let mut bytes = v2_bytes(&rig);
-    bytes[VERSION_AT..VERSION_AT + 4].copy_from_slice(&3u32.to_le_bytes());
-    let key = rig.put_bytes(&bytes).await;
-    let (job, seen) = held(&rig, "js.1", &key);
-    run(Arc::clone(&rig.provider.shared), job).await;
-    assert_eq!(
-        *seen.borrow(),
-        Stage::Refused("unsupported tree list version 3".to_owned())
-    );
-    assert!(rig.bench.store.mount_paths().is_empty());
+    nothing_placed_or_counted(&rig, "js.1");
 }
 
 /// Asserts that a version 2 list with more entries than `trees.max_entries` is refused by the
@@ -270,7 +361,7 @@ async fn a_v2_list_over_the_entry_limit_is_refused() {
         ..TreesConfig::default()
     };
     let rig = Rig::with("prov-v2-limit", config, |_| {}).await;
-    let key = rig.put_list_v2(&list_of(&rig.bench.pack)).await;
+    let key = rig.key.clone();
     let (job, seen) = held(&rig, "js.1", &key);
     run(Arc::clone(&rig.provider.shared), job).await;
     let Stage::Refused(why) = seen.borrow().clone() else {
@@ -293,7 +384,7 @@ async fn a_v2_list_whose_tree_the_store_refuses_is_refused() {
         ..TreesConfig::default()
     };
     let rig = Rig::with("prov-v2-store-refuses", config, |_| {}).await;
-    let key = rig.put_list_v2(&list_of(&rig.bench.pack)).await;
+    let key = rig.key.clone();
     let (job, seen) = held(&rig, "js.1", &key);
     run(Arc::clone(&rig.provider.shared), job).await;
     let Stage::Refused(why) = seen.borrow().clone() else {
@@ -315,7 +406,7 @@ async fn a_v2_list_the_store_cannot_place_now_is_failed() {
         ..TreesConfig::default()
     };
     let rig = Rig::with("prov-v2-failed", config, |_| {}).await;
-    let key = rig.put_list_v2(&list_of(&rig.bench.pack)).await;
+    let key = rig.key.clone();
     let (job, seen) = held(&rig, "js.1", &key);
     run(Arc::clone(&rig.provider.shared), job).await;
     assert_eq!(
@@ -329,7 +420,7 @@ async fn a_v2_list_the_store_cannot_place_now_is_failed() {
 #[tokio::test]
 async fn a_v2_list_of_a_released_source_ends_released_with_no_placement() {
     let rig = Rig::new("prov-v2-released").await;
-    let key = rig.put_list_v2(&list_of(&rig.bench.pack)).await;
+    let key = rig.key.clone();
     let (job, seen) = job("js.1", &key, true);
     run(Arc::clone(&rig.provider.shared), job).await;
     assert_eq!(*seen.borrow(), Stage::Released);
@@ -342,7 +433,7 @@ async fn a_v2_list_of_a_released_source_ends_released_with_no_placement() {
 #[tokio::test]
 async fn an_earlier_v2_preparation_leaves_a_later_ones_placement() {
     let rig = Rig::new("prov-v2-newer").await;
-    let key = rig.put_list_v2(&list_of(&rig.bench.pack)).await;
+    let key = rig.key.clone();
     let later = rig.provider.prepare(source("js.1", 0), &key, READ_ONLY);
     later.expect("prepared");
     rig.provider
