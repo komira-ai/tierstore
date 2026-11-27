@@ -21,6 +21,7 @@ fn held(rig: &Rig, run: &str, key: &str) -> (Job, watch::Receiver<Stage>) {
         agent: AGENT.to_owned(),
         run: run.to_owned(),
         index: 0,
+        attempt: 0,
     };
     rig.provider.hold(id, key)
 }

@@ -368,6 +368,7 @@ async fn bad_sources_refs_and_modes_are_refused_by_name() {
             agent: agent.into(),
             run: run.into(),
             index: 0,
+            attempt: 0,
         })
     };
     assert_eq!(
@@ -410,7 +411,7 @@ async fn bad_sources_refs_and_modes_are_refused_by_name() {
     assert_eq!(provider.mount(None).await, invalid("no source"));
     assert_eq!(provider.release(None), invalid("no source"));
     assert_eq!(
-        provider.sweep("", &[]),
+        provider.sweep("", &[], &[]),
         invalid("the agent is 1 to 120 bytes")
     );
 }
@@ -493,19 +494,23 @@ async fn a_sweep_releases_the_runs_not_kept_and_leaves_other_agents() {
         agent: "agent-2".into(),
         run: "js.1".into(),
         index: 0,
+        attempt: 0,
     });
     rig.provider
         .prepare(other.clone(), &rig.key, READ_ONLY)
         .unwrap();
     rig.provider.mount(other).await.unwrap();
     let keep = ["js.2".to_owned()];
-    assert_eq!(rig.provider.sweep(AGENT, &keep), Ok(1));
+    assert_eq!(rig.provider.sweep(AGENT, &keep, &[]), Ok(1));
     let store = &rig.bench.store;
     assert!(store.locate_fs(&Rig::place_of("js.1", 0)).is_none());
     assert!(store.locate_fs(&Rig::place_of("js.2", 0)).is_some());
     assert!(store.locate_fs(&Rig::place_of("js.2", 1)).is_some());
-    assert_eq!(rig.provider.sweep("agent-2", &["js.1".to_owned()]), Ok(0));
-    assert_eq!(rig.provider.sweep(AGENT, &[]), Ok(2));
+    assert_eq!(
+        rig.provider.sweep("agent-2", &["js.1".to_owned()], &[]),
+        Ok(0)
+    );
+    assert_eq!(rig.provider.sweep(AGENT, &[], &[]), Ok(2));
     assert_eq!(store.mount_paths().len(), 1);
 }
 
@@ -535,7 +540,7 @@ async fn after_a_restart_the_placements_are_found_by_their_paths() {
             .locate_fs(&Rig::place_of("js.1", 0))
             .is_none()
     );
-    assert_eq!(restarted.sweep(AGENT, &[]), Ok(1));
+    assert_eq!(restarted.sweep(AGENT, &[], &[]), Ok(1));
     assert!(rig.bench.store.mount_paths().is_empty());
 }
 
@@ -555,7 +560,7 @@ async fn a_placement_above_a_sources_path_is_not_the_sources() {
     let answer = provider.mount(source("js.1", 0)).await.unwrap_err();
     assert_eq!(unavailable(answer), "the source is not prepared here");
     assert_eq!(provider.release(source("js.1", 0)), Ok(()));
-    assert_eq!(provider.sweep(AGENT, &[]), Ok(0));
+    assert_eq!(provider.sweep(AGENT, &[], &[]), Ok(0));
     assert!(bench.store.locate_fs(parent).is_some());
 }
 
@@ -633,7 +638,7 @@ async fn a_sweep_the_store_cannot_make_is_unavailable() {
     let holder = rig.bench.rig.locked();
     let waiting = rig.bench.rig.locked();
     let provider = Provider::with(Bench::reopen(waiting.clone()), waiting, settings());
-    let answer = provider.sweep(AGENT, &[]).unwrap_err();
+    let answer = provider.sweep(AGENT, &[], &[]).unwrap_err();
     assert!(unavailable(answer).starts_with("the placement was not released: "));
     drop(holder);
 }
