@@ -11,6 +11,7 @@ use http_body_util::Full;
 use hyper::body::{Body, Frame, SizeHint};
 use hyper::header::{HeaderName, HeaderValue};
 use hyper::{Response, StatusCode};
+use tokio::sync::OwnedSemaphorePermit;
 
 use crate::{Error, ReadBody};
 
@@ -53,6 +54,8 @@ struct Counted {
     ended: bool,
     /// The claim of this answer on the wire of its connection, held until the body is dropped.
     wire: Option<WireHold>,
+    /// The permit of the read this body streams (`bounds`), held until the body is dropped.
+    permit: Option<OwnedSemaphorePermit>,
 }
 
 impl Counted {
@@ -103,6 +106,14 @@ impl AnswerBody {
         }
     }
 
+    /// Makes a streamed body hold `permit` until it is dropped, as it holds the wire. A body held
+    /// whole holds nothing, and the permit is given back at once.
+    pub(super) fn hold_permit(&mut self, permit: OwnedSemaphorePermit) {
+        if let Kind::Streamed(counted) = &mut self.kind {
+            counted.permit = Some(permit);
+        }
+    }
+
     /// A body of `len` bytes that `chunks` gives.
     pub(crate) fn streamed(len: u64, chunks: ReadBody) -> Self {
         let kind = Kind::Streamed(Counted {
@@ -111,6 +122,7 @@ impl AnswerBody {
             held: None,
             ended: false,
             wire: None,
+            permit: None,
         });
         Self { kind }
     }
@@ -287,6 +299,13 @@ impl S3Error {
     /// More streamed bodies than the server takes at once: try again after a moment.
     pub(crate) fn busy() -> Self {
         let text = "The server is taking as many uploads as it can; retry after a moment.";
+        Self::new(StatusCode::SERVICE_UNAVAILABLE, "SlowDown", text).with("retry-after", "1")
+    }
+
+    /// More reads of objects than the server streams at once (`server.max_concurrent_reads`): try
+    /// again after a moment.
+    pub(crate) fn busy_reading() -> Self {
+        let text = "The server is serving as many reads as it can; retry after a moment.";
         Self::new(StatusCode::SERVICE_UNAVAILABLE, "SlowDown", text).with("retry-after", "1")
     }
 

@@ -150,6 +150,7 @@ pub(super) mod opens;
 mod pin_set;
 mod pins;
 mod prefetch;
+mod preparations;
 mod queued_reads;
 mod revalidate;
 mod scrub;
@@ -286,6 +287,7 @@ use index::Index;
 use keep::Sent;
 use layout::{Name, name_of};
 use metrics::{add, bump};
+pub(super) use preparations::{Preparations, Preparing};
 pub(super) use queued_reads::QueuedReads;
 use revalidate::Verdict;
 pub(super) use source::{Blob, FillError};
@@ -531,6 +533,8 @@ pub(super) struct Inner {
     starts: starts::Starts,
     /// The room of the reads the mount provider queues (`queued_reads`).
     queued_reads: Arc<queued_reads::QueuedReads>,
+    /// The counts of the mount provider's sources and preparations (`preparations`).
+    preparations: Arc<preparations::Preparations>,
     /// Whether a pass of the eviction is running.
     evicting: AtomicBool,
     /// Whether this cache may write to its directory, and the lock that says so.
@@ -661,6 +665,7 @@ impl LocalCache {
             before_insert: Mutex::new(None),
             starts: starts::Starts::default(),
             queued_reads: Arc::default(),
+            preparations: Arc::default(),
             evicting: AtomicBool::new(false),
             hold: Hold::new(standing),
             large: std::sync::OnceLock::new(),

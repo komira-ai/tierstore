@@ -462,6 +462,7 @@ fn assert_restarts(serving: Option<&str>, staged_text: &str, params: &Params) {
 mod live_configs;
 mod macos;
 mod reload;
+mod stale;
 mod switch_macos;
 mod switch_systemd;
 mod systemd_rollback;

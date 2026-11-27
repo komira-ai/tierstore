@@ -88,7 +88,7 @@ async fn a_provider_whose_mount_nothing_serves_answers_no_directory() {
     assert_eq!(rig.bench.rig.calls_on(Op::Head, &sidecar), 0);
     assert!(rig.bench.store.mount_paths().is_empty());
     assert_eq!(rig.provider.release(source("js.1", 0)), Ok(()));
-    assert_eq!(rig.provider.sweep(AGENT, &[]), Ok(0));
+    assert_eq!(rig.provider.sweep(AGENT, &[], &[]), Ok(0));
     assert_eq!(counted(&rig.bench.rig.cache), only("no_fs", 2));
 }
 
@@ -196,7 +196,7 @@ async fn a_release_and_a_sweep_the_store_cannot_make_count_not_released() {
     let waiting = rig.bench.rig.locked();
     let provider = Provider::with(Bench::reopen(waiting.clone()), waiting.clone(), settings());
     assert!(provider.release(source("js.1", 0)).is_err());
-    assert!(provider.sweep(AGENT, &[]).is_err());
+    assert!(provider.sweep(AGENT, &[], &[]).is_err());
     assert_eq!(counted(&waiting), only("not_released", 2));
     drop(holder);
 }

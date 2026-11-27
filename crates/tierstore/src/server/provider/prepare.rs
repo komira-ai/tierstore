@@ -35,6 +35,13 @@
 //! source drops them at once, even while every read of the node is taken (as when the upstream does
 //! not answer).
 //!
+//! A preparation holds its tree's list whole (at most 256 MiB) while it reads it, and the list and
+//! the walk of it while it makes the tree. So the reading and the making take a turn of the
+//! node's (`trees.prepare_concurrency` at once, `local_cache/preparations.rs`) and give it back
+//! once the tree is placed or refused, before the files are read. A preparation waits for its turn
+//! holding nothing of its list; a release of its source ends the wait, or the read of the list,
+//! at once, and a stop of the process fails a preparation still waiting.
+//!
 //! The reads queued hold about a hundred bytes of heap for each file until each is read or
 //! dropped, and the queue drains only as fast as the node's reads go. So the reads of a source
 //! are queued only if they fit, with those of every other source, under the node's bound (the
@@ -61,7 +68,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use futures::channel::mpsc::{UnboundedSender, unbounded};
 use futures::{Stream, StreamExt as _, stream};
 use tierstore_list::{OpenError, TreeListL2, sidecar_key};
-use tokio::sync::watch;
+use tokio::sync::{SemaphorePermit, watch};
 
 use super::groups::{Group, alone, groups};
 use super::names::SourceId;
@@ -71,7 +78,7 @@ use crate::server::local_cache::trees::{
     CreateError, CreateRequest, Created, FetchError, FileSpan, ImageRequest, PreparePrefetch,
     StagedImage, TreeStore,
 };
-use crate::server::local_cache::{LocalCache, QueuedReads};
+use crate::server::local_cache::{LocalCache, Preparing, QueuedReads};
 use crate::{
     Backend as _, BuiltFile, BuiltTree, Error, TreeDigest, TreeImage, TreeLimits, TreeListError,
     build_tree, is_tree_list_v2, parse_tree_list,
@@ -180,7 +187,15 @@ pub(super) async fn run(shared: Arc<Shared>, job: Job) {
 /// when the tree is placed, the placement is left to the preparation that holds the source now,
 /// or, if none does, removed here, since the release may have looked for it before it was made.
 async fn place(shared: &Shared, job: &Job, reads: UnboundedSender<Queued>) -> Result<Made, Stage> {
-    let read = read_tree(shared, job).await?;
+    let mut stage = job.stage.subscribe();
+    // Held until the tree is placed or refused: the list and its walk are dropped by then.
+    let _turn = turn(shared, &mut stage).await?;
+    // A release ends the read of the list at once, and gives the turn back.
+    let read = tokio::select! {
+        biased;
+        () = gone(&mut stage) => return Err(Stage::Released),
+        read = read_tree(shared, job) => read?,
+    };
     let from_list = matches!(read, Read::List(_));
     let (digest, at) = (job.digest, job.id.location());
     let (ttl, store, cache) = (
@@ -247,6 +262,22 @@ async fn place(shared: &Shared, job: &Job, reads: UnboundedSender<Queued>) -> Re
             Err(Stage::Released)
         }
     }
+}
+
+/// A turn of the node's to read and make a tree (module docs), counted while it is held. A
+/// release of the source, whose `stage` this is, while it waits ends the wait, as released; a
+/// stop of the process fails it.
+async fn turn<'a>(
+    shared: &'a Shared,
+    stage: &mut watch::Receiver<Stage>,
+) -> Result<(SemaphorePermit<'a>, Preparing), Stage> {
+    let turn = tokio::select! {
+        biased;
+        () = gone(stage) => return Err(Stage::Released),
+        turn = shared.turns.acquire() => turn,
+    };
+    let turn = turn.map_err(|_| Stage::Failed("the provider is stopping".to_owned()))?;
+    Ok((turn, shared.counts.enter()))
 }
 
 /// Where a preparation queues its reads, and the node's room for them.

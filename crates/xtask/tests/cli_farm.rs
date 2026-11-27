@@ -1,6 +1,6 @@
-//! `cargo xtask farm-build` end to end, and the flags of `fetch --extract zst` that install the
+//! `cargo xtask farm-check` end to end, and the flags of `fetch --extract zst` that install the
 //! farm lane's buck2: the verb is run as a process with `--buck2` naming the stand-in
-//! (src/bin/gh-fake.rs), which answers each buck2 call from files of the working directory and
+//! (src/bin/gh-fake.rs), which answers buck2's `audit` from files of the working directory and
 //! records the calls it got (`buck2.calls`). Each test reads the verb's exit status and words, and
 //! those calls.
 
@@ -17,12 +17,8 @@ const FAKE: &str = env!("CARGO_BIN_EXE_gh-fake");
 
 /// What buck2 prints for a key that is set.
 const SET: &str = r#"{"buildrules_re.linux_x86_64_properties":"OSFamily=Linux,ISA=x86-64"}"#;
-/// A farm build's summary line.
-const FARM: &str = "Commands: 474 (cached: 0, remote: 474, local: 0)";
 /// The audit call.
 const AUDIT: &str = "audit config buildrules_re.linux_x86_64_properties --style json";
-/// The calls of a run that got as far as the build.
-const BUILT: [&str; 3] = [AUDIT, "build //:ci", "kill"];
 
 /// A fresh directory with `answers` (file name, text) in it.
 fn dir(name: &str, answers: &[(&str, &str)]) -> PathBuf {
@@ -43,8 +39,8 @@ fn xtask(cwd: &Path, args: &[&str]) -> Output {
         .expect("run xtask")
 }
 
-fn farm_build(cwd: &Path, buck2: &str) -> Output {
-    xtask(cwd, &["farm-build", "--buck2", buck2, "--target", "//:ci"])
+fn farm_check(cwd: &Path, buck2: &str) -> Output {
+    xtask(cwd, &["farm-check", "--buck2", buck2])
 }
 
 fn calls(dir: &Path) -> Vec<String> {
@@ -64,97 +60,30 @@ fn stderr(o: &Output) -> String {
 }
 
 #[test]
-fn a_farm_build_prints_its_summary_line_and_stops_buck2_with_status_0() {
-    // Catches: the build not run, run before the worker check, its log not passed on, its
-    // summary not printed, or buck2's daemon left running.
-    let log = format!("[t] Waiting on 3 actions\n[t] {FARM}\nBUILD SUCCEEDED\n");
-    let d = dir(
-        "ok",
-        &[("buck2-audit.stdout", SET), ("buck2-build.stderr", &log)],
-    );
-    let o = farm_build(&d, FAKE);
+fn a_set_worker_property_set_passes_with_status_0_and_one_audit() {
+    // Catches: the key not asked for, asked for by another name, a pass that prints nothing, or
+    // a check that runs anything more than the one audit (a build, a daemon stop).
+    let d = dir("set", &[("buck2-audit.stdout", SET)]);
+    let o = farm_check(&d, FAKE);
     assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
-    assert_eq!(stdout(&o), format!("{FARM}\n"));
-    assert_eq!(stderr(&o), log);
-    assert_eq!(calls(&d), BUILT);
-}
-
-#[test]
-fn a_build_with_actions_on_this_machine_fails_with_status_1() {
-    // Catches: a build that ran an action on the runner taken for a farm build.
-    let line = "Commands: 5 (cached: 2, remote: 1, local: 2)";
-    let d = dir(
-        "local",
-        &[
-            ("buck2-audit.stdout", SET),
-            ("buck2-build.stderr", &format!("{line}\nBUILD SUCCEEDED\n")),
-        ],
-    );
-    let o = farm_build(&d, FAKE);
-    assert_eq!(o.status.code(), Some(1));
     assert_eq!(
-        stderr(&o),
-        format!(
-            "{line}\nBUILD SUCCEEDED\nxtask: `{line}`: actions ran on this machine, not on the farm (local must be 0)\n"
-        )
+        stdout(&o),
+        "buildrules_re.linux_x86_64_properties is set: buck2 builds on the farm\n"
     );
-    assert_eq!(calls(&d), BUILT);
+    assert_eq!(stderr(&o), "");
+    assert_eq!(calls(&d), [AUDIT]);
 }
 
 #[test]
-fn a_build_with_no_summary_line_fails_with_status_1() {
-    // Catches: a build whose summary is missing taken for one that ran nothing locally.
-    let d = dir(
-        "no-summary",
-        &[
-            ("buck2-audit.stdout", SET),
-            ("buck2-build.stderr", "BUILD SUCCEEDED\n"),
-        ],
-    );
-    let o = farm_build(&d, FAKE);
-    assert_eq!(o.status.code(), Some(1));
-    assert!(
-        stderr(&o).ends_with(
-            "xtask: the build printed no summary line (`Commands: N (cached: N, remote: N, local: N)`)\n"
-        ),
-        "{}",
-        stderr(&o)
-    );
-    assert_eq!(calls(&d), BUILT);
-}
-
-#[test]
-fn a_failed_build_fails_with_status_1_shows_its_log_and_still_stops_buck2() {
-    // Catches: a failed build read as a pass because its summary says `local: 0`, its log (the
-    // failing action's words) hidden, or the daemon left running after a failure.
-    let log = format!("Action failed: test of tierstore\n{FARM}\nBUILD FAILED\n");
-    let d = dir(
-        "failed",
-        &[
-            ("buck2-audit.stdout", SET),
-            ("buck2-build.stderr", &log),
-            ("buck2-build.status", "3"),
-        ],
-    );
-    let o = farm_build(&d, FAKE);
-    assert_eq!(o.status.code(), Some(1));
-    assert_eq!(
-        stderr(&o),
-        format!("{log}xtask: `buck2 build //:ci` failed (exit status: 3)\n")
-    );
-    assert_eq!(calls(&d), BUILT);
-}
-
-#[test]
-fn no_worker_property_set_fails_before_the_build_with_status_1() {
-    // Catches: a build started with no farm to run on (buck2 would then fail at analysis, or a
+fn no_worker_property_set_fails_with_status_1() {
+    // Catches: a build let start with no farm to run on (buck2 would then fail at analysis, or a
     // later change could fall back to this machine): the key unset, and set to nothing.
     for (name, audit) in [
         ("unset", "{}"),
         ("empty", r#"{"buildrules_re.linux_x86_64_properties":""}"#),
     ] {
         let d = dir(&format!("workers-{name}"), &[("buck2-audit.stdout", audit)]);
-        let o = farm_build(&d, FAKE);
+        let o = farm_check(&d, FAKE);
         assert_eq!(o.status.code(), Some(1), "{name}");
         assert_eq!(
             stderr(&o),
@@ -162,12 +91,12 @@ fn no_worker_property_set_fails_before_the_build_with_status_1() {
              [komira_re] linux_x86_64_properties, so buck2 has no farm to build on\n",
             "{name}"
         );
-        assert_eq!(calls(&d), [AUDIT, "kill"], "{name}");
+        assert_eq!(calls(&d), [AUDIT], "{name}");
     }
 }
 
 #[test]
-fn a_failed_audit_fails_before_the_build_with_status_1() {
+fn a_failed_audit_fails_with_status_1() {
     // Catches: an audit that failed (no .buckconfig, a broken cell) read as a set key.
     let d = dir(
         "audit-fails",
@@ -177,35 +106,29 @@ fn a_failed_audit_fails_before_the_build_with_status_1() {
             ("buck2-audit.status", "3"),
         ],
     );
-    let o = farm_build(&d, FAKE);
+    let o = farm_check(&d, FAKE);
     assert_eq!(o.status.code(), Some(1));
     assert_eq!(
         stderr(&o),
         "xtask: `buck2 audit config` failed (exit status: 3): no .buckconfig\n"
     );
-    assert_eq!(calls(&d), [AUDIT, "kill"]);
+    assert_eq!(calls(&d), [AUDIT]);
 }
 
 #[test]
-fn a_buck2_that_cannot_start_fails_with_status_1_and_the_flags_are_required() {
-    // Catches: a missing buck2 taken for a passing build, and a verb that runs without its
-    // target or its buck2.
+fn a_buck2_that_cannot_start_fails_with_status_1_and_the_flag_is_required() {
+    // Catches: a missing buck2 taken for a set key, and a verb that runs without its buck2.
     let d = dir("no-buck2", &[]);
-    let o = farm_build(&d, "/nonexistent/buck2");
+    let o = farm_check(&d, "/nonexistent/buck2");
     assert_eq!(o.status.code(), Some(1));
     assert!(
         stderr(&o).starts_with("xtask: cannot run \"/nonexistent/buck2\": "),
         "{}",
         stderr(&o)
     );
-    for args in [
-        &["farm-build", "--buck2", FAKE][..],
-        &["farm-build", "--target", "//:ci"][..],
-    ] {
-        let o = xtask(&d, args);
-        assert_eq!(o.status.code(), Some(2), "{args:?}");
-        assert!(stderr(&o).contains("required"), "{}", stderr(&o));
-    }
+    let o = xtask(&d, &["farm-check"]);
+    assert_eq!(o.status.code(), Some(2));
+    assert!(stderr(&o).contains("required"), "{}", stderr(&o));
     assert_eq!(calls(&d), Vec::<String>::new());
 }
 

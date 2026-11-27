@@ -18,10 +18,10 @@ use Step::Rollback;
 const DEFAULT_SOCKET: &str = "/run/tierstore-fs/control.sock";
 /// 512 MiB, the cap a file that names none has, and 1 GiB.
 const DEFAULT_CAP: u64 = 512 << 20;
-const GIB: u64 = 1 << 30;
+pub(super) const GIB: u64 = 1 << 30;
 
 /// A file with an `fs` interface whose params are `params` (lines of the table).
-fn fs_file(params: &str) -> String {
+pub(super) fn fs_file(params: &str) -> String {
     format!(
         "{}\n[[interface]]\ntype = \"fs\"\n\n[interface.params]\n{params}",
         lin::WITH_SOCKET
@@ -29,19 +29,19 @@ fn fs_file(params: &str) -> String {
 }
 
 /// The params line of the cap `bytes`.
-fn cap(bytes: u64) -> String {
+pub(super) fn cap(bytes: u64) -> String {
     format!("tree_list_ram_bytes = {bytes}\n")
 }
 
 /// A node serving a file with an `fs` interface whose cap is `from`, and a config package that
 /// stages the same file with the cap `to` (a `None` names no cap).
-fn changing(from: Option<u64>, to: Option<u64>) -> Linux {
+pub(super) fn changing(from: Option<u64>, to: Option<u64>) -> Linux {
     let text = |bytes: Option<u64>| fs_file(&bytes.map(cap).unwrap_or_default());
     Linux::new(Some(&text(from)), &text(to))
 }
 
 /// The set request of `bytes` to the default control socket.
-fn set(bytes: u64) -> (PathBuf, String) {
+pub(super) fn set(bytes: u64) -> (PathBuf, String) {
     (
         PathBuf::from(DEFAULT_SOCKET),
         format!("set tree_list_ram_bytes {bytes}"),
@@ -49,7 +49,7 @@ fn set(bytes: u64) -> (PathBuf, String) {
 }
 
 /// The record of the reload from `from` to `to` on the default socket, prepared (no mount yet).
-fn changed(from: u64, to: u64) -> Reload {
+pub(super) fn changed(from: u64, to: u64) -> Reload {
     Reload {
         guard: false,
         tree_list_ram_bytes: Some(ListCap {
