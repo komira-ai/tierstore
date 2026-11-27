@@ -692,6 +692,7 @@ impl LocalCache {
         text.push_str(&inner.starts.render());
         let queued = &inner.queued_reads;
         text.push_str(&queued_reads(queued.bytes(), queued.skipped()));
+        text.push_str(&inner.preparations.render());
         if let Some(large) = inner.large.get() {
             text.push_str(&large.metrics());
         }

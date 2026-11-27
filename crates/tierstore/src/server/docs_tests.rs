@@ -27,7 +27,7 @@ use clap::CommandFactory;
 
 use super::cli::Args;
 use super::config::{KEYS, keys_for_flags};
-use super::config_cache::{LocalCacheTable, read_path::CacheTable};
+use super::config_cache::LocalCacheTable;
 use super::config_interface::Params;
 use super::config_policy::Policy;
 use super::config_testing::{DEFAULTS, loads};
@@ -110,6 +110,8 @@ const FLAGLESS_KEYS: &[&str] = &[
     "server.door_look",
     "server.put_pieces_queued",
     "server.oci_handshake_timeout",
+    "server.max_connections",
+    "server.max_concurrent_reads",
     "server.s3_chunks_waiting",
     "server.dir_copy_chunk",
     "server.dir_read_chunk",
@@ -180,7 +182,8 @@ const UNDOCUMENTED_KEYS: &[&str] = &[];
 /// a name that no change adds, for the test of this rule to link to whatever pages land.
 const PENDING_PAGES: &[&str] = &["a-page-no-change-adds.md"];
 
-/// The tables of the file; the keys of those not in the key table are read from their structs.
+/// The tables of the file. The keys of `[[policy]]` and `[local_cache]`, which are not in the key
+/// table, are read from their structs (see `table_keys`).
 const SECTIONS: &[&str] = &[
     "server",
     "hot_store",
@@ -189,7 +192,6 @@ const SECTIONS: &[&str] = &[
     "params",
     "policy",
     "local_cache",
-    "cache",
     "fs",
 ];
 
@@ -203,8 +205,8 @@ struct Doc {
 struct Code {
     flags: BTreeSet<String>,
     keys: BTreeSet<String>,
-    /// The keys of `[local_cache]` and of `[cache]`, which have no flag and so are not in `keys`:
-    /// every page must name each.
+    /// The keys of `[local_cache]`, which have no flag and so are not in `keys`: every page must
+    /// name each.
     cache_keys: BTreeSet<String>,
     /// The keys of `[[policy]]`, which a page may name.
     policy_keys: BTreeSet<String>,
@@ -641,12 +643,10 @@ fn code() -> Code {
     let said = keys_for_flags(&source);
     source.push('\n');
     source.push_str(&said);
-    let mut cache_keys = table_keys::<LocalCacheTable>("local_cache");
-    cache_keys.extend(table_keys::<CacheTable>("cache"));
     Code {
         flags,
         keys,
-        cache_keys,
+        cache_keys: table_keys::<LocalCacheTable>("local_cache"),
         policy_keys: table_keys::<Policy>("policy"),
         fs_keys: table_keys::<FsTable>("fs"),
         source,

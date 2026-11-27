@@ -6,10 +6,10 @@ use std::path::PathBuf;
 use tierstore_journal::BootId;
 use tierstore_testkit::dir::TestDir;
 
-use super::ReadPath;
+use super::{CacheTable, ReadPath};
 use crate::server::cache_cli_tests::QUICK;
 use crate::server::config::settings_from_text;
-use crate::server::config_unknown::unknown_key_warnings;
+use crate::server::config_unknown::{fields_of, unknown_key_warnings};
 use crate::server::local_cache::large::testing::{build_node_file, cache_settings};
 
 /// The message of the refusal of the file `text`.
@@ -121,4 +121,19 @@ fn an_unknown_key_of_the_table_is_one_warning() {
         ["tierstore: config key cache.shared_socket is not known to this release and is ignored"]
     );
     assert_eq!(cache_settings(&text).read_path.unwrap().budget, 1 << 30);
+}
+
+/// Asserts that the page of the configuration names every key of `[cache]` as `cache.<key>`, the
+/// keys read from the table's struct, so a key added to it is a key the page must name too.
+#[test]
+fn the_configuration_page_names_every_key_of_the_table() {
+    let page = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/configuration.md"),
+    )
+    .unwrap();
+    let keys = fields_of::<CacheTable>();
+    assert_eq!(keys, ["root", "budget"]);
+    for key in keys {
+        assert!(page.contains(&format!("`cache.{key}`")), "cache.{key}");
+    }
 }

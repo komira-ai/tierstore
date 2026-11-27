@@ -386,6 +386,8 @@ pub(super) struct ServerTable {
     pub door_look: Option<Dur>,
     pub put_pieces_queued: Option<u32>,
     pub oci_handshake_timeout: Option<Dur>,
+    pub max_connections: Option<u32>,
+    pub max_concurrent_reads: Option<u32>,
     pub s3_chunks_waiting: Option<u32>,
     pub dir_copy_chunk: Option<Size>,
     pub dir_read_chunk: Option<Size>,

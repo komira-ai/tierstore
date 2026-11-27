@@ -59,3 +59,16 @@ fn a_copy_answer_that_is_not_a_result_is_an_error() {
         other => panic!("expected Service, got {other:?}"),
     }
 }
+
+/// Asserts that a document laid out over lines, as AWS sends it, with text and a comment between
+/// its elements, gives its tag: only elements are read as its fields.
+#[test]
+fn a_copy_result_laid_out_over_lines_gives_its_tag() {
+    let laid_out = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<CopyObjectResult>\n  \
+                    <!-- written by the store -->\n  \
+                    <LastModified>2026-11-03T08:49:37.000Z</LastModified>\n  \
+                    <ETag>\"abc\"</ETag>\n</CopyObjectResult>\n";
+    let answer = read(laid_out, "CopyObjectResult").unwrap();
+    assert_eq!(answer.etag, "\"abc\"");
+    assert_eq!(answer.modified_millis, Some(1_793_695_777_000));
+}

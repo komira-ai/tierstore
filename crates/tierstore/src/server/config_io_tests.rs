@@ -43,6 +43,8 @@ fn without_the_keys_the_settings_are_the_values_the_code_had() {
         listen,
         put_pieces_queued: 4,
         oci_handshake_timeout: Duration::from_secs(10),
+        max_connections: 8192,
+        max_concurrent_reads: 512,
     };
     assert_eq!(cli.io_tuning, want);
     assert_eq!(cli.io_tuning, IoTuning::default());
@@ -62,6 +64,8 @@ door_grace             = "5s"
 door_look              = "20ms"
 put_pieces_queued      = 9
 oci_handshake_timeout  = "15s"
+max_connections        = 300
+max_concurrent_reads   = 40
 s3_chunks_waiting      = 3
 dir_copy_chunk         = "2MiB"
 dir_read_chunk         = "128KiB"
@@ -74,6 +78,7 @@ dir_read_chunk         = "128KiB"
     assert_eq!(io.listen.door_look, Duration::from_millis(20));
     assert_eq!(io.put_pieces_queued, 9);
     assert_eq!(io.oci_handshake_timeout, Duration::from_secs(15));
+    assert_eq!((io.max_connections, io.max_concurrent_reads), (300, 40));
     let client = cli.s3_client;
     assert_eq!(client.chunks_waiting, 3);
     assert_eq!(client.dir_copy_chunk, 2 << 20);
@@ -94,6 +99,10 @@ fn a_value_outside_its_range_is_refused_naming_the_key() {
         ("door_look", "\"10ms\""),
         ("put_pieces_queued", "4096"),
         ("oci_handshake_timeout", "\"1h\""),
+        ("max_connections", "1"),
+        ("max_connections", "1000000"),
+        ("max_concurrent_reads", "1"),
+        ("max_concurrent_reads", "1000000"),
         ("s3_chunks_waiting", "1024"),
         ("dir_copy_chunk", "1"),
         ("dir_copy_chunk", "\"1GiB\""),
@@ -121,6 +130,10 @@ fn a_value_outside_its_range_is_refused_naming_the_key() {
         ("put_pieces_queued", "4097"),
         ("oci_handshake_timeout", "\"0s\""),
         ("oci_handshake_timeout", "\"2h\""),
+        ("max_connections", "0"),
+        ("max_connections", "1000001"),
+        ("max_concurrent_reads", "0"),
+        ("max_concurrent_reads", "1000001"),
         ("s3_chunks_waiting", "0"),
         ("s3_chunks_waiting", "1025"),
         ("dir_copy_chunk", "0"),

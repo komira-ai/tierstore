@@ -384,11 +384,12 @@ pub struct Cli {
     /// that says in its `Content-Length` that its body is longer is refused before any byte of
     /// it is read.
     pub max_request_bytes: u64,
-    /// The most put bodies and upload parts taken at once. One more waits for a slot, at most
-    /// `server.put_permit_wait`, and is then answered 503 `SlowDown` with `Retry-After: 1`; its body
-    /// is not read, while it waits or after. A body in flight holds a few pieces of
-    /// at most the size the connection delivers (tens of KiB), and an S3 tier up to 16 MiB
-    /// more, so 32 bodies hold about half a GiB at most, with S3 tiers, and a few MiB with
+    /// The most request bodies taken at once: put bodies and upload parts, and the bodies read
+    /// whole (at most 8 MiB each, which take their slot at their first byte). One more waits for a
+    /// slot, at most `server.put_permit_wait`, and is then answered 503 `SlowDown` with
+    /// `Retry-After: 1`; a put body is not read, while it waits or after. A body in flight holds a
+    /// few pieces of at most the size the connection delivers (tens of KiB), and an S3 tier up to
+    /// 16 MiB more, so 32 bodies hold about half a GiB at most, with S3 tiers, and a few MiB with
     /// directory tiers.
     pub max_concurrent_puts: u32,
     /// The domains of virtual-hosted-style addressing (`server.domains`): a request whose `Host`
@@ -405,8 +406,8 @@ pub struct Cli {
     /// every connection of the tiers' stores; raise it for a store that deletes fast, lower it for
     /// one that throttles. At least 1.
     pub delete_concurrency: u32,
-    /// How long a put body or upload part that arrives when `server.max_concurrent_puts` bodies are
-    /// already being taken waits for one of them to end: a number and `ms`, `s`, `m` or `h`. If a
+    /// How long a request body that arrives when `server.max_concurrent_puts` bodies are already
+    /// being taken waits for one of them to end: a number and `ms`, `s`, `m` or `h`. If a
     /// slot is free in that time the body is taken; if not, it is answered 503 `SlowDown` with
     /// `Retry-After: 1`. The request's body is not read while it waits, so a slow tier makes
     /// clients queue here, up to this long, instead of retrying at once. 0 answers 503 at once.

@@ -67,19 +67,24 @@ jobs:
       RELEASE_VERSION: ${{ inputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        timeout-minutes: 10
         with:
           persist-credentials: false
       - run: rustup toolchain install
+        timeout-minutes: 10
       - name: Compile xtask
+        timeout-minutes: 20
         run: cargo xtask --help
       - name: Join the farm's Tailscale network
         uses: tailscale/github-action@d1b6cd204f8dceda5b3eaad7f1f767be390056cd # v4.2.0
+        timeout-minutes: 10
         with:
           oauth-client-id: ${{ vars.TS_CLIENT_ID }}
           audience: ${{ vars.TS_AUDIENCE }}
           tags: tag:ci
       # The action's timeout is the verb's default (40 minutes, under the farm's limit); this
-      # step's bounds a run that waits for a free Mac.
+      # step's bounds a run that waits for a free Mac. This step runs no buck2, so komira's
+      # buck2-farm watchdog does not watch it: its time limit is what ends a dead connection.
       - name: The macOS release files, built and checked on a farm Mac
         timeout-minutes: 75
         env:
@@ -89,12 +94,14 @@ jobs:
           FARM_PROPERTIES: ${{ vars.FARM_DARWIN_ARM64_PROPERTIES }}
         run: cargo xtask mac-farm --address "$FARM_ADDRESS" --instance "$FARM_INSTANCE" --tls "$FARM_TLS" --properties "$FARM_PROPERTIES" --scratch "$RUNNER_TEMP/mac-farm" --tool-url "https://github.com/CycloneDX/cyclonedx-rust-cargo/releases/download/cargo-cyclonedx-$CYCLONEDX_VERSION/cargo-cyclonedx-aarch64-apple-darwin.tar.xz" --tool-sha256 "$CYCLONEDX_SHA256_AARCH64_MACOS" --tool-member cargo-cyclonedx-aarch64-apple-darwin/cargo-cyclonedx --output dist --output pkg -- xtask release macos-assets --version "$RELEASE_VERSION" --commit "$GITHUB_SHA" --scratch target/macos-assets
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        timeout-minutes: 10
         with:
           name: pkg-unsigned-macos-arm64
           path: pkg/
           retention-days: 90
           if-no-files-found: error
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        timeout-minutes: 10
         with:
           name: assets-macos-arm64
           path: dist/

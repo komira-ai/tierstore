@@ -104,7 +104,7 @@ impl Server {
                 text,
             ));
         }
-        let body = reader.read_all(check).await?;
+        let (body, _held) = self.whole_body(reader, check).await?;
         let asked = xml::parse_delete(&body).ok_or_else(malformed)?;
         if asked.objects.is_empty() || asked.objects.len() > DELETE_KEYS {
             return Err(malformed());

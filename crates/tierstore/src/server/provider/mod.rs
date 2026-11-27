@@ -81,6 +81,8 @@ mod prepare_list_tests;
 #[cfg(test)]
 mod prepare_tests;
 #[cfg(test)]
+mod prepare_turns_tests;
+#[cfg(test)]
 mod prepare_v2_tests;
 #[cfg(test)]
 mod release_tests;

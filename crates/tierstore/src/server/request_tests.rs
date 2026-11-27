@@ -168,6 +168,27 @@ async fn a_body_is_read_up_to_its_limit() {
     assert_eq!(cut.kind(), (StatusCode::BAD_REQUEST, "IncompleteBody"));
 }
 
+/// Asserts that the hook of a body read whole is called once, at its first byte: not for an empty
+/// piece before it, nor for the pieces after it, and not at all for a body of no bytes; and that
+/// what it gives comes back with the body.
+#[tokio::test]
+async fn a_body_read_whole_calls_its_hook_once_at_its_first_byte() {
+    let calls = std::cell::Cell::new(0);
+    let hook = || {
+        calls.set(calls.get() + 1);
+        async { Ok(calls.get()) }
+    };
+    let steps = vec![Step::Data(b""), Step::Data(b"ab"), Step::Data(b"cd")];
+    let reader = Reader::new(Scripted::new(steps), 100, IDLE);
+    let (whole, taken) = reader.read_whole(unchecked(), hook).await.unwrap();
+    assert_eq!((whole, taken), (Bytes::from_static(b"abcd"), Some(1)));
+    assert_eq!(calls.get(), 1);
+    let empty = Reader::new(Scripted::new(vec![Step::Data(b"")]), 100, IDLE);
+    let (whole, taken) = empty.read_whole(unchecked(), hook).await.unwrap();
+    assert_eq!((whole, taken), (Bytes::new(), None));
+    assert_eq!(calls.get(), 1);
+}
+
 /// Asserts that a body is read a piece at a time, that a frame of trailers carries no piece, and
 /// that the end of the body is `None`.
 #[tokio::test]
