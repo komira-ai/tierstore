@@ -1,11 +1,16 @@
 //! The rules of `farm.yml` ([`super::farm_lane`]), the farm lane: the one job that holds
 //! `id-token: write` on a pull request, and only under its exact `if:`; farm-connect pinned by
 //! commit in that file alone, with exactly the variables it is given; the triggers, the runner,
-//! the rights, and the build through `cargo xtask farm-build` after farm-connect. Each rule is shown
+//! the rights, the build through `cargo xtask farm-build` after farm-connect, and the three steps
+//! after it that offer the regenerated buildrules tables of a failed build. Each rule is shown
 //! to refuse its defect by putting it into the committed workflow and reading the exact problems
 //! the lint reports.
 
-use super::farm_lane::{BUILD_RUN, CONNECT_INPUTS, FARM_CONNECT, FILE, JOB_IF, ON_PROBLEM, RUNNER};
+use super::farm_lane::{
+    BUILD_RUN, CONNECT_INPUTS, FARM_CONNECT, FILE, JOB_IF, OFFER_IF, OFFER_INPUTS,
+    OFFER_ORDER_PROBLEM, ON_PROBLEM, RUNNER, SUMMARY_IF, SUMMARY_RUN, SYNC_ID, SYNC_IF, SYNC_RUN,
+    UPLOAD,
+};
 use super::lint::lint;
 use super::text_of;
 
@@ -270,4 +275,129 @@ fn the_job_runs_on_its_one_runner() {
         ),
         [format!("job build: runs-on must be {RUNNER}")]
     );
+}
+
+/// The problem of a job with no step that builds `//:sync_patch` as it must.
+fn no_sync() -> String {
+    format!("job build: no step `id: {SYNC_ID}` runs `{SYNC_RUN}` under `if: {SYNC_IF}`")
+}
+
+/// The problem of a job with no step that uploads the patch as it must.
+fn no_upload() -> String {
+    format!("job build: no {UPLOAD} step under `if: {OFFER_IF}` has the `with:` {OFFER_INPUTS:?}")
+}
+
+/// The problem of a job with no step that writes the summary as it must.
+fn no_summary() -> String {
+    format!("job build: no step runs `{SUMMARY_RUN}` under `if: {SUMMARY_IF}`")
+}
+
+/// The committed farm.yml cut into: what comes before the three steps of the patch, then each of
+/// the three (the sync, the upload, the summary), which end the file.
+fn offer_steps() -> [String; 4] {
+    let text = committed();
+    let at = |needle: &str| text.find(needle).expect("the step is in farm.yml");
+    let sync = at("      - name: Regenerate the generated files");
+    let upload = at("      - name: Offer the patch");
+    let summary = at("      - name: Say what the patch is");
+    assert!(
+        sync < upload && upload < summary,
+        "the steps in farm.yml's order"
+    );
+    [
+        text[..sync].to_owned(),
+        text[sync..upload].to_owned(),
+        text[upload..summary].to_owned(),
+        text[summary..].to_owned(),
+    ]
+}
+
+#[test]
+fn a_failed_build_is_followed_by_the_sync_of_the_patch_on_the_farm() {
+    // Catches: the sync of another target, under another condition, or without the id the two
+    // steps after it read.
+    for (from, to) in [
+        ("build //:sync_patch --out", "build //:ci --out"),
+        ("        if: failure()\n", "        if: always()\n"),
+        ("        id: sync_patch\n", "        id: sync\n"),
+        (
+            "--out \"$RUNNER_TEMP/sync-patch\"'\n",
+            "--out \"$RUNNER_TEMP/elsewhere\"'\n",
+        ),
+    ] {
+        assert_eq!(problems_with(from, to), [no_sync()], "{to}");
+    }
+}
+
+#[test]
+fn the_patch_is_uploaded_as_the_artifact_sync_patch_only_when_the_sync_finished() {
+    // Catches: the artifact renamed (the summary's commands download `sync-patch`), the whole
+    // output uploaded instead of `offer/`, an empty offer failing the step, an input added, and
+    // an upload attempted after a sync that did not finish.
+    let path = "          path: ${{ runner.temp }}/sync-patch/offer/\n";
+    for (from, to) in [
+        ("          name: sync-patch\n", "          name: patch\n"),
+        (path, "          path: ${{ runner.temp }}/sync-patch/\n"),
+        (
+            "          if-no-files-found: ignore\n",
+            "          if-no-files-found: error\n",
+        ),
+        ("          if-no-files-found: ignore\n", ""),
+        (
+            "          if-no-files-found: ignore\n",
+            "          if-no-files-found: ignore\n          retention-days: 1\n",
+        ),
+        (
+            "        if: failure() && steps.sync_patch.outcome == 'success'\n",
+            "        if: failure()\n",
+        ),
+    ] {
+        assert_eq!(problems_with(from, to), [no_upload()], "{to}");
+    }
+    let problems = problems_with(
+        "uses: actions/upload-artifact@",
+        "uses: actions/cache/save@",
+    );
+    assert!(problems.contains(&no_upload()), "{problems:?}");
+}
+
+#[test]
+fn the_summary_runs_whenever_the_sync_ran_and_names_the_artifact() {
+    // Catches: no summary after a sync that failed (the reader would not learn there is no
+    // patch), commands that download another artifact, and a summary written to the log alone.
+    for (from, to) in [
+        (
+            "        if: failure() && steps.sync_patch.outcome != 'skipped'\n",
+            "        if: failure() && steps.sync_patch.outcome == 'success'\n",
+        ),
+        ("--artifact sync-patch --to", "--artifact patch --to"),
+        (" --to \"$GITHUB_STEP_SUMMARY\"", ""),
+    ] {
+        assert_eq!(problems_with(from, to), [no_summary()], "{to}");
+    }
+}
+
+#[test]
+fn the_three_steps_of_the_patch_are_required() {
+    // Catches: the steps dropped, which leaves a pull request that changes a manifest with no
+    // patch and no word of one.
+    let [before, ..] = offer_steps();
+    assert_eq!(lint(FILE, &before), [no_sync(), no_upload(), no_summary()]);
+}
+
+#[test]
+fn the_steps_of_the_patch_follow_the_build_in_their_order() {
+    // Catches: the summary before the upload, the upload before the sync it reads, and the three
+    // moved before the build (they would run on a farm-connect failure, never on the build's).
+    let [before, sync, upload, summary] = offer_steps();
+    for reordered in [
+        format!("{before}{sync}{summary}{upload}"),
+        format!("{before}{upload}{sync}{summary}"),
+    ] {
+        assert_eq!(lint(FILE, &reordered), [OFFER_ORDER_PROBLEM]);
+    }
+    let build = "      - name: buck2 build //:ci on the farm, local 0\n";
+    assert_eq!(before.matches(build).count(), 1, "the build step once");
+    let early = before.replace(build, &format!("{sync}{upload}{summary}{build}"));
+    assert_eq!(lint(FILE, &early), [OFFER_ORDER_PROBLEM]);
 }

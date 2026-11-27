@@ -13,8 +13,9 @@
 //! the file as for any workflow.
 //!
 //! [`problems`] holds the file to its shape: the triggers, the one job, its rights, farm-connect's
-//! inputs and the check of the build. It does not fix the other steps of the job, each of which
-//! could ask for the token; a change to them is reviewed like any change to a workflow:
+//! inputs, the check of the build and the steps that offer the sync patch. It does not fix the
+//! other steps of the job, each of which could ask for the token; a change to them is reviewed
+//! like any change to a workflow:
 //! - its `on` is exactly `pull_request` with no filter and `push` to `branches: [main]`;
 //! - its jobs are exactly [`JOB`], on [`RUNNER`], with `permissions` exactly `contents: read`
 //!   and `id-token: write`;
@@ -24,7 +25,13 @@
 //!   else (no secret, no token, no input a pull request could set);
 //! - a step after farm-connect's runs exactly [`BUILD_RUN`]: `cargo xtask farm-build` of `//:ci`,
 //!   which refuses a build with no farm workers or whose summary line does not say `local: 0`
-//!   (crates/xtask/src/farm.rs).
+//!   (crates/xtask/src/farm.rs);
+//! - after it, in this order, the three steps that offer the regenerated buildrules tables of a
+//!   failed build (buildrules' docs/how.md, "A stale table in a pull request"; docs/farm.md): the
+//!   step [`SYNC_ID`] runs [`SYNC_RUN`] under `if: failure()`, an [`UPLOAD`] step uploads its
+//!   `offer/` with exactly [`OFFER_INPUTS`] under [`OFFER_IF`], and a step runs [`SUMMARY_RUN`]
+//!   under [`SUMMARY_IF`]. Each is held word for word, so a pull request that changes a manifest
+//!   keeps getting the patch and the commands that apply it.
 
 use std::collections::BTreeMap;
 
@@ -56,6 +63,33 @@ pub const CONNECT_INPUTS: [(&str, &str); 6] = [
 /// The build step's `run:`.
 pub const BUILD_RUN: &str =
     "cargo xtask farm-build --buck2 \"$RUNNER_TEMP/bin/buck2\" --target //:ci";
+
+/// The `id:` of the step that builds buildrules' `//:sync_patch`, which the two after it read.
+pub const SYNC_ID: &str = "sync_patch";
+/// The `if:` of that step: it runs only when a step before it failed.
+pub const SYNC_IF: &str = "failure()";
+/// Its `run:`: `buildrules sync` on the farm, whose output (the verdict and `offer/`) goes under
+/// the runner's temporary directory.
+pub const SYNC_RUN: &str =
+    r#""$RUNNER_TEMP/bin/buck2" build //:sync_patch --out "$RUNNER_TEMP/sync-patch""#;
+/// The action of the step that uploads the patch (its pin is held by the lint's pin rule).
+pub const UPLOAD: &str = "actions/upload-artifact@";
+/// The `if:` of the upload: only when the sync finished.
+pub const OFFER_IF: &str = "failure() && steps.sync_patch.outcome == 'success'";
+/// The `with:` of the upload, exactly: the artifact `sync-patch`, made of `offer/` (empty when
+/// there is no patch, which then uploads nothing).
+pub const OFFER_INPUTS: [(&str, &str); 3] = [
+    ("name", "sync-patch"),
+    ("path", "${{ runner.temp }}/sync-patch/offer/"),
+    ("if-no-files-found", "ignore"),
+];
+/// The `if:` of the summary: whenever the sync ran, so a sync that failed is said too.
+pub const SUMMARY_IF: &str = "failure() && steps.sync_patch.outcome != 'skipped'";
+/// The summary's `run:`: buildrules' verdict and the two commands that take the patch of this
+/// run's artifact, in the job's summary.
+pub const SUMMARY_RUN: &str = r#""$RUNNER_TEMP/bin/buck2" run buildrules//rules/rust:sync_patch -- summary --dir "$RUNNER_TEMP/sync-patch" --run "$GITHUB_RUN_ID" --repository "$GITHUB_REPOSITORY" --artifact sync-patch --to "$GITHUB_STEP_SUMMARY""#;
+/// What a job whose three steps of the patch are not in order after the build is refused with.
+pub const OFFER_ORDER_PROBLEM: &str = "job build: the steps that offer the sync patch must follow the build, in the order sync, upload, summary";
 
 /// What a [`FILE`] whose `on` is anything else is refused with.
 pub const ON_PROBLEM: &str =
@@ -119,6 +153,61 @@ fn connects(step: &Node) -> bool {
         .is_some_and(|u| unversioned_pin_allowed(FILE, u))
 }
 
+/// The scalar of `key` in the step `step`.
+fn scalar<'a>(step: &'a Node, key: &str) -> Option<&'a str> {
+    entry(step, key).and_then(Node::as_str)
+}
+
+/// Whether `step` is the step that builds `//:sync_patch`.
+fn syncs(step: &Node) -> bool {
+    scalar(step, "id") == Some(SYNC_ID)
+        && scalar(step, "if") == Some(SYNC_IF)
+        && scalar(step, "run") == Some(SYNC_RUN)
+}
+
+/// Whether `step` uploads the patch as the artifact `sync-patch`.
+fn offers(step: &Node) -> bool {
+    scalar(step, "uses").is_some_and(|u| u.starts_with(UPLOAD))
+        && scalar(step, "if") == Some(OFFER_IF)
+        && entry(step, "with").and_then(scalar_map) == Some(BTreeMap::from(OFFER_INPUTS))
+}
+
+/// Whether `step` writes the verdict and the commands to the job's summary.
+fn summarises(step: &Node) -> bool {
+    scalar(step, "if") == Some(SUMMARY_IF) && scalar(step, "run") == Some(SUMMARY_RUN)
+}
+
+/// What is wrong with the three steps that offer the patch, given the position of the build.
+fn offer_problems(steps: &[Node], build: Option<usize>) -> Vec<String> {
+    let mut problems = Vec::new();
+    let sync = steps.iter().position(syncs);
+    if sync.is_none() {
+        problems.push(format!(
+            "job {JOB}: no step `id: {SYNC_ID}` runs `{SYNC_RUN}` under `if: {SYNC_IF}`"
+        ));
+    }
+    let upload = steps.iter().position(offers);
+    if upload.is_none() {
+        problems.push(format!(
+            "job {JOB}: no {UPLOAD} step under `if: {OFFER_IF}` has the `with:` {OFFER_INPUTS:?}"
+        ));
+    }
+    let summary = steps.iter().position(summarises);
+    if summary.is_none() {
+        problems.push(format!(
+            "job {JOB}: no step runs `{SUMMARY_RUN}` under `if: {SUMMARY_IF}`"
+        ));
+    }
+    let found: Vec<usize> = [build, sync, upload, summary]
+        .into_iter()
+        .flatten()
+        .collect();
+    if found.windows(2).any(|pair| pair[0] >= pair[1]) {
+        problems.push(OFFER_ORDER_PROBLEM.to_owned());
+    }
+    problems
+}
+
 /// What is wrong with the shape of [`FILE`], the document `doc`.
 pub fn problems(doc: &Node) -> Vec<String> {
     let mut problems = Vec::new();
@@ -176,5 +265,6 @@ fn job_problems(job: &Node) -> Vec<String> {
             "job {JOB}: the build does not come after the farm-connect step"
         )),
     }
+    problems.extend(offer_problems(steps, build));
     problems
 }

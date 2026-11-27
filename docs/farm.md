@@ -148,8 +148,8 @@ starts that holds a write scope (AGENTS.md, B10 of this repository). The workflo
 scope and `contents: read`; the exact `if:` that skips a fork's pull request (which gets no OIDC
 token) and Dependabot's; farm-connect's inputs exactly the variables above, and farm-connect the
 one action pinned by commit with no version comment, in this file alone; a step after
-farm-connect's that runs `cargo xtask farm-build` of `//:ci`; and the triggers, one job and one
-runner. It does not fix the job's other steps, each of which could ask for the token: a change to
+farm-connect's that runs `cargo xtask farm-build` of `//:ci`; after it, in order, the three steps
+that offer the sync patch (above), each word for word; and the triggers, one job and one runner. It does not fix the job's other steps, each of which could ask for the token: a change to
 them is reviewed like any change to a workflow.
 
 A pull request's build and a build of `main` share the farm's action cache, as every build of
