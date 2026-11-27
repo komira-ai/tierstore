@@ -8,7 +8,8 @@
 //! attach <sha256> for <run> prefetch all   the same; every blob of the tree is also filled in the
 //!                                  background, in manifest order, and pinned, without delaying
 //!                                  the answer
-//! detach <run>                     {"ok":true,"failures":[{"path":..,"digest":..,"reason":..}]}
+//! detach <run>                     {"ok":true,"failures":[{"path":..,"digest":..,"reason":..}],
+//!                                  "stall_ms":<ms>}
 //! detach-all-except [<run> ...]    {"ok":true,"detached":<number of runs>}
 //! attachments                      {"ok":true,"attachments":[{"tree":..,"run":..}]}
 //! set tree_list_ram_bytes <bytes>  {"ok":true,"tree_list_ram_bytes":<bytes>,"mount":"<id>"}
@@ -16,8 +17,10 @@
 //!
 //! A request that is refused is answered `{"ok":false,"error":"<why>"}`. `attach` is answered when
 //! the tree's manifests are read and flattened. `detach` of a run that attached nothing is
-//! answered `not attached`. These are the attachments of runs: a tree a lookup attached with no run
-//! (`core/implicit.rs`) is not listed, and no request here ends it.
+//! answered `not attached`. `stall_ms` is the time, in milliseconds, the opens under the run's
+//! attachments waited on fills (`attach.rs`): 0 for a run whose opens the cache answered. These
+//! are the attachments of runs: a tree a lookup attached with no run (`core/implicit.rs`) is not
+//! listed, and no request here ends it.
 //!
 //! `set tree_list_ram_bytes` makes `<bytes>`, a whole number of at least 4096 as in the file, the
 //! cap `fs.tree_list_ram_bytes` from now on (`core/lists.rs`), once the lists over it that nothing
@@ -59,7 +62,11 @@ pub(super) fn handle(core: &Arc<Core>, line: &str) -> serde_json::Value {
             attached(core.attach_asking(digest, run, true))
         }
         (Some("detach"), [run]) => match core.detach(run) {
-            Some(failures) => serde_json::json!({"ok": true, "failures": failures_of(&failures)}),
+            Some(detached) => serde_json::json!({
+                "ok": true,
+                "failures": failures_of(&detached.failures),
+                "stall_ms": detached.stall_ms,
+            }),
             None if core.is_held() => refused(&AttachError::Replaced.to_string()),
             None => refused("not attached"),
         },

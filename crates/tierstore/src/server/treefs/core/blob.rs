@@ -377,10 +377,30 @@ impl Core {
     /// (`Loaded::keep_span`), for the opens that follow while its pack is open. `asked` is set to
     /// [`Source::Filled`] once a try asks the node for the bytes (`core/opens.rs`).
     ///
+    /// An open that asked the node for the bytes waited on the fill from `begun` to its answer, or
+    /// its failure: that time is added to the stall of every run's attachment of the tree
+    /// (`attach.rs`). An open the cache answered adds nothing.
+    ///
     /// # Errors
     /// [`Errno::Io`] for bytes that cannot be had: recorded on the attachments of the tree and
     /// said on stderr.
     pub(super) fn blob(
+        &self,
+        (loaded, number): (&Loaded, u64),
+        entry: &TreeEntry,
+        blob: (&TreeDigest, u64, Option<&BlobSource>),
+        (begun, asked): (u64, &mut Source),
+    ) -> Result<FileBytes, Errno> {
+        let got = self.blob_tried((loaded, number), entry, blob, (begun, &mut *asked));
+        if *asked == Source::Filled {
+            let waited = self.now().saturating_sub(begun);
+            self.state().attachments.stalled(number, waited);
+        }
+        got
+    }
+
+    /// [`Core::blob`], with no stall added.
+    fn blob_tried(
         &self,
         (loaded, number): (&Loaded, u64),
         entry: &TreeEntry,
