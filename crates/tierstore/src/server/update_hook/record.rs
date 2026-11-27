@@ -70,7 +70,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use super::args::Step;
-use super::params::Params;
+use super::params::{Params, Previous};
 use super::ports::Instance;
 
 /// The schema this hook writes and reads.
@@ -210,6 +210,35 @@ pub struct ListCap {
     pub mount: Option<String>,
 }
 
+/// What [`Record::stale`] finds.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum Stale {
+    /// The record is at rest, committed, or of the update the params name: the step goes by
+    /// its own rules.
+    Not,
+    /// The record is of another update, in flight and not committed, that returns the host to
+    /// the release the params name as the one it runs (`updater.previous_release`, the release
+    /// `current` names): hostkeeper gave that update up and moved `current` back, and its
+    /// rollback never ran. A `prepare` or a `rollback` rolls it back first with the params it
+    /// was written under.
+    Own(Box<Written>),
+    /// The record is of another update, in flight and not committed, that these params do not
+    /// roll back, and why: a first install, or one that returns the host to another release than
+    /// the one `current` names, as an update still in its cutover does (hostkeeper moved
+    /// `current` to its staged release). It is kept, and the step refuses as before.
+    Kept(String),
+}
+
+/// The params an update on record was written under, as [`Stale::Own`] finds them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct Written {
+    /// The params of the step, with the update's own staged release and version: its previous
+    /// release is the params', which is the update's own (`from`).
+    pub(super) params: Params,
+    /// That previous release and its version: what the rollback brings back.
+    pub(super) previous: Previous,
+}
+
 /// Only the schema of a record, read before the rest is trusted.
 #[derive(Deserialize)]
 struct Header {
@@ -345,6 +374,45 @@ impl Record {
             last.display(),
             self.version.as_deref().unwrap_or("of no version"),
         ))
+    }
+
+    /// What a step of the update `params` name makes of a record of another update, in flight and
+    /// not committed, that no updater will finish: an updater that started it and is gone (its
+    /// host lost its network or its power) left it, and its rollback never ran. See
+    /// [`Stale`].
+    pub(super) fn stale(&self, params: &Params) -> Stale {
+        if !self.updating || self.committed() || self.is_of(params) {
+            return Stale::Not;
+        }
+        // `check` holds an update in flight to naming both.
+        let to = self.to.clone().unwrap_or_default();
+        let version = self.version.clone().unwrap_or_default();
+        let Some(from) = &self.from else {
+            return Stale::Kept(format!(
+                "the first install of {version} is rolled back only with the params it was \
+                 written under: it stops the instance it started, which no other order may do"
+            ));
+        };
+        match &params.previous {
+            Some(previous) if &previous.release == from => Stale::Own(Box::new(Written {
+                params: Params {
+                    staged_release: to,
+                    target_version: version,
+                    ..params.clone()
+                },
+                previous: previous.clone(),
+            })),
+            other => Stale::Kept(format!(
+                "the update to {version} returns the host to {}, and the params name {} as the \
+                 release the host runs: it is rolled back only by params that name the release \
+                 it started from",
+                from.display(),
+                other.as_ref().map_or_else(
+                    || "no release".to_owned(),
+                    |previous| previous.release.display().to_string()
+                ),
+            )),
+        }
     }
 
     /// Whether `marker` is set.

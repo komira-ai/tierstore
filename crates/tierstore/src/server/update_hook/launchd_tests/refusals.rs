@@ -7,7 +7,7 @@ use super::fake::{
     CONFIG, Fake, LABEL, NEW, NEW_VERSION, OLD, assert_failed, assert_ok, in_flight, params_for,
     path,
 };
-use crate::server::update_hook::{Instance, Marker, Mode, Params, Reason, Record, Step};
+use crate::server::update_hook::{Instance, Marker, Mode, Params, Previous, Reason, Record, Step};
 
 use Step::{Cleanup, Cutover, Prepare, Restore, Rollback, Uninstall, Verify};
 
@@ -118,7 +118,9 @@ fn steps_out_of_order_are_refused() {
 /// Asserts that every step after `prepare` refuses params that name another release, or another
 /// version of the same release, than the update on record, with `bad_params` and no launchd call,
 /// while the update is in flight and after it is committed. Catches a step that acts on an
-/// update it does not belong to.
+/// update it does not belong to. A `rollback` is asked with params that name the staged release
+/// on record as the release the host runs, as an order that races the update does: one whose
+/// params name the release that update started from rolls it back (`stale`).
 #[test]
 fn params_of_another_update_are_refused() {
     let other_release = params_for(OTHER, NEW_VERSION, Some((OLD, "0.3.0+000000000003")));
@@ -127,9 +129,17 @@ fn params_of_another_update_are_refused() {
         let fake = Fake::new();
         fake.advance(&[Prepare, Cutover, Verify]);
         let before = fake.launchd_calls().len();
-        for step in [Cutover, Verify, Cleanup, Rollback] {
+        for step in [Cutover, Verify, Cleanup] {
             assert_failed(&fake.run_with(step, params, LABEL), Reason::BadParams);
         }
+        let racing = Params {
+            previous: Some(Previous {
+                release: NEW.into(),
+                version: NEW_VERSION.to_owned(),
+            }),
+            ..params.clone()
+        };
+        assert_failed(&fake.run_with(Rollback, &racing, LABEL), Reason::BadParams);
         assert_eq!(fake.launchd_calls().len(), before);
         fake.advance(&[Cleanup]);
         assert_failed(&fake.run_with(Verify, params, LABEL), Reason::BadParams);

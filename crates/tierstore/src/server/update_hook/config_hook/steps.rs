@@ -388,22 +388,19 @@ fn systemd_attempt(
         Step::Restore => Err(not_a_step()),
         Step::Uninstall => Ok(uninstalled()),
         Step::Prepare => {
-            let holds_fs = || fs_runs(ports);
-            let mut prepared =
-                prepare_params(params, ports.host, common, &holds_fs, (false, true))?;
-            if let Some(reload) = prepared.reload.take() {
-                if let Some(done) = reload::prepare(params, ports, common.build, reload)? {
-                    return Ok(done);
-                }
-                // The node is not one instance serving: the change is the arm's, refusals and all.
-                prepared = prepare_params(params, ports.host, common, &holds_fs, (false, false))?;
-            }
-            let policy = if prepared.switch {
-                FsPolicy::Switch
-            } else {
-                left
+            // A reload of another package past its cutover, whose updater is gone, is rolled back
+            // first; the record of an update of the arm is the arm's to judge.
+            let Some(note) = reload::roll_back_before_prepare(&act)? else {
+                return systemd_prepare(params, ports, common, &arm);
             };
-            Ok(arm(step, &prepared.params, policy))
+            let led = |mut done: Done| {
+                let rest = done.report.detail.take().unwrap_or_default();
+                done.report.detail = Some(format!("{note}; {rest}"));
+                done
+            };
+            systemd_prepare(params, ports, common, &arm)
+                .map(led)
+                .map_err(led)
         }
         Step::Cutover => {
             if let Some(done) = in_place()? {
@@ -432,6 +429,31 @@ fn systemd_attempt(
             Ok(done)
         }
     }
+}
+
+/// `prepare` of the config package `params` name on systemd: in place when the staged file
+/// allows it and one instance serves, by the arm otherwise.
+fn systemd_prepare(
+    params: &Params,
+    ports: &SystemdPorts<'_>,
+    common: &Common<'_>,
+    arm: &dyn Fn(Step, &Params, FsPolicy) -> Done,
+) -> Result<Done, Done> {
+    let holds_fs = || fs_runs(ports);
+    let mut prepared = prepare_params(params, ports.host, common, &holds_fs, (false, true))?;
+    if let Some(reload) = prepared.reload.take() {
+        if let Some(done) = reload::prepare(params, ports, common.build, reload)? {
+            return Ok(done);
+        }
+        // The node is not one instance serving: the change is the arm's, refusals and all.
+        prepared = prepare_params(params, ports.host, common, &holds_fs, (false, false))?;
+    }
+    let policy = if prepared.switch {
+        FsPolicy::Switch
+    } else {
+        FsPolicy::LeftAlone
+    };
+    Ok(arm(Step::Prepare, &prepared.params, policy))
 }
 
 /// The rollback of a node's first config package on systemd: the instance that runs serves,
