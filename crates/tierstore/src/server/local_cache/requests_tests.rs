@@ -1,6 +1,5 @@
 //! What the mounts report of the requests of their frontends, as the cache counts and renders it:
-//! the kinds and their words; the report read back as written and every other form refused,
-//! another number of kinds or of buckets among them; the family at zero before any report; each
+//! the kinds and their words; the family at zero before any report; each
 //! process's totals added by what they grew by, across a hand-over and a lost report; the bound
 //! on the mounts.
 
@@ -87,60 +86,6 @@ fn every_kind_has_its_place_and_its_word() {
     for (at, kind) in KINDS.into_iter().enumerate() {
         assert_eq!(kind.index(), at);
         assert_eq!(kind.word(), WORDS[at]);
-    }
-}
-
-/// Asserts that a report reads back as written, the largest numbers included, and that a report
-/// with a bucket fewer or more (a mount of another release), the cells of a kind fewer, a missing
-/// or an extra word, an empty word, a number with a sign or a non-digit, a number over 64 bits, a
-/// bad mount name and no numbers at all are refused.
-#[test]
-fn a_requests_report_reads_back_as_written_and_any_other_form_is_refused() {
-    let mut one = only("boot-1", 4242, RequestKind::Lookup, 2, 30);
-    one.spans[KINDS.len() - 1] = spans(9, 3, 1);
-    let line = one.line();
-    let rest = line.strip_prefix("requests ").unwrap();
-    assert!(rest.starts_with("boot-1 4242 30 2 0 0"), "{line}");
-    assert_eq!(rest.split(' ').count(), 2 + KINDS.len() * (1 + BUCKETS));
-    assert_eq!(Requests::parse(rest), Some(one));
-    let most = Requests {
-        mount: "m".to_owned(),
-        process: u64::MAX,
-        spans: [spans(u64::MAX, BUCKETS - 1, u64::MAX); KINDS.len()],
-    };
-    let line = most.line();
-    assert_eq!(
-        Requests::parse(line.strip_prefix("requests ").unwrap()),
-        Some(most)
-    );
-    let fewer = rest.rsplit_once(' ').unwrap().0.to_owned();
-    let more = format!("{rest} 0");
-    let kind_fewer = rest
-        .split(' ')
-        .take(2 + (KINDS.len() - 1) * (1 + BUCKETS))
-        .collect::<Vec<_>>()
-        .join(" ");
-    let big = rest.replacen(" 4242 ", &format!(" {}0 ", u64::MAX), 1);
-    let signed = rest.replacen(" 4242 ", " +4242 ", 1);
-    let lettered = rest.replacen(" 4242 ", " 4242x ", 1);
-    let doubled = rest.replacen(" 4242 ", "  4242 ", 1);
-    let named = rest.replacen("boot-1", "boot\u{e9}", 1);
-    let unnamed = rest.replacen("boot-1", "", 1);
-    for refused in [
-        "",
-        "boot-1",
-        "boot-1 4242",
-        fewer.as_str(),
-        more.as_str(),
-        kind_fewer.as_str(),
-        big.as_str(),
-        signed.as_str(),
-        lettered.as_str(),
-        doubled.as_str(),
-        named.as_str(),
-        unnamed.as_str(),
-    ] {
-        assert_eq!(Requests::parse(refused), None, "{refused:?}");
     }
 }
 

@@ -110,8 +110,8 @@ pub const HANDOFF_FS_CAPABILITY: &str = "handoff-fs-v1";
 /// either is accepted, the mount's first. While it holds the mount it offers it on both, to a
 /// successor of either layout or release, one taker at a time; a successor that takes it with the
 /// sockets ends the process, which drains S3 and OCI, as one that takes the sockets after a
-/// `take-fs 1` does. It binds the fill socket (`local_cache.fill_socket`) while its cache is the
-/// writer, as every build node does. The hook updates a node whose file has an `fs` interface only
+/// `take-fs 1` does. Its file system calls its cache in the process: it binds no fill socket. The
+/// hook updates a node whose file has an `fs` interface only
 /// between releases that both list it.
 pub const HANDOFF_SERVICE_CAPABILITY: &str = "handoff-service-v1";
 

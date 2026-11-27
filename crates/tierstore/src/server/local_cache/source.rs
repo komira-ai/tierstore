@@ -1,25 +1,25 @@
-//! Fills asked for by the filesystem process over the fill socket (see
-//! [`fill_socket`](crate::server::fill_socket)): a blob that lies inside a larger object of the
-//! upstream, and a whole object named by its content.
+//! Fills asked for by the file system's core, which calls them in this process
+//! (`treefs/in_process.rs`): a blob that lies inside a larger object of the upstream, and a whole
+//! object named by its content.
 //!
 //! - [`LocalCache::fill_blob`] reads `size` bytes from `offset` of the upstream object `from`,
 //!   hashes them as they pass, and keeps them as the entry named by `<sha256>` (the name of the
 //!   object `cas/l/<sha256>`) if they hash to `<sha256>`. The entry is the same one the S3 front
 //!   keeps for that object: one entry and one fill for a digest, whichever path asks. A blob cut
 //!   out of a larger object is of origin `span`, which the S3 front does not serve as an object;
-//!   the filesystem process opens its file at the path the layout gives the name ([`blob_path`]).
+//!   the core opens its file at the path the layout gives the name ([`blob_path`]).
 //! - [`LocalCache::fill_manifest`] fills the object `cas/l/<sha256>`, up to
 //!   [`WHOLE_FILL_LIMIT`], the file a tree's manifest is: the caller knows its hash and not its
 //!   size. Each such fill is timed on the cache's clock, from the request to its answer
 //!   (`tierstore_cache_manifest_fill_seconds`, `attaches.rs`).
 //! - [`LocalCache::fill_tree`] fills the new manifests of a tree, going down from its root
-//!   itself, so that the filesystem process crosses the socket once for them (`tree_fill.rs`).
+//!   itself, so that the core calls the cache once for them (`tree_fill.rs`).
 //! - [`LocalCache::touch_blobs`] counts blobs as used now, for the cache's order of eviction.
 //!
 //! These fills have a pool of permits of their own (`fill_socket_concurrency`) and wait for one
 //! up to `fill_socket_wait`: a request that finds none free is answered [`FillError::Busy`]. They
 //! never take a permit of `max_concurrent_fills`, which a miss of the S3 front takes without
-//! waiting. A request for a digest that has a fill running, started by this socket or by the S3
+//! waiting. A request for a digest that has a fill running, started by the core or by the S3
 //! front, joins it and takes no permit. Every fetch is a task of its own, so a caller that gives
 //! up does not stop it. A cache that does not hold the lock of its
 //! directory fills nothing ([`FillError::ReadOnly`]).
@@ -59,8 +59,8 @@ pub(in crate::server) struct Blob<'a> {
     pub offset: u64,
 }
 
-/// Why a fill asked for over the fill socket left nothing in the cache. The text is the answer
-/// the socket gives.
+/// Why a fill asked for by the core left nothing in the cache. The text is the words of the
+/// failure.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub(in crate::server) enum FillError {
     /// The upstream failed, refused the request (403: it does not accept this node's key) or has
@@ -79,7 +79,7 @@ pub(in crate::server) enum FillError {
     /// A whole object is larger than a manifest may be.
     #[error("too large")]
     TooLarge,
-    /// No permit of the fill socket's pool came free in time.
+    /// No permit of the pool of `fill_socket_concurrency` came free in time.
     #[error("busy")]
     Busy,
     /// This process does not hold the lock of the cache directory, or lost it during the fill.
@@ -114,26 +114,26 @@ pub(super) fn object_key(sha256: &str) -> String {
 }
 
 /// The path of the file of the blob `sha256` under the cache directory `root`, where the
-/// filesystem process opens it once a fill has been answered `ok`: the file of the entry named by
+/// core opens it once a fill has been answered `ok`: the file of the entry named by
 /// the digest, the same one a whole object `cas/l/<sha256>` has.
 pub(in crate::server) fn blob_path(root: &std::path::Path, sha256: &str) -> std::path::PathBuf {
     data_path(root, sha256)
 }
 
 /// The path of the file of the object `cas/l/<sha256>` under the cache directory `root`, where the
-/// filesystem process reads a tree manifest once its fill has been answered `ok`.
+/// core reads a tree manifest once its fill has been answered `ok`.
 pub(in crate::server) fn manifest_path(root: &std::path::Path, sha256: &str) -> std::path::PathBuf {
     data_path(root, sha256)
 }
 
-/// What the fill socket's request is about.
+/// What a request for a fill is about.
 struct Wanted {
     key: String,
     name: Name,
     plan: Plan,
 }
 
-/// The answer of the socket to a fill that ended as `ended`.
+/// The answer to a fill that ended as `ended`.
 pub(super) fn answer(ended: Ended) -> Result<(), FillError> {
     match ended {
         Ok(Filled::Kept) => Ok(()),
@@ -149,7 +149,7 @@ pub(super) fn answer(ended: Ended) -> Result<(), FillError> {
     }
 }
 
-/// The answer of the socket to the fill `pending`, once it ends; none if it is the place of a keep
+/// The answer to the fill `pending`, once it ends; none if it is the place of a keep
 /// that has left the table, and the request is to look again.
 async fn waited(pending: Pending) -> Option<Result<(), FillError>> {
     if pending.keeping {
@@ -162,7 +162,7 @@ async fn waited(pending: Pending) -> Option<Result<(), FillError>> {
 
 impl Inner {
     /// The fill of `wanted`: at once if it is in the cache, else shared with the fill that runs
-    /// for its name (whichever path started it), else started when a permit of the socket's pool
+    /// for its name (whichever path started it), else started when a permit of the pool
     /// comes free.
     async fn source_fill(self: &Arc<Self>, wanted: Wanted) -> Result<(), FillError> {
         if !self.read_write() {
@@ -299,8 +299,8 @@ impl LocalCache {
         }
     }
 
-    /// The mode of the cache now, and each time it changes: the fill socket is bound while the
-    /// cache is read-write and only then.
+    /// The mode of the cache now, and each time it changes: the mount provider's socket and the
+    /// put ingest serve while the cache is read-write and only then.
     pub(in crate::server) fn watch_mode(&self) -> watch::Receiver<Mode> {
         self.inner.hold.subscribe()
     }

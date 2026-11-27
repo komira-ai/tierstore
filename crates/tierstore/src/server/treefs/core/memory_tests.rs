@@ -40,7 +40,7 @@ fn found(core: &Core, parent: u64, name: &str) -> u64 {
 
 /// Takes the tree of `attached` out of memory, counted exactly: the run detached and the one
 /// lookup of `bin` forgotten. The manifests are taken out of the cache too, so that the next read
-/// asks the fill socket for each, and the test can hold it there.
+/// has the cache fill each, and the test can hold it there.
 fn out_of_memory(rig: &Rig, bin: u64) {
     assert!(rig.core.detach(RUN).is_some());
     rig.core.forget(bin, 1);
@@ -73,7 +73,7 @@ fn ask_from(
         .collect()
 }
 
-/// The fills of the root manifest of the sample tree the fill socket was asked for.
+/// The fills of the root manifest of the sample tree that reached the upstream.
 fn root_fills(rig: &Rig) -> usize {
     let root = rig.upstream.built.lock().unwrap().root.clone();
     let line = format!("fill {root}");
@@ -86,7 +86,7 @@ fn root_fills(rig: &Rig) -> usize {
 
 /// Asserts that requests that name inodes of a tree that left memory, all at once, make one read
 /// of the tree between them: the first reads it, the others wait for that read and are answered
-/// from it, and the fill socket is asked for the root manifest once. Catches a core that reads a
+/// from it, and the upstream is asked for the root manifest once. Catches a core that reads a
 /// tree once for each request, which kept every FUSE thread flattening the same tree.
 #[test]
 fn requests_at_once_for_a_tree_out_of_memory_read_it_once() {
@@ -96,7 +96,7 @@ fn requests_at_once_for_a_tree_out_of_memory_read_it_once() {
     let fills = rig.upstream.asked("fill").len();
     rig.upstream.gate_manifests();
     let asking = ask_from(&rig, 4, bin);
-    // The first read is at the fill socket, held there (the gate counts every fill of a
+    // The first read is at the upstream, held there (the gate counts every fill of a
     // manifest, those of the attach too); the three other requests wait for it.
     rig.upstream.wait_for_manifest_fills(fills + 1);
     until(|| rig.core.waiting_for_reads() == 3);
@@ -105,8 +105,8 @@ fn requests_at_once_for_a_tree_out_of_memory_read_it_once() {
         assert_eq!(asked.join().unwrap(), Ok(bin));
     }
     assert_eq!(root_fills(&rig), before + 1);
-    // The one read asks for the two directories below the root, `bin` and `include`, at once
-    // (a level of the tree at a time); four reads would have had four roots in flight.
+    // The one read has the cache fill the two directories below the root, `bin` and `include`,
+    // at once (a level of the tree at a time); four reads would have had four roots in flight.
     assert!(rig.upstream.most_manifest_fills() <= 2);
     assert_eq!(rig.core.waiting_for_reads(), 0);
     // Read at the attach and once again now.
@@ -136,11 +136,14 @@ fn requests_that_waited_for_a_failed_read_fail_with_it_and_the_next_reads_again(
     for asked in asking {
         assert_eq!(asked.join().unwrap(), Err(Errno::Io));
     }
-    assert_eq!(root_fills(&rig), before + 1);
+    // One read, which asked for the root twice: the cache's fill of the tree, which failed, and
+    // the read's own fill of the root, which failed in the same words. Three reads would have
+    // asked six times.
+    assert_eq!(root_fills(&rig), before + 2);
     assert_eq!(rig.core.trees_in_memory(), 0);
     rig.upstream.failing.lock().unwrap().clear();
     assert_eq!(rig.core.getattr(bin).unwrap().attr.ino, bin);
-    assert_eq!(root_fills(&rig), before + 2);
+    assert_eq!(root_fills(&rig), before + 3);
 }
 
 /// Asserts that a lookup counted on a tree that left memory after the caller took it puts the
@@ -253,7 +256,7 @@ fn a_number_the_table_does_not_know_is_no_entry() {
 }
 
 /// Asserts that a read of a tree that takes `SLOW_READ_MS` or more on the core's clock (held here
-/// at the fill socket while the test moves the clock) still answers its request and is counted as
+/// at the upstream while the test moves the clock) still answers its request and is counted as
 /// a read, the one that is said at warn.
 #[test]
 fn a_slow_read_again_answers_its_request() {
@@ -329,7 +332,7 @@ fn requests_that_waited_for_a_read_that_stopped_fail_and_the_next_reads_again() 
     assert_eq!(rig.core.trees_in_memory(), 0);
     assert_eq!(rig.core.getattr(bin).unwrap().attr.ino, bin);
     // The read of the attach and this one; the stopped read never ended, so is not counted. (Its
-    // fills left the manifests in the cache, so this read asks the fill socket for none.)
+    // fills left the manifests in the cache, so this read has none filled.)
     assert_eq!(rig.core.times_read(1), 2);
 }
 
@@ -353,23 +356,19 @@ fn read_line(rig: &Rig, times: u64, how: &str, why: &str) -> String {
 }
 
 /// A core that has not read the tree numbered 1 in its process (the successor of the rig's, over
-/// the same table), over a cache and an upstream that have no manifest of it, and where the
-/// upstream answers the manifest of the tree with `answer`: none to leave it with no manifest at
-/// all.
+/// the same table), over a cache that has no manifest of it, and where the upstream answers the
+/// root manifest of the tree with `answer`: none for a 404, as for a tree the upstream does not
+/// have.
 fn unread_tree(name: &str, answer: Option<&str>) -> (Rig, Arc<Core>) {
     let (rig, bin) = attached(name);
     out_of_memory(&rig, bin);
     let root = rig.upstream.built.lock().unwrap().root.clone();
-    match answer {
-        Some(answer) => {
-            rig.upstream
-                .failing
-                .lock()
-                .unwrap()
-                .insert(root, answer.to_owned());
-        }
-        None => rig.upstream.built.lock().unwrap().manifests.clear(),
-    }
+    let answer = answer.unwrap_or("upstream 404");
+    rig.upstream
+        .failing
+        .lock()
+        .unwrap()
+        .insert(root, answer.to_owned());
     let successor = rig.successor();
     (rig, successor)
 }

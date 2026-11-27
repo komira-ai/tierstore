@@ -78,7 +78,7 @@
 //!   `deleted`, as a delete is): the order in which the upstream took them is not known here, and
 //!   the first read of the object fills it (see `Writing`, in `write`).
 //! - A multipart upload is not kept: the first read of the object fills it.
-//! - A put that names the SHA-256 of its body (the `put` of the fill socket) is sent with
+//! - A put that names the SHA-256 of its body (the `put` of the core) is sent with
 //!   [`put_stream_sha256`](crate::Backend::put_stream_sha256), with no HEAD before it (a key that
 //!   exists is compared, not refused, by that call). One that finds the object there already
 //!   ([`PutOutcome::Existed`]) wrote nothing and keeps nothing: the first read of the object

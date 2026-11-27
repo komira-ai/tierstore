@@ -149,7 +149,7 @@ pub(super) enum Call {
 const CALLS: [&str; 4] = ["get", "head", "list", "list_uploads"];
 
 /// The label of the path of each read that joined a fill that was running, in the order of
-/// [`Counters::joined`]'s argument: the fill socket (the mount), then the S3 front.
+/// [`Counters::joined`]'s argument: the core (the mount), then the S3 front.
 const JOIN_PATHS: [&str; 2] = ["mount", "s3"];
 
 /// The kind of a family that only goes up (or is set once, when the cache is opened).
@@ -302,11 +302,11 @@ pub struct Counters {
     pub(super) staging_files: AtomicU64,
     /// The reads that joined a fill that was running instead of starting one, by path.
     joins: [AtomicU64; JOIN_PATHS.len()],
-    /// The requests of the fill socket that wait for a permit now (a gauge).
+    /// The requests of the core that wait for a permit now (a gauge).
     pub(super) socket_waiting: AtomicU64,
     /// The HEADs and GETs sent to the upstream and not answered yet (a gauge).
     pub(super) upstream_in_flight: AtomicU64,
-    /// The requests of the fill socket answered `busy`.
+    /// The requests of the core answered `busy`.
     pub(super) socket_busy: AtomicU64,
     /// When a line about those answers was last said.
     pub(super) busy_log: Mutex<BusyLog>,
@@ -402,12 +402,12 @@ impl Counters {
     }
 
     /// Counts a read that joined a fill that was running, of the S3 front if `s3`, else of the
-    /// fill socket.
+    /// core.
     pub(super) fn joined(&self, s3: bool) {
         bump(&self.joins[usize::from(s3)]);
     }
 
-    /// The reads of the S3 front (`s3`) or of the fill socket that joined a running fill.
+    /// The reads of the S3 front (`s3`) or of the core that joined a running fill.
     #[cfg(test)]
     pub(super) fn joins(&self, s3: bool) -> u64 {
         read(&self.joins[usize::from(s3)])

@@ -1,6 +1,6 @@
 //! The commit: a rename of a `.part` name to a final one. [`StagedStore::rename`] checks the file and
 //! hashes it, and hands the caller a [`Commit`]: the key, the SHA-256, the size and the staged file
-//! to put upstream (the fill socket's `put` verb, create-only, with the checksum). The caller ends
+//! to put upstream (the cache's put of a staged file, create-only, with the checksum). The caller ends
 //! it with the answer, [`Commit::finish`]. Until then the file can be neither written, removed,
 //! swept, nor committed again, and no other file is committed to the same key; a commit that is
 //! dropped unfinished leaves the file staged as it was.

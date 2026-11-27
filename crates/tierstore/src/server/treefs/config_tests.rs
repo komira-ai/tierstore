@@ -9,7 +9,7 @@ use super::{Database, FsSettings, builders, from_text, ignored, load, load_with}
 
 /// The keys every file needs.
 const NEEDED: &str = "client_group = \"builders\"\nowner = \"1000:1001\"\n\
-    fill_socket = \"/run/tierstore/fill.sock\"\ncache_path = \"/var/cache/tierstore\"\n";
+    cache_path = \"/var/cache/tierstore\"\n";
 
 fn fs(extra: &str) -> String {
     format!("[fs]\n{NEEDED}{extra}")
@@ -30,7 +30,6 @@ fn the_needed_keys_alone_give_the_defaults() {
         control_socket: PathBuf::from("/run/tierstore-fs/control.sock"),
         client_group: 2001,
         owner: (1000, 1001),
-        fill_socket: Some(PathBuf::from("/run/tierstore/fill.sock")),
         cache_path: PathBuf::from("/var/cache/tierstore"),
         fetch_timeout: Duration::from_secs(60),
         threads: 16,
@@ -52,7 +51,7 @@ fn the_needed_keys_alone_give_the_defaults() {
 #[test]
 fn every_key_is_taken_when_it_is_set() {
     let text = "[fs]\nmountpoint = \"/m\"\nruntime_dir = \"/r\"\nclient_group = \"77\"\n\
-        owner = \"5:6\"\nfill_socket = \"/f\"\ncache_path = \"/c\"\nfetch_timeout = \"5s\"\n\
+        owner = \"5:6\"\ncache_path = \"/c\"\nfetch_timeout = \"5s\"\n\
         threads = 3\n\
         handoff_socket = \"/h.sock\"\nhandoff_wait = \"5s\"\nrecover_wait = \"2m\"\nreattach_concurrency = 3\n\
         tree_idle_secs = 604800\n";
@@ -73,7 +72,7 @@ fn every_key_is_taken_when_it_is_set() {
     );
     // Left out, the hand-over socket follows the runtime directory that was set.
     let text = "[fs]\nruntime_dir = \"/r\"\nclient_group = \"77\"\nowner = \"5:6\"\n\
-        fill_socket = \"/f\"\ncache_path = \"/c\"\n";
+        cache_path = \"/c\"\n";
     assert_eq!(
         from_text(text, &builders).unwrap().handoff_socket,
         PathBuf::from("/r/handoff.sock")
@@ -83,6 +82,18 @@ fn every_key_is_taken_when_it_is_set() {
         from_text(&own, &builders).unwrap().control_socket,
         PathBuf::from("/elsewhere.sock")
     );
+}
+
+/// Asserts that `fs.fill_socket` is not needed and is read and ignored: a file without it loads,
+/// and a file with it, whatever its value (a relative path included), makes the very settings the
+/// file without it makes.
+#[test]
+fn fill_socket_is_not_needed_and_is_ignored() {
+    let without = from_text(&fs(""), &builders).unwrap();
+    for value in ["/run/tierstore/fill.sock", "relative.sock"] {
+        let text = fs(&format!("fill_socket = \"{value}\"\n"));
+        assert_eq!(from_text(&text, &builders).unwrap(), without, "{value}");
+    }
 }
 
 /// Asserts that a file that leaves out `fs.tree_list_ram_bytes` keeps 512 MiB of tree lists
@@ -127,12 +138,18 @@ fn every_refusal_names_its_key() {
     let cases: Vec<(String, &str)> = vec![
         (fs("mountpoint = \"relative\"\n"), "fs.mountpoint"),
         (fs("runtime_dir = \"relative\"\n"), "fs.runtime_dir"),
-        (fs("control_socket = \"relative.sock\"\n"), "fs.control_socket"),
+        (
+            fs("control_socket = \"relative.sock\"\n"),
+            "fs.control_socket",
+        ),
         (
             fs(&format!("control_socket = \"/{}\"\n", "s".repeat(120))),
             "fs.control_socket",
         ),
-        (fs("handoff_socket = \"relative.sock\"\n"), "fs.handoff_socket"),
+        (
+            fs("handoff_socket = \"relative.sock\"\n"),
+            "fs.handoff_socket",
+        ),
         (
             fs(&format!("handoff_socket = \"/{}\"\n", "s".repeat(120))),
             "fs.handoff_socket",
@@ -140,7 +157,10 @@ fn every_refusal_names_its_key() {
         (fs("handoff_wait = \"999ms\"\n"), "fs.handoff_wait"),
         (fs("handoff_wait = \"2h\"\n"), "fs.handoff_wait"),
         (fs("reattach_concurrency = 0\n"), "fs.reattach_concurrency"),
-        (fs("reattach_concurrency = 1025\n"), "fs.reattach_concurrency"),
+        (
+            fs("reattach_concurrency = 1025\n"),
+            "fs.reattach_concurrency",
+        ),
         (fs("tree_idle_secs = 0\n"), "fs.tree_idle_secs"),
         (fs("tree_idle_secs = 604801\n"), "fs.tree_idle_secs"),
         (fs("recover_wait = \"0s\"\n"), "fs.recover_wait"),
@@ -150,29 +170,19 @@ fn every_refusal_names_its_key() {
         (fs("threads = 0\n"), "fs.threads"),
         (fs("threads = 253\n"), "fs.threads"),
         (
-            "[fs]\nowner = \"1:2\"\nfill_socket = \"/f\"\ncache_path = \"/c\"\n".to_owned(),
+            "[fs]\nowner = \"1:2\"\ncache_path = \"/c\"\n".to_owned(),
             "fs.client_group",
         ),
         (
-            "[fs]\nclient_group = \"1\"\nfill_socket = \"/f\"\ncache_path = \"/c\"\n".to_owned(),
+            "[fs]\nclient_group = \"1\"\ncache_path = \"/c\"\n".to_owned(),
             "fs.owner",
         ),
         (
-            "[fs]\nclient_group = \"1\"\nowner = \"1:2\"\ncache_path = \"/c\"\n".to_owned(),
-            "fs.fill_socket",
-        ),
-        (
-            "[fs]\nclient_group = \"1\"\nowner = \"1:2\"\nfill_socket = \"/f\"\n".to_owned(),
+            "[fs]\nclient_group = \"1\"\nowner = \"1:2\"\n".to_owned(),
             "fs.cache_path",
         ),
         (
-            "[fs]\nclient_group = \"1\"\nowner = \"1:2\"\nfill_socket = \"f\"\ncache_path = \"/c\"\n"
-                .to_owned(),
-            "fs.fill_socket",
-        ),
-        (
-            "[fs]\nclient_group = \"1\"\nowner = \"1:2\"\nfill_socket = \"/f\"\ncache_path = \"c\"\n"
-                .to_owned(),
+            "[fs]\nclient_group = \"1\"\nowner = \"1:2\"\ncache_path = \"c\"\n".to_owned(),
             "fs.cache_path",
         ),
         (fs("").replace("1000:1001", "1000"), "fs.owner"),

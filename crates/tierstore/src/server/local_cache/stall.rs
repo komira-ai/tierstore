@@ -1,4 +1,4 @@
-//! What shows a stall of the fills: the requests of the fill socket that wait for a permit, the
+//! What shows a stall of the fills: the requests of the core that wait for a permit, the
 //! calls the upstream has not answered, the answers `busy`, and the watchdog that says on stderr
 //! when requests wait and nothing moves.
 //!
@@ -46,9 +46,9 @@ impl Drop for Tally<'_> {
 /// What the watchdog looks at.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Counts {
-    /// Requests of the fill socket that wait for a permit.
+    /// Requests of the core that wait for a permit.
     pub waiting: u64,
-    /// Fills that hold a permit of the fill socket's pool.
+    /// Fills that hold a permit of the pool of `fill_socket_concurrency`.
     pub running: u64,
     /// Calls to the upstream that have not been answered.
     pub in_flight: u64,
@@ -134,12 +134,12 @@ impl BusyLog {
 }
 
 impl Inner {
-    /// The size of the fill socket's pool.
+    /// The size of the pool of `fill_socket_concurrency`.
     fn socket_limit(&self) -> usize {
         self.config.fill_socket_concurrency.max(1)
     }
 
-    /// The fills that hold a permit of the fill socket's pool now.
+    /// The fills that hold a permit of the pool of `fill_socket_concurrency` now.
     pub(super) fn socket_running(&self) -> u64 {
         let free = self.source_permits.available_permits();
         self.socket_limit().saturating_sub(free) as u64
@@ -154,7 +154,7 @@ impl Inner {
         }
     }
 
-    /// A permit of the fill socket's pool, waited for up to `fill_socket_wait`; none, counted and
+    /// A permit of the pool of `fill_socket_concurrency`, waited for up to `fill_socket_wait`; none, counted and
     /// said, if no permit came free in time.
     pub(super) async fn socket_permit(&self) -> Option<OwnedSemaphorePermit> {
         let waiting = Arc::clone(&self.source_permits).acquire_owned();
@@ -180,7 +180,7 @@ impl Inner {
 }
 
 impl LocalCache {
-    /// Looks once a second until `halt` is notified at the fills of the fill socket, and says on
+    /// Looks once a second until `halt` is notified at the fills of the core, and says on
     /// stderr when requests wait for a permit while the upstream is asked for nothing.
     pub(in crate::server) async fn watch_fills(&self, halt: Arc<Notify>) {
         let mut state = Watch::default();

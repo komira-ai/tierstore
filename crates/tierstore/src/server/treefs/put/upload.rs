@@ -1,7 +1,7 @@
-//! The upload of a commit: the `put` of the staged file ([`Fills::put`]: the fill socket's request,
-//! or the same put made in process), asked again with a jittered back-off while the answer says
+//! The upload of a commit: the put of the staged file ([`InProcess::put`]: the cache of this
+//! process puts it to the upstream), asked again with a jittered back-off while the answer says
 //! the upstream may take it later, until the commit's deadline (`fs.put.commit_deadline_secs`).
-//! The answer is one line of JSON, the socket's:
+//! The answer is one line of JSON, the one `in_process/put.rs` makes:
 //!
 //! ```text
 //! {"ok":true,"created":true}     Created
@@ -11,9 +11,9 @@
 //!                                stage, or a word this release does not know: Upstream at once
 //! ```
 //!
-//! A socket that is not there, or that gives no answer in time, is asked again like `upstream`. Any
-//! other line (the socket's `refused <why>` for a request it did not understand) is `Upstream` at
-//! once, and said: asking again would get the same answer.
+//! A cache that did not become read-write, or gave no answer, in the time a try is given is asked
+//! again like `upstream`. Any other line (`refused <why>`, for a key or path the put does not
+//! take) is `Upstream` at once, and said: asking again would get the same answer.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -24,7 +24,7 @@ use serde::Deserialize;
 use super::commit::PutOutcome;
 use super::names::Sha256Digest;
 use crate::Clock;
-use crate::server::treefs::fills::Fills;
+use crate::server::treefs::in_process::InProcess;
 
 /// The first pause before a put is asked again.
 const FIRST_PAUSE: Duration = Duration::from_millis(100);
@@ -32,7 +32,7 @@ const FIRST_PAUSE: Duration = Duration::from_millis(100);
 /// The longest pause between two tries.
 const MOST_PAUSE: Duration = Duration::from_secs(5);
 
-/// The answer of the socket to a `put`.
+/// The answer of the cache to a put.
 #[derive(Debug, Deserialize)]
 struct Answer {
     ok: bool,
@@ -47,7 +47,7 @@ struct Answer {
 enum Tried {
     /// The answer, final.
     Done(PutOutcome),
-    /// The upstream, or the socket, may take it later.
+    /// The upstream, or the cache, may take it later.
     Again,
 }
 
@@ -89,11 +89,11 @@ pub(super) fn pause_before(tries: u32, sha256: &Sha256Digest) -> Duration {
     Duration::from_millis(half + half * spread / (255 * 255))
 }
 
-/// The upload of commits over the fill socket.
+/// The upload of commits by the cache of this process.
 pub(in crate::server) struct Uploader {
-    /// What puts the file: a client of the fill socket that does not wait for it itself (the
-    /// waits are this one's), or the cache of this process.
-    client: Arc<dyn Fills>,
+    /// What puts the file: the cache of this process, whose pauses between tries are not taken
+    /// (the waits are this one's).
+    client: Arc<InProcess>,
     /// The longest a try waits for its answer.
     most: Duration,
     /// The time the deadlines are told by, in milliseconds.
@@ -103,11 +103,10 @@ pub(in crate::server) struct Uploader {
 }
 
 impl Uploader {
-    /// Uploads by `client` (a client of the fill socket made by `FillClient::for_puts`, or the
-    /// cache of this process); each try waits for its answer until the deadline of its commit, and
-    /// no longer than `answer_timeout`.
+    /// Uploads by `client`, the cache of this process; each try waits for its answer until the
+    /// deadline of its commit, and no longer than `answer_timeout`.
     pub(in crate::server) fn new(
-        client: Arc<dyn Fills>,
+        client: Arc<InProcess>,
         answer_timeout: Duration,
         clock: Arc<dyn Clock>,
         pause: Arc<dyn Fn(Duration) + Send + Sync>,

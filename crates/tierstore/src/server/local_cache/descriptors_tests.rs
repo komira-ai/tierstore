@@ -1,6 +1,5 @@
-//! What the mounts report of their descriptors, as the cache counts and renders it: the report
-//! read back as written and every other form refused; the gauge taking the last report and the
-//! counter adding up; the mounts rendered apart and in order; the bound on the mounts.
+//! What the core reports of its descriptors, as the cache counts and renders it: the gauge taking the last report and
+//! the counter adding up; the mounts rendered apart and in order; the bound on the mounts.
 
 use super::{Descriptors, MOST_MOUNTS};
 use crate::server::local_cache::testing::Rig;
@@ -25,46 +24,6 @@ fn families(rig: &Rig) -> Vec<String> {
         })
         .map(str::to_owned)
         .collect()
-}
-
-/// Asserts that a report reads back as written, and that a missing or extra word, an empty word,
-/// a number with a sign, a space or a non-digit, a number over 64 bits and a bad mount name are
-/// refused.
-#[test]
-fn a_descriptors_report_reads_back_as_written_and_any_other_form_is_refused() {
-    let one = report("boot-1", 4242, 12, 3);
-    assert_eq!(one.line(), "descriptors boot-1 4242 12 3");
-    assert_eq!(Descriptors::parse("boot-1 4242 12 3"), Some(one));
-    let most = report("m", u64::MAX, u64::MAX, 0);
-    let rest = most.line().replacen("descriptors ", "", 1);
-    assert_eq!(Descriptors::parse(&rest), Some(most));
-    let too_long = format!("{} 7 1 1", "m".repeat(129));
-    let big = format!("m 7 1 {}0", u64::MAX);
-    for refused in [
-        "",
-        "m",
-        "m 7",
-        "m 7 1",
-        "m 7 1 2 3",
-        "m  7 1 2",
-        " 7 1 2",
-        "m 7 1 ",
-        "m 7 +1 2",
-        "m 7 1 -2",
-        "m -7 1 2",
-        "m 7 1x 2",
-        "m 7 1 2x",
-        "m x 1 2",
-        "m 7 0x1 2",
-        "m 7 1.0 2",
-        "m 7 a b",
-        "m\u{e9} 7 1 2",
-        "m\t7 1 2",
-        &too_long,
-        &big,
-    ] {
-        assert_eq!(Descriptors::parse(refused), None, "{refused:?}");
-    }
 }
 
 /// Asserts that before any report the families have their `# TYPE` lines and no series.

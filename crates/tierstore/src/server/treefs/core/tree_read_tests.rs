@@ -1,62 +1,32 @@
 //! The bound of one read of a tree's manifests ([`TREE_READ`]): a lookup of `trees/<digest>`
-//! whose fills the fill socket does not answer is answered `EIO` by that bound on the core's clock,
-//! however many manifests the tree has and however long the client would retry one alone, and a
-//! socket that comes back within the bound still serves the read. The clock is the rig's, moved
-//! only by the client's pauses and the slow socket's answers, so no test waits for real time.
+//! whose fills the node's cache does not answer is answered `EIO`, however many manifests the tree
+//! has; the fills of one tree share the one bound on the core's clock, which only the test moves; and
+//! a cache that takes the write role within the wait still serves the read.
 
-use std::io::{BufRead as _, BufReader, Write as _};
-use std::os::unix::net::UnixListener;
-use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use super::super::{Core, Errno, Looked, Settings};
 use super::TREE_READ;
-use crate::Clock;
-use crate::server::local_cache::manifest_path;
-use crate::server::treefs::fill_client::FillClient;
+use crate::server::local_cache::{CacheConfig, LocalCache, Mode, Tick};
+use crate::server::treefs::in_process::InProcess;
 use crate::server::treefs::ino;
 use crate::server::treefs::table::TreeTable;
 use crate::server::treefs::testing::{
-    Built, FakeFill, OWNER, Rig, TREE_IDLE, TREE_LIST_RAM, dir, file, sample,
+    Built, OWNER, Rig, TREE_IDLE, TREE_LIST_RAM, dir, file, sample, until,
 };
-
-/// What the production client of an `fs.fetch_timeout` of 60 s (the default) retries a closed
-/// socket for: 60 pauses of a second.
-const TRIES: u32 = 60;
+use crate::{Backend, Clock, Mono, TestClock};
 
 /// The milliseconds of the bound.
 fn bound_ms() -> u64 {
     u64::try_from(TREE_READ.as_millis()).unwrap()
 }
 
-/// The name of the client's thread that sends the reports (`fetched` after a read), which pauses
-/// with the same function as the requests of a read.
-const REPORTER: &str = "fs-reports";
-
-/// A core over the rig's cache and clock whose fill client asks the socket at `socket`, retrying
-/// it as the production client does. Each pause of a request moves the rig's clock on by the
-/// pause, and `paused` is told how many such pauses were taken so far; the pauses of the thread
-/// that sends the reports move nothing, so the clock is the read's alone.
-pub(super) fn core_over(
-    rig: &Rig,
-    socket: &Path,
-    paused: impl Fn(u32) + Send + Sync + 'static,
-) -> Arc<Core> {
+/// A core over the rig's cache directory and clock, with its own table of tree numbers, that calls
+/// the cache through `asks`.
+fn core_calling(rig: &Rig, asks: Arc<InProcess>) -> Arc<Core> {
     let runtime = rig.dir.path().join("run-bound");
     std::fs::create_dir_all(&runtime).unwrap();
-    let clock = Arc::clone(&rig.clock);
-    let count = Mutex::new(0u32);
-    let pause = Arc::new(move |pause: Duration| {
-        if std::thread::current().name() == Some(REPORTER) {
-            return;
-        }
-        clock.advance(pause);
-        let mut count = count.lock().unwrap();
-        *count += 1;
-        paused(*count);
-    });
-    let fills = FillClient::pausing(socket.to_owned(), TRIES, Duration::from_secs(60), pause);
     Arc::new(Core::new(
         Settings {
             owner: OWNER,
@@ -69,116 +39,144 @@ pub(super) fn core_over(
             tree_list_ram_bytes: TREE_LIST_RAM,
             clock: Arc::clone(&rig.clock) as Arc<dyn Clock>,
         },
-        Arc::new(fills),
+        asks,
         TreeTable::create(&runtime).unwrap(),
         &runtime,
     ))
 }
 
-/// A socket path in the rig's directory that nothing listens on.
-fn away(rig: &Rig) -> PathBuf {
-    rig.dir.path().join("away.sock")
+/// A core over the rig's node cache and clock. Each pause the core takes between its tries moves
+/// the rig's clock on by the pause, and `paused` is told how many such pauses were taken so far.
+pub(super) fn core_over(rig: &Rig, paused: impl Fn(u32) + Send + Sync + 'static) -> Arc<Core> {
+    let clock: Arc<Mono> = Arc::clone(&rig.clock);
+    let count = Mutex::new(0u32);
+    let pause = Arc::new(move |pause: Duration| {
+        clock.advance(pause);
+        let mut count = count.lock().unwrap();
+        *count += 1;
+        paused(*count);
+    });
+    core_calling(rig, rig.asks_pausing(pause))
 }
 
-/// Asserts that a lookup of a tree none of whose manifests the cache holds, with the fill socket
-/// away, is `EIO` exactly when the bound has passed on the core's clock: not after the 60 s the
-/// client would retry one manifest for, which is the job agent's whole bound for the lookup. No
-/// tree is numbered or attached.
+/// Two caches over the rig's cache directory, whose upstream is the rig's: the first holds the
+/// lock of the directory, and so the write role; the second is read-only until the first is
+/// dropped and the second ticks.
+fn read_only_pair(rig: &Rig) -> (LocalCache, LocalCache) {
+    let handle = rig.work.handle();
+    let _entered = handle.enter();
+    let open = || {
+        let mut config =
+            CacheConfig::new(rig.cache.clone(), 1 << 30, vec![("cas/".to_owned(), true)]);
+        crate::server::local_cache::testing::never_expires(&mut config);
+        let backend: Arc<dyn Backend> = rig.upstream.clone();
+        LocalCache::open_locked(
+            config,
+            backend,
+            Arc::new(crate::server::local_cache::testing::FakeDisk::new()),
+            Arc::new(TestClock::new()),
+        )
+        .unwrap()
+    };
+    let holder = open();
+    let waiting = open();
+    assert_eq!(holder.mode(), Mode::ReadWrite);
+    assert_eq!(waiting.mode(), Mode::ReadOnly);
+    (holder, waiting)
+}
+
+/// Asserts that a lookup of a tree none of whose manifests the cache holds, while the cache stays
+/// read-only (another process holds the lock of its directory) for the whole of the wait, is `EIO`:
+/// nothing is filled, and no tree is numbered or attached.
 #[test]
-fn a_lookup_with_the_fill_socket_away_is_answered_by_the_bound() {
-    let rig = Rig::new("tfs-bound-away", sample());
+fn a_lookup_with_the_cache_read_only_for_the_whole_wait_is_answered_eio() {
+    let rig = Rig::new("tfs-bound-readonly", sample());
     let root = rig.upstream.built.lock().unwrap().root.clone();
-    let core = core_over(&rig, &away(&rig), |_| {});
+    let (_holder, waiting) = read_only_pair(&rig);
+    let asks = Arc::new(InProcess::new(
+        (waiting, None),
+        rig.work.handle(),
+        Duration::from_millis(1),
+        Arc::new(|_| {}),
+    ));
+    let core = core_calling(&rig, asks);
     assert_eq!(core.lookup(ino::TREES, &root), Err(Errno::Io));
-    assert_eq!(rig.clock.now(), bound_ms());
+    assert!(rig.upstream.asked("fill").is_empty());
+    assert_eq!(rig.clock.now(), 0);
     assert!(bound_ms() < 60_000);
     assert!(core.implicit().is_empty());
 }
 
-/// Serves fills at `socket` slowly on the rig's clock: each `fill <sha>` puts the manifest in the
-/// cache, moves the clock on by `step`, and answers `ok`; any other request is refused as unknown.
-/// The fill lines are recorded.
-fn slow_fills(rig: &Rig, socket: &Path, step: Duration) -> Arc<Mutex<Vec<String>>> {
-    let listener = UnixListener::bind(socket).unwrap();
-    let lines = Arc::new(Mutex::new(Vec::new()));
-    let (seen, clock, upstream) = (
-        Arc::clone(&lines),
-        Arc::clone(&rig.clock),
-        Arc::clone(&rig.upstream),
-    );
-    let cache = rig.cache.clone();
-    let _ = std::thread::spawn(move || {
-        for stream in listener.incoming().flatten() {
-            let (seen, clock) = (Arc::clone(&seen), Arc::clone(&clock));
-            let (upstream, cache) = (Arc::clone(&upstream), cache.clone());
-            let _ = std::thread::spawn(move || {
-                let mut reader = BufReader::new(&stream);
-                let mut line = String::new();
-                while reader.read_line(&mut line).unwrap_or(0) > 0 {
-                    let text = line.trim_end_matches('\n').to_owned();
-                    line.clear();
-                    let Some(sha) = text.strip_prefix("fill ") else {
-                        (&stream).write_all(b"refused unknown request\n").unwrap();
-                        continue;
-                    };
-                    seen.lock().unwrap().push(text.clone());
-                    let bytes = upstream.built.lock().unwrap().manifests[sha].clone();
-                    let path = manifest_path(&cache, sha);
-                    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-                    std::fs::write(&path, bytes).unwrap();
-                    clock.advance(step);
-                    (&stream).write_all(b"ok\n").unwrap();
-                }
-            });
-        }
-    });
-    lines
-}
-
-/// Asserts that the fills of one tree share the one bound: in a tree three levels deep, read a
-/// level at a time with one manifest at each, and each fill answered 20 s later on the clock, the
-/// fills of the root and of the level below it are answered within 30 s of the start and the third
-/// is not asked, so the lookup is `EIO`, where a bound for each fill would have read the whole
-/// tree in 60 s.
+/// Asserts that the fills of one tree share the one bound: in a tree four levels deep, whose root
+/// the cache holds, read a level at a time with one manifest at each, and each fill answered 20 s
+/// later on the clock, the fills of the first two levels below the root are answered within 30 s of
+/// the start (the second with 10 s left) and the third is not asked, so the lookup is `EIO`, where
+/// a bound for each fill would have read the whole tree in 60 s.
 #[test]
 fn the_manifests_of_one_tree_share_one_bound() {
-    let deep = Built::of(vec![("a", dir(vec![("b", dir(vec![("c", file(b"x"))]))]))]);
+    let deep = Built::of(vec![(
+        "a",
+        dir(vec![("b", dir(vec![("c", dir(vec![("d", file(b"x"))]))]))]),
+    )]);
     let rig = Rig::new("tfs-bound-shared", deep);
     let root = rig.upstream.built.lock().unwrap().root.clone();
-    assert_eq!(rig.upstream.built.lock().unwrap().manifests.len(), 3);
-    let socket = rig.dir.path().join("slow.sock");
-    let lines = slow_fills(&rig, &socket, Duration::from_secs(20));
-    let core = core_over(&rig, &socket, |_| {});
-    assert_eq!(core.lookup(ino::TREES, &root), Err(Errno::Io));
-    let lines = lines.lock().unwrap().clone();
-    assert_eq!(lines.len(), 2);
+    assert_eq!(rig.upstream.built.lock().unwrap().manifests.len(), 4);
+    // The root is in the cache before the lookup, so that its fills are those of the levels below.
+    rig.upstream.gate_manifests();
+    rig.upstream.permit_manifests(1);
+    rig.work
+        .handle()
+        .block_on(rig.node.fill_manifest(&root))
+        .unwrap();
+    let core = core_over(&rig, |_| {});
+    let step = Duration::from_secs(20);
+    let looked = std::thread::scope(|scope| {
+        let lookup = scope.spawn(|| core.lookup(ino::TREES, &root));
+        rig.upstream.wait_for_manifest_fills(2);
+        rig.clock.advance(step);
+        rig.upstream.permit_manifests(1);
+        rig.upstream.wait_for_manifest_fills(3);
+        rig.clock.advance(step);
+        rig.upstream.permit_manifests(1);
+        lookup.join().unwrap()
+    });
+    assert_eq!(looked, Err(Errno::Io));
+    let lines = rig.upstream.asked("fill");
+    assert_eq!(lines.len(), 3);
     assert_eq!(lines[0], format!("fill {root}"));
     assert_eq!(rig.clock.now(), 40_000);
     assert!(core.implicit().is_empty());
 }
 
-/// Asserts that a fill socket that comes back within the bound (the node's tierstore is being
-/// updated) serves the read: the lookup resolves the tree, after the pauses taken while it was
-/// away, and the bound is not spent.
+/// Asserts that a cache that takes the write role within the wait (the process that held the lock
+/// of its directory ended) serves the read: the lookup, which waits for the role, resolves the tree
+/// once the cache has it, and nothing was filled while it was read-only.
 #[test]
-fn a_socket_back_within_the_bound_serves_the_lookup() {
+fn a_cache_that_takes_the_write_role_within_the_wait_serves_the_lookup() {
     let rig = Rig::new("tfs-bound-back", sample());
     let root = rig.upstream.built.lock().unwrap().root.clone();
-    let socket = away(&rig);
-    let upstream = Arc::clone(&rig.upstream);
-    let started: Arc<Mutex<Option<FakeFill>>> = Arc::new(Mutex::new(None));
-    let serving = Arc::clone(&started);
-    let at = socket.clone();
-    let core = core_over(&rig, &socket, move |paused| {
-        if paused == 10 {
-            *serving.lock().unwrap() = Some(FakeFill::start(&at, Arc::clone(&upstream)));
-        }
+    let (holder, waiting) = read_only_pair(&rig);
+    let watching = waiting.mode_watchers();
+    let asks = Arc::new(InProcess::new(
+        (waiting.clone(), None),
+        rig.work.handle(),
+        Duration::from_secs(30),
+        Arc::new(|_| {}),
+    ));
+    let core = core_calling(&rig, asks);
+    let found = std::thread::scope(|scope| {
+        let lookup = scope.spawn(|| core.lookup(ino::TREES, &root));
+        until(|| waiting.mode_watchers() > watching);
+        assert!(!lookup.is_finished());
+        assert!(rig.upstream.asked("fill").is_empty());
+        drop(holder);
+        assert_eq!(waiting.tick().unwrap(), Tick::Took);
+        lookup.join().unwrap()
     });
-    let Looked::Found(entry) = core.lookup(ino::TREES, &root).unwrap() else {
+    let Looked::Found(entry) = found.unwrap() else {
         panic!("not found");
     };
     assert_eq!(entry.attr.ino, 1 << 24);
-    assert_eq!(rig.clock.now(), 10_000);
+    assert_eq!(rig.clock.now(), 0);
     assert_eq!(core.implicit(), vec![1]);
-    drop(started.lock().unwrap().take());
 }

@@ -7,7 +7,7 @@
 //! the request to its answer (`treefs/core/runs.rs`); its three parts add up to it:
 //!
 //! - **fetch**: from the start to the end of the last manifest the read of the tree fetched (from
-//!   the cache directory, or filled through the fill socket), its `fill-tree` included; a tree in
+//!   the cache directory, or filled by the cache), its fill included; a tree in
 //!   memory already, or one another request is reading, or one read again into memory under the
 //!   number it has, counts the whole read here;
 //! - **flatten**: from there to the end of the read: the entries made of the manifests, or the
@@ -17,25 +17,23 @@
 //!   written.
 //!
 //! An attach refused before the read (a digest or a run that is not one, a process being
-//! replaced) has every part 0. When it ends, the mount sends
-//! `run-attached <outcome> <ms> <fetch-ms> <flatten-ms> <append-ms>`, `ok` when it answered a path
+//! replaced) has every part 0. When it ends, the mount reports
+//! an attach with its outcome, its milliseconds and those of each part, `ok` when it answered a path
 //! and `failed` when it did not; one sample of `tierstore_fs_run_attach_seconds` and one of each
 //! part of `tierstore_fs_run_attach_part_seconds`.
 //!
-//! A detach is `detach <run>`, timed the same way, and sent as `run-detached <outcome> <ms>`: `ok`
+//! A detach is `detach <run>`, timed the same way, and reported with its outcome and milliseconds: `ok`
 //! when it ended the run's attachments, `failed` when it did not (the run attached nothing, or
 //! the process is being replaced); one sample of `tierstore_fs_run_detach_seconds`. A run detached
 //! with `detach-all-except` is one sample too.
 //!
-//! The mount sends them from the thread that sends `started` (`fill_client.rs`), so no attach
-//! waits on them; one is lost when that thread has a queue of 1024, when the fill socket is away,
-//! or when the node is of a release before the report (it answers `refused unknown request`, which
-//! the mount ignores).
+//! The mount reports them by calling the cache in its process (`LocalCache::run_attached` and
+//! `run_detached`), from the thread that reports `started`, so no attach waits on them; one is
+//! lost when that thread has a queue of 1024.
 
 use std::fmt::Write as _;
 use std::sync::Mutex;
 
-use super::super::descriptors::number;
 use super::super::{LocalCache, locked};
 use super::{BUCKETS, Histogram, bucket_of};
 
@@ -74,10 +72,6 @@ impl RunOutcome {
             Self::Failed => "failed",
         }
     }
-
-    fn of(word: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|outcome| outcome.word() == word)
-    }
 }
 
 /// The parts of an attach, in the order of a report and of the rendered series: the label
@@ -93,55 +87,11 @@ pub(in crate::server) struct RunAttach {
     pub parts: [u64; 3],
 }
 
-impl RunAttach {
-    /// The line of the report.
-    pub(in crate::server) fn line(&self) -> String {
-        let [fetch, flatten, append] = self.parts;
-        format!(
-            "run-attached {} {} {fetch} {flatten} {append}",
-            self.outcome.word(),
-            self.ms
-        )
-    }
-
-    /// The report whose words after `run-attached` are `rest`: an outcome and four numbers. None
-    /// for anything else.
-    pub(in crate::server) fn parse(rest: &str) -> Option<Self> {
-        let (outcome, numbers) = rest.split_once(' ')?;
-        let numbers: Vec<u64> = numbers.split(' ').map(number).collect::<Option<_>>()?;
-        let [ms, fetch, flatten, append] = numbers.as_slice() else {
-            return None;
-        };
-        Some(Self {
-            outcome: RunOutcome::of(outcome)?,
-            ms: *ms,
-            parts: [*fetch, *flatten, *append],
-        })
-    }
-}
-
 /// A detach of a run: how it ended and how long it took. The report `run-detached`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::server) struct RunDetach {
     pub outcome: RunOutcome,
     pub ms: u64,
-}
-
-impl RunDetach {
-    /// The line of the report.
-    pub(in crate::server) fn line(&self) -> String {
-        format!("run-detached {} {}", self.outcome.word(), self.ms)
-    }
-
-    /// The report whose words after `run-detached` are `rest`: an outcome and a number. None for
-    /// anything else.
-    pub(in crate::server) fn parse(rest: &str) -> Option<Self> {
-        let (outcome, ms) = rest.split_once(' ')?;
-        Some(Self {
-            outcome: RunOutcome::of(outcome)?,
-            ms: number(ms)?,
-        })
-    }
 }
 
 /// One span of `ms` milliseconds in a histogram.

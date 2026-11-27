@@ -107,7 +107,6 @@ pub(super) async fn serve_combined(
         beside_halt,
         beating: Some(beating),
         handoff: cli.handoff.as_ref(),
-        fill_socket: settings.fill_socket.as_deref(),
         trees: None,
         provider: None,
         put_ingest: None,

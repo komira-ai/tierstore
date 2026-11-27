@@ -20,7 +20,7 @@ use crate::server::treefs::config::{builders, from_text};
 fn file(put: &str) -> String {
     format!(
         "[fs]\nclient_group = \"7\"\nowner = \"1000:1001\"\n\
-         fill_socket = \"/run/tierstore/fill.sock\"\ncache_path = \"/var/cache/tierstore\"\n\
+         cache_path = \"/var/cache/tierstore\"\n\
          [fs.put]\n{put}"
     )
 }
@@ -43,8 +43,7 @@ const ENABLED: &str =
 /// directory, whatever else the table holds.
 #[test]
 fn the_put_directory_is_not_served_unless_enabled() {
-    let none =
-        "[fs]\nclient_group = \"7\"\nowner = \"1:2\"\nfill_socket = \"/f\"\ncache_path = \"/c\"\n";
+    let none = "[fs]\nclient_group = \"7\"\nowner = \"1:2\"\ncache_path = \"/c\"\n";
     assert_eq!(from_text(none, &builders).unwrap().put, None);
     assert_eq!(put_of(""), None);
     assert_eq!(put_of("enabled = false\nprefixes = [\"cas/b/\"]\n"), None);
