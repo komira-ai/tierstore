@@ -24,7 +24,7 @@ use crate::{MAX_TREE_LIST_BYTES, TreeDigest, tree_list_digest};
 /// Where the preparation of a source is.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum Stage {
-    /// The tree list is being read, or the tree made.
+    /// The tree's sidecar is being read, or the tree made.
     Preparing,
     /// The tree is placed: it can be opened, and its files may still be filling.
     Placed,
@@ -62,7 +62,7 @@ struct Held {
 pub(super) struct Settings {
     /// The mount of `tierstore fs`.
     pub mountpoint: PathBuf,
-    /// The longest read of a tree list.
+    /// The longest read of a tree's sidecar.
     pub list_timeout: Duration,
     /// The longest read of the bytes of one file.
     pub fill_timeout: Duration,
@@ -70,7 +70,7 @@ pub(super) struct Settings {
     pub mount_wait: Duration,
     /// How long a placement lasts unless it is released.
     pub ttl: Duration,
-    /// The largest tree list read.
+    /// The largest sidecar read.
     pub max_list_bytes: usize,
 }
 
@@ -78,7 +78,7 @@ pub(super) struct Settings {
 pub(super) struct Shared {
     /// The node's trees.
     pub store: TreeStore,
-    /// The node's cache, which the tree lists are read through.
+    /// The node's cache, which the sidecars are read through.
     pub cache: LocalCache,
     pub settings: Settings,
     /// The reads of files of every source together: `trees.fill_concurrency` at once. Closed when

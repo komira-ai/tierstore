@@ -271,13 +271,35 @@ impl<B: AsRef<[u8]>> TreeListL2<B> {
             })
     }
 
-    /// The SHA-256 of the version 2 list this list holds: its header as the version 2 writer
+    /// The version 2 list this list holds, byte for byte: its header as the version 2 writer
     /// writes it (major 1, minor 0, no flags), then the entries, the digests, the key offsets made
     /// from the packs' keys, the keys, the names and the ranges, each at the next multiple of 8 with
-    /// zeros between them. It is the SHA-256 of the version 2 list the L2 list was made from, the
-    /// digest of the key the tree is named by.
+    /// zeros between them. Its SHA-256 is [`projection_digest`](Self::projection_digest): for a
+    /// list [`open_sidecar`](Self::open_sidecar) opened, the tree id, so these are the bytes of
+    /// the list `cas/l/<id>` the tree is named by. The bytes are a new allocation of the list's
+    /// size, beside the L2 list's own.
+    #[must_use]
+    pub fn projection(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        self.project(|piece| bytes.extend_from_slice(piece));
+        bytes
+    }
+
+    /// The SHA-256 of the version 2 list this list holds ([`projection`](Self::projection)),
+    /// hashed piece by piece with no copy of the list. It is the SHA-256 of the version 2 list the
+    /// L2 list was made from, the digest of the key the tree is named by.
     #[must_use]
     pub fn projection_digest(&self) -> [u8; 32] {
+        let mut context = Context::new(&SHA256);
+        self.project(|piece| context.update(piece));
+        let mut digest = [0; 32];
+        digest.copy_from_slice(context.finish().as_ref());
+        digest
+    }
+
+    /// Gives `put` the bytes of the version 2 list this list holds, in order, a piece at a time
+    /// ([`projection`](Self::projection)).
+    fn project(&self, mut put: impl FnMut(&[u8])) {
         let packs = self.header.place(Section::Packs).count;
         let mut offsets = Vec::with_capacity((packs as usize + 1) * 4);
         offsets.extend_from_slice(&0u32.to_le_bytes());
@@ -315,17 +337,13 @@ impl<B: AsRef<[u8]>> TreeListL2<B> {
             header.extend_from_slice(&(*place as u32).to_le_bytes());
             header.extend_from_slice(&count.to_le_bytes());
         }
-        let mut context = Context::new(&SHA256);
-        context.update(&header);
+        put(&header);
         let mut at = V2_HEADER_LEN;
         for (place, (bytes, _)) in places.iter().zip(&sections) {
-            context.update(&[0u8; 8][..place - at]);
-            context.update(bytes);
+            put(&[0u8; 8][..place - at]);
+            put(bytes);
             at = place + bytes.len();
         }
-        let mut digest = [0; 32];
-        digest.copy_from_slice(context.finish().as_ref());
-        digest
     }
 
     /// Checks that the version 2 list this list holds hashes to its tree id

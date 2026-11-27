@@ -1,10 +1,10 @@
 //! The groups of a preparation's reads: which spans of a version 2 list are read together, where a
-//! group is cut, which spans are read alone, and the reads of a version 1 list's files.
+//! group is cut, and which spans are read alone.
 
 use std::sync::Arc;
 
-use super::groups::{GROUP_MAX_BYTES, Group, alone, groups};
-use crate::{BlobSource, BuiltFile, ListRange, ListSpan, TreeDigest};
+use super::groups::{GROUP_MAX_BYTES, Group, groups};
+use crate::{ListRange, ListSpan, TreeDigest};
 
 /// The digest the tests give the span at `offset`: distinct for each offset.
 fn digest_at(offset: u64) -> TreeDigest {
@@ -246,42 +246,6 @@ fn the_pack_of_a_group_is_the_key_its_spans_name() {
     assert_eq!(found.len(), 2);
     assert!(Arc::ptr_eq(&found[0].pack, &keys[0]));
     assert!(Arc::ptr_eq(&found[1].pack, &keys[1]));
-}
-
-/// The file `path` of `size` bytes with the digest of `at`, whose bytes are in `key` at `offset`
-/// (none if `key` is empty).
-fn file(path: &str, at: u64, size: u64, key: &str, offset: u64) -> BuiltFile {
-    BuiltFile {
-        path: path.to_owned(),
-        sha256: digest_at(at),
-        size,
-        source: (!key.is_empty()).then(|| BlobSource {
-            key: Arc::from(key),
-            offset,
-        }),
-    }
-}
-
-/// Asserts that a version 1 list's files are read one group each, one per digest at the span of the
-/// digest's first file, and that a file with no source (an empty one) is not read.
-#[test]
-fn each_digest_of_the_files_is_one_group_at_its_first_file() {
-    let files = vec![
-        file("a", 1, 10, "p", 0),
-        file("zero", 9, 0, "", 0),
-        file("b", 1, 10, "p", 50),
-        file("c", 2, 5, "q", 7),
-        file("d", 1, 10, "q", 0),
-    ];
-    let expected = |pack: &str, offset: u64, size: u64, at: u64| Group {
-        pack: Arc::from(pack),
-        parts: vec![(offset, size, digest_at(at))],
-    };
-    assert_eq!(
-        alone(&files),
-        [expected("p", 0, 10, 1), expected("q", 7, 5, 2)]
-    );
-    assert_eq!(alone(&[]), []);
 }
 
 /// The span of key number `key` at `offset` of `size` bytes with the digest of `bytes`.

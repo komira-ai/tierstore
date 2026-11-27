@@ -434,6 +434,31 @@ The 99th percentile, over an hour:
 histogram_quantile(0.99, sum by (le) (rate(tierstore_request_to_start_seconds_bucket[1h])))
 ```
 
+### Build node: tree lists the mount provider refused
+
+The mount provider reads a tree's L2 sidecar, `cas/l2/<id>`, and refuses a tree it cannot mount
+through tierstore with `tree list not supported: <reason>` (`ListVersionUnsupported`,
+`docs/design/fetch-cache-serve.md`, 3.5), on which the CAS service takes its miss path. The two
+families are in the cache's block, with a `# TYPE` line, on every process with a cache, and stay
+at zero on one that serves no provider.
+
+| name | type | labels | what it says |
+|---|---|---|---|
+| `tierstore_list_refused_total` | counter | `reason`: `v1_list`, `missing_sidecar`, `unknown_cell_digest`, `unknown_version` | the preparations refused because the tree has no sidecar (`missing_sidecar`) or the object at the sidecar's key is a version 1 or 2 list (`v1_list`) or an L2 list of a major version or a cell digest function this release does not read |
+| `tierstore_l2_sidecar_missing_total` | counter | none | the preparations refused because the tree has no sidecar: the same count as `reason="missing_sidecar"`, the one the rollout watches |
+
+What it does not count:
+
+- A sidecar that is there and refused as malformed (another tree's, a projection that does not hash to the id, a cell shift other than 20): the provider's log line names it.
+- A `Mount` asked again of a refused source: a preparation is counted once.
+
+Trees refused for want of a sidecar, over a day, which must stay at zero for 7 days before the CAS
+service stops writing version 2 lists:
+
+```promql
+sum(increase(tierstore_l2_sidecar_missing_total[1d]))
+```
+
 ### Build node: tree attach on a lookup
 
 A lookup of `trees/<digest>` that no run has attached reads the tree's manifests (or the one tree
