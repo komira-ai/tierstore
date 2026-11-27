@@ -285,7 +285,7 @@ fn a_detach_holds_no_lock_but_its_trees_while_its_unpin_is_in_flight() {
         until(|| t.gate().watching() > waiting);
         let open = nothing_waits(&t, scope, waiting + 1);
         t.gate().give();
-        assert_eq!(detach.join().unwrap().unwrap().len(), 0);
+        assert_eq!(detach.join().unwrap().unwrap().failures.len(), 0);
         core.release(open.join().unwrap().unwrap());
     });
     assert_eq!(t.pinned(), BIG);

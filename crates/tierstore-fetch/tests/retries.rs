@@ -240,6 +240,7 @@ fn late_headers_rig() -> (Rig, Arc<Semaphore>, Arc<Semaphore>) {
         budget: budget.clone(),
         verifier: Arc::new(Sha256Verifier),
         timer: Arc::new(ManualTimer::new(clock.clone())),
+        cache_metrics: None,
     };
     let engine = FetchEngine::new(parts, config(), &tokio::runtime::Handle::current());
     let rig = Rig {
@@ -247,6 +248,7 @@ fn late_headers_rig() -> (Rig, Arc<Semaphore>, Arc<Semaphore>) {
         store,
         upstream,
         budget,
+        cache: tierstore_metrics::Metrics::new("test").node_cache().cache,
         engine,
     };
     (rig, gate, delivered)

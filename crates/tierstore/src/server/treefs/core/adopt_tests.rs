@@ -301,7 +301,6 @@ async fn a_file_opened_before_the_hand_over_under_a_newer_placement_is_read_by_t
     assert_eq!(read, Ok(live.bench.pack.content(1).to_vec()));
 }
 
-
 /// Asserts that the handles of the other kinds of member of a placed tree that an earlier process
 /// gave out are treated as those of a tree of manifests: the handle of the empty file is made
 /// again as an empty open, and that of a symbolic link is `EINVAL`.

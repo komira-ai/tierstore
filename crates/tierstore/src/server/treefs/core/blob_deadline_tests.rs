@@ -102,7 +102,7 @@ fn a_fill_that_took_the_whole_fetch_timeout_is_not_asked_again() {
     assert_eq!(open_taking(&rig, WAIT), Err(Errno::Io));
     assert_eq!(blob_fills(&rig, &cc), 1);
     assert_eq!(pauses.lock().unwrap().len(), 0);
-    let failures = rig.core.detach(RUN).unwrap();
+    let failures = rig.core.detach(RUN).unwrap().failures;
     assert_eq!(failures.len(), 1);
     assert_eq!(failures[0].reason, "upstream 503");
 }
@@ -127,7 +127,7 @@ fn a_pause_is_taken_only_while_more_than_a_second_is_left_before_the_end() {
         assert_eq!(open_taking(&rig, taken), Err(Errno::Io), "{name}");
         assert_eq!(blob_fills(&rig, &cc), 1, "{name}");
         assert_eq!(pauses.lock().unwrap().len(), 0, "{name}");
-        let failures = rig.core.detach(RUN).unwrap();
+        let failures = rig.core.detach(RUN).unwrap().failures;
         assert_eq!(failures[0].reason, "upstream 503", "{name}");
     }
     let (rig, pauses) = rig_ticking("tfs-deadline-over", |path| File::open(path));

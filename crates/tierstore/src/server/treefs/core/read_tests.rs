@@ -139,7 +139,7 @@ fn read_ino_of_a_fill_failure_is_eio() {
         .unwrap()
         .insert(cc.clone(), "mismatch".to_owned());
     assert_eq!(core.read_ino(ino::of(1, 3), 0, 10), Err(Errno::Io));
-    let failures = core.detach(RUN).unwrap();
+    let failures = core.detach(RUN).unwrap().failures;
     assert_eq!(failures.len(), 1);
     assert_eq!(failures[0].path, "/bin/cc");
     assert_eq!(failures[0].digest, cc);

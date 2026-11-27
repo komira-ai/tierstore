@@ -196,7 +196,7 @@ fn running_out_of_descriptors_fails_the_open() {
     assert_eq!(core.descriptor_failures(), 1);
     assert_eq!(core.read(before, 0, 3000).unwrap(), expected);
     assert!(after.is_ok(), "{after:?}");
-    let failures = core.detach(RUN).unwrap();
+    let failures = core.detach(RUN).unwrap().failures;
     let digest = failures
         .first()
         .map(|failure| failure.digest.clone())

@@ -252,7 +252,7 @@ fn a_fill_that_passes_is_asked_again_and_the_open_succeeds() {
     });
     assert!(opened.is_ok(), "{opened:?}");
     assert_eq!(blob_fills(&rig, &cc), 2);
-    assert_eq!(core.detach(RUN).unwrap(), Vec::<Failure>::new());
+    assert_eq!(core.detach(RUN).unwrap().failures, Vec::<Failure>::new());
 }
 
 /// Asserts that a fill that keeps answering a reason that can pass is asked `FILL_TRIES` times,
@@ -286,7 +286,7 @@ fn a_fill_is_asked_at_most_three_times_and_a_permanent_answer_once() {
             reason: "mismatch".into(),
         },
     ];
-    assert_eq!(core.detach(RUN).unwrap(), want);
+    assert_eq!(core.detach(RUN).unwrap().failures, want);
 }
 
 /// Asserts the line said at warn for a failed open, whole: said once for the first failure of a
@@ -373,7 +373,7 @@ fn a_cache_file_that_cannot_be_opened_for_lack_of_descriptors_fails_at_once_as_s
         assert_eq!(core.descriptor_failures(), 1, "{name}");
         assert_eq!(core.open_descriptors(), 0);
         let reason = format!("no descriptor: {}", io::Error::from_raw_os_error(errno));
-        let failures = core.detach(RUN).unwrap();
+        let failures = core.detach(RUN).unwrap().failures;
         assert_eq!(
             failures,
             [Failure {
@@ -438,7 +438,7 @@ fn a_cache_file_that_cannot_be_opened_otherwise_is_an_io_failure_tried_three_tim
     assert_eq!(blob_fills(&rig, &cc), 1);
     assert_eq!(calls.load(Ordering::SeqCst), 5);
     assert_eq!(core.descriptor_failures(), 0);
-    let failures = core.detach(RUN).unwrap();
+    let failures = core.detach(RUN).unwrap().failures;
     assert_eq!(
         failures,
         [Failure {

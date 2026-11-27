@@ -8,9 +8,10 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use super::{AttachError, Attr, Core, DirItem, Entry, Errno, Failure, Kind, Looked, TREE_TTL};
+use super::{AttachError, Attr, Core, DirItem, Entry, Errno, Kind, Looked, TREE_TTL};
 use crate::Backend as _;
 use crate::server::local_cache::Blob;
+use crate::server::treefs::attach::{Detached, Failure};
 use crate::server::treefs::ino;
 use crate::server::treefs::table::TreeTable;
 use crate::server::treefs::testing::{
@@ -537,10 +538,10 @@ fn a_failed_fill_fails_the_open_and_is_recorded_for_every_run_of_the_tree() {
             reason: "upstream 404".into(),
         },
     ];
-    assert_eq!(core.detach("run-1").unwrap(), want);
+    assert_eq!(core.detach("run-1").unwrap().failures, want);
     rig.upstream.failing.lock().unwrap().clear();
     assert!(open_cached(core, ino::of(1, 3), false).is_ok());
-    assert_eq!(core.detach("run-2").unwrap(), want);
+    assert_eq!(core.detach("run-2").unwrap().failures, want);
     assert!(core.detach("run-2").is_none());
 }
 
@@ -615,12 +616,12 @@ fn a_detach_unpins_a_tree_only_when_its_last_run_goes() {
     let _ = core.attach(&root, "run-2").unwrap();
     let open = open_cached(core, ino::of(1, 3), false).unwrap();
     assert_eq!(rig.node.pinned_bytes(), 3000);
-    assert_eq!(core.detach("run-1"), Some(Vec::new()));
+    assert_eq!(core.detach("run-1"), Some(Detached::default()));
     assert_eq!(core.pins.unpins_asked(), 0);
     assert_eq!(rig.node.pinned_bytes(), 3000);
     assert_eq!(core.attachments().len(), 1);
     assert_eq!(core.detach("run-1"), None);
-    assert_eq!(core.detach("run-2"), Some(Vec::new()));
+    assert_eq!(core.detach("run-2"), Some(Detached::default()));
     assert_eq!(core.pins.unpins_asked(), 1);
     assert_eq!(rig.node.pinned_bytes(), 0);
     core.release(open);
@@ -963,5 +964,5 @@ fn a_held_core_changes_neither_the_table_nor_the_attachments() {
     assert_eq!(std::fs::read(rig.runtime.join("trees")).unwrap(), table);
     core.hold(false);
     let _ = core.attach(&first, "run-2").unwrap();
-    assert_eq!(core.detach("run-1"), Some(Vec::new()));
+    assert_eq!(core.detach("run-1"), Some(Detached::default()));
 }

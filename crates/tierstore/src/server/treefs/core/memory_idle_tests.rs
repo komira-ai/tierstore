@@ -174,7 +174,7 @@ fn a_tree_a_run_has_attached_never_leaves_at_the_sweep() {
     assert_eq!(core.drop_idle(0), 0);
     assert_eq!(core.trees_in_memory(), 1);
     assert_eq!(core.times_read(1), 1);
-    assert_eq!(core.detach(RUN).map(|failures| failures.len()), Some(0));
+    assert_eq!(core.detach(RUN).map(|got| got.failures.len()), Some(0));
     assert_eq!(
         core.trees_in_memory(),
         0,
