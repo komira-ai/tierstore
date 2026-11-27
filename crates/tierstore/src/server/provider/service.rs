@@ -76,7 +76,7 @@ impl MountProvider for ProviderFront {
         let request = request.into_inner();
         let released = self
             .provider
-            .sweep(&request.agent, &request.keep)
+            .sweep(&request.agent, &request.keep, &request.keep_attempts)
             .map_err(status_of)?;
         Ok(Response::new(SweepResponse { released }))
     }

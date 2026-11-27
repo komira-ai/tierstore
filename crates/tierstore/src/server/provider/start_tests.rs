@@ -60,7 +60,7 @@ async fn the_first_prepare_of_a_run_stamps_it_and_a_release_or_a_sweep_forgets_i
         .prepare(source("js.3", 0), &rig.key, READ_ONLY)
         .unwrap();
     assert_eq!(cache.runs_kept(), 1);
-    assert_eq!(provider.sweep(AGENT, &[]), Ok(1));
+    assert_eq!(provider.sweep(AGENT, &[], &[]), Ok(1));
     assert_eq!(cache.runs_kept(), 0);
 }
 

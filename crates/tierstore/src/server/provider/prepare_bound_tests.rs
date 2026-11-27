@@ -75,6 +75,7 @@ async fn a_released_source_drops_its_queued_reads_while_every_read_of_the_node_i
         agent: AGENT.to_owned(),
         run: "js.1".to_owned(),
         index: 0,
+        attempt: 0,
     };
     let (job, mut seen) = rig.provider.hold(id, &rig.key);
     let running = tokio::spawn(run(Arc::clone(&rig.provider.shared), job));
@@ -145,6 +146,7 @@ async fn a_version_2_list_over_the_bound_is_placed_with_no_read_queued() {
         agent: AGENT.to_owned(),
         run: "js.1".to_owned(),
         index: 0,
+        attempt: 0,
     };
     let (job, seen) = rig.provider.hold(id, &key);
     run(Arc::clone(&rig.provider.shared), job).await;
