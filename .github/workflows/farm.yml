@@ -137,6 +137,44 @@ jobs:
           args: build //:ci
           assert-remote: ${{ runner.temp }}/bin/assert_remote
           buck2: ${{ runner.temp }}/bin/buck2
+      # When the build failed, buildrules' `:sync_patch` runs `buildrules sync` on the farm (no
+      # network: the sources Cargo.lock pins, fetched by hash) and says what it would change instead
+      # of changing it: the files it would write go up as the artifact `sync-patch` (`sync.patch`,
+      # which `git apply` takes, and the files themselves), and the job's summary gives the verdict
+      # and the two commands that take the patch. Nothing is pushed and the job stays red. These are
+      # the steps of buildrules' docs/how.md ("A stale table in a pull request"), with each buck2
+      # build through buck2-farm: buildrules' summary tool is built there and run here, rather than
+      # by `buck2 run`. docs/farm.md says how to use them.
+      - name: Regenerate the generated files on the farm (when the build failed)
+        id: sync_patch
+        if: failure()
+        uses: komira-ai/komira/.github/actions/buck2-farm@b2080fe989248adf9b47d4bd14c0ecefa0802f79
+        timeout-minutes: 30
+        with:
+          args: build //:sync_patch --out ${{ runner.temp }}/sync-patch
+          assert-remote: ${{ runner.temp }}/bin/assert_remote
+          buck2: ${{ runner.temp }}/bin/buck2
+      - name: Offer the patch (it is never pushed)
+        if: failure() && steps.sync_patch.outcome == 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        timeout-minutes: 10
+        with:
+          name: sync-patch
+          path: ${{ runner.temp }}/sync-patch/offer/
+          if-no-files-found: ignore
+      - name: Build buildrules' sync_patch tool on the farm (when the sync ran)
+        id: sync_patch_tool
+        if: failure() && steps.sync_patch.outcome != 'skipped'
+        uses: komira-ai/komira/.github/actions/buck2-farm@b2080fe989248adf9b47d4bd14c0ecefa0802f79
+        timeout-minutes: 20
+        with:
+          args: build buildrules//rules/rust:sync_patch --out ${{ runner.temp }}/bin/sync_patch
+          assert-remote: ${{ runner.temp }}/bin/assert_remote
+          buck2: ${{ runner.temp }}/bin/buck2
+      - name: Say what the patch is and how to apply it
+        if: failure() && steps.sync_patch_tool.outcome == 'success'
+        timeout-minutes: 5
+        run: '"$RUNNER_TEMP/bin/sync_patch" summary --dir "$RUNNER_TEMP/sync-patch" --run "$GITHUB_RUN_ID" --repository "$GITHUB_REPOSITORY" --artifact sync-patch --to "$GITHUB_STEP_SUMMARY"'
       # The daemon outlives the build: stop it however the build ended.
       - name: Stop buck2
         if: ${{ always() }}
