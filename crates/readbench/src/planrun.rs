@@ -117,7 +117,6 @@ pub async fn plan_tree(
     let input = PlanInput {
         list,
         needed: &needed,
-        profile: &[],
         media: &media,
         backlog: Backlog::default(),
     };
