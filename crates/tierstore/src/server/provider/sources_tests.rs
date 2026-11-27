@@ -7,21 +7,29 @@ use std::time::Duration;
 
 use tierstore_trees_api::provider::v1::{MountMode, Source};
 
-use super::testing::{AGENT, READ_ONLY, Rig, refused, settings, source, unavailable};
+use super::testing::{
+    AGENT, READ_ONLY, Rig, member, refused, settings, sidecar_key_of, source, unavailable,
+};
 use super::{Provider, ProviderError};
 use crate::server::local_cache::testing::until;
 use crate::server::local_cache::trees::testing::{Bench, fs_at};
 use crate::server::local_cache::trees::{FileSpan, Resolved, TreesConfig};
-use crate::{BlobSource, ListEntry, ListKind, Mode, Op, TreeDigest, TreeList, tree_list_key};
+use crate::{ListEntry, ListKind, Mode, Op, TreeDigest, TreeList, tree_list_key};
 
 /// The calls the upstream has had on `key`: GETs.
 fn gets(rig: &Rig, key: &str) -> u64 {
     rig.bench.rig.calls_on(Op::Get, key)
 }
 
+/// The key of the L2 sidecar of the rig's tree, the one object of the tree a preparation reads.
+fn sidecar(rig: &Rig) -> String {
+    sidecar_key_of(&rig.key)
+}
+
 /// Asserts that a prepared source is placed at its path under the mount with exactly the list's
-/// tree, that `Mount` answers that directory, and that every file of the tree is read into the
-/// cache, once each, and the tree then marked ready.
+/// tree, that `Mount` answers that directory, that every file of the tree is read into the cache
+/// (the three files are one range of the list: one read of the pack) and the tree then marked
+/// ready, and that the tree's sidecar is read once and its list never.
 #[tokio::test]
 async fn a_prepared_source_is_placed_at_its_path_and_its_files_are_read() {
     let rig = Rig::new("prov-place").await;
@@ -45,23 +53,29 @@ async fn a_prepared_source_is_placed_at_its_path_and_its_files_are_read() {
             .is_some_and(|placement| placement.ready)
     })
     .await;
-    assert_eq!(gets(&rig, &rig.bench.pack.key), 3);
-    assert_eq!(gets(&rig, &rig.key), 1);
+    assert_eq!(gets(&rig, &rig.bench.pack.key), 1);
+    assert_eq!(gets(&rig, &sidecar(&rig)), 1);
+    assert_eq!(gets(&rig, &rig.key), 0);
 }
 
 /// Asserts that an open of a file whose bytes the preparation is reading (the span request the
 /// mount makes for it) joins that read: the cache counts a join, and the upstream is read once for
-/// each file, not once more for the open.
+/// the file, not once more for the open. The tree is of that one file, so its read is of its span
+/// alone, the read an open makes.
 #[tokio::test]
 async fn an_open_of_a_file_being_read_joins_that_read() {
     let rig = Rig::new("prov-join").await;
     let pack = rig.bench.pack.key.clone();
+    let list = TreeList {
+        entries: vec![member(&rig.bench.pack, "bin/tool", 0, 0o755)],
+    };
+    let key = rig.put_list_v2(&list).await;
     let gate = rig.bench.rig.tamper.hold_key(&pack);
-    rig.mounted("js.1", 0).await;
-    until("the three reads are at the upstream", || {
-        gets(&rig, &pack) == 3
-    })
-    .await;
+    rig.provider
+        .prepare(source("js.1", 0), &key, READ_ONLY)
+        .unwrap();
+    rig.provider.mount(source("js.1", 0)).await.unwrap();
+    until("the read is at the upstream", || gets(&rig, &pack) == 1).await;
     let store = rig.bench.store.clone();
     let (sha, offset, size) = rig.bench.pack.blobs[0].clone();
     let span = FileSpan {
@@ -80,10 +94,10 @@ async fn an_open_of_a_file_being_read_joins_that_read() {
             .contains("tierstore_cache_extent_joins_total 1\n")
     })
     .await;
-    gate.add_permits(3);
+    gate.add_permits(1);
     assert_eq!(open.await.unwrap(), Ok(()));
-    rig.filled().await;
-    assert_eq!(gets(&rig, &pack), 3);
+    until("the file was read", || rig.holds(0)).await;
+    assert_eq!(gets(&rig, &pack), 1);
 }
 
 /// Asserts that a `Mount` asked while the tree list is being read waits, and answers the directory
@@ -91,13 +105,16 @@ async fn an_open_of_a_file_being_read_joins_that_read() {
 #[tokio::test]
 async fn mount_waits_for_the_tree_and_answers_its_directory() {
     let rig = Rig::new("prov-wait").await;
-    let gate = rig.bench.rig.tamper.hold_key(&rig.key);
+    let gate = rig.bench.rig.tamper.hold_key(&sidecar(&rig));
     rig.provider
         .prepare(source("js.1", 0), &rig.key, READ_ONLY)
         .unwrap();
     let provider = rig.provider.clone();
     let mount = tokio::spawn(async move { provider.mount(source("js.1", 0)).await });
-    until("the list is being read", || gets(&rig, &rig.key) == 1).await;
+    until("the sidecar is being read", || {
+        gets(&rig, &sidecar(&rig)) == 1
+    })
+    .await;
     for _ in 0..50 {
         tokio::task::yield_now().await;
     }
@@ -114,7 +131,7 @@ async fn mount_is_not_ready_past_its_wait() {
         settings.mount_wait = Duration::ZERO;
     })
     .await;
-    let _gate = rig.bench.rig.tamper.hold_key(&rig.key);
+    let _gate = rig.bench.rig.tamper.hold_key(&sidecar(&rig));
     rig.provider
         .prepare(source("js.1", 0), &rig.key, READ_ONLY)
         .unwrap();
@@ -149,8 +166,8 @@ fn empty_files(paths: &[&str]) -> TreeList {
 }
 
 /// Asserts that a ref the provider cannot use is refused at `Mount` with the reason, each by name:
-/// no object at the key, a malformed line, a file without its digest, a tree the builder refuses, a
-/// list over the bound, and a tree over the store's limit.
+/// a tree whose list and sidecar are not there, one whose list (a version 1 list here) has no
+/// sidecar, a sidecar over the bound, and a tree over the store's limit.
 #[tokio::test]
 async fn a_ref_the_provider_cannot_use_is_refused_with_its_reason() {
     let config = TreesConfig {
@@ -164,50 +181,23 @@ async fn a_ref_the_provider_cannot_use_is_refused_with_its_reason() {
     let missing = tree_list_key(b"never written");
     assert_eq!(
         refusal_of(&rig, "js.missing", &missing).await,
-        format!("no tree list at {missing}")
+        "tree list not supported: missing_sidecar"
     );
 
-    let malformed = b"{\"format\":\"tierstore.tree-list\",\"version\":1}\n{}\n";
-    let key = tree_list_key(malformed);
-    rig.bench.rig.put(&key, malformed).await;
-    assert!(
-        refusal_of(&rig, "js.malformed", &key)
-            .await
-            .starts_with("tree list line 2: malformed: ")
-    );
-
-    let unhashed = TreeList {
-        entries: vec![ListEntry {
-            path: "a".into(),
-            kind: ListKind::File {
-                mode: Mode::FILE,
-                size: 5,
-                source: Some(BlobSource {
-                    key: "k".into(),
-                    offset: 0,
-                }),
-                sha256: None,
-            },
-        }],
-    };
-    let key = rig.put_list(&unhashed).await;
+    let v1 = b"{\"format\":\"tierstore.tree-list\",\"version\":1}\n";
+    let key = rig.put_bytes(v1).await;
     assert_eq!(
-        refusal_of(&rig, "js.unhashed", &key).await,
-        "tree list line 2: file without sha256"
+        refusal_of(&rig, "js.v1", &key).await,
+        "tree list not supported: missing_sidecar"
     );
-
-    let key = rig.put_list(&empty_files(&["a", "a/b"])).await;
-    assert_eq!(
-        refusal_of(&rig, "js.below", &key).await,
-        r#"the tree is refused: file and directory at one path "a/b""#
-    );
+    assert_eq!(gets(&rig, &key), 0);
 
     let names: Vec<String> = (0..40).map(|n| format!("file-{n:02}")).collect();
     let names: Vec<&str> = names.iter().map(String::as_str).collect();
-    let key = rig.put_list(&empty_files(&names)).await;
+    let key = rig.put_list_v2(&empty_files(&names)).await;
     assert_eq!(
         refusal_of(&rig, "js.long", &key).await,
-        "the tree list is over 2000 bytes"
+        format!("the L2 sidecar {} is over 2000 bytes", sidecar_key_of(&key))
     );
 
     assert_eq!(
@@ -215,6 +205,11 @@ async fn a_ref_the_provider_cannot_use_is_refused_with_its_reason() {
         "the tree is refused: tree too large: 6000 bytes of files, at most 5000"
     );
     assert!(rig.bench.store.mount_paths().is_empty());
+    let metricz = rig.bench.rig.cache.metrics();
+    assert!(
+        metricz.contains("tierstore_l2_sidecar_missing_total 2\n"),
+        "{metricz}"
+    );
 }
 
 /// Asserts that a preparation that failed for a reason that may pass (the upstream failed the read
@@ -232,7 +227,8 @@ async fn a_failed_preparation_is_begun_again_by_the_next_mount() {
         .prepare(source("js.1", 0), &rig.key, READ_ONLY)
         .unwrap();
     let first = unavailable(rig.provider.mount(source("js.1", 0)).await.unwrap_err());
-    assert!(first.starts_with("the tree list was not read: "), "{first}");
+    let not_read = format!("the L2 sidecar {} was not read: ", sidecar(&rig));
+    assert!(first.starts_with(&not_read), "{first}");
     let again = rig.provider.mount(source("js.1", 0)).await;
     assert_eq!(again, Ok(Rig::path_of("js.1", 0)));
 }
@@ -254,7 +250,10 @@ async fn a_failed_preparation_is_begun_again_by_the_next_prepare() {
     rig.provider
         .prepare(source("js.1", 0), &rig.key, READ_ONLY)
         .unwrap();
-    until("the list was read again", || gets(&rig, &rig.key) == 2).await;
+    until("the sidecar was read again", || {
+        gets(&rig, &sidecar(&rig)) == 2
+    })
+    .await;
     let again = rig.provider.mount(source("js.1", 0)).await;
     assert_eq!(again, Ok(Rig::path_of("js.1", 0)));
 }
@@ -278,19 +277,23 @@ async fn a_tree_the_node_cannot_make_now_is_unavailable() {
     );
 }
 
-/// Asserts that a tree list not read within its bound is unavailable, naming the bound.
+/// Asserts that a tree's sidecar not read within the list's bound is unavailable, naming it and the
+/// bound.
 #[tokio::test]
 async fn a_list_not_read_within_its_bound_is_unavailable() {
     let rig = Rig::with("prov-list-bound", TreesConfig::default(), |settings| {
         settings.list_timeout = Duration::ZERO;
     })
     .await;
-    let _gate = rig.bench.rig.tamper.hold_key(&rig.key);
+    let _gate = rig.bench.rig.tamper.hold_key(&sidecar(&rig));
     rig.provider
         .prepare(source("js.1", 0), &rig.key, READ_ONLY)
         .unwrap();
     let answer = rig.provider.mount(source("js.1", 0)).await.unwrap_err();
-    assert_eq!(unavailable(answer), "the tree list was not read within 0ns");
+    assert_eq!(
+        unavailable(answer),
+        format!("the L2 sidecar {} was not read within 0ns", sidecar(&rig))
+    );
 }
 
 /// The answer `INVALID_ARGUMENT` with `why`.
@@ -374,8 +377,8 @@ async fn prepare_is_idempotent_by_source_and_ref() {
         rig.provider.mount(source("js.1", 0)).await,
         Ok(Rig::path_of("js.1", 0))
     );
-    assert_eq!(gets(&rig, &rig.key), 1);
-    let other = rig.put_list(&empty_files(&["x"])).await;
+    assert_eq!(gets(&rig, &sidecar(&rig)), 1);
+    let other = rig.put_list_v2(&empty_files(&["x"])).await;
     let refused = rig.provider.prepare(source("js.1", 0), &other, READ_ONLY);
     assert_eq!(
         refused,
@@ -409,13 +412,16 @@ async fn release_removes_the_placement_and_is_idempotent() {
 #[tokio::test]
 async fn a_mount_waiting_when_the_source_is_released_is_refused() {
     let rig = Rig::new("prov-release-wait").await;
-    let gate = rig.bench.rig.tamper.hold_key(&rig.key);
+    let gate = rig.bench.rig.tamper.hold_key(&sidecar(&rig));
     rig.provider
         .prepare(source("js.1", 0), &rig.key, READ_ONLY)
         .unwrap();
     let provider = rig.provider.clone();
     let mount = tokio::spawn(async move { provider.mount(source("js.1", 0)).await });
-    until("the list is being read", || gets(&rig, &rig.key) == 1).await;
+    until("the sidecar is being read", || {
+        gets(&rig, &sidecar(&rig)) == 1
+    })
+    .await;
     for _ in 0..50 {
         tokio::task::yield_now().await;
     }
@@ -518,26 +524,6 @@ async fn a_release_the_store_cannot_make_is_unavailable() {
         "the placement was not released: this node does not hold the lock of its cache directory"
     );
     drop(holder);
-}
-
-/// Asserts that an object whose bytes do not hash to its key is unavailable, not refused: the cache
-/// checks the bytes of a key of `cas/l/` as it fills them and fails the read, as it fails a read of
-/// a store that gave bad bytes, which a retry may mend.
-#[tokio::test]
-async fn a_list_that_does_not_hash_to_its_key_is_unavailable() {
-    let rig = Rig::new("prov-mismatch").await;
-    let other = tree_list_key(b"other bytes");
-    rig.bench
-        .rig
-        .put(&other, &TreeList::default().encode())
-        .await;
-    rig.provider
-        .prepare(source("js.1", 0), &other, READ_ONLY)
-        .unwrap();
-    let answer = rig.provider.mount(source("js.1", 0)).await.unwrap_err();
-    let why = unavailable(answer);
-    assert!(why.starts_with("the tree list was not read: "), "{why}");
-    assert!(rig.bench.store.mount_paths().is_empty());
 }
 
 /// Asserts that a source whose placement's lease ended (the run outlived `trees.ttl_max`) is made

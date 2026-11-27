@@ -9,7 +9,7 @@ use std::sync::atomic::AtomicBool;
 use futures::channel::mpsc::unbounded;
 use tokio::sync::{SemaphorePermit, watch};
 
-use super::groups::Group;
+use super::groups::{Group, groups};
 use super::names::SourceId;
 use super::prepare::{fill, run};
 use super::queued::{admit, held};
@@ -17,7 +17,7 @@ use super::sources::Stage;
 use super::testing::{AGENT, READ_ONLY, Rig, list_of, source};
 use crate::server::local_cache::testing::until;
 use crate::server::local_cache::trees::TreesConfig;
-use crate::{Op, TreeDigest};
+use crate::{Op, TreeDigest, TreeImage};
 
 /// Takes every read of the node, so that no queued read gets its turn: a stalled upstream, as the
 /// queue sees it.
@@ -41,14 +41,18 @@ fn queued_bytes(rig: &Rig) -> u64 {
     rig.provider.shared.queued.bytes()
 }
 
-/// The bytes the reads of one source of the pack's version 1 list hold once queued: its three
-/// files, each read alone (a read of one span holds the same, whatever its span).
-fn one_list() -> u64 {
-    let alone = Group {
-        pack: Arc::from("cas/pack/any"),
-        parts: vec![(0, 1, TreeDigest::of(b""))],
-    };
-    3 * held(&alone)
+/// The bytes the reads of one source of the pack's list hold once queued: the groups the
+/// preparation makes of its walk, each as [`held`] counts it.
+fn one_list(rig: &Rig) -> u64 {
+    let list = list_of(&rig.bench.pack)
+        .encode_v2()
+        .expect("a list to encode");
+    let limits = rig.bench.store.config().limits();
+    let mut spans = Vec::new();
+    let image = TreeImage::open(list.into(), &limits, |span| spans.push(span)).expect("a list");
+    let reads = groups(image.keys(), spans, image.ranges());
+    assert!(!reads.is_empty());
+    reads.iter().map(held).sum()
 }
 
 /// Prepares the source `run`/0 with `key` and waits for its tree to be placed.
@@ -77,7 +81,7 @@ async fn a_released_source_drops_its_queued_reads_while_every_read_of_the_node_i
     seen.wait_for(|stage| *stage == Stage::Placed)
         .await
         .expect("placed");
-    assert_eq!(queued_bytes(&rig), one_list());
+    assert_eq!(queued_bytes(&rig), one_list(&rig));
 
     rig.provider.release(source("js.1", 0)).expect("released");
     until("the released preparation ends", || running.is_finished()).await;
@@ -95,7 +99,8 @@ async fn a_released_source_drops_its_queued_reads_while_every_read_of_the_node_i
 /// its reads again.
 #[tokio::test]
 async fn the_queued_reads_of_every_source_stay_under_the_bound_of_the_node() {
-    let room = one_list();
+    let probe = Rig::new("prov-bound-probe").await;
+    let room = one_list(&probe);
     let rig = Rig::with("prov-bound-sources", TreesConfig::default(), |settings| {
         settings.max_queued_bytes = room;
     })

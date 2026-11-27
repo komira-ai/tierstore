@@ -778,6 +778,17 @@ impl Backend for Proxy {
         Err(Error::Other(format!("the proxy does not replace {key}")))
     }
 
+    /// Refused, with 404 and 412 as a HEAD finds them (see `refuse_swap`, in `overwrite`).
+    async fn put_stream_if_match(
+        &self,
+        key: &str,
+        _len: Option<u64>,
+        _body: PartBody<'_>,
+        etag: &str,
+    ) -> Result<String, Error> {
+        self.inner.refuse_swap(key, etag).await
+    }
+
     async fn get(&self, key: &str, range: Option<ByteRange>) -> Result<Bytes, Error> {
         self.inner.get_object(key, range).await
     }
@@ -890,6 +901,17 @@ impl Backend for Proxy {
         parts: &[(u32, String)],
     ) -> Result<String, Error> {
         self.inner.complete_replacing(key, id, parts).await
+    }
+
+    /// Refused as `put_stream_if_match` is; the upload stays open.
+    async fn complete_upload_if_match(
+        &self,
+        key: &str,
+        _id: &str,
+        _parts: &[(u32, String)],
+        etag: &str,
+    ) -> Result<String, Error> {
+        self.inner.refuse_swap(key, etag).await
     }
 
     async fn abort_upload(&self, key: &str, id: &str) -> Result<(), Error> {

@@ -235,6 +235,8 @@ mod start_tests;
 #[cfg(test)]
 mod stream_tests;
 #[cfg(test)]
+mod swap_tests;
+#[cfg(test)]
 pub(in crate::server) mod testing;
 #[cfg(test)]
 mod tiered_tests;
@@ -710,24 +712,6 @@ impl Inner {
     fn kept(&self, name: &Name) -> Option<Meta> {
         locked(&self.index).get(&name.hex).map(index::Entry::meta)
     }
-
-    /// Whether the object the index holds is the one on the disk. A read-only cache's index is
-    /// its scan, and the holder may have put the object again since, so the sidecar is read; a
-    /// read-write cache, and a key named by its content, need no check.
-    async fn unchanged(&self, name: &Name, meta: &Meta) -> bool {
-        if self.read_write() || name.content.is_some() {
-            return true;
-        }
-        let believed = stream::Believed {
-            size: meta.size,
-            tag: meta.tag.clone(),
-        };
-        let (root, hex) = (self.config.path.clone(), name.hex.clone());
-        let reading = tokio::task::spawn_blocking(move || {
-            stream::same_version_on_disk(&root, &hex, &believed)
-        });
-        reading.await.unwrap_or(false)
-    }
 }
 
 #[async_trait]
@@ -823,6 +807,18 @@ impl Backend for LocalCache {
         Err(Error::Unsupported(READ_ONLY.to_owned()))
     }
 
+    /// `If-Match`: sent to the upstream's own call, which compares and replaces; the cache
+    /// forgets the key (see `swap_through`, in `write`).
+    async fn put_stream_if_match(
+        &self,
+        key: &str,
+        len: Option<u64>,
+        body: PartBody<'_>,
+        etag: &str,
+    ) -> Result<String, Error> {
+        self.inner.swap_through(key, len, body, etag).await
+    }
+
     async fn delete(&self, key: &str) -> Result<(), Error> {
         self.inner.delete_through(key).await
     }
@@ -859,6 +855,17 @@ impl Backend for LocalCache {
         parts: &[(u32, String)],
     ) -> Result<String, Error> {
         self.inner.complete_through(key, id, parts).await
+    }
+
+    /// As `put_stream_if_match`, for a completion (see `complete_swap_through`, in `write`).
+    async fn complete_upload_if_match(
+        &self,
+        key: &str,
+        id: &str,
+        parts: &[(u32, String)],
+        etag: &str,
+    ) -> Result<String, Error> {
+        self.inner.complete_swap_through(key, id, parts, etag).await
     }
 
     async fn abort_upload(&self, key: &str, id: &str) -> Result<(), Error> {

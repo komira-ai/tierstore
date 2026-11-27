@@ -803,6 +803,27 @@ fn projection_digest_is_the_sha256_of_the_version_2_list_for_several_trees() {
     }
 }
 
+/// Asserts that the projection is the version 2 list the L2 list was made from, byte for byte,
+/// for every shape of tree the digest test takes (padding after an odd and an even count of key
+/// offsets, no ranges, the root alone), and that a sidecar opened for its tree id projects the
+/// list that id names.
+#[test]
+fn projection_is_the_version_2_list_byte_for_byte_for_several_trees() {
+    let trees = [
+        ("small", small_tree()),
+        ("deep", deep_tree()),
+        ("root only", Tree::default()),
+        ("many keys even", tree_of_many_packs(40)),
+        ("many keys odd", tree_of_many_packs(41)),
+        ("no ranges", tree_without_ranges()),
+    ];
+    for (case, tree) in trees {
+        let (v2, l2) = tree.lists();
+        let list = TreeListL2::open_sidecar(Some(l2), &sha256(&v2)).unwrap();
+        assert_eq!(list.projection(), v2, "{case}");
+    }
+}
+
 #[test]
 fn tree_without_ranges_reads_files_less() {
     let list = open(&tree_without_ranges());
