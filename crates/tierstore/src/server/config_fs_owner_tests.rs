@@ -305,7 +305,7 @@ fn the_table_is_the_fs_interfaces_alone() {
         .to_string();
     assert_eq!(why, "interface[0].params.owner: not for type \"s3\"");
     let fs_toml = "[fs]\nclient_group = \"builders\"\nowner = { subids_of = \"builders\", id = 1 }\n\
-                   fill_socket = \"/f\"\ncache_path = \"/c\"\n";
+                   cache_path = \"/c\"\n";
     let why = treefs::from_text(fs_toml, &treefs::builders)
         .expect_err("refused")
         .to_string();

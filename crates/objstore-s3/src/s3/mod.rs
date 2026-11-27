@@ -37,9 +37,13 @@
 //! object of the wrong length that the PUT made, and only that one (`cut_put.rs`,
 //! [`S3Store::cut_puts`]). A streamed write can send digests of its body for the store to check
 //! ([`S3Store::put_stream_new_checked`], [`S3Store::put_stream_replacing_checked`]).
+//!
+//! A copy within the bucket is the store's own (`copy.rs`): [`S3Store::copy_object`] and
+//! [`S3Store::upload_part_copy`], with the source's conditions sent for the store to test.
 
 mod bound;
 mod checksum;
+mod copy;
 mod credentials;
 mod cut_put;
 mod endpoint;
@@ -57,6 +61,7 @@ mod tuning;
 mod xml;
 
 pub use checksum::StoredSha256;
+pub use copy::{CopyAnswer, CopyConditions, CopySource};
 pub use credentials::{AwsEnv, CredentialSource, Credentials, CredentialsError};
 pub use cut_put::CutPuts;
 pub use endpoint::Addressing;

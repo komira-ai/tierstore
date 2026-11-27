@@ -8,7 +8,7 @@ use super::super::Opened;
 use crate::server::local_cache::attaches::BUCKETS;
 use crate::server::local_cache::opens::{Opens, Spans};
 use crate::server::treefs::ino;
-use crate::server::treefs::testing::{Rig, sample, sha, until};
+use crate::server::treefs::testing::{Rig, sample, sha};
 
 /// The entries of the sample tree (`testing::sample`), numbered 1: the index of each.
 const BIN: u32 = 2;
@@ -101,21 +101,60 @@ fn an_open_waits_until_its_timing_ends_or_is_dropped() {
     assert_eq!(counted, 1);
 }
 
-/// Asserts that the look for idle trees tells the node the counts as the core has them, totals
-/// that the next look carries again, grown by what came between.
+/// The value of the series `name` with `labels` in the node's cache text: its last line, whole.
+fn series(rig: &Rig, name: &str, labels: &str) -> String {
+    let prefix = format!("{name}{{{labels}}} ");
+    rig.node
+        .metrics()
+        .lines()
+        .find(|line| line.starts_with(&prefix))
+        .map(str::to_owned)
+        .unwrap_or_else(|| panic!("no series {prefix}"))
+}
+
+/// Asserts that the look for idle trees tells the node's cache the counts as the core has them,
+/// totals that the next look carries again, grown by what came between: the cache's count of the
+/// opens that were `ok` and `cached`, its sum in seconds and its buckets.
 #[test]
 fn the_look_for_idle_trees_reports_the_opens() {
     let rig = attached("tfs-opens-look");
     let core = &rig.core;
-    let told = || rig.upstream.asked("opens");
+    let kind = "outcome=\"ok\",source=\"cached\"";
+    let bucket = |le: &str| {
+        let labels = format!("{kind},le=\"{le}\"");
+        series(&rig, "tierstore_fs_open_seconds_bucket", &labels)
+    };
     assert!(timed(&rig, EMPTY, 3));
+    assert_eq!(
+        series(&rig, "tierstore_fs_open_seconds_count", kind),
+        format!("tierstore_fs_open_seconds_count{{{kind}}} 0")
+    );
     core.look_around();
-    until(|| told().len() == 1);
-    assert_eq!(told()[0], core.opens_report().line());
+    assert_eq!(
+        series(&rig, "tierstore_fs_open_seconds_count", kind),
+        format!("tierstore_fs_open_seconds_count{{{kind}}} 1")
+    );
+    assert_eq!(
+        series(&rig, "tierstore_fs_open_seconds_sum", kind),
+        format!("tierstore_fs_open_seconds_sum{{{kind}}} 0.003")
+    );
     assert!(timed(&rig, EMPTY, 4));
     core.look_around();
-    until(|| told().len() == 2);
-    let last = Opens::parse(told()[1].strip_prefix("opens ").unwrap()).unwrap();
-    // 3 ms and 4 ms: both in the bucket up to 0.005 s.
-    assert_eq!(last.spans[0], spans(7, 2, 2));
+    // 3 ms and 4 ms: both in the bucket up to 0.005 s, neither in the one up to 0.002 s.
+    assert_eq!(
+        series(&rig, "tierstore_fs_open_seconds_count", kind),
+        format!("tierstore_fs_open_seconds_count{{{kind}}} 2")
+    );
+    assert_eq!(
+        series(&rig, "tierstore_fs_open_seconds_sum", kind),
+        format!("tierstore_fs_open_seconds_sum{{{kind}}} 0.007")
+    );
+    assert_eq!(
+        bucket("0.005"),
+        format!("tierstore_fs_open_seconds_bucket{{{kind},le=\"0.005\"}} 2")
+    );
+    assert_eq!(
+        bucket("0.002"),
+        format!("tierstore_fs_open_seconds_bucket{{{kind},le=\"0.002\"}} 0")
+    );
 }

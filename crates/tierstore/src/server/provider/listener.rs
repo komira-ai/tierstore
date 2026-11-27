@@ -1,9 +1,8 @@
-//! The socket of the provider: gRPC over HTTP/2 on a Unix socket, mode 0600, bound as the fill
-//! socket is (see [`fill_socket`](super::super::fill_socket)): only while the cache holds the lock
-//! of its directory, so that of the two instances of a hand-over the one that serves the cache is
-//! the one that answers, replacing the file the instance before it left, and removing its own
-//! file when it goes if the name still leads to it. The agent asks again when it finds the socket
-//! closed.
+//! The socket of the provider: gRPC over HTTP/2 on a Unix socket, mode 0600 (see
+//! [`socket`](super::socket)), bound only while the cache holds the lock of its directory, so that
+//! of the two instances of a hand-over the one that serves the cache is the one that answers,
+//! replacing the file the instance before it left, and removing its own file when it goes if the
+//! name still leads to it. The agent asks again when it finds the socket closed.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -19,10 +18,10 @@ use tokio::task::JoinSet;
 use tonic::codegen::Service as _;
 
 use super::super::ACCEPT_PAUSE;
-use super::super::fill_socket::{REBIND_PAUSE, SocketFile, bind_socket, pause_if};
 use super::super::local_cache::{LocalCache, Mode};
 use super::Provider;
 use super::service::ProviderFront;
+use super::socket::{REBIND_PAUSE, SocketFile, bind_socket, pause_if};
 
 /// A socket that is bound, and the connections it has accepted.
 struct Listening {

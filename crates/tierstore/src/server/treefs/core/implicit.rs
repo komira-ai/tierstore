@@ -1,7 +1,7 @@
 //! Trees that resolve on lookup: a lookup of `trees/<digest>` that no run has attached reads the
-//! tree's manifests (the root `cas/l/<digest>` through the fill socket's `fill <digest>`, which
+//! tree's manifests (the root `cas/l/<digest>` through the cache's fill of a manifest, which
 //! checks the bytes against the digest and takes at most 64 MiB, where the cache does not hold
-//! them; the new manifests of a new tree by one `fill-tree <digest>` first, `core/placed.rs`),
+//! them; the new manifests of a new tree by one fill of the tree first, `core/placed.rs`),
 //! flattens it, and attaches it with no run: an implicit attachment. A root that is a version 2
 //! tree list (its first bytes are `TSTREE\0\0`) is the whole tree, named by the list's own digest:
 //! it is read as the list, mapped and walked for its shape, and nothing below it is read
@@ -10,7 +10,7 @@
 //! every quarter of that time (at least a second, at most a minute apart).
 //!
 //! A lookup of a digest whose root manifest the upstream does not have is `ENOENT`; any other
-//! tree that cannot be read (a manifest below the root missing or refused, the fill socket away)
+//! tree that cannot be read (a manifest below the root missing or refused, the cache not answering)
 //! is `EIO`, said on stderr. The read ends 30 s after it began, all the tree's fills together
 //! (`core/placed.rs`, `TREE_READ`), so a lookup is answered while the job agent that made it still
 //! waits for it. A digest that cannot be read gets no tree number, so lookups of digests that are

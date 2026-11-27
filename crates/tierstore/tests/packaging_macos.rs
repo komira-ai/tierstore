@@ -292,12 +292,11 @@ fn the_mac_ingests_its_jobs_put_directories() {
     assert_eq!(cache["write_through"].as_bool(), Some(true));
 }
 
-/// Asserts that the Mac's node binds the fill socket `tierstore fs` reads every file through: the
-/// file names `local_cache.fill_socket` itself, in the directory the installer package makes
-/// (`run`, beside the provider's socket and apart from it, outside the cache), because launchd
-/// sets no `STATE_DIRECTORY` for either plist (neither has `EnvironmentVariables`), and the
-/// default socket is made only in that directory. It would catch a Mac whose node binds no fill
-/// socket, so that its mount cannot fill one file of a tree, of a job's input or of a placement.
+/// Asserts that the Mac's file still names `local_cache.fill_socket` itself, in the directory the
+/// installer package makes (`run`, beside the provider's socket and apart from it, outside the
+/// cache), because launchd sets no `STATE_DIRECTORY` for either plist (neither has
+/// `EnvironmentVariables`). The node reads the key and ignores it: no fill socket is served, and
+/// the file keeps the key until the packaging drops it.
 #[test]
 fn the_mac_names_its_fill_socket_since_launchd_gives_no_state_directory() {
     for dict in [plist(), plist_in(&package_plist_text())] {
@@ -321,8 +320,8 @@ fn the_mac_names_its_fill_socket_since_launchd_gives_no_state_directory() {
 /// file, copied into a scratch directory with its key files and its cache there (keys of the
 /// form the process reads, mode 0600), is checked by the binary run with the plist's own
 /// arguments and `--check-config`, which reads the file and the key files and binds nothing, and
-/// it exits 0 and says nothing. It would catch a file or a flag the binary refuses, which would
-/// leave the job restarting for ever.
+/// it exits 0 and says only that the file's `local_cache.fill_socket` is ignored. It would catch a
+/// file or a flag the binary refuses, which would leave the job restarting for ever.
 #[test]
 fn the_binary_accepts_the_plists_command_line_and_file() {
     let scratch = TestDir::under(std::env::temp_dir(), "packaging-macos-check");
@@ -360,7 +359,13 @@ fn the_binary_accepts_the_plists_command_line_and_file() {
             String::from_utf8_lossy(&out.stdout).into_owned(),
             String::from_utf8_lossy(&out.stderr).into_owned()
         ),
-        (Some(0), String::new(), String::new())
+        (
+            Some(0),
+            String::new(),
+            "tierstore: local_cache.fill_socket is ignored: no fill socket is served, the file \
+             system of an fs interface calls the cache in this process\n"
+                .to_owned()
+        )
     );
 }
 
@@ -558,12 +563,12 @@ fn the_plist_waits_210_seconds_on_exit() {
 }
 
 /// Asserts that the shipped `fs.toml` is the file the job's command line names and that it agrees
-/// with `tierstore.toml`: its `fs.fill_socket` is `local_cache.fill_socket`, its `fs.mountpoint` is
-/// the mount provider's `mountpoint`, its `fs.cache_path` is `local_cache.path`, its runtime
-/// directory is under `run` beside the sockets, the account it names is `_tierstore`, the job's,
-/// and its NFS socket is on loopback. It would catch a file service that reads the fill socket,
-/// cache or mount point of another place than the node's, so that the mount cannot fill a file or
-/// the provider's trees appear where no job looks.
+/// with `tierstore.toml`: its `fs.fill_socket` is `local_cache.fill_socket` (both read and
+/// ignored), its `fs.mountpoint` is the mount provider's `mountpoint`, its `fs.cache_path` is
+/// `local_cache.path`, its runtime directory is under `run` beside the sockets, the account it
+/// names is `_tierstore`, the job's, and its NFS socket is on loopback. It would catch a file
+/// service that reads the cache or mount point of another place than the node's, so that the
+/// provider's trees appear where no job looks.
 #[test]
 fn the_fs_file_repeats_the_nodes_fill_socket_cache_and_mountpoint() {
     let node = config();

@@ -7,21 +7,23 @@
 //! The agent of jobscheduler on the node hands a job's source to the provider as soon as it has the
 //! job, and the provider makes the source's tree local while the agent readies the container:
 //!
-//! - **`Prepare(source, ref)`** checks the ref, which must be the key of a tree list
-//!   (`cas/l/<64 hex>`, version 1, [`parse_tree_list`](crate::parse_tree_list), or version 2,
-//!   [`TreeListV2`](crate::TreeListV2), told apart by their first bytes), and answers at once. In
-//!   the background it reads that one object through the cache, checks that it hashes to its key,
-//!   builds the tree of exactly its entries, and places it in the tree store at the path of the
-//!   source under the mount of `tierstore fs` (module `names`). It reads the bytes of every file
-//!   into the cache (a version 2 list's as its walk meets them, before the tree is placed; a
-//!   version 1 list's once it is placed), at most `trees.fill_concurrency` files at once across
-//!   the node, each with the call an open of the mount makes for it (`TreeStore::fetch_span`), so that an open of
-//!   a file still being read waits for that one read instead of starting another. With
-//!   `trees.prepare_prefetch = "none"` it reads no file and pins nothing: each file is read on its
-//!   first open.
+//! - **`Prepare(source, ref)`** checks the ref, which must be the key of a tree's version 2 list
+//!   (`cas/l/<64 hex>`, `<id>` the tree id), and answers at once. In the background it reads the
+//!   one object of the tree a reader of this release reads, its L2 sidecar `cas/l2/<id>`
+//!   (`docs/design/fetch-cache-serve.md`, 3.5), through the cache, checks it whole and that its
+//!   version 2 projection hashes to the id, keeps that list as the tree of exactly its entries,
+//!   and places it in the tree store at the path of the source under the mount of `tierstore fs`
+//!   (module `names`). A tree with no sidecar, or a sidecar of a version it does not read, is
+//!   refused with `ListVersionUnsupported` (`tree list not supported: <reason>`, on which the CAS
+//!   service takes its miss path) and counted. It reads the bytes of every file into the cache as
+//!   the walk of the list meets them, before the tree is placed, at most `trees.fill_concurrency`
+//!   files at once across the node, each with the call an open of the mount makes for it
+//!   (`TreeStore::fetch_span`), so that an open of a file still being read waits for that one read
+//!   instead of starting another. With `trees.prepare_prefetch = "none"` it reads no file and pins
+//!   nothing: each file is read on its first open.
 //! - **`Mount(source)`** answers the tree's directory once it is placed (its files may still be
 //!   filling), or `UNAVAILABLE` "not ready" after [`MOUNT_WAIT`], and the agent asks again; a ref
-//!   the provider cannot use (no such object, a malformed list, a tree the store refuses) is
+//!   the provider cannot use (no sidecar, a sidecar refused, a tree the store refuses) is
 //!   `FAILED_PRECONDITION` with the reason.
 //! - **`Release(source)`** stops the source's reads and removes its placement; the tree goes when
 //!   nothing else holds it, and its packs stay in the cache to be evicted in their turn.
@@ -34,7 +36,7 @@
 //!
 //! Every call is idempotent by its source. Every read of the store has a bound,
 //! `params.fetch_timeout`; a read that passes it fails that file (an open reads it again) or, for
-//! the tree list, the preparation, which the next `Mount` starts again. A placement lasts
+//! the sidecar, the preparation, which the next `Mount` starts again. A placement lasts
 //! `trees.ttl_max` from its preparation unless it is released, so a source an agent never released
 //! goes in its turn.
 
@@ -44,6 +46,7 @@ mod listener;
 mod names;
 mod prepare;
 mod service;
+mod socket;
 mod sources;
 
 #[cfg(test)]

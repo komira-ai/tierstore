@@ -30,10 +30,10 @@ use crate::server::config::{PerRun, settings_from_text};
 use crate::server::config_cache::CacheSettings;
 use crate::server::handoff::testing::within;
 use crate::server::local_cache::pack_testing::Pack;
-use crate::server::provider::testing::{Client, READ_ONLY, Rig, list_of, source};
+use crate::server::provider::testing::{Client, READ_ONLY, Rig, source, tree_objects};
 use crate::server::treefs::fakedev::{self, FakeDevice};
 use crate::server::treefs::testing::FakeManager;
-use crate::{Backend, MemoryBackend, tree_list_key};
+use crate::{Backend, MemoryBackend};
 
 /// The slots of the two processes, which tell their answers apart on the sockets they share.
 const FIRST: u16 = 9711;
@@ -249,9 +249,9 @@ async fn a_provider_mount_during_the_hand_over_is_answered_by_the_second_process
         .put(&pack.key, Bytes::copy_from_slice(pack.bytes()))
         .await
         .unwrap();
-    let list = list_of(&pack).encode();
-    let key = tree_list_key(&list);
+    let [(key, list), (sidecar, l2)] = tree_objects(&pack);
     upstream.put(&key, Bytes::from(list)).await.unwrap();
+    upstream.put(&sidecar, Bytes::from(l2)).await.unwrap();
     let (second, to_second, manager) = draining
         .take_over(Arc::new(upstream), Some("provider.sock".as_ref()))
         .await;

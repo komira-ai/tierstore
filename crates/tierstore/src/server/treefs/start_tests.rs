@@ -3,9 +3,8 @@
 use super::{Identity, Setup, Signals, StartError, new_mount_id};
 use crate::server::treefs::config::FsSettings;
 use crate::server::treefs::core::Errno;
-use crate::server::treefs::fills::Reach;
 use crate::server::treefs::ino;
-use crate::server::treefs::testing::{Rig, SIGNALS, file, sample};
+use crate::server::treefs::testing::{PACK, Rig, SIGNALS, file, sample, sha};
 
 use std::io::{BufRead as _, BufReader, Write as _};
 use std::os::unix::net::UnixStream;
@@ -13,6 +12,25 @@ use std::os::unix::net::UnixStream;
 /// Settings over the scratch directories of a rig.
 fn settings(rig: &Rig) -> FsSettings {
     rig.settings()
+}
+
+/// Fills the blob `content` of the sample tree into the rig's cache, and pins it for `tree` of
+/// `mount`; the bytes the cache then holds pinned.
+fn pinned_for(rig: &Rig, (mount, tree): (&str, &str), content: &[u8]) -> u64 {
+    let digest = sha(content);
+    let offset = rig.upstream.built.lock().unwrap().offsets[&digest];
+    let asks = rig.asks();
+    asks.fill_blob(
+        (digest.as_str(), content.len() as u64),
+        (PACK, offset),
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        asks.pin(mount, tree, &[digest.as_str()]).unwrap(),
+        "ok 1 0 0"
+    );
+    rig.node.pinned_bytes()
 }
 
 fn ask(path: &std::path::Path, request: &str) -> serde_json::Value {
@@ -28,7 +46,8 @@ fn ask(path: &std::path::Path, request: &str) -> serde_json::Value {
 /// Asserts that a start makes attachments again from the file in the runtime directory (leaving out
 /// a tree it cannot read), tells the cache which trees are attached, and serves the control socket:
 /// a client attaches over it and the core has the attachment; and starts the thread that detaches
-/// the idle trees lookups attached.
+/// the idle trees lookups attached. What the mount pinned for the tree the file holds stays pinned
+/// in the cache, and what it pinned for a tree the file does not hold is taken away.
 #[test]
 fn setup_restores_saved_attachments_and_serves_the_control_socket() {
     let rig = Rig::new("tfs-start-restore", sample());
@@ -39,18 +58,21 @@ fn setup_restores_saved_attachments_and_serves_the_control_socket() {
         format!("{root} run-1\n{gone} run-2\n"),
     )
     .unwrap();
+    let mount = "nfs-00000007";
+    let kept = pinned_for(&rig, (mount, &root), b"int a;");
+    let cc: Vec<u8> = (0..3000u32).map(|i| (i % 241) as u8).collect();
+    assert!(pinned_for(&rig, (mount, "not-attached"), &cc) > kept);
     let settings = settings(&rig);
-    let setup = Setup::start((&settings, &Reach::Socket), true, Identity::Fresh, None).unwrap();
-    let kept: Vec<String> = setup
+    let setup = Setup::start((&settings, &rig.calls()), true, Identity::Boot(7), None).unwrap();
+    let attached: Vec<String> = setup
         .core
         .attachments()
         .into_iter()
         .map(|(_, run)| run)
         .collect();
-    assert_eq!(kept, ["run-1"]);
+    assert_eq!(attached, ["run-1"]);
     setup.core.settled().unwrap();
-    let pins = rig.upstream.asked("pins-live");
-    assert_eq!(pins.last().unwrap().split(' ').next_back().unwrap(), root);
+    assert_eq!(rig.node.pinned_bytes(), kept);
     let answer = ask(
         &settings.control_socket,
         &format!("attach {root} for run-3"),
@@ -93,14 +115,14 @@ fn setup_refuses_an_unwritable_runtime_dir_with_its_key_name() {
         ),
     ];
     for (settings, what) in cases {
-        let error = Setup::start((&settings, &Reach::Socket), true, Identity::Fresh, None)
+        let error = Setup::start((&settings, &rig.calls()), true, Identity::Fresh, None)
             .err()
             .unwrap();
         assert!(error.to_string().contains(what), "{what}: {error}");
         assert_eq!(error.status(), 1);
     }
     std::fs::create_dir_all(rig.runtime.join("backing/inside")).unwrap();
-    let error = Setup::start((&base, &Reach::Socket), true, Identity::Fresh, None)
+    let error = Setup::start((&base, &rig.calls()), true, Identity::Fresh, None)
         .err()
         .unwrap();
     assert!(error.to_string().contains("removing"), "{error}");
@@ -122,14 +144,14 @@ fn setup_creates_a_fresh_table_of_tree_numbers() {
         .add_tree(vec![("only.txt", file(b"only"))]);
     let settings = settings(&rig);
     {
-        let first = Setup::start((&settings, &Reach::Socket), true, Identity::Fresh, None).unwrap();
+        let first = Setup::start((&settings, &rig.calls()), true, Identity::Fresh, None).unwrap();
         let _ = first.core.attach(&first_root, "run-1").unwrap();
         let _ = first.core.attach(&second_root, "run-2").unwrap();
         assert!(first.core.getattr(ino::of(2, 0)).is_ok());
         assert!(first.core.detach("run-1").is_some());
         assert!(first.core.detach("run-2").is_some());
     }
-    let second = Setup::start((&settings, &Reach::Socket), true, Identity::Fresh, None).unwrap();
+    let second = Setup::start((&settings, &rig.calls()), true, Identity::Fresh, None).unwrap();
     assert!(second.core.attachments().is_empty());
     assert_eq!(second.core.getattr(ino::of(1, 0)), Err(Errno::NoEnt));
     let _ = second.core.attach(&second_root, "run-3").unwrap();
@@ -144,7 +166,7 @@ fn setup_passes_the_lookup_choice_to_the_core() {
     let rig = Rig::new("tfs-start-lookups", sample());
     let root = rig.upstream.built.lock().unwrap().root.clone();
     let settings = settings(&rig);
-    let setup = Setup::start((&settings, &Reach::Socket), false, Identity::Fresh, None).unwrap();
+    let setup = Setup::start((&settings, &rig.calls()), false, Identity::Fresh, None).unwrap();
     let _ = setup.core.attach(&root, "run-1").unwrap();
     let ino = ino::of(1, 0);
     setup.core.count(ino);

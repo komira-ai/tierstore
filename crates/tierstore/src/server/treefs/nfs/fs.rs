@@ -217,7 +217,7 @@ impl TreeNfs {
     }
 
     /// The core's answer to a lookup of `name` in `dirid`. A lookup in the namespace may read a
-    /// tree that no run has attached through the fill socket (`core/implicit.rs`), or ask it where
+    /// tree that no run has attached through the cache (`core/implicit.rs`), or ask it where
     /// a path is among the placements (`core/placed.rs`), so it runs on a blocking thread, as a
     /// fill for a read does, and holds up no other request.
     async fn looked(&self, dirid: fileid3, name: &str) -> Result<Looked, Errno> {

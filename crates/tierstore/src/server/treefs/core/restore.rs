@@ -1,6 +1,6 @@
 //! The attachments made again at a start (`fs.reattach_concurrency`): before a frontend serves,
 //! every pair of tree digest and run the attachments file holds is attached in memory, which reads
-//! the tree's manifests (through the fill socket where the cache does not hold them: a fill is a
+//! the tree's manifests (through the cache where the cache does not hold them: a fill is a
 //! request of its own, so reading them one tree after the other makes the start as long as the sum
 //! of the fills).
 //!

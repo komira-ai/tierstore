@@ -91,13 +91,3 @@ pub(in crate::server) enum NfsError {
         said: String,
     },
 }
-
-impl NfsError {
-    /// The exit status of a serve that this ended: that of the start that failed, else 1.
-    pub(in crate::server) fn status(&self) -> u8 {
-        match self {
-            Self::Start(why) => why.status(),
-            _ => 1,
-        }
-    }
-}

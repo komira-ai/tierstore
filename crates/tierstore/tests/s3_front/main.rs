@@ -19,6 +19,7 @@ mod cold_node;
 mod combined_node;
 mod config_file;
 mod conformance;
+mod copy;
 mod drain;
 mod files;
 mod handed;
