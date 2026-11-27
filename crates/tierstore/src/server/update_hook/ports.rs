@@ -1,7 +1,8 @@
 //! What the steps do to the machine, as ports: the two systemd instances of each of the two
 //! templates and their start markers, the process of an fs instance and the binary it runs, the
-//! launchd job, the instances' HTTP answers and the control socket of the one that serves, what the
-//! host says of itself, the clock and the state directory.
+//! launchd job, the instances' HTTP answers and the control socket of the one that serves, the
+//! node's mount provider and its mount, what the host says of itself, the clock and the state
+//! directory.
 //!
 //! Each port is a small trait; the steps take a [`SystemdPorts`] or a [`LaunchdPorts`] and never
 //! reach for the machine themselves. Tests keep the machine's world in a fake. Nothing here reads
@@ -11,6 +12,7 @@
 //! one, removing an absent marker and booting out a job that is not loaded are not errors.
 
 use std::any::Any;
+use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -468,6 +470,76 @@ pub trait Control {
     fn ask(&self, socket: &Path, line: &str) -> Result<String, PortError>;
 }
 
+/// What one path of a tree is, as a read of the mount finds it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TreeNode {
+    /// A regular file, with its bytes.
+    File(Vec<u8>),
+    /// A directory.
+    Dir,
+    /// A symbolic link, with its target.
+    Link(String),
+}
+
+/// The status of an answer of the mount provider that is not success, as gRPC numbers it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProviderCode {
+    /// `INVALID_ARGUMENT`: the request is wrong in itself.
+    InvalidArgument,
+    /// `FAILED_PRECONDITION`: what the request names cannot be used.
+    FailedPrecondition,
+    /// `UNAVAILABLE`: not now; ask again.
+    Unavailable,
+    /// Any other status, by its number.
+    Other(i32),
+}
+
+/// Why a call of the mount provider did not succeed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ProviderFault {
+    /// No answer: the socket is not there or nobody listens on it, the call timed out, or what
+    /// came back is not an answer of the protocol.
+    Silent(String),
+    /// An answer, with a status other than OK: the provider is there and said no.
+    Answered {
+        /// The status.
+        code: ProviderCode,
+        /// The provider's reason.
+        reason: String,
+    },
+}
+
+/// The node's mount provider (jobscheduler's `MountProvider` protocol on a Unix socket), asked as
+/// jobscheduler's agent asks it, for the sources of the update check
+/// (`provider/check.rs`: its agent and run, and the source's index), and the mount it answers.
+pub trait MountProvider {
+    /// `Prepare` of the check's source `index` with the tree list `reference`, read-only.
+    ///
+    /// # Errors
+    /// No answer, or an answer that is not success.
+    fn prepare(&self, socket: &Path, index: u32, reference: &str) -> Result<(), ProviderFault>;
+
+    /// `Mount` of the check's source `index`: the directory of its tree.
+    ///
+    /// # Errors
+    /// No answer, or an answer that is not success.
+    fn mount(&self, socket: &Path, index: u32) -> Result<PathBuf, ProviderFault>;
+
+    /// `Release` of the check's source `index`.
+    ///
+    /// # Errors
+    /// No answer, or an answer that is not success.
+    fn release(&self, socket: &Path, index: u32) -> Result<(), ProviderFault>;
+
+    /// Every path below the directory `dir` with what it is: files with their bytes, directories,
+    /// and links with their targets, never followed.
+    ///
+    /// # Errors
+    /// The directory or a path below it cannot be read, or is of another kind, or the tree is
+    /// larger than a tree of the check is: what was wrong, without the bytes of any file.
+    fn read_tree(&self, dir: &Path) -> Result<BTreeMap<String, TreeNode>, String>;
+}
+
 /// Everything a step of the systemd arm may touch.
 pub struct SystemdPorts<'a> {
     /// The two instances' units of `tierstore@.service`.
@@ -484,6 +556,8 @@ pub struct SystemdPorts<'a> {
     pub instances: &'a dyn Instances,
     /// The host.
     pub host: &'a dyn Host,
+    /// The node's mount provider and its mount.
+    pub provider: &'a dyn MountProvider,
     /// Time.
     pub clock: &'a dyn Clock,
     /// The state directory.
@@ -498,6 +572,8 @@ pub struct LaunchdPorts<'a> {
     pub instances: &'a dyn Instances,
     /// The host.
     pub host: &'a dyn Host,
+    /// The node's mount provider and its mount.
+    pub provider: &'a dyn MountProvider,
     /// Time.
     pub clock: &'a dyn Clock,
     /// The state directory.

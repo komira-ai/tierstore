@@ -118,7 +118,7 @@ pub(in crate::server) struct Rig {
 }
 
 impl Rig {
-    pub(super) async fn new(name: &str) -> Self {
+    pub(in crate::server) async fn new(name: &str) -> Self {
         Self::with(name, TreesConfig::default(), |_| {}).await
     }
 

@@ -1,0 +1,388 @@
+//! The client of the mount provider's socket against the node's real provider, the mount check
+//! over it, and the read of a tree through `std::fs`.
+
+use std::collections::BTreeMap;
+use std::os::unix::ffi::OsStrExt as _;
+use std::os::unix::net::UnixListener;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use bytes::Bytes;
+use tierstore_testkit::dir::TestDir;
+use tierstore_trees_api::provider::v1::MountResponse;
+use tokio::sync::Notify;
+use tonic::Code;
+
+use super::super::mount_check::check;
+use super::super::ports::{MountProvider, ProviderCode, ProviderFault, TreeNode};
+use super::super::report::{Done, Outcome, Reason};
+use super::super::shape::ProviderShape;
+use super::provider::{MAX_FILE_BYTES, MAX_PATHS, ProviderSocket, ProviderTimes};
+use super::provider::{code_of, framed, unframed};
+use crate::server::local_cache::trees::TreeStore;
+use crate::server::provider::check::{TREES, WITH_SIDECAR, WITHOUT_SIDECAR, pack, pack_key};
+use crate::server::provider::testing::Rig;
+use crate::server::provider::{NOT_PREPARED_HERE, serve};
+
+/// The mount the test provider answers directories under.
+const MOUNT: &str = "/run/tierstore/fs";
+
+/// A provider over the tree store's bench, served on a socket in a scratch directory.
+struct Served {
+    rig: Rig,
+    _dir: TestDir,
+    socket: PathBuf,
+    halt: Arc<Notify>,
+}
+
+impl Served {
+    /// The provider, with the check's objects in its upstream as a build service stores them: the
+    /// pack, both lists and the one sidecar, the list of the tree without a sidecar left out when
+    /// `refuse_plain`, so that the provider refuses that tree.
+    async fn start(name: &str, refuse_plain: bool) -> Self {
+        let rig = Rig::new(name).await;
+        let up = &rig.bench.rig;
+        up.put(&pack_key(), &pack()).await;
+        up.put(&WITH_SIDECAR.key(), WITH_SIDECAR.list).await;
+        up.put(&WITH_SIDECAR.sidecar_key(), WITH_SIDECAR.sidecar.unwrap())
+            .await;
+        if !refuse_plain {
+            up.put(&WITHOUT_SIDECAR.key(), WITHOUT_SIDECAR.list).await;
+        }
+        let dir = TestDir::under(std::env::temp_dir(), name);
+        let socket = dir.path().join("provider.sock");
+        let halt = Arc::new(Notify::new());
+        let (provider, cache) = (rig.provider.clone(), rig.bench.rig.cache.clone());
+        let (path, notify) = (socket.clone(), Arc::clone(&halt));
+        tokio::spawn(async move { serve(provider, &cache, &path, notify).await });
+        let bound = socket.clone();
+        crate::server::local_cache::testing::until("the socket is bound", || bound.exists()).await;
+        Self {
+            rig,
+            _dir: dir,
+            socket,
+            halt,
+        }
+    }
+
+    fn shape(&self) -> ProviderShape {
+        ProviderShape {
+            socket: self.socket.clone(),
+            mountpoint: PathBuf::from(MOUNT),
+        }
+    }
+}
+
+impl Drop for Served {
+    fn drop(&mut self) {
+        self.halt.notify_one();
+    }
+}
+
+/// The real client, with a read of a tree that finds, instead of the mount (which no test has),
+/// the tree the store has placed at the directory: the tree of the check whose id the placement
+/// names.
+struct ThroughStore {
+    socket: ProviderSocket,
+    store: TreeStore,
+}
+
+impl MountProvider for ThroughStore {
+    fn prepare(&self, socket: &Path, index: u32, reference: &str) -> Result<(), ProviderFault> {
+        self.socket.prepare(socket, index, reference)
+    }
+
+    fn mount(&self, socket: &Path, index: u32) -> Result<PathBuf, ProviderFault> {
+        self.socket.mount(socket, index)
+    }
+
+    fn release(&self, socket: &Path, index: u32) -> Result<(), ProviderFault> {
+        self.socket.release(socket, index)
+    }
+
+    fn read_tree(&self, dir: &Path) -> Result<BTreeMap<String, TreeNode>, String> {
+        let place = dir.strip_prefix(MOUNT).map_err(|_| "outside".to_owned())?;
+        let located = self
+            .store
+            .locate_fs(&place.to_string_lossy())
+            .ok_or_else(|| format!("nothing is placed at {place:?}"))?;
+        let tree = TREES
+            .iter()
+            .find(|tree| tree.key() == format!("cas/l/{}", located.tree))
+            .ok_or_else(|| "another tree is placed".to_owned())?;
+        Ok(tree.nodes())
+    }
+}
+
+/// The mount check of `served` with the real client.
+async fn checked(served: &Served) -> Result<String, Done> {
+    let through = ThroughStore {
+        socket: ProviderSocket::new(PathBuf::from("/"), ProviderTimes::default()),
+        store: served.rig.bench.store.clone(),
+    };
+    let shape = served.shape();
+    tokio::task::spawn_blocking(move || check(&through, &shape, 5))
+        .await
+        .unwrap()
+}
+
+/// Asserts that the hook's client drives the node's real provider through the whole check over
+/// its socket: both trees prepared from the objects as a build service stores them (one placed
+/// from its L2 sidecar, one from its list alone), mounted at their sources' directories, found
+/// placed there, released, and then not prepared here; and that no placement is left. Catches a
+/// client whose requests the provider does not take, a provider that cannot place one of the two
+/// forms, and a check that leaves a placement.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_check_passes_against_the_real_provider_and_leaves_no_placement() {
+    let served = Served::start("hook-prov-pass", false).await;
+    let said = checked(&served).await.expect("the check passes");
+    assert!(said.starts_with("the mount provider at "), "{said}");
+    assert_eq!(served.rig.bench.store.sizes().0, 0);
+}
+
+/// Asserts that against a real provider that refuses the tree without an L2 sidecar (its list is
+/// not in the store, so the provider answers its `Mount` `FAILED_PRECONDITION`), the check fails
+/// with `provider_refused` and the provider's own reason, and leaves no placement of either tree.
+/// Catches a verify that passes a node whose provider refuses that form of tree.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_real_provider_that_refuses_the_tree_without_a_sidecar_fails_the_check() {
+    let served = Served::start("hook-prov-refuse", true).await;
+    let done = checked(&served).await.expect_err("the check fails");
+    assert_eq!(done.outcome, Outcome::Failure);
+    assert_eq!(done.report.reason, Some(Reason::ProviderRefused));
+    let detail = done.report.detail.unwrap_or_default();
+    let reason = format!("no tree list at {}", WITHOUT_SIDECAR.key());
+    assert!(
+        detail.ends_with(&format!("with FailedPrecondition: {reason}")),
+        "{detail}"
+    );
+    assert_eq!(served.rig.bench.store.sizes().0, 0);
+}
+
+/// Asserts that the client names each answer of the real provider by its status: a ref that is
+/// no tree list's key `INVALID_ARGUMENT`, a source prepared again with another ref
+/// `FAILED_PRECONDITION`, a `Mount` of a source never prepared `UNAVAILABLE` with exactly
+/// [`NOT_PREPARED_HERE`] (what the check takes for a placement gone), and a `Release` of it a
+/// success.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_client_names_each_answer_by_its_status() {
+    let served = Served::start("hook-prov-codes", false).await;
+    let socket = served.socket.clone();
+    let answers = tokio::task::spawn_blocking(move || {
+        let client = ProviderSocket::new(PathBuf::from("/"), ProviderTimes::default());
+        let bad = client.prepare(&socket, 0, "cas/l/short");
+        client
+            .prepare(&socket, 0, &WITH_SIDECAR.key())
+            .expect("prepared");
+        let again = client.prepare(&socket, 0, &WITHOUT_SIDECAR.key());
+        let mounted = client.mount(&socket, 0);
+        client.release(&socket, 0).expect("released");
+        let unknown = client.mount(&socket, 7);
+        let released = client.release(&socket, 7);
+        (bad, again, mounted, unknown, released)
+    })
+    .await
+    .unwrap();
+    let (bad, again, mounted, unknown, released) = answers;
+    assert!(matches!(
+        bad,
+        Err(ProviderFault::Answered {
+            code: ProviderCode::InvalidArgument,
+            ..
+        })
+    ));
+    assert_eq!(
+        again,
+        Err(ProviderFault::Answered {
+            code: ProviderCode::FailedPrecondition,
+            reason: format!(
+                "the source was prepared with another ref, {}",
+                WITH_SIDECAR.key()
+            ),
+        })
+    );
+    let dir = mounted.expect("mounted");
+    assert!(dir.starts_with(MOUNT), "{dir:?}");
+    assert!(dir.ends_with("0"), "{dir:?}");
+    assert_eq!(
+        unknown,
+        Err(ProviderFault::Answered {
+            code: ProviderCode::Unavailable,
+            reason: NOT_PREPARED_HERE.to_owned(),
+        })
+    );
+    assert_eq!(released, Ok(()));
+}
+
+/// Asserts that a socket nobody listens on, and one whose listener closes the connection without
+/// an answer, are silence (no answer of the protocol), each naming the call. Catches a provider
+/// that is not there taken for one that refused.
+#[test]
+fn a_socket_with_no_answer_is_silence() {
+    let dir = TestDir::under(std::env::temp_dir(), "hook-prov-silent");
+    let client = ProviderSocket::new(PathBuf::from("/"), ProviderTimes::default());
+    let missing = dir.path().join("missing.sock");
+    match client.release(&missing, 0) {
+        Err(ProviderFault::Silent(why)) => {
+            assert!(why.starts_with("Release: "), "{why}");
+            assert!(why.contains("missing.sock"), "{why}");
+        }
+        other => panic!("{other:?}"),
+    }
+    let closing = dir.path().join("closing.sock");
+    let listener = UnixListener::bind(&closing).unwrap();
+    let accepting = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        drop(stream);
+    });
+    match client.mount(&closing, 0) {
+        Err(ProviderFault::Silent(why)) => assert!(why.starts_with("Mount: "), "{why}"),
+        other => panic!("{other:?}"),
+    }
+    accepting.join().unwrap();
+}
+
+/// Asserts the port's name of every gRPC status: the three the provider answers by their names,
+/// any other by its number.
+#[test]
+fn every_status_has_its_name() {
+    assert_eq!(
+        code_of(Code::InvalidArgument),
+        ProviderCode::InvalidArgument
+    );
+    assert_eq!(
+        code_of(Code::FailedPrecondition),
+        ProviderCode::FailedPrecondition
+    );
+    assert_eq!(code_of(Code::Unavailable), ProviderCode::Unavailable);
+    assert_eq!(code_of(Code::Internal), ProviderCode::Other(13));
+    assert_eq!(code_of(Code::Unimplemented), ProviderCode::Other(12));
+}
+
+/// Asserts that an answer's frame is read back to its message, and that data shorter than a
+/// frame's head, a compressed frame, a frame of another length than it says, and bytes that are
+/// not the message are refused by name.
+#[test]
+fn an_answer_is_one_frame_of_its_message() {
+    let message = MountResponse {
+        path: "/run/tierstore/fs/x".to_owned(),
+    };
+    let frame = framed(&message).unwrap();
+    assert_eq!(frame[..5], [0, 0, 0, 0, 21]);
+    assert_eq!(unframed::<MountResponse>(&frame), Ok(message));
+    assert_eq!(
+        unframed::<MountResponse>(&[0, 0, 0]),
+        Err("an answer of 3 bytes, not a frame".to_owned())
+    );
+    let mut flagged = frame.to_vec();
+    flagged[0] = 1;
+    assert_eq!(
+        unframed::<MountResponse>(&flagged),
+        Err("an answer framed as 21 bytes (flag 1) with 21 bytes".to_owned())
+    );
+    assert_eq!(
+        unframed::<MountResponse>(&frame[..10]),
+        Err("an answer framed as 21 bytes (flag 0) with 5 bytes".to_owned())
+    );
+    let junk = [0, 0, 0, 0, 2, 0xff, 0xff];
+    let refused = unframed::<MountResponse>(&junk).unwrap_err();
+    assert!(
+        refused.starts_with("an answer that is not the message: "),
+        "{refused}"
+    );
+}
+
+/// The read of the tree at `dir` with the real client.
+fn read(dir: &Path) -> Result<BTreeMap<String, TreeNode>, String> {
+    ProviderSocket::new(PathBuf::from("/"), ProviderTimes::default()).read_tree(dir)
+}
+
+/// Asserts that the read of a tree gives every path below the directory by its path, with the
+/// bytes of every file (an empty one included), every directory (an empty one included), and the
+/// target of a link, which is not followed. Catches a read that follows a link out of the tree,
+/// or leaves out an empty file or directory that the tree has.
+#[test]
+fn a_tree_is_read_whole_without_following_a_link() {
+    let dir = TestDir::under(std::env::temp_dir(), "hook-prov-read");
+    let root = dir.path().join("tree");
+    std::fs::create_dir_all(root.join("data/dir")).unwrap();
+    std::fs::create_dir_all(root.join("bin")).unwrap();
+    std::fs::write(root.join("bin/tool"), b"#!/bin/sh\n").unwrap();
+    std::fs::write(root.join("data/empty"), b"").unwrap();
+    std::os::unix::fs::symlink("/etc", root.join("tool")).unwrap();
+    let read = read(&root).expect("a tree");
+    let want = BTreeMap::from([
+        ("bin".to_owned(), TreeNode::Dir),
+        (
+            "bin/tool".to_owned(),
+            TreeNode::File(b"#!/bin/sh\n".to_vec()),
+        ),
+        ("data".to_owned(), TreeNode::Dir),
+        ("data/dir".to_owned(), TreeNode::Dir),
+        ("data/empty".to_owned(), TreeNode::File(Vec::new())),
+        ("tool".to_owned(), TreeNode::Link("/etc".to_owned())),
+    ]);
+    assert_eq!(read, want);
+}
+
+/// Asserts that the read refuses, by name: a directory that is not there, a file over
+/// [`MAX_FILE_BYTES`], more than [`MAX_PATHS`] paths, a name or a link target that is not UTF-8,
+/// and a path that is no file, directory or link (a socket). Catches a read that loads a large
+/// file whole, walks a huge directory, or takes a socket for a file.
+#[test]
+fn a_tree_that_is_no_tree_of_the_check_is_refused_by_name() {
+    let dir = TestDir::under(std::env::temp_dir(), "hook-prov-refuse-read");
+    let missing = dir.path().join("missing");
+    let refused = read(&missing).unwrap_err();
+    assert!(
+        refused.starts_with("the directory could not be listed: "),
+        "{refused}"
+    );
+
+    let large = dir.path().join("large");
+    std::fs::create_dir_all(&large).unwrap();
+    std::fs::write(large.join("big"), vec![0u8; MAX_FILE_BYTES as usize + 1]).unwrap();
+    assert_eq!(
+        read(&large),
+        Err(format!("big is larger than {MAX_FILE_BYTES} bytes"))
+    );
+
+    let many = dir.path().join("many");
+    std::fs::create_dir_all(&many).unwrap();
+    for n in 0..=MAX_PATHS {
+        std::fs::write(many.join(format!("f{n}")), b"").unwrap();
+    }
+    assert_eq!(read(&many), Err(format!("more than {MAX_PATHS} paths")));
+
+    let odd = dir.path().join("odd");
+    std::fs::create_dir_all(&odd).unwrap();
+    let name = std::ffi::OsStr::from_bytes(b"bad\xff");
+    std::fs::write(odd.join(name), b"").unwrap();
+    assert_eq!(
+        read(&odd),
+        Err("\"\" holds a name that is not UTF-8".to_owned())
+    );
+
+    let link = dir.path().join("link");
+    std::fs::create_dir_all(&link).unwrap();
+    std::os::unix::fs::symlink(name, link.join("l")).unwrap();
+    assert_eq!(
+        read(&link),
+        Err("l links to a target that is not UTF-8".to_owned())
+    );
+
+    let special = dir.path().join("special");
+    std::fs::create_dir_all(&special).unwrap();
+    let _listener = UnixListener::bind(special.join("s")).unwrap();
+    assert_eq!(
+        read(&special),
+        Err("s is neither a file, a directory nor a link".to_owned())
+    );
+}
+
+/// The bytes of a frame, for the length in [`an_answer_is_one_frame_of_its_message`].
+#[test]
+fn a_request_frame_is_its_message_after_five_bytes() {
+    let frame: Bytes = framed(&MountResponse::default()).unwrap();
+    assert_eq!(frame.as_ref(), [0, 0, 0, 0, 0]);
+}

@@ -29,6 +29,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use crate::server::build_info::gauge;
+use crate::server::update_hook::provider_fake::FakeProvider;
 use crate::server::update_hook::systemd::run_step;
 use crate::server::update_hook::{
     CACHE_HANDOFF_CAPABILITY, Clock, Done, HANDOFF_CAPABILITY, HANDOFF_STATE_DIR_CAPABILITY, Host,
@@ -404,6 +405,8 @@ pub struct SystemdFake {
     w: Rc<RefCell<World>>,
     /// The ports of the second unit, over the same world.
     fs: fake_fs::FsPorts,
+    /// The node's mount provider.
+    pub provider: FakeProvider,
 }
 
 impl SystemdFake {
@@ -447,6 +450,7 @@ impl SystemdFake {
         SystemdFake {
             fs: fake_fs::FsPorts::new(Rc::clone(&w)),
             w,
+            provider: FakeProvider::default(),
         }
     }
 
@@ -479,6 +483,7 @@ impl SystemdFake {
             fs_processes: &self.fs,
             instances: self,
             host: self,
+            provider: &self.provider,
             clock: self,
             state: self,
         }

@@ -16,7 +16,7 @@ use tokio::sync::{Semaphore, watch};
 
 use super::names::{SourceId, check_name, source_of};
 use super::prepare::{Job, run};
-use super::{MOUNT_WAIT, ProviderError, ProviderFlags};
+use super::{MOUNT_WAIT, NOT_PREPARED_HERE, ProviderError, ProviderFlags};
 use crate::server::local_cache::trees::{LifeError, PlacementId, PreparePrefetch, TreeStore};
 use crate::server::local_cache::{LocalCache, QueuedReads};
 use crate::{MAX_TREE_LIST_BYTES, TreeDigest, tree_list_digest};
@@ -287,9 +287,7 @@ impl Provider {
             let Some(held) = sources.get(&id) else {
                 return match self.placement_at(&id) {
                     Some(_) => Ok(path),
-                    None => Err(ProviderError::Unavailable(
-                        "the source is not prepared here".to_owned(),
-                    )),
+                    None => Err(ProviderError::Unavailable(NOT_PREPARED_HERE.to_owned())),
                 };
             };
             self.again_if_failed(&id, held);

@@ -1,7 +1,8 @@
 //! What the hook reads of a node's file about its `fs` interface (`docs/design/one-service.md`
 //! sections 1.2 and 3.6): whether the node holds a mount, and the three paths a successor must
 //! share with the instance that runs to take the mount over (the mount point, the control socket
-//! and the runtime directory, which holds the hand-over socket of the mount and its state).
+//! and the runtime directory, which holds the hand-over socket of the mount and its state); and
+//! about its `mount-provider` interface: the socket `verify` asks and the mount its trees are under.
 //!
 //! The file is read as TOML, not loaded: the hook does not resolve users or groups, nor look at
 //! the disk. A path a param leaves out is the default the loader gives it (`treefs/config.rs`).
@@ -11,6 +12,7 @@
 
 use std::path::PathBuf;
 
+use crate::server::provider::DEFAULT_MOUNTPOINT as PROVIDER_DEFAULT_MOUNTPOINT;
 use crate::server::treefs::{DEFAULT_CONTROL_SOCKET, DEFAULT_MOUNTPOINT, DEFAULT_RUNTIME_DIR};
 
 /// The `type` of the interface that serves the trees as a file system.
@@ -74,11 +76,62 @@ pub(super) fn fs_interface(text: &str) -> Option<FsShape> {
     })
 }
 
+/// The `type` of the interface of the mount provider.
+pub(super) const PROVIDER_INTERFACE: &str = "mount-provider";
+
+/// Where a file's `mount-provider` interface is served: its socket, and the mount of
+/// `tierstore fs` its trees are placed under.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct ProviderShape {
+    /// `params.socket`.
+    pub(super) socket: PathBuf,
+    /// `params.mountpoint`, or the loader's default.
+    pub(super) mountpoint: PathBuf,
+}
+
+/// The `mount-provider` interface of the file whose text is `text`: `None` for a file with none
+/// (or a text that is not TOML); an error for an entry whose socket or mount point is not an
+/// absolute path, which the release's check of the file refuses.
+pub(super) fn provider_interface(text: &str) -> Result<Option<ProviderShape>, String> {
+    let Ok(table) = text.parse::<toml::Table>() else {
+        return Ok(None);
+    };
+    let entry = table
+        .get("interface")
+        .and_then(toml::Value::as_array)
+        .and_then(|entries| {
+            entries
+                .iter()
+                .filter_map(toml::Value::as_table)
+                .find(|entry| {
+                    entry.get("type").and_then(toml::Value::as_str) == Some(PROVIDER_INTERFACE)
+                })
+        });
+    let Some(entry) = entry else {
+        return Ok(None);
+    };
+    let params = entry.get("params").and_then(toml::Value::as_table);
+    let path = |key: &str, default: Option<&str>| -> Result<PathBuf, String> {
+        let given = params.and_then(|params| params.get(key));
+        let text = match given {
+            Some(value) => value.as_str(),
+            None => default,
+        };
+        text.map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+            .ok_or_else(|| format!("the {PROVIDER_INTERFACE} interface has no absolute {key}"))
+    };
+    Ok(Some(ProviderShape {
+        socket: path("socket", None)?,
+        mountpoint: path("mountpoint", Some(PROVIDER_DEFAULT_MOUNTPOINT))?,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
 
-    use super::{FsShape, fs_interface};
+    use super::{FsShape, ProviderShape, fs_interface, provider_interface};
 
     fn shape(mountpoint: &str, control_socket: &str, runtime_dir: &str) -> FsShape {
         FsShape {
@@ -151,6 +204,63 @@ mod tests {
         assert_eq!(
             a.moved(&shape("/n", "/d", "/s")),
             ["mountpoint", "control_socket", "runtime_dir"]
+        );
+    }
+
+    /// Asserts that a file's `mount-provider` interface is found among its interfaces with its
+    /// socket and its mount point, the mount point the loader's default when it is left out; that
+    /// a file with none, or a text that is not TOML, has none; and that an entry whose socket is
+    /// missing, not a string or not absolute, or whose mount point is not absolute, is refused by
+    /// name. Catches a build node whose check is skipped because its entry was missed, and a socket
+    /// taken from an entry the release refuses.
+    #[test]
+    fn the_provider_interface_is_read_with_the_loaders_default_mount() {
+        let entry = |params: &str| {
+            format!(
+                "[[interface]]\ntype = \"s3\"\n[[interface]]\ntype = \"mount-provider\"\n{params}"
+            )
+        };
+        let shape = |socket: &str, mountpoint: &str| ProviderShape {
+            socket: PathBuf::from(socket),
+            mountpoint: PathBuf::from(mountpoint),
+        };
+        assert_eq!(
+            provider_interface(&entry("params = { socket = \"/var/p.sock\" }\n")),
+            Ok(Some(shape("/var/p.sock", "/run/tierstore/fs")))
+        );
+        assert_eq!(
+            provider_interface(&entry(
+                "params = { socket = \"/var/p.sock\", mountpoint = \"/mnt/fs\" }\n"
+            )),
+            Ok(Some(shape("/var/p.sock", "/mnt/fs")))
+        );
+        for none in [
+            "",
+            "[server]\n",
+            "[[interface]]\ntype = \"fs\"\n",
+            "interface = 1\n",
+            "= x",
+        ] {
+            assert_eq!(provider_interface(none), Ok(None), "{none:?}");
+        }
+        let no_socket = "the mount-provider interface has no absolute socket".to_owned();
+        for params in [
+            "",
+            "params = {}\n",
+            "params = { socket = 5 }\n",
+            "params = { socket = \"p.sock\" }\n",
+        ] {
+            assert_eq!(
+                provider_interface(&entry(params)),
+                Err(no_socket.clone()),
+                "{params:?}"
+            );
+        }
+        assert_eq!(
+            provider_interface(&entry(
+                "params = { socket = \"/p.sock\", mountpoint = \"fs\" }\n"
+            )),
+            Err("the mount-provider interface has no absolute mountpoint".to_owned())
         );
     }
 }

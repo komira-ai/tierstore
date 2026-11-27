@@ -47,6 +47,7 @@
 //! `trees.ttl_max` from its preparation unless it is released, so a source an agent never released
 //! goes in its turn.
 
+pub(in crate::server) mod check;
 pub(super) mod config;
 mod groups;
 mod listener;
@@ -57,6 +58,10 @@ mod service;
 mod socket;
 mod sources;
 
+#[cfg(test)]
+mod check_tests;
+#[cfg(test)]
+mod check_upstream_tests;
 #[cfg(test)]
 mod groups_tests;
 #[cfg(test)]
@@ -101,6 +106,10 @@ pub(super) const DEFAULT_FETCH_TIMEOUT: Duration = Duration::from_secs(60);
 /// How long a `Mount` waits for its tree before it answers "not ready": below the 30 s the contract
 /// gives the call.
 pub(super) const MOUNT_WAIT: Duration = Duration::from_secs(25);
+
+/// What a `Mount` of a source this process holds nothing of, and finds no placement of, is
+/// answered (`UNAVAILABLE`): after a `Release`, the proof that the source's placement is gone.
+pub(in crate::server) const NOT_PREPARED_HERE: &str = "the source is not prepared here";
 
 /// The longest reason a refusal carries, in bytes, as the contract bounds it.
 pub(super) const MAX_REASON_BYTES: usize = 256;

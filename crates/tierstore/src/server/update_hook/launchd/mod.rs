@@ -36,7 +36,9 @@
 //!   `rollback`.
 //! - `verify` observes the target version served by the loaded job and records `verified`; a job
 //!   that serves read-only (its cache has not taken the write role yet) defers with `not_ready`
-//!   and records nothing. After the commit it only observes.
+//!   and records nothing. On a node with a mount provider the job, once it is the writer, must
+//!   pass the mount check ([`mount_check`]) before `verified` is recorded. After the commit it only
+//!   observes.
 //! - `rollback` boots the fs job out first when there is one, then, for an update, puts the
 //!   previous binary in place and boots the job out and in again (a hand-over of a loaded job
 //!   sends `SIGUSR2` instead), waits for the previous version and boots the fs job in; a first
@@ -62,6 +64,7 @@ use std::path::Path;
 use super::LAUNCHD_PLIST;
 use super::args::Step;
 use super::look::{Look, verified, writable};
+use super::mount_check;
 use super::params::Params;
 use super::ports::LaunchdPorts;
 use super::record::{Marker, Record};
@@ -321,12 +324,19 @@ fn verify(c: &Ctx<'_, '_>, params: &Params, record: &mut Record) -> Result<Done,
     }
     let observed = c.look().observed(target)?;
     let mode = writable(observed, c.label, params.verify_retry_secs)?;
+    // The writer binds the mount provider's socket: the provider must now do its job.
+    let mounted = mount_check::on_node(c.ports.host, c.ports.provider, params)?;
     // `verified` follows its act: everything above was observed.
     if !record.has(Marker::Verified) {
         let marked = record.with(Marker::Verified);
         c.save(record, marked)?;
     }
-    Ok(verified(mode, target))
+    let mut done = verified(mode, target);
+    if !mounted.is_empty() {
+        let rest = done.report.detail.take().unwrap_or_default();
+        done.report.detail = Some(format!("{mounted}; {rest}"));
+    }
+    Ok(done)
 }
 
 fn rollback(c: &Ctx<'_, '_>, params: &Params, record: &mut Record) -> Result<Done, Done> {

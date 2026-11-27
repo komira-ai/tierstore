@@ -13,7 +13,9 @@ use super::super::Drained;
 use super::super::cache_cli_tests::{Node, serving};
 use super::super::local_cache::pack_testing::Pack;
 use super::super::local_cache::{Disk, SystemDisk};
+use super::check::TREES;
 use super::testing::{Client, READ_ONLY, Rig, source, tree_objects};
+use crate::server::local_cache::testing::until;
 use crate::{Backend, FaultyBackend, MemoryBackend};
 
 /// Asserts that a build node whose file has a `mount-provider` interface serves the provider on
@@ -66,4 +68,52 @@ async fn a_build_node_serves_its_mount_provider_beside_the_s3_front() {
     let drained = serving(&settings, upstream, disk, work).await.unwrap();
     assert_eq!(drained, Drained { abandoned: 0 });
     assert!(!socket.exists());
+}
+
+/// Asserts that a build node with a mount provider has the update check's objects in front of its
+/// upstream: with nothing of the check in the upstream, both trees of the check are prepared and
+/// mounted over the socket (one from its sidecar, one from its list alone), read from no store, and
+/// released, and nothing is written to the upstream. Catches a node whose update check would need
+/// the objects in the store, or the network.
+#[tokio::test]
+async fn a_build_node_answers_the_check_trees_without_its_upstream() {
+    use crate::server::update_hook::MountProvider as _;
+    use crate::server::update_hook::machine::{ProviderSocket, ProviderTimes};
+
+    let node = Node::new("prov-node-check");
+    let socket = node.cache_dir().with_file_name("provider.sock");
+    let interface = format!(
+        "\n[[interface]]\ntype   = \"mount-provider\"\nparams = {{ socket = \"{}\" }}\n",
+        socket.display()
+    );
+    let settings = node.settings("", &interface);
+    let memory = Arc::new(MemoryBackend::new());
+    let upstream: Arc<dyn Backend> = Arc::new(FaultyBackend::new(memory.clone()));
+    let disk: Arc<dyn Disk> = Arc::new(SystemDisk);
+    let path = socket.clone();
+    let work = |_| async move {
+        until("the socket is bound", || path.exists()).await;
+        let answers = tokio::task::spawn_blocking(move || {
+            let client = ProviderSocket::new("/".into(), ProviderTimes::default());
+            let mut answers = Vec::new();
+            for tree in TREES {
+                answers.push(
+                    client
+                        .prepare(&path, tree.index, &tree.key())
+                        .map(|()| None),
+                );
+                answers.push(client.mount(&path, tree.index).map(Some));
+                answers.push(client.release(&path, tree.index).map(|()| None));
+            }
+            answers
+        })
+        .await
+        .unwrap();
+        for answer in answers {
+            assert!(answer.is_ok(), "{answer:?}");
+        }
+    };
+    let drained = serving(&settings, upstream, disk, work).await.unwrap();
+    assert_eq!(drained, Drained { abandoned: 0 });
+    assert!(memory.list("").await.unwrap().is_empty());
 }

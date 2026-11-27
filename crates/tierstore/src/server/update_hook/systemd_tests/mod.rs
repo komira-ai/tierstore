@@ -12,6 +12,7 @@ pub(in crate::server::update_hook) mod fake;
 mod fs_exe_tests;
 mod fs_failure_tests;
 mod fs_tests;
+mod mount_check_tests;
 mod prepare_tests;
 mod rollback_tests;
 mod service_tests;

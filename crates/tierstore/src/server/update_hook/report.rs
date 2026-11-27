@@ -113,11 +113,19 @@ pub enum Reason {
     /// under running jobs. The params' `mode = "restart"` overrides it, for an operator who has
     /// drained the node's jobs.
     ModeUnsupported,
+    /// `verify`: the node's mount provider refused a call of the mount check, for a tree of a
+    /// form the build service writes (with its L2 sidecar or without one): the node's jobs would
+    /// be refused the same way.
+    ProviderRefused,
+    /// `verify`: a tree the node's mount provider placed for the mount check was read back wrong
+    /// through the mount (a file missing or of other bytes, a path of another kind or not in the
+    /// tree, a directory outside the mount), or its placement outlived its release.
+    MountedTreeWrong,
 }
 
 impl Reason {
     /// Every reason.
-    pub const ALL: [Reason; 22] = [
+    pub const ALL: [Reason; 24] = [
         Reason::BadArgs,
         Reason::BadParams,
         Reason::Locked,
@@ -140,6 +148,8 @@ impl Reason {
         Reason::StateIo,
         Reason::HostFailed,
         Reason::ModeUnsupported,
+        Reason::ProviderRefused,
+        Reason::MountedTreeWrong,
     ];
 
     /// The token in the JSON.
@@ -168,6 +178,8 @@ impl Reason {
             Reason::StateIo => "state_io",
             Reason::HostFailed => "host_failed",
             Reason::ModeUnsupported => "mode_unsupported",
+            Reason::ProviderRefused => "provider_refused",
+            Reason::MountedTreeWrong => "mounted_tree_wrong",
         }
     }
 
@@ -197,7 +209,9 @@ impl Reason {
             | Reason::ProbeFailed
             | Reason::WrongBuild
             | Reason::ServiceManagerUnknown
-            | Reason::NoPreviousRelease => Class::Release,
+            | Reason::NoPreviousRelease
+            | Reason::ProviderRefused
+            | Reason::MountedTreeWrong => Class::Release,
         }
     }
 }

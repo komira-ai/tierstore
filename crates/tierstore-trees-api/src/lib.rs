@@ -11,6 +11,11 @@
 //! The crate also carries jobscheduler's protocol of a node-local mount provider, which tierstore
 //! serves on a Unix socket: [`provider`].
 
+/// The protobuf runtime the messages are generated for, so that a client that frames a call by
+/// hand (tierstore's update hook asks the mount provider over a Unix socket) encodes and decodes
+/// them with that same version and needs no dependency of its own on it.
+pub use prost;
+
 /// The gRPC package of the contract; a later incompatible service is a `v2` package beside it.
 pub const PACKAGE: &str = "tierstore.trees.v1";
 
