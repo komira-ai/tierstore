@@ -11,8 +11,9 @@
 //! can be, and not the hand-off socket. `params.mountpoint` is the node's
 //! file system mount, under which the provider answers a source's directory: an absolute path. In a
 //! file with an `fs` interface it is that interface's `mountpoint`, which it takes when left out and
-//! must equal when given (`config_fs.rs`); in a file without one it is the mount of `tierstore fs`
-//! on the node (its `fs.mountpoint`), `/run/tierstore/fs` if left out. `params.fetch_timeout` bounds one
+//! must equal when given (`config_fs.rs`); in a file without one it is the mountpoint given,
+//! `/run/tierstore/fs` if left out, which no process of this release serves: the provider then
+//! answers every `Prepare` and `Mount` `UNAVAILABLE` (see [`provider`](super)). `params.fetch_timeout` bounds one
 //! read of the store (a tree list, or the bytes of one file): longer than zero, `60s` if left out.
 //! The interface listens on no address and takes no other param; a file has at most one, and only
 //! a build node's file has one, since the provider makes its trees in the node's tree store.
@@ -82,10 +83,12 @@ pub(in crate::server) fn provider_of(
         let why = "it must be longer than zero";
         return Err(invalid(&format!("{place}.fetch_timeout"), why));
     }
+    // An `fs` interface of the same file makes it served (`config_fs.rs`).
     Ok(ProviderFlags {
         socket,
         mountpoint,
         fetch_timeout,
+        served: false,
     })
 }
 
