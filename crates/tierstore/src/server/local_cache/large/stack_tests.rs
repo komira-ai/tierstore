@@ -4,6 +4,7 @@
 //! left, and its families on `/metricz`. The evictor's and the committer's clock is injected and
 //! moved by hand; the engine's timers never fire in these tests.
 
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, UNIX_EPOCH};
@@ -347,7 +348,8 @@ async fn restart_replays_the_journal_and_serves_journaled_cells_without_refetch(
 
 /// Asserts that the entries an earlier process left are counted against the budget when the
 /// lock is taken: the oldest of them is removed (its data file, journal and snapshot) until the
-/// rest fit, and an entry that another process holds open is never removed.
+/// rest fit, and an entry that another process holds open is never removed. A directory of
+/// `packs-v2/` that cannot be read is passed over, and the sweep goes on with the others.
 #[tokio::test]
 async fn entries_left_by_an_earlier_process_are_removed_oldest_first_past_the_budget() {
     let dir = TestDir::under(std::env::temp_dir(), "tsstack-sweep");
@@ -372,7 +374,12 @@ async fn entries_left_by_an_earlier_process_are_removed_oldest_first_past_the_bu
         size: 3 * MIB,
     };
     let _open = other.open(&held).unwrap();
+    let unreadable = root.join("packs-v2/zz");
+    std::fs::create_dir_all(&unreadable).unwrap();
+    let mode = |m| std::fs::Permissions::from_mode(m);
+    std::fs::set_permissions(&unreadable, mode(0o000)).unwrap();
     let stack = stack::start(parts(&root, 4 * MIB, &dir.path().join("cache"), &upstream)).unwrap();
+    std::fs::set_permissions(&unreadable, mode(0o755)).unwrap();
     assert!(stack.is_evictor());
     let stem = |path: &PathBuf, suffix: &str| {
         let mut name = path.with_extension("").into_os_string();

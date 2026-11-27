@@ -354,3 +354,25 @@ fn an_output_that_cannot_be_written_is_a_failure() {
     assert_eq!(why, "writing the output: closed");
     assert!(Refusing.flush().is_ok());
 }
+
+/// Asserts that a legacy directory the verb cannot look at (the cache directory may not be
+/// searched) is a failure with status 1 naming it, in a dry run too, and that nothing is removed.
+#[test]
+fn a_directory_that_cannot_be_looked_at_is_a_failure_with_status_1() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let node = Node::new("tsgc-legacy-unsearchable");
+    put(&node.cache.join("obj/ab/x"), b"kept");
+    let mode = |m| std::fs::Permissions::from_mode(m);
+    std::fs::set_permissions(&node.cache, mode(0o600)).unwrap();
+    let (code, out, err) = node.legacy(&[]);
+    std::fs::set_permissions(&node.cache, mode(0o755)).unwrap();
+    assert_eq!(code, status(1));
+    assert_eq!(out, "");
+    let obj = node.cache.join("obj");
+    let want = format!(
+        "tierstore gc legacy: {}: Permission denied (os error 13)\n",
+        obj.display()
+    );
+    assert_eq!(err, want);
+    assert_eq!(std::fs::read(node.cache.join("obj/ab/x")).unwrap(), b"kept");
+}
