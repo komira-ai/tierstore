@@ -13,7 +13,7 @@ use tokio::sync::OwnedSemaphorePermit;
 use tokio::task::JoinError;
 
 use crate::journal::is_reserved;
-use crate::{Error, Meta, Opened, ReadBody, Span, Window};
+use crate::{Error, Meta, Opened, PutKind, ReadBody, Span, Window};
 
 use super::Server;
 use super::bucket;
@@ -483,7 +483,8 @@ impl Server {
                 Writes::Full if parts.headers.contains_key("if-none-match") => Writes::Creates,
                 other => other,
             };
-            return self.put_streamed(key, len, reader, check, writes).await;
+            let put = self.put_streamed(key, len, reader, check, writes).await;
+            return self.counted_put(put);
         }
         let body = reader.read_all(check).await?;
         if let Some(setting) = &setting {
@@ -626,7 +627,8 @@ impl Server {
     /// object visible only after the last piece. A body that is refused (a hash that does not match, a body
     /// over the limit, a stalled or cut one) ends the stream with an error, so the backend
     /// stores nothing, and `refused` has the answer to send. `len` is the `Content-Length` of
-    /// the request, if it has one. The answer has the object's `ETag` (see [`landed`]).
+    /// the request, if it has one. The digests the request named go with the put, for the
+    /// store to check the body against. The answer has the object's `ETag` (see [`landed`]).
     ///
     /// The backend's call runs on a task of its own, so that a client that goes away after
     /// the whole body was handed over leaves the put to be carried to its end, with its
@@ -650,6 +652,7 @@ impl Server {
         let permit = self.admit(len, writes.grant()).await?;
         let hot_only = matches!(writes, Writes::Presigned(_));
         let claim = matches!(writes, Writes::Full).then(|| check.claim());
+        let digests = check.digests();
         let refused = Refused::default();
         let (carry, body) = hand_over(
             pieces(reader, check, refused.clone()),
@@ -658,10 +661,12 @@ impl Server {
         let (backend, name) = (Arc::clone(&self.backend), key.to_owned());
         let mut storing = tokio::spawn(async move {
             let _permit = permit;
-            let put = match &claim {
-                Some(claim) => backend.put_stream_replacing(&name, len, body, claim),
-                None => backend.put_stream_answered(&name, len, body, hot_only),
+            let kind = match &claim {
+                Some(claim) => PutKind::Replaces(claim),
+                None if hot_only => PutKind::CreatesHotOnly,
+                None => PutKind::Creates,
             };
+            let put = backend.put_stream_digested(&name, len, body, kind, digests);
             put.await
         });
         let early = tokio::select! {
@@ -678,8 +683,7 @@ impl Server {
             return Err(error);
         }
         let answered = stored.map_err(S3Error::from)?;
-        let headers = landed::etag(self.backend.as_ref(), key, answered).await;
-        Ok(answer(StatusCode::OK, &headers, Bytes::new()))
+        Ok(landed::answer_put(self.backend.as_ref(), key, answered).await)
     }
 
     /// `If-Match`: an object cannot be replaced, so the answer is that the condition does not

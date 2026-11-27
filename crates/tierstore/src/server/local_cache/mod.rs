@@ -218,6 +218,8 @@ mod scrub_tests;
 #[cfg(test)]
 mod selfcheck_tests;
 #[cfg(test)]
+mod short_object_tests;
+#[cfg(test)]
 mod size_tests;
 #[cfg(test)]
 mod source_tests;
@@ -257,8 +259,8 @@ use tokio::sync::Semaphore;
 use crate::journal::is_reserved;
 use crate::server::lock;
 use crate::{
-    Backend, ByteRange, Clock, Error, Listed, Meta, OpenUpload, Opened, PartBody, PutAnswer,
-    PutClaim, PutOutcome, ReadBody, TreeDigest, UploadedPart, UploadsAfter,
+    Backend, BodyDigests, ByteRange, Clock, Error, Listed, Meta, OpenUpload, Opened, PartBody,
+    PutAnswer, PutClaim, PutKind, PutOutcome, ReadBody, TreeDigest, UploadedPart, UploadsAfter,
 };
 
 pub use disk::{Disk, Space, SystemDisk};
@@ -277,7 +279,7 @@ use fill::Pending;
 use hold::{Hold, Standing};
 use index::Index;
 use keep::Sent;
-use layout::{Name, data_path, name_of};
+use layout::{Name, name_of};
 use metrics::{add, bump};
 use revalidate::Verdict;
 pub(super) use source::{Blob, FillError};
@@ -702,41 +704,22 @@ impl Inner {
         locked(&self.index).get(&name.hex).map(index::Entry::meta)
     }
 
-    /// Removes the object from the index and, if this cache may write to its directory, from the
-    /// disk. A read-only cache forgets the object and leaves its files: they are the holder's.
-    /// It notes the name, and removes the files when it takes the lock (see `hold`), so that the
-    /// object is not served from them then: it was deleted or replaced at the upstream.
-    fn drop_entry(&self, hex: &str) {
-        let _ = self.remove_entry(hex, false);
-    }
-
-    /// [`drop_entry`](Self::drop_entry) for the eviction: an object that is pinned stays. Says
-    /// whether the object was removed.
-    fn evict_entry(&self, hex: &str) -> bool {
-        self.remove_entry(hex, true)
-    }
-
-    /// The work of both; `keep_pinned` leaves a pinned object where it is, looking at the pins
-    /// under the lock of the index, so that a pin made since the eviction chose the object holds.
-    fn remove_entry(&self, hex: &str, keep_pinned: bool) -> bool {
-        // Asked first: a take that is running holds the answer until it has looked at the notes,
-        // and an entry removed before that would be put back by the index it makes.
-        let may_delete = self.may_delete(hex);
-        #[cfg(test)]
-        self.trace_between_delete_steps();
-        {
-            let mut index = locked(&self.index);
-            if keep_pinned && index.pins.is_pinned(hex) {
-                return false;
-            }
-            drop(index.remove(hex));
+    /// Whether the object the index holds is the one on the disk. A read-only cache's index is
+    /// its scan, and the holder may have put the object again since, so the sidecar is read; a
+    /// read-write cache, and a key named by its content, need no check.
+    async fn unchanged(&self, name: &Name, meta: &Meta) -> bool {
+        if self.read_write() || name.content.is_some() {
+            return true;
         }
-        if may_delete {
-            let root = &self.config.path;
-            let _ = std::fs::remove_file(data_path(root, hex));
-            let _ = std::fs::remove_file(layout::meta_path(root, hex));
-        }
-        true
+        let believed = stream::Believed {
+            size: meta.size,
+            tag: meta.tag.clone(),
+        };
+        let (root, hex) = (self.config.path.clone(), name.hex.clone());
+        let reading = tokio::task::spawn_blocking(move || {
+            stream::same_version_on_disk(&root, &hex, &believed)
+        });
+        reading.await.unwrap_or(false)
     }
 }
 
@@ -780,20 +763,6 @@ impl Backend for LocalCache {
         Ok(())
     }
 
-    /// Create-only, sent as `put_stream` (or `put_stream_hot_only`) is; the answer is the
-    /// upstream's (see `put_through`, in `keep`).
-    async fn put_stream_answered(
-        &self,
-        key: &str,
-        len: Option<u64>,
-        body: PartBody<'_>,
-        hot_only: bool,
-    ) -> Result<Option<PutAnswer>, Error> {
-        let sent = Sent::creates(hot_only);
-        let put = self.inner.put_through(key, len, body, sent);
-        put.await.map(|(_, answer)| answer)
-    }
-
     /// Sent to the upstream's own call, through the cache as a create-only put is (see
     /// `put_through`, in `keep`).
     async fn put_stream_sha256(
@@ -819,6 +788,23 @@ impl Backend for LocalCache {
     ) -> Result<Option<PutAnswer>, Error> {
         let sent = Sent::Replaces(claim);
         let put = self.inner.put_through(key, len, body, sent);
+        put.await.map(|(_, answer)| answer)
+    }
+
+    /// The put of `kind` through the cache, as `put_stream`, `put_stream_hot_only` and
+    /// `put_stream_replacing` make it, with `digests` passed to the upstream's own call.
+    async fn put_stream_digested(
+        &self,
+        key: &str,
+        len: Option<u64>,
+        body: PartBody<'_>,
+        kind: PutKind<'_>,
+        digests: BodyDigests,
+    ) -> Result<Option<PutAnswer>, Error> {
+        let sent = Sent::of(kind);
+        let put = self
+            .inner
+            .put_through_digested(key, len, body, (sent, digests));
         put.await.map(|(_, answer)| answer)
     }
 

@@ -17,7 +17,7 @@ use tokio::sync::{Mutex, MutexGuard};
 use crate::server::local_cache::LocalCache;
 use crate::server::{ACCEPT_PAUSE, pause_after};
 
-use super::mount::{self, Mount};
+use super::mount::{self, Holding, Mount};
 use super::wire::{self, MAX_FDS};
 use super::written::after_ready;
 use super::{Front, HandoffError, line};
@@ -41,6 +41,9 @@ pub(super) const NO_MOUNT: &str = "this instance holds no mount";
 /// Why an instance that holds the mount refuses a taker that does not ask for it: the mount must
 /// not be left with an instance about to end.
 pub(super) const HOLDS_MOUNT: &str = "this instance holds the mount, and a taker must ask for it";
+/// Why a request for the mount is refused while a taker of the other conversation that offers it
+/// (`take-fs 1`) is at it.
+pub(super) const MOUNT_BUSY: &str = "another taker is taking the mount";
 
 /// A listening socket the instance offers: a copy of the descriptor the front serves from, so
 /// that the offer outlives nothing but itself.
@@ -163,16 +166,14 @@ impl Offer {
     }
 
     /// The same, holding `mount`: it is offered to a taker that asks for it (`take 1`, `ready`,
-    /// `mount`; the `ready` step needs [`with_ready_wait`](Self::with_ready_wait)), and a taker
-    /// that does not ask for it is refused. At `ack` the mount is quiesced, at `ready` given up;
-    /// a taker gone between the two leaves it resumed.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the start of the fs interface offers its mount (one-service.md section 6, P3)"
-        )
-    )]
+    /// `mount`; the `ready` step needs [`with_ready_wait`](Self::with_ready_wait)), which has
+    /// `mount.wait` for the quiesce and for its `ready`. At `ack` the mount is quiesced, at `ready`
+    /// given up; a taker gone between the two leaves it resumed. While this instance holds the
+    /// mount, a taker that does not ask for it is refused: at its request when it asks `take 1`
+    /// alone, and at its `ready` when it asked for that step and the mount was not taken meanwhile
+    /// on the instance's other conversation (`take-fs 1`, which a taker of the previous release
+    /// asks between its request here and its `ready`, `mount.claim`). Once the mount is given up
+    /// on either, a request for it is refused as by an instance that holds none.
     pub(crate) fn with_mount(mut self, mount: Mount) -> Self {
         self.mount = Some(mount);
         self
@@ -299,6 +300,9 @@ impl Offer {
         if let Some(held) = self.mount.as_ref().filter(|_| state.quiesced) {
             run(&held.resume).await;
         }
+        if let Some(held) = self.mount.as_ref().filter(|_| state.claimed) {
+            held.claim.release();
+        }
         if state.held {
             self.held(false).await;
         }
@@ -313,6 +317,7 @@ impl Offer {
     async fn hand(&self, stream: UnixStream, offered: &Offered) {
         if let Some(held) = self.mount.as_ref().filter(|_| offered.mount) {
             run(&held.give_up).await;
+            held.claim.give_up();
         }
         let cache = self.cache.as_ref().filter(|_| offered.lock);
         if let Some(cache) = cache {
@@ -386,14 +391,27 @@ impl Offer {
         if stream.peer_cred()?.uid() != self.uid {
             return refuse(stream, "the taker is not the user of this instance").await;
         }
-        match (asked.mount, self.mount.is_some()) {
-            (true, false) => return refuse(stream, NO_MOUNT).await,
-            (false, true) => return refuse(stream, HOLDS_MOUNT).await,
+        match (asked.mount, self.mount.as_ref()) {
+            (true, None) => return refuse(stream, NO_MOUNT).await,
+            // A taker with no `ready` step is handed the sockets at `done`: the mount would be left.
+            (false, Some(held))
+                if asked.ready.is_none() && held.claim.holding() != Holding::Gone =>
+            {
+                return refuse(stream, HOLDS_MOUNT).await;
+            }
             _ => {}
         }
         let Ok(taking) = self.taking.try_lock() else {
             return refuse(stream, "another taker is taking the sockets").await;
         };
+        if let Some(held) = self.mount.as_ref().filter(|_| asked.mount) {
+            match held.claim.claim() {
+                Holding::Here => state.claimed = true,
+                Holding::Taking => return refuse(stream, MOUNT_BUSY).await,
+                // Taken on `take-fs 1`: this instance holds no mount any more.
+                Holding::Gone => return refuse(stream, NO_MOUNT).await,
+            }
+        }
         let mut lines = vec!["offer".to_owned()];
         for socket in &self.sockets {
             lines.push(line(socket.front, socket.listener.local_addr()?));
@@ -433,7 +451,20 @@ impl Offer {
         state.unlinked = true;
         wire::send(stream, &["done".to_owned()], &[]).await?;
         if let Some(wait) = asked.ready {
+            let mount = self.mount.as_ref();
+            let wait = mount
+                .filter(|_| offered.mount)
+                .map_or(wait, |held| wait.max(held.wait));
             awaits_ready(stream, wait).await?;
+            if !offered.mount && mount.is_some_and(|held| held.claim.holding() != Holding::Gone) {
+                // The mount was not taken on `take-fs 1` meanwhile: this instance must not end
+                // with it. The taker is told so in place of `bye`, and this instance goes on.
+                refuse::<()>(stream, HOLDS_MOUNT).await?;
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "a taker that did not ask for the mount said ready while this instance holds it",
+                ));
+            }
         }
         Ok(Some((offered, taking)))
     }
@@ -454,6 +485,8 @@ struct State {
     held: bool,
     /// The mount was quiesced.
     quiesced: bool,
+    /// The mount was claimed for this taker.
+    claimed: bool,
 }
 
 /// Reads the taker's `ready`, which it has `wait` to send after `done`. The answer, `bye`, is

@@ -14,6 +14,7 @@ use tokio::task::JoinHandle;
 
 use super::{Listening, SocketFile, pinned, serve, serve_as};
 use crate::Op;
+use crate::server::local_cache::opens::requests::{RequestKind, Requests};
 use crate::server::local_cache::opens::{Opens, Spans};
 use crate::server::local_cache::pack_testing::{Pack, blob_hex, fills, recency};
 use crate::server::local_cache::testing::{Rig, digest, pattern, until, wait_advancing};
@@ -682,6 +683,51 @@ async fn an_opens_is_answered_ok_and_counted() {
         "tierstore_fs_opens_waiting 1\n".to_owned(),
     ] {
         assert!(metrics.contains(&line), "{line}{metrics}");
+    }
+    served.stop().await;
+}
+
+/// Asserts that a `requests`, a `run-attached` and a `run-detached` are answered `ok`, by a node
+/// with no tree store, and show in the cache's families; a malformed one of each is refused and
+/// counts nothing.
+#[tokio::test]
+async fn a_requests_and_the_reports_of_runs_are_answered_ok_and_counted() {
+    let rig = Rig::new("tfs-requests");
+    let place = Place::new("tfs-requests");
+    let served = Served::start(&rig.cache, &place.path);
+    let mut client = Client::connect(&place.path).await;
+    let mut spans = [Spans::default(); 8];
+    spans[RequestKind::Lookup.index()].ms = 3;
+    spans[RequestKind::Lookup.index()].buckets[2] = 1;
+    let report = Requests {
+        mount: "boot-1".to_owned(),
+        process: 7,
+        spans,
+    };
+    assert_eq!(client.ask(&report.line()).await, "ok");
+    let fewer = report.line().rsplit_once(' ').unwrap().0.to_owned();
+    assert_eq!(client.ask(&fewer).await, "refused malformed request");
+    assert_eq!(client.ask("run-attached ok 35 25 7 3").await, "ok");
+    assert_eq!(
+        client.ask("run-attached ok 35 25 7").await,
+        "refused malformed request"
+    );
+    assert_eq!(client.ask("run-detached failed 4").await, "ok");
+    assert_eq!(
+        client.ask("run-detached failed x").await,
+        "refused malformed request"
+    );
+    let metrics = rig.cache.metrics();
+    for line in [
+        "tierstore_fs_request_seconds_sum{kind=\"lookup\"} 0.003\n",
+        "tierstore_fs_request_seconds_count{kind=\"lookup\"} 1\n",
+        "tierstore_fs_run_attach_seconds_sum{outcome=\"ok\"} 0.035\n",
+        "tierstore_fs_run_attach_seconds_count{outcome=\"ok\"} 1\n",
+        "tierstore_fs_run_attach_part_seconds_sum{part=\"flatten\",outcome=\"ok\"} 0.007\n",
+        "tierstore_fs_run_detach_seconds_sum{outcome=\"failed\"} 0.004\n",
+        "tierstore_fs_run_detach_seconds_count{outcome=\"failed\"} 1\n",
+    ] {
+        assert!(metrics.contains(line), "{line}{metrics}");
     }
     served.stop().await;
 }

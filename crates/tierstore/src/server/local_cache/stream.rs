@@ -298,23 +298,6 @@ impl Inner {
         })
     }
 
-    /// Whether the object the index holds is the one on the disk. A read-only cache's index is
-    /// its scan, and the holder may have put the object again since, so the sidecar is read; a
-    /// read-write cache, and a key named by its content, need no check.
-    pub(super) async fn unchanged(&self, name: &Name, meta: &Meta) -> bool {
-        if self.read_write() || name.content.is_some() {
-            return true;
-        }
-        let believed = Believed {
-            size: meta.size,
-            tag: meta.tag.clone(),
-        };
-        let (root, hex) = (self.config.path.clone(), name.hex.clone());
-        let reading =
-            tokio::task::spawn_blocking(move || same_version_on_disk(&root, &hex, &believed));
-        reading.await.unwrap_or(false)
-    }
-
     /// `len` bytes of `file` from `offset`, a chunk at a time.
     fn from_file(self: &Arc<Self>, file: Arc<File>, window: (u64, u64), from: Served) -> ReadBody {
         let (offset, len) = window;

@@ -11,15 +11,30 @@
 //! asks. A HEAD that fails leaves the answer without the header: the object is stored, and a put
 //! that succeeded is not answered as one that failed, which a client would send again.
 
+use bytes::Bytes;
+use hyper::StatusCode;
+
+use crate::server::reply::{Answer, answer};
 use crate::{Backend, PutAnswer};
 
 #[cfg(test)]
 #[path = "landed_tests.rs"]
 mod tests;
 
+/// The 200 of a put of `key` that `backend` stored and answered with `answered`, with its `ETag`
+/// header; none if the answer gave no tag and the HEAD after it failed.
+pub(super) async fn answer_put(
+    backend: &dyn Backend,
+    key: &str,
+    answered: Option<PutAnswer>,
+) -> Answer {
+    let headers = etag(backend, key, answered).await;
+    answer(StatusCode::OK, &headers, Bytes::new())
+}
+
 /// The `ETag` header of the answer to a put of `key` that `backend` stored and answered with
 /// `answered`; none if it gave no tag and the HEAD after it failed.
-pub(super) async fn etag(
+async fn etag(
     backend: &dyn Backend,
     key: &str,
     answered: Option<PutAnswer>,

@@ -238,8 +238,7 @@ async fn a_windowed_read_of_an_object_whose_tag_moves_is_served_only_when_the_up
 }
 
 /// Asserts that a hot-only put through the cache reaches the upstream as a hot-only put and a
-/// plain streamed put as a plain one, under a key the cache keeps and under one it does not, and
-/// that the put that gives the upstream's answer (`put_stream_answered`) is each as it says.
+/// plain streamed put as a plain one, under a key the cache keeps and under one it does not.
 #[tokio::test]
 async fn a_hot_only_put_reaches_the_upstream_as_a_hot_only_put() {
     let rig = Rig::new("tscache-hot-only");
@@ -268,13 +267,6 @@ async fn a_hot_only_put_reaches_the_upstream_as_a_hot_only_put() {
         .unwrap();
     assert_eq!(probe.hot_only.load(Ordering::SeqCst), 2);
     assert_eq!(probe.plain.load(Ordering::SeqCst), 2);
-
-    for (key, hot_only) in [("cas/b/five", true), ("cas/b/six", false)] {
-        let put = cache.put_stream_answered(key, Some(1), body(b"5"), hot_only);
-        put.await.unwrap();
-    }
-    assert_eq!(probe.hot_only.load(Ordering::SeqCst), 3);
-    assert_eq!(probe.plain.load(Ordering::SeqCst), 3);
 }
 
 /// Asserts that a read cache refuses a hot-only put as it refuses every write, and that a
