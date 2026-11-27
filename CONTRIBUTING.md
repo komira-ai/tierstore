@@ -31,7 +31,7 @@ generated files (`buildrules.lock.bzl`, `buildrules.bzl`, `third_party/buildrule
 `//:check` fails while they no longer match the manifests. You need not run `buildrules sync` yourself: push the change
 with the `Cargo.lock` cargo writes for it, and when the farm lane fails it regenerates the files on the farm and offers
 them as the artifact `sync-patch`. Its summary prints the two commands that take it, run at the root of a checkout of
-the pull request's head; commit what they change and push. Running `buildrules sync` and committing what it writes
+the pull request's branch, merged with `main` (the run builds that merge); commit what they change and push. Running `buildrules sync` and committing what it writes
 does the same. What the farm cannot sync, and why: [docs/farm.md](docs/farm.md), "A stale table in a pull request".
 
 ## Coverage

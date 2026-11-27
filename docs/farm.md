@@ -47,8 +47,8 @@ upload `offer/` as the run's artifact `sync-patch` (`sync.patch`, one patch `git
 files are stale) or `lock` (cargo changed `Cargo.lock` too, and the patch holds that
 `Cargo.lock`: read that part before you commit it). Nothing is pushed, and the job stays red.
 
-For a stale table, the summary gives two commands. Run them at the root of a checkout of the pull
-request's head, then commit what changed and push:
+For the verdicts `tables` and `lock`, the summary gives two commands. Run them at the root of a
+checkout of the pull request's branch, then commit what changed and push:
 
 ```sh
 gh run download <run> -R komira-ai/tierstore -n sync-patch -D ../sync-patch-<run>
@@ -57,9 +57,10 @@ git apply ../sync-patch-<run>/sync.patch
 
 So a pull request that adds or bumps a dependency needs no `buildrules sync` on a workstation: push
 the `Cargo.toml` change with the `Cargo.lock` that cargo writes for it (any `cargo` command of the
-workspace does), wait for the farm lane, and take its patch. The patch is made for the commit the
-run built; after a merge of `main` or another push that touches a manifest, take the patch of the
-newer run.
+workspace does), wait for the farm lane, and take its patch. A pull request's run builds the
+branch merged into `main` (the `pull_request` checkout), so the patch is made for that merge: when
+the branch is behind `main`, merge `main` into it and push first, and take the patch of that run.
+After any other push that touches a manifest, take the patch of the newer run.
 
 What the farm sync cannot do, the first step says in its log, and the summary says there is no
 patch; these need `buildrules sync` where there is a network:
