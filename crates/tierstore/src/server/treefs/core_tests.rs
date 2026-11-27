@@ -667,7 +667,7 @@ fn tell_live_names_the_trees_attached_now() {
     let open = open_cached(core, ino::of(1, 3), false).unwrap();
     assert_eq!(
         rig.node
-            .pin("mount-1", &stale, &[a.clone()])
+            .pin("mount-1", &stale, std::slice::from_ref(&a))
             .unwrap()
             .pinned,
         1

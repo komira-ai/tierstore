@@ -497,14 +497,13 @@ fn build_node_file(node: &Node, cache_extra: &str) -> OsString {
     path.into_os_string()
 }
 
-/// Asserts that a build node's file with `local_cache.fill_socket` at an absolute path, as the
-/// build nodes' files of the release before have it, starts on both releases (the release before
-/// binds its fill socket there; this branch reads the key and ignores it, serving no fill socket),
-/// so that a host rolled back to the release before, or forward to this one, starts on the same
-/// file; that the file without the key starts on both; and that a relative path, which the release
-/// before refuses with status 2, starts on this branch, which no longer reads it.
+/// Asserts that a build node's file with `local_cache.fill_socket`, at an absolute path or a
+/// relative one, starts on this branch, which reads the key and ignores it (serving no fill
+/// socket), and is refused with status 2 by the pinned release before, which does not know the
+/// key (it refuses an unknown key of `[local_cache]`); and that the file without the key starts on
+/// both, so the file a host can roll back with is the one without it.
 #[test]
-fn a_build_node_file_with_local_cache_fill_socket_starts_on_both_releases() {
+fn a_build_node_file_with_local_cache_fill_socket_starts_here_and_without_it_on_both() {
     let node = Node::new("compat-config-fill-socket");
     let ok = status(ExitCode::SUCCESS);
     let refused = status(ExitCode::from(2));
@@ -512,9 +511,9 @@ fn a_build_node_file_with_local_cache_fill_socket_starts_on_both_releases() {
     let named = format!("fill_socket = \"{}\"", socket.display());
     assert_eq!(
         both(&build_node_file(&node, &named)),
-        (ok.clone(), ok.clone())
+        (ok.clone(), refused.clone())
     );
-    assert_eq!(both(&build_node_file(&node, "")), (ok.clone(), ok.clone()));
     let relative = build_node_file(&node, "fill_socket = \"fill.sock\"");
-    assert_eq!(both(&relative), (ok, refused));
+    assert_eq!(both(&relative), (ok.clone(), refused));
+    assert_eq!(both(&build_node_file(&node, "")), (ok.clone(), ok));
 }

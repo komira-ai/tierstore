@@ -41,8 +41,8 @@ pub(in crate::server) struct Live {
     /// How long the core waits for an answer.
     fetch_timeout: Duration,
     pub runtime: PathBuf,
-    pub mountpoint: PathBuf,
-    pub dir: TestDir,
+    /// Last: the directories go after everything in them.
+    _dir: TestDir,
 }
 
 impl Live {
@@ -84,7 +84,7 @@ impl Live {
             Settings {
                 owner: OWNER,
                 cache_path: bench.rig.config.path.clone(),
-                mountpoint: mountpoint.clone(),
+                mountpoint,
                 mount_id: MOUNT.to_owned(),
                 generation: 1,
                 count_lookups: true,
@@ -103,8 +103,7 @@ impl Live {
             cache,
             fetch_timeout,
             runtime,
-            mountpoint,
-            dir,
+            _dir: dir,
         }
     }
 

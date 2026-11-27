@@ -33,8 +33,6 @@ use std::fmt::Write as _;
 use std::sync::Mutex;
 
 use super::attaches::{BUCKETS, Histogram};
-#[cfg(test)]
-use super::descriptors::number;
 use super::descriptors::{MOST_MOUNTS, PROCESSES};
 use super::{LocalCache, locked};
 
@@ -136,51 +134,6 @@ pub(in crate::server) struct Opens {
     pub waiting: u64,
     /// The opens of each kind of [`KINDS`] since the mount process started.
     pub spans: [Spans; KINDS.len()],
-}
-
-impl Opens {
-    /// The line of the report. Only the tests of the core still read the words of a report.
-    #[cfg(test)]
-    pub(in crate::server) fn line(&self) -> String {
-        let mut line = format!("opens {} {} {}", self.mount, self.process, self.waiting);
-        for spans in &self.spans {
-            let _ = write!(line, " {}", spans.ms);
-            for count in spans.buckets {
-                let _ = write!(line, " {count}");
-            }
-        }
-        line
-    }
-
-    /// The report whose words after `opens` are `rest`: a mount name, two numbers, and for each
-    /// kind the milliseconds and one number for each bucket. None for anything else, among it a
-    /// report of another number of buckets. Only the tests of the core still read the words of a
-    /// report.
-    #[cfg(test)]
-    pub(in crate::server) fn parse(rest: &str) -> Option<Self> {
-        let (mount, numbers) = rest.split_once(' ')?;
-        let numbers: Vec<u64> = numbers.split(' ').map(number).collect::<Option<_>>()?;
-        let [process, waiting, cells @ ..] = numbers.as_slice() else {
-            return None;
-        };
-        if cells.len() != KINDS.len() * (1 + BUCKETS) {
-            return None;
-        }
-        let mut spans = [Spans::default(); KINDS.len()];
-        // Each chunk is the milliseconds and then the buckets: `1 + BUCKETS` numbers.
-        for (spans, cells) in spans.iter_mut().zip(cells.chunks_exact(1 + BUCKETS)) {
-            spans.ms = cells[0];
-            for (count, cell) in spans.buckets.iter_mut().zip(&cells[1..]) {
-                *count = *cell;
-            }
-        }
-        Some(Self {
-            mount: mount.to_owned(),
-            process: *process,
-            waiting: *waiting,
-            spans,
-        })
-    }
 }
 
 /// What one mount reported.

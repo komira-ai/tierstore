@@ -320,8 +320,8 @@ fn the_mac_names_its_fill_socket_since_launchd_gives_no_state_directory() {
 /// file, copied into a scratch directory with its key files and its cache there (keys of the
 /// form the process reads, mode 0600), is checked by the binary run with the plist's own
 /// arguments and `--check-config`, which reads the file and the key files and binds nothing, and
-/// it exits 0 and says nothing. It would catch a file or a flag the binary refuses, which would
-/// leave the job restarting for ever.
+/// it exits 0 and says only that the file's `local_cache.fill_socket` is ignored. It would catch a
+/// file or a flag the binary refuses, which would leave the job restarting for ever.
 #[test]
 fn the_binary_accepts_the_plists_command_line_and_file() {
     let scratch = TestDir::under(std::env::temp_dir(), "packaging-macos-check");
@@ -359,7 +359,13 @@ fn the_binary_accepts_the_plists_command_line_and_file() {
             String::from_utf8_lossy(&out.stdout).into_owned(),
             String::from_utf8_lossy(&out.stderr).into_owned()
         ),
-        (Some(0), String::new(), String::new())
+        (
+            Some(0),
+            String::new(),
+            "tierstore: local_cache.fill_socket is ignored: no fill socket is served, the file \
+             system of an fs interface calls the cache in this process\n"
+                .to_owned()
+        )
     );
 }
 

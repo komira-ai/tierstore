@@ -54,16 +54,6 @@ pub(in crate::server) struct Descriptors {
     pub short: u64,
 }
 
-/// The number `word` writes in decimal digits, with no sign; none for anything else. Only the
-/// reading of an `opens` line in the tests of the core still uses it.
-#[cfg(test)]
-pub(super) fn number(word: &str) -> Option<u64> {
-    if word.is_empty() || !word.bytes().all(|byte| byte.is_ascii_digit()) {
-        return None;
-    }
-    word.parse().ok()
-}
-
 /// `name` as the value of a label: `\` and `"` escaped.
 fn escaped(name: &str) -> String {
     name.replace('\\', "\\\\").replace('"', "\\\"")

@@ -237,7 +237,12 @@ async fn attachments_and_pins_are_restored_on_restart() {
     second._setup.core.settled().unwrap();
     // The start told the cache the attached trees: no other pin of the mount, and none of another
     // mount, was left for the cache to take away.
-    assert_eq!(rig.node.pins_live(&mount, &[digest.clone()]).unwrap(), 0);
+    assert_eq!(
+        rig.node
+            .pins_live(&mount, std::slice::from_ref(&digest))
+            .unwrap(),
+        0
+    );
     // The pin of the attached tree is the one that stayed.
     assert!(rig.node.unpin(&mount, &digest).unwrap() >= 1);
     second.leave(Leaving::Signal).await.unwrap();
