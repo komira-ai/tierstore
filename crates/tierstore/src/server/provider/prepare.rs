@@ -201,11 +201,11 @@ async fn place(shared: &Shared, job: &Job, reads: UnboundedSender<Group>) -> Res
     let (created, files) = made
         .await
         .map_err(|why| Stage::Failed(format!("the tree was not made: {why}")))??;
-    if from_list {
-        shared.cache.sidecar_fallback();
-    }
     match shared.owner(&job.id, &job.released) {
         Owner::Ours => {
+            if from_list {
+                shared.cache.sidecar_fallback();
+            }
             if !reads.is_closed() {
                 for group in alone(&files) {
                     let _ = reads.unbounded_send(group);
@@ -272,6 +272,8 @@ fn built_v1(bytes: &[u8], digest: &TreeDigest, limits: &TreeLimits) -> Result<Bu
 
 /// The version 2 list in `bytes`, read at the ref for want of a sidecar, once it hashes to
 /// `digest`, the tree id; a list that does not is refused, and nothing of it is walked or read.
+/// The cache fails a read of `cas/l/` bytes that do not hash to their key before this sees them,
+/// so this repeats that check here, where the tree is made, as `parse_tree_list` does.
 pub(super) fn list_v2(bytes: Vec<u8>, digest: &TreeDigest) -> Result<Vec<u8>, Stage> {
     let actual = TreeDigest::of(&bytes);
     if actual != *digest {
