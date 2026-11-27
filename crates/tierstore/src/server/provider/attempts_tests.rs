@@ -15,7 +15,7 @@ use super::testing::{
 };
 use crate::TreeList;
 use crate::server::local_cache::trees::testing::Bench;
-use crate::server::local_cache::trees::{Resolved, TreeStore};
+use crate::server::local_cache::trees::{PreparePrefetch, Resolved, TreeStore, TreesConfig};
 
 /// The directory the provider answers for the source `index` of the attempt `attempt` of `run`.
 fn attempt_path(run: &str, index: u32, attempt: u64) -> PathBuf {
@@ -115,10 +115,17 @@ async fn a_release_of_the_same_attempt_removes_its_tree() {
 
 /// Asserts that a release of an attempt the store cannot make (the cache does not hold the lock of
 /// its directory) is unavailable, so that the agent asks again: of the attempt's own placement,
-/// and of the same source placed without an attempt.
+/// and of the same source placed without an attempt. The trees are prepared with
+/// `trees.prepare_prefetch = "none"`, so that no read of their files is still going on, or has
+/// marked a tree ready, when the store is read again without the lock: a ready tree whose bytes
+/// that store's cache does not yet see would be dropped, and its placement with it.
 #[tokio::test]
 async fn a_release_of_an_attempt_the_store_cannot_make_is_unavailable() {
-    let rig = Rig::new("prov-attempt-ro").await;
+    let lazy = TreesConfig {
+        prepare_prefetch: PreparePrefetch::None,
+        ..TreesConfig::default()
+    };
+    let rig = Rig::with("prov-attempt-ro", lazy, |_| {}).await;
     rig.mounted_attempt("js.1", 0, 2).await;
     rig.mounted("js.2", 0).await;
     let holder = rig.bench.rig.locked();
