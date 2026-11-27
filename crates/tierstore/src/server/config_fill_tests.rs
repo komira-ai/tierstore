@@ -1,15 +1,21 @@
-//! The place of the fill socket: its default in the state directory, the key that names another
-//! path, what it is refused for, the two keys that size its pool, and the shape of node that does
-//! not take them.
+//! The keys the fill socket had in `[local_cache]`: `fill_socket`, read and ignored with its line
+//! on stderr whatever its value, the two keys that size the pool of the file system's fills, and
+//! the shape of node that does not take the prefetch keys.
 
+use std::io::{self, Write};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use super::super::config::{PerRun, settings_from_text};
+use tracing::Level;
+use tracing::subscriber::with_default;
+
+use super::super::build_info::stderr_log::LineLog;
+use super::super::config::{PerRun, Settings, settings_from_text};
 use super::super::config_cache::CacheSettings;
 use super::super::config_testing::DEFAULTS;
 use super::super::local_cache::{FILL_SOCKET_CONCURRENCY, FILL_SOCKET_WAIT};
-use super::DEFAULT_FILL_SOCKET_NAME;
+use super::IGNORED_FILL_SOCKET;
 
 /// A build node's file with `more` lines in `[local_cache]` and `server` in `[server]`.
 fn file(server: &str, more: &str) -> String {
@@ -56,65 +62,73 @@ fn refusal(text: &str, run: PerRun) -> String {
     settings_from_text(text, run).unwrap_err().to_string()
 }
 
-/// Asserts that a node with no key and no state directory has no fill socket, that one with a state
-/// directory has `fill.sock` in it, and that the key names another path and wins.
-#[test]
-fn the_socket_is_in_the_state_directory_unless_a_key_names_another_path() {
-    assert_eq!(DEFAULT_FILL_SOCKET_NAME, "fill.sock");
-    assert_eq!(cache_of(&file("", ""), DEFAULTS).fill_socket, None);
-    let default = Some(PathBuf::from("/var/lib/tierstore/fill.sock"));
-    assert_eq!(cache_of(&file("", ""), serviced()).fill_socket, default);
-    let named = file("", "fill_socket = \"/run/tierstore/fill.sock\"");
-    let wanted = Some(PathBuf::from("/run/tierstore/fill.sock"));
-    assert_eq!(cache_of(&named, serviced()).fill_socket, wanted);
-    assert_eq!(cache_of(&named, DEFAULTS).fill_socket, wanted);
+/// A writer whose bytes the test reads back: the operator's stderr.
+#[derive(Clone, Default)]
+struct Stderr(Arc<Mutex<Vec<u8>>>);
+
+impl Stderr {
+    fn text(&self) -> String {
+        let bytes = self.0.lock().expect("the buffer is not poisoned").clone();
+        String::from_utf8(bytes).expect("the lines are text")
+    }
 }
 
-/// Asserts what a path is refused for: a relative path, a directory, a path too long for a Unix
-/// socket (the last length that fits is taken), the hand-off socket's path, a path inside the cache
-/// directory, and a cache directory that is relative and so cannot be compared with it.
+impl Write for Stderr {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let mut held = self.0.lock().expect("the buffer is not poisoned");
+        held.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// The settings of `text` for `run`, and what their load said on stderr.
+fn loaded(text: &str, run: PerRun) -> (Settings, String) {
+    let stderr = Stderr::default();
+    let settings = with_default(LineLog::new(stderr.clone(), Level::INFO), || {
+        settings_from_text(text, run)
+    });
+    (settings.expect("the file loads"), stderr.text())
+}
+
+/// Asserts that a build node's file with `local_cache.fill_socket` loads, whatever the path (one
+/// a release that served the socket took, a relative one, one longer than a Unix socket's
+/// address, the hand-off socket's, one inside the cache directory: each refused by such a
+/// release), and says once on stderr, word for word, that the key is ignored; that the settings
+/// are those of the same file without the key; and that the file without it says nothing.
 #[test]
-fn a_path_that_cannot_be_a_socket_is_refused_by_name() {
-    let refused = |value: &str| refusal(&file("", &format!("fill_socket = \"{value}\"")), DEFAULTS);
-    assert!(refused("fill.sock").starts_with("local_cache.fill_socket: "));
-    assert!(refused("fill.sock").contains("must be an absolute path"));
-    assert!(refused("/").contains("must name a file"));
-    let long = format!("/{}", "a".repeat(103));
-    assert!(refused(&long).contains("is 104 bytes; the path of a Unix socket is at most 103"));
-    let longest = format!("/{}", "a".repeat(102));
-    let fits = file("", &format!("fill_socket = \"{longest}\""));
+fn a_file_with_local_cache_fill_socket_starts_and_says_it_is_ignored() {
     assert_eq!(
-        cache_of(&fits, DEFAULTS).fill_socket,
-        Some(PathBuf::from(&longest))
+        IGNORED_FILL_SOCKET,
+        "tierstore: local_cache.fill_socket is ignored: no fill socket is served, the file \
+         system of an fs interface calls the cache in this process"
     );
-
-    let same = file(
-        "handoff_socket = \"/run/t/s.sock\"",
-        "fill_socket = \"/run/t/s.sock\"",
-    );
-    let why = refusal(&same, DEFAULTS);
-    assert!(why.starts_with("local_cache.fill_socket: "), "{why}");
-    assert!(why.contains("server.handoff_socket too"), "{why}");
-
-    let inside = file(
-        "",
-        "fill_socket = \"/var/lib/tierstore-cache/obj/fill.sock\"",
-    );
-    let why = refusal(&inside, DEFAULTS);
-    assert!(
-        why.starts_with("local_cache.path: must not hold local_cache.fill_socket"),
-        "{why}"
-    );
-
-    let relative = file("", "fill_socket = \"/run/t/f.sock\"").replace(
-        "path   = \"/var/lib/tierstore-cache\"",
-        "path   = \"cache\"",
-    );
-    let why = refusal(&relative, DEFAULTS);
-    assert!(
-        why.starts_with("local_cache.path: must be an absolute path"),
-        "{why}"
-    );
+    let handoff = "handoff_socket = \"/var/lib/tierstore/handoff.sock\"";
+    let long = format!("/run/{}", "s".repeat(120));
+    let (plain, said) = loaded(&file(handoff, ""), serviced());
+    assert_eq!(said, "");
+    let plain = plain.into_cache().unwrap();
+    for path in [
+        "/run/tierstore/fill.sock",
+        "fill.sock",
+        long.as_str(),
+        "/var/lib/tierstore/handoff.sock",
+        "/var/lib/tierstore-cache/fill.sock",
+    ] {
+        let text = file(handoff, &format!("fill_socket = \"{path}\""));
+        let (settings, said) = loaded(&text, serviced());
+        assert_eq!(said, format!("{IGNORED_FILL_SOCKET}\n"), "{path}");
+        let settings = settings.into_cache().unwrap();
+        let (got, wanted) = (
+            format!("{:?}", settings.cache),
+            format!("{:?}", plain.cache),
+        );
+        assert_eq!(got, wanted, "{path}");
+        assert_eq!(settings.handoff, plain.handoff, "{path}");
+    }
 }
 
 /// Asserts the pool's keys: their defaults are the constants, a value reaches the cache, and a
@@ -157,7 +171,8 @@ fn the_pool_of_the_socket_has_defaults_and_ranges() {
 }
 
 /// Asserts that a storage node with a cache in front of its proxy has no prefetch queue and
-/// refuses the keys of it by name; its fill-socket keys are read (see `config_combined_tests`).
+/// refuses the keys of it by name; and that its `local_cache.fill_socket` is read and ignored with
+/// its line on stderr, as a build node's is.
 #[test]
 fn a_storage_node_with_a_cache_refuses_the_keys_of_the_socket() {
     let node = r#"
@@ -207,6 +222,11 @@ cache  = true
         );
     }
     let plain = node.replace("KEY", "");
-    let settings = settings_from_text(&plain, serviced()).unwrap();
+    let (settings, said) = loaded(&plain, serviced());
+    assert_eq!(said, "");
+    assert!(settings.into_combined().is_some());
+    let named = node.replace("KEY", "fill_socket = \"/var/lib/tierstore/fill.sock\"");
+    let (settings, said) = loaded(&named, serviced());
+    assert_eq!(said, format!("{IGNORED_FILL_SOCKET}\n"));
     assert!(settings.into_combined().is_some());
 }

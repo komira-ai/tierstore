@@ -569,7 +569,7 @@ pub trait Backend: Send + Sync {
     /// with [`Error::BadDigest`] in place of its last chunk, so the backend stores nothing (as for
     /// [`Backend::put_stream`]). The S3 backend also sends the digest for the store to check,
     /// records it in the object's metadata and, for a key that exists, compares the digest a
-    /// HEAD reads back (the `put` request of the fill socket, in the operations guide). The provided
+    /// HEAD reads back (the put of the file system's staged file through the cache, in the operations guide). The provided
     /// implementation is [`Backend::put_stream`] of the checked body and, for a key that exists,
     /// a read of the whole object to hash it.
     ///

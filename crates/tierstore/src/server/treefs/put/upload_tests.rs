@@ -1,5 +1,5 @@
-//! The upload of a commit: what each answer of the socket comes to, and the pauses of the
-//! back-off. The tries over a socket, and the deadline, are asserted through the namespace in
+//! The upload of a commit: what each answer of the cache comes to, and the pauses of the
+//! back-off. The tries at a cache, and the deadline, are asserted through the namespace in
 //! `space_commit_tests.rs`.
 
 use std::time::Duration;
@@ -8,12 +8,12 @@ use super::super::commit::PutOutcome;
 use super::super::names::Sha256Digest;
 use super::{Tried, pause_before, read_answer};
 
-/// Asserts what each line the socket may answer a `put` with comes to: the two successes, the
+/// Asserts what each line the cache may answer a put with comes to: the two successes, the
 /// three final refusals, `upstream` asked again, and anything else (a word this release does not
-/// know, `stage`, JSON without the word, the socket's own refusal, a line that is not JSON) a
-/// failure not asked again.
+/// know, `stage`, JSON without the word, the cache's own `refused` line, a line that is not JSON)
+/// a failure not asked again.
 #[test]
-fn each_answer_of_the_socket_comes_to_its_outcome() {
+fn each_answer_of_the_cache_comes_to_its_outcome() {
     for (line, tried) in [
         (
             r#"{"ok":true,"created":true}"#,
@@ -91,14 +91,9 @@ fn millis(duration: Duration) -> u64 {
 #[test]
 fn a_try_waits_for_its_answer_no_longer_than_the_deadline_leaves() {
     let rig = super::super::testing::SpaceRig::new("put-upload-left");
-    let socket = rig.rig.root.path().join("fill.sock");
     let clock = rig.rig.clock.clone();
-    let client = crate::server::treefs::fill_client::FillClient::for_puts(
-        Some(socket),
-        Duration::from_secs(30),
-    );
     let uploader = super::Uploader::new(
-        std::sync::Arc::new(client),
+        rig.puts.asks(),
         Duration::from_secs(30),
         clock.clone(),
         std::sync::Arc::new(|_| {}),
@@ -112,6 +107,8 @@ fn a_try_waits_for_its_answer_no_longer_than_the_deadline_leaves() {
         clock.now() + 5,
     );
     assert_eq!(outcome, PutOutcome::Upstream);
+    // The put the try gave up waiting for goes on at the cache, and waits at the upstream.
+    rig.puts.wait_for_held(1);
     assert_eq!(rig.puts.count(), 1);
     rig.puts.let_go();
 }

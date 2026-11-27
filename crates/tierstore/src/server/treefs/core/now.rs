@@ -1,7 +1,7 @@
-//! The opens that are answered now, with no request of the fill socket, on the reader that read
+//! The opens that are answered now, with no call of the node's cache, on the reader that read
 //! them (`node_fs.rs`, `fetches.rs`): the open of a file of a tree in memory whose bytes the
 //! process can have without asking the node. Every other open is parked and made by
-//! [`Core::open_from`] on a thread of the fetches, so that no reader waits on the fill socket.
+//! [`Core::open_from`] on a thread of the fetches, so that no reader waits on the cache.
 //!
 //! The bytes are had without the node:
 //! - for a file of a tree of manifests, when the cache file of its blob opens and the blob needs
@@ -9,8 +9,8 @@
 //!   nothing);
 //! - for a file of a placed tree, when the tree was given the span of that file before and the
 //!   pack's file it read it from is still open (`Loaded::held_span`); or when the node holds the
-//!   span now and says so without waiting (`Fills::span_held`, which only a core in the node's
-//!   process answers: the whole pack of a job's output on the node that wrote it, or the ranges
+//!   span now and says so without waiting (`InProcess::span_held`, which answers
+//!   only where the cache holds it: the whole pack of a job's output on the node that wrote it, or the ranges
 //!   a node filled before) and the pack's file opens; the span is then kept with the tree;
 //! - for an empty file, always;
 //! - for a blob an earlier release registered a backing id for, when no pin is asked, as for a
@@ -26,7 +26,7 @@ use super::{Core, Errno, Handle, Loaded, Opened, ino};
 
 impl Core {
     /// The open of `ino`, for writing if `writing`, where it is answered with no request of the
-    /// fill socket (module docs); none where it is not, which [`Core::open_from`] then makes.
+    /// node's cache (module docs); none where it is not, which [`Core::open_from`] then makes.
     pub(in crate::server::treefs) fn open_now(
         &self,
         ino: u64,
@@ -39,7 +39,7 @@ impl Core {
         if number == 0 || ino::is_placed_dir(ino) {
             return Some(Err(Errno::IsDir));
         }
-        // A tree that is not in memory is read first, which may ask the fill socket.
+        // A tree that is not in memory is read first, which may ask the node's cache.
         let loaded = self.in_memory(number)?;
         let Some(entry) = loaded.tree.entry(index) else {
             return Some(Err(Errno::NoEnt));
@@ -97,7 +97,7 @@ impl Core {
     }
 
     /// The bytes of a file of a placed tree, the blob `digest` of `size` bytes at `source`, if the
-    /// node holds its span now (`Fills::span_held`) and the pack's file opens: kept with the tree
+    /// node holds its span now (`InProcess::span_held`) and the pack's file opens: kept with the tree
     /// for the opens that follow (`Loaded::keep_span`). None otherwise, and the open is parked.
     fn span_now(
         &self,
@@ -115,8 +115,8 @@ impl Core {
         Some(bytes)
     }
 
-    /// Whether a read of the handle `fh` must first make the open again, which may ask the fill
-    /// socket: a handle an earlier process gave out that no read made again yet (`core/adopt.rs`).
+    /// Whether a read of the handle `fh` must first make the open again, which may ask the node's
+    /// cache: a handle an earlier process gave out that no read made again yet (`core/adopt.rs`).
     pub(in crate::server::treefs) fn read_reopens(&self, fh: u64) -> bool {
         !self.handles.contains(fh) && self.foreign(fh)
     }

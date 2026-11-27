@@ -2,7 +2,7 @@
 //! serves and the NFS frontend (macOS) will share, with no protocol in it. A file a job writes under
 //! `put/<key prefix>/` is staged in the staged-file store ([`store`]), and its commit, a `rename` of
 //! a `.part` name to a final name, hands over the staged file, its key and its SHA-256, which are put
-//! upstream through the fill socket's `put` verb ([`upload`]); the answer is then recorded.
+//! upstream through the cache's put of a staged file ([`upload`]); the answer is then recorded.
 //! [`space`] is the namespace of inode numbers over the store that a frontend answers from, and
 //! [`carry`] what it hands a successor; [`config`] is the `[fs.put]` table.
 //!
@@ -66,8 +66,6 @@ pub(in crate::server) use upload::Uploader;
 mod compact_tests;
 #[cfg(test)]
 mod error_tests;
-#[cfg(test)]
-pub(in crate::server) mod fake;
 #[cfg(test)]
 mod hasher_tests;
 #[cfg(test)]

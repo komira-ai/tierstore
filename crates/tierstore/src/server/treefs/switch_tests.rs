@@ -257,38 +257,19 @@ async fn a_switch_whose_new_process_dies_after_ack_is_started_again_and_takes_or
     stop(adopter).await.unwrap();
 }
 
-/// Asks the fill socket at `path` `line` on a connection of its own, and gives the answer's line.
-async fn ask_fill(path: &std::path::Path, line: &str) -> String {
-    use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
-    let stream = tokio::net::UnixStream::connect(path).await.unwrap();
-    let (read, mut write) = stream.into_split();
-    write
-        .write_all(format!("{line}\n").as_bytes())
-        .await
-        .unwrap();
-    let mut answer = String::new();
-    BufReader::new(read).read_line(&mut answer).await.unwrap();
-    answer
-}
-
-/// Asserts that a process of the one-process layout whose file names `local_cache.fill_socket`
-/// binds that socket while its cache is the writer, and answers on it as a node of the old layout
-/// does (a request of the pins is answered `ok`, which only the writer does); and that when an
-/// old-layout `tierstore fs` takes the mount from it with `take-fs 1` (the rollback of the switch:
-/// that process fills through the socket its `fs.toml` names, which is this one), it goes on
-/// serving the socket, and S3, until it stops, which removes the socket. Catches a release M whose
-/// one process makes no fill socket, so that the rollback's old `tierstore fs` cannot fill a file
-/// until the old `tierstore` has the lock.
+/// Asserts that an old-layout `tierstore fs` (the previous release, which a rollback of the switch
+/// starts) takes the mount from the one process with `take-fs 1`, which the one process still
+/// answers: the old process serves the kernel's requests, and the one process goes on serving S3
+/// until it stops. Catches a release M whose one process stops answering `take-fs 1`, so that a
+/// rollback of the switch cannot take the mount back.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn the_one_process_instance_binds_the_fill_socket_while_it_is_the_writer_in_m() {
-    use crate::server::treefs::fills::Reach;
+async fn the_previous_releases_fs_process_takes_the_mount_back_from_the_one_process_in_m() {
     use crate::server::treefs::handover::{self, Paths};
     use crate::server::treefs::run::{Prepared, Running};
+    use crate::server::treefs::testing::{Rig, sample};
 
-    let node = FsNode::new("tsfs-one-fill");
-    let fill = node.dir.path().join("fill.sock");
-    let local = format!("fill_socket = {:?}", fill.display().to_string());
-    let settings = node.settings_with("", "", "127.0.0.1:0", &local);
+    let node = FsNode::new("tsfs-one-back");
+    let settings = node.settings("", "", "127.0.0.1:0");
     let fs = settings.fs.clone().unwrap();
     let old = old_fs(&fs);
     let manager = FakeManager::start(&node.dir.path().join("notify.sock"));
@@ -301,20 +282,13 @@ async fn the_one_process_instance_binds_the_fill_socket_while_it_is_the_writer_i
     let bound = within("the one process serves", &mut one.bound)
         .await
         .unwrap();
-    crate::server::local_cache::testing::until("the fill socket is bound", || fill.exists()).await;
-    assert_eq!(ask_fill(&fill, "pins-live boot-1").await, "ok 0\n");
 
-    // An old-layout `tierstore fs` on the old `fs.toml`, which names this fill socket, takes the
-    // mount back.
-    let back = FsSettings {
-        fill_socket: Some(fill.clone()),
-        ..fs.clone()
-    };
+    // An old-layout `tierstore fs` on the old `fs.toml` takes the mount back.
     let paths = Paths {
-        socket: &back.handoff_socket,
-        mountpoint: &back.mountpoint,
-        control: &back.control_socket,
-        wait: back.handoff_wait,
+        socket: &fs.handoff_socket,
+        mountpoint: &fs.mountpoint,
+        control: &fs.control_socket,
+        wait: fs.handoff_wait,
         device: |_| Ok(()),
     };
     let taken = within(
@@ -325,22 +299,16 @@ async fn the_one_process_instance_binds_the_fill_socket_while_it_is_the_writer_i
     .unwrap()
     .expect("the one process answers take-fs 1");
     taken.notice.ready().await.unwrap();
-    let prepared = Prepared::load(&back).unwrap();
-    let running = Running::take_over(
-        (&back, &Reach::Socket),
-        prepared,
-        taken.device,
-        taken.control,
-    )
-    .unwrap();
+    let prepared = Prepared::load(&fs).unwrap();
+    let back = Rig::new("tsfs-one-back-cache", sample());
+    let running =
+        Running::take_over((&fs, &back.calls()), prepared, taken.device, taken.control).unwrap();
     running.start_reading().unwrap();
     assert_answers(&old.kernel, 1);
-    // The one process is the writer still: it serves the fill socket, and S3.
-    assert_eq!(ask_fill(&fill, "pins-live boot-1").await, "ok 0\n");
+    // The one process serves S3 still.
     let (status, _) = probe(bound.s3, "/healthz").await;
     assert_eq!(status, 200);
     stop(one).await.unwrap();
-    assert!(!fill.exists());
     running.leave();
     drop(old.running);
 }

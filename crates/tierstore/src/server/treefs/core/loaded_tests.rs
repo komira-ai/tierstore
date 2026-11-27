@@ -7,11 +7,12 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use super::{Loaded, Lookups, Pinned, Trees};
+use crate::server::local_cache::Blob;
 use crate::server::treefs::core::fetched::Fetched;
 use crate::server::treefs::core::{Core, Looked};
 use crate::server::treefs::ino;
 use crate::server::treefs::locked;
-use crate::server::treefs::testing::{Rig, TREE_IDLE, file, open_cached, sample};
+use crate::server::treefs::testing::{Rig, TREE_IDLE, file, open_cached, sample, sha};
 use crate::tree_manifest::TreeDigest;
 
 const RUN: &str = "run-1";
@@ -336,14 +337,33 @@ fn many_trees_come_into_memory_and_leave_it_with_their_runs() {
 }
 
 /// Asserts that a forget, a drop and an unpin of a tree that is not in memory change nothing: the
-/// tree is still not there, and the unpin is sent.
+/// tree is still not there, and the unpin is sent (the cache, which pinned a blob for that tree of
+/// the mount, no longer pins it).
 #[test]
 fn a_tree_that_is_not_in_memory_is_forgotten_dropped_and_unpinned_with_no_change() {
     let rig = Rig::new("tfs-loaded-absent", sample());
     let core = &rig.core;
+    let tool = sha(b"tool bytes");
+    let from = format!("cas/l/{tool}");
+    let blob = Blob {
+        sha256: &tool,
+        size: 10,
+        from: &from,
+        offset: 0,
+    };
+    rig.work
+        .handle()
+        .block_on(rig.node.fill_blob(&blob))
+        .unwrap();
+    let pins = rig
+        .node
+        .pin("mount-1", &digest(1).to_string(), &[tool])
+        .unwrap();
+    assert_eq!(pins.pinned, 1);
+    assert_eq!(rig.node.pinned_bytes(), 10);
     core.forget(ino::of(9, 3), 1);
     core.drop_if_forgotten(9);
     core.free_tree(9, &digest(1));
     assert_eq!(core.trees_in_memory(), 0);
-    assert_eq!(rig.upstream.asked("unpin").len(), 1);
+    assert_eq!(rig.node.pinned_bytes(), 0);
 }
