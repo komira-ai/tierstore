@@ -42,6 +42,12 @@ including failure and boundary cases, until the uncovered lines and branches are
 - Tests are hermetic and deterministic: no network, no fixed ports or paths, no shared state, and no assertions on elapsed
   time (inject a clock or wait on an explicit event).
 - Write tests in Rust, in the crate they test.
+- A change that removes, refuses or stops serving something (a config key, an interface, a layout, a kind of object, a
+  verb) shows in its pull request which live host configurations and which callers still use it, read from their source
+  rather than assumed, and comes with a test that fails while one of them does. The build farm's host configurations are
+  copied into `crates/tierstore/tests/live_configs/` (its README says how), and the tests named there load each one with
+  the candidate binary and have the node serve what it declares: a file that still names what the change removes either
+  fails to load with the reason, or the test fails. "Loads fine, serves nothing" is never a pass.
 
 ## Code
 
