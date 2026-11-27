@@ -25,9 +25,9 @@ use super::listen::{bind_all_with, duplicates, local_addrs};
 use super::lock::Received;
 use super::memory_format::start_format;
 use super::oci::{OciError, OciFront, OciListener, OciMode};
+use super::process::Source;
 use super::rounds::Rounds;
 use super::stop_watcher::{oci_cut_note, serve_fronts, serve_oci, stop_watcher};
-use super::process::Source;
 use super::{Drained, Server};
 
 /// The addresses [`run_serving`] is bound to.

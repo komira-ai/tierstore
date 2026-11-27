@@ -97,6 +97,7 @@ use super::listen::{LoopbackBind, bind_set, bind_with, joined};
 use super::local_cache::trees::{TreeStore, TreesConfig};
 use super::local_cache::{CacheConfig, Disk, Every, LocalCache, Mode, SystemDisk, check_local};
 use super::oci::OciListener;
+use super::process::Source;
 use super::provider::{self, Provider, ProviderFlags};
 use super::put_ingest::PutIngest;
 use super::stop_watcher::{
@@ -107,7 +108,6 @@ use super::treefs::Service;
 #[cfg(any(target_os = "macos", test))]
 use super::treefs::{NfsServed, NfsService};
 use super::trees::{TreesSetup, trees_setup_of};
-use super::process::Source;
 use super::{Drained, Server, ServerConfig};
 #[cfg(target_os = "linux")]
 use mount::{Own as Asked, take_mount_and_sockets, with_mount};

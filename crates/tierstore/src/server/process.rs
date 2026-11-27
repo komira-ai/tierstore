@@ -9,7 +9,8 @@
 //!
 //! On Linux they are read from procfs ([`Source::procfs`]): `self/stat` gives the CPU time
 //! (fields 14 and 15, `utime` and `stime`, in clock ticks), the start (field 22, `starttime`, in
-//! clock ticks since boot, added to the `btime` of `stat`, a whole second), the virtual size (field
+//! clock ticks since boot, added to the `btime` of `stat`, a whole second; the first start read is
+//! kept, since the kernel moves `btime` with every step of the wall clock), the virtual size (field
 //! 23, `vsize`, bytes) and the resident pages (field 24, `rss`, times the size of a page); the
 //! descriptors are the entries of `self/fd`, the one the list is read through included, as the
 //! standard clients count them. On macOS they are what the kernel's calls for the process give,
@@ -22,6 +23,8 @@
 use std::fmt::Write as _;
 #[cfg(target_os = "linux")]
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "linux")]
+use std::sync::OnceLock;
 
 /// The figures of the process, each `None` where it could not be read.
 #[derive(Debug, Default, Clone, PartialEq)]
@@ -90,6 +93,9 @@ pub(super) enum Source {
         ticks: u64,
         /// Bytes in a page.
         page: u64,
+        /// The start of the process, as first read: kept, so that a step of the wall clock,
+        /// which moves `btime`, does not move it.
+        start: OnceLock<f64>,
     },
     /// The calls of macOS for this process.
     #[cfg(target_os = "macos")]
@@ -122,6 +128,7 @@ impl Source {
             root: root.to_path_buf(),
             ticks: rustix::param::clock_ticks_per_second(),
             page: rustix::param::page_size() as u64,
+            start: OnceLock::new(),
         }
     }
 
@@ -130,7 +137,18 @@ impl Source {
         match self {
             Self::None => Figures::default(),
             #[cfg(target_os = "linux")]
-            Self::Procfs { root, ticks, page } => procfs(root, *ticks, *page),
+            Self::Procfs {
+                root,
+                ticks,
+                page,
+                start,
+            } => {
+                let mut figures = procfs(root, *ticks, *page);
+                if let Some(read) = figures.start_seconds {
+                    figures.start_seconds = Some(*start.get_or_init(|| read));
+                }
+                figures
+            }
             #[cfg(target_os = "macos")]
             Self::Darwin => darwin(),
         }

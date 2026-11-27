@@ -188,6 +188,7 @@ mod linux {
             root: dir.path().to_path_buf(),
             ticks: 100,
             page: 4096,
+            start: std::sync::OnceLock::new(),
         };
         assert_eq!(
             source.read(),
@@ -213,8 +214,30 @@ mod linux {
             root: dir.path().to_path_buf(),
             ticks: 100,
             page: 4096,
+            start: std::sync::OnceLock::new(),
         };
         assert_eq!(source.read(), Figures::default());
         assert_eq!(source.read().render(), "");
+    }
+
+    /// Asserts that the start is the first one read and stays so: before `stat` exists there is
+    /// none; once it does, its start is shown; and when the boot time moves, as a step of the wall
+    /// clock moves it, the start shown does not.
+    #[test]
+    fn the_start_read_first_stays_when_the_boot_time_moves() {
+        let dir = TestDir::under(std::env::temp_dir(), "tsprocess-start");
+        std::fs::create_dir_all(dir.path().join("self/fd")).unwrap();
+        std::fs::write(dir.path().join("self/stat"), STAT).unwrap();
+        let source = Source::Procfs {
+            root: dir.path().to_path_buf(),
+            ticks: 100,
+            page: 4096,
+            start: std::sync::OnceLock::new(),
+        };
+        assert_eq!(source.read().start_seconds, None);
+        std::fs::write(dir.path().join("stat"), PROC_STAT).unwrap();
+        assert_eq!(source.read().start_seconds, Some(1_790_000_042.0));
+        std::fs::write(dir.path().join("stat"), "btime 1790000005\n").unwrap();
+        assert_eq!(source.read().start_seconds, Some(1_790_000_042.0));
     }
 }

@@ -526,7 +526,7 @@ and they need no tierstore-specific rule.
 |---|---|---|---|
 | `process_resident_memory_bytes` | gauge | none | the bytes of memory resident now: what the kernel holds for the process in RAM, which a watch on a node's memory reads |
 | `process_virtual_memory_bytes` | gauge | none | the bytes of its virtual address space now (on macOS this includes the shared region every process maps, some GiB) |
-| `process_start_time_seconds` | gauge | none | when it started, in seconds since the Unix epoch, told in whole seconds of the boot or start time and so up to a second early; a change is a restart |
+| `process_start_time_seconds` | gauge | none | when it started, in seconds since the Unix epoch, told in whole seconds of the boot or start time and so up to a second early; read at the first scrape and kept for the life of the process, so a change is a restart |
 | `process_cpu_seconds_total` | counter | none | the CPU time it has used, user and system together, in seconds |
 | `process_open_fds` | gauge | none | the file descriptors it has open now |
 
@@ -536,7 +536,7 @@ Where each comes from, and what each system cannot give:
 |---|---|---|
 | resident memory | `rss` of `/proc/self/stat` (field 24), in pages, times the page size | the task's resident size (`proc_pidinfo`, `PROC_PIDTASKINFO`) |
 | virtual memory | `vsize` of `/proc/self/stat` (field 23) | the task's virtual size, from the same call |
-| start | `starttime` of `/proc/self/stat` (field 22), in clock ticks after the boot, plus `btime` of `/proc/stat` | the start of the process (`PROC_PIDTBSDINFO`), whole seconds |
+| start | `starttime` of `/proc/self/stat` (field 22), in clock ticks after the boot, plus `btime` of `/proc/stat`, as read at the first scrape (the kernel moves `btime` when the wall clock is stepped) | the start of the process (`PROC_PIDTBSDINFO`), whole seconds |
 | CPU time | `utime` and `stime` of `/proc/self/stat` (fields 14 and 15), in clock ticks | the task's user and system time, from the same call as the memory |
 | open descriptors | the entries of `/proc/self/fd`, the one the list is read through included, as the standard clients count them | the descriptors `proc_pidinfo` lists (`PROC_PIDLISTFDS`) |
 

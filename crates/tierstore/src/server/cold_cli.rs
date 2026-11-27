@@ -28,8 +28,8 @@ use crate::server::drain::late_of;
 use crate::server::front::server_config;
 use crate::server::listen::joined;
 use crate::server::oci::OciListener;
-use crate::server::stop_watcher::{oci_cut_note, serve_fronts, serve_oci, stop_watcher};
 use crate::server::process::Source;
+use crate::server::stop_watcher::{oci_cut_note, serve_fronts, serve_oci, stop_watcher};
 use crate::server::{Drained, Server};
 
 use super::{Bound, bind_fronts, bind_s3, cut_note, stopped_by};
