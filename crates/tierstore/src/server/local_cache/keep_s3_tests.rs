@@ -44,16 +44,18 @@ async fn drained(config: &CacheConfig) {
     panic!("after {SPINS} turns of the scheduler, the stage directory was not empty");
 }
 
-/// A cache of 64 MiB that keeps `cas/` and writes through, over a bucket of `s3`.
-fn node(s3: &FakeS3, name: &str) -> (LocalCache, CacheConfig, TestDir) {
+/// A cache of 64 MiB that keeps `cas/` and writes through, over a bucket of `s3`, and the backend
+/// it writes to (to wait for the abort of a failed upload, which runs in a task of its own).
+fn node(s3: &FakeS3, name: &str) -> (LocalCache, Arc<S3Backend>, CacheConfig, TestDir) {
     let dir = TestDir::under(std::env::temp_dir(), name);
     let policies = vec![("cas/".to_owned(), true)];
     let mut config = CacheConfig::new(dir.path().join("cache"), 64 << 20, policies);
     config.write_through = true;
     never_expires(&mut config);
     let clock = Arc::new(TestClock::new());
-    let cache = LocalCache::open(config.clone(), s3_backend(s3), Arc::new(SystemDisk), clock);
-    (cache.unwrap(), config, dir)
+    let backend = s3_backend(s3);
+    let cache = LocalCache::open(config.clone(), backend.clone(), Arc::new(SystemDisk), clock);
+    (cache.unwrap(), backend, config, dir)
 }
 
 /// A backend over the bucket of the loopback S3 service, with `single_put_max` of 16 MiB.
@@ -264,7 +266,7 @@ async fn a_put_over_s3_of_more_than_a_part_is_one_put_by_default() {
 async fn a_name_mismatch_stores_nothing_over_s3() {
     for (label, size) in [("single", 1usize << 20), ("parts", 17 << 20)] {
         let s3 = FakeS3::start().await;
-        let (cache, config, _dir) = node(&s3, &format!("tscache-keep-s3-bad-{label}"));
+        let (cache, backend, config, _dir) = node(&s3, &format!("tscache-keep-s3-bad-{label}"));
         let key = format!("cas/l/{}", digest(b"what the name says"));
         let bytes = pattern(size);
         let made = cache.put_stream(&key, Some(size as u64), pieces(&bytes));
@@ -274,6 +276,7 @@ async fn a_name_mismatch_stores_nothing_over_s3() {
             "{label}"
         );
 
+        backend.cleanups_idle().await;
         assert_eq!(s3.keys(), Vec::<String>::new(), "{label}");
         assert_eq!(s3.incomplete_uploads(), 0, "{label}");
         let stats = s3.stats();
@@ -291,7 +294,8 @@ async fn a_name_mismatch_stores_nothing_over_s3() {
 #[tokio::test]
 async fn a_cut_multipart_sized_body_leaves_nothing_over_s3() {
     let s3 = FakeS3::start().await;
-    let upstream = s3_backend(&s3);
+    let backend = s3_backend(&s3);
+    let upstream = backend.clone();
     let dir = TestDir::under(std::env::temp_dir(), "tscache-keep-s3-cut");
     let policies = vec![("cas/".to_owned(), true)];
     let mut config = CacheConfig::new(dir.path().join("cache"), 64 << 20, policies);
@@ -314,6 +318,7 @@ async fn a_cut_multipart_sized_body_leaves_nothing_over_s3() {
     let made = cache.put_stream("cas/b/cut", Some(18 << 20), body).await;
     assert!(made.is_err(), "{made:?}");
 
+    backend.cleanups_idle().await;
     assert_eq!(s3.keys(), Vec::<String>::new());
     assert_eq!(s3.incomplete_uploads(), 0);
     assert_eq!(cache.held(), (0, 0));

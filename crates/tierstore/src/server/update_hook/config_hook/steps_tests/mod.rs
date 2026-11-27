@@ -83,6 +83,13 @@ impl Host for Files {
         Ok(self.mounts.borrow().contains(path))
     }
 
+    /// A directory just below a listed mount answers; nothing else is there.
+    fn is_dir(&self, path: &Path) -> Result<bool, PortError> {
+        Ok(path
+            .parent()
+            .is_some_and(|mount| self.mounts.borrow().contains(mount)))
+    }
+
     fn capabilities(&self, _release: &Path) -> Result<Vec<String>, PortError> {
         Ok(self.capabilities.clone())
     }
@@ -497,6 +504,10 @@ fn the_config_hook_host_never_puts_or_removes_a_binary() {
     };
     assert_eq!(running.install_binary(Path::new(PKG_NEW)), Ok(()));
     assert_eq!(running.remove_binary(), Ok(()));
+    // The look-up of a directory is the host's own answer.
+    files.mounts.borrow_mut().insert(PathBuf::from("/m"));
+    assert_eq!(running.is_dir(Path::new("/m/trees")), Ok(true));
+    assert_eq!(running.is_dir(Path::new("/n/trees")), Ok(false));
     assert!(files.install_binary(Path::new(PKG_NEW)).is_err());
     assert!(files.remove_binary().is_err());
 }

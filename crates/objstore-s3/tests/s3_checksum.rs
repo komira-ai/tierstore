@@ -198,6 +198,7 @@ async fn a_multipart_put_of_a_key_that_exists_is_refused_and_aborted() {
         matches!(again, ObjectStoreError::AlreadyExists(_)),
         "{again}"
     );
+    store.cleanups_idle().await;
     assert_eq!(s3.incomplete_uploads(), 0);
     assert_eq!(s3.stats().aborted, 1);
 }

@@ -799,6 +799,7 @@ async fn a_large_streamed_put_is_completed_only_after_the_last_chunk() {
         .put_stream("big", len, generated(17, Some(cut.clone())))
         .await;
     assert_eq!(failed, Err(cut));
+    backend.cleanups_idle().await;
     assert_eq!(s3.keys(), Vec::<String>::new());
     assert_eq!(s3.incomplete_uploads(), 0);
     assert_eq!(s3.stats().completed, 0);
@@ -815,6 +816,7 @@ async fn a_large_streamed_put_is_completed_only_after_the_last_chunk() {
 
     let again = backend.put_stream("big", len, generated(17, None)).await;
     assert_eq!(again, Err(Error::AlreadyExists("big".to_owned())));
+    backend.cleanups_idle().await;
     assert_eq!(s3.incomplete_uploads(), 0);
     assert_eq!(s3.stats().completed, 1);
 }

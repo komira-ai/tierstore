@@ -9,7 +9,6 @@ use std::time::Duration;
 
 use tierstore_testkit::dir::TestDir;
 
-use super::launchd::fs::FS_BOOTOUT_TIMEOUT;
 use super::look::POLL_INTERVAL;
 use super::machine::testing::me;
 use super::machine::{Call, Output, RunError, Runner, SystemRunner};
@@ -443,22 +442,20 @@ fn exit_timeout_of(path: &str) -> Duration {
     Duration::from_secs(number.trim().parse().unwrap())
 }
 
-/// Asserts that the hook waits for `launchctl bootout` of each job longer than launchd lets the
-/// job's process take to exit (`ExitTimeOut` of each plist the jobs are loaded from, the archive
-/// package's and the installer package's): the main job's wait is above its plists' 210 s, and the
-/// fs job's above its plists' 150 s. Catches a wait left at the 120 s of the 90 s plist, with which
+/// Asserts that the hook waits for `launchctl bootout` of the job longer than launchd lets the
+/// job's process take to exit (`ExitTimeOut` of each plist the job is loaded from, the archive
+/// package's and the installer package's): the wait is above its plists' 210 s. No package ships
+/// the plist of the fs job any more. Catches a wait left at the 120 s of the 90 s plist, with which
 /// the hook gives up on a bootout while launchd still lets the process drain and unmount, and
 /// fails the step of an update that was going well.
 #[test]
 fn the_hook_waits_for_each_bootout_longer_than_its_plists_let_the_job_exit() {
-    for (wait, plist) in [
-        (BOOTOUT_TIMEOUT, "tierstore.plist"),
-        (FS_BOOTOUT_TIMEOUT, "tierstore-fs.plist"),
-    ] {
-        for dir in ["packaging/hostkeeper/units", "packaging/macos-pkg"] {
-            let exit = exit_timeout_of(&format!("{dir}/{plist}"));
-            assert!(wait > exit, "{dir}/{plist}: {wait:?} is not above {exit:?}");
-        }
+    for dir in ["packaging/hostkeeper/units", "packaging/macos-pkg"] {
+        let exit = exit_timeout_of(&format!("{dir}/tierstore.plist"));
+        assert!(
+            BOOTOUT_TIMEOUT > exit,
+            "{dir}/tierstore.plist: {BOOTOUT_TIMEOUT:?} is not above {exit:?}"
+        );
     }
     assert_eq!(
         exit_timeout_of("packaging/macos-pkg/tierstore.plist"),

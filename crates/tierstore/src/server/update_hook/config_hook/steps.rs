@@ -45,6 +45,10 @@ impl Host for Running<'_> {
         self.host.mounted(path)
     }
 
+    fn is_dir(&self, path: &Path) -> Result<bool, PortError> {
+        self.host.is_dir(path)
+    }
+
     fn capabilities(&self, _release: &Path) -> Result<Vec<String>, PortError> {
         self.host.capabilities(self.release)
     }

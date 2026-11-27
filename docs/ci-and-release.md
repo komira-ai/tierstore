@@ -5,7 +5,7 @@
 | file | when | what |
 |---|---|---|
 | `ci.yml` | pull request, merge queue (`merge_group`), push to `main` | `lint`: format, cargo-deny (licences, bans, sources), clippy, the workflow lint. `test`: every test under cargo-llvm-cov with branch coverage, and the 99% gate on lines and branches of every crate (`crates/coverage-gate`). |
-| `farm.yml` | pull request from a branch of this repository (not Dependabot's), push to `main` | the farm lane, advisory: `buck2 build //:ci` of the workspace through buildrules, every action on the build farm or from its cache, through komira's buck2-farm action, which runs it again after a run cut or hung on a dead connection to the farm (at most three runs) and refuses it unless the summary line says `local: 0`; every step has its own time limit (docs/farm.md). `//:ci` is every member's rustfmt check, clippy and, but for the members and tests that stay here, its tests. It is not a gate: `ci.yml` is. See [docs/farm.md](farm.md). |
+| `farm.yml` | pull request from a branch of this repository (not Dependabot's), push to `main` | the farm lane, advisory: `buck2 build //:ci` of the workspace through buildrules, every action on the build farm or from its cache, through komira's buck2-farm action, which runs it again after a run cut or hung on a dead connection to the farm (at most three runs) and refuses it unless the summary line says `local: 0`; every step has its own time limit (docs/farm.md). `//:ci` is every member's rustfmt check, clippy and, but for the members and tests that stay here, its tests. When the build fails, it also runs `buildrules sync` on the farm and offers what that would change as the artifact `sync-patch`, with the commands that apply it in the job's summary. It is not a gate: `ci.yml` is. See [docs/farm.md](farm.md). |
 | `advisories.yml` | daily, push to `main` | `cargo deny check advisories`; the result is kept in one issue, and the run is green whatever it finds. |
 | `artifacts.yml` | pull request (linux-x86_64 only), push to `main`; by hand | builds `tierstore` (`--features server`) for linux-x86_64, linux-arm64 and macos-arm64, each on a GitHub-hosted runner of its platform, packages it with its SBOM and as a hostkeeper package (and, for the Homebrew tap and apt, as a tap-named tarball and, on Linux, a Debian package and an RPM package), writes the release index of the hostkeeper packages, makes `SHA256SUMS`. A pull request runs on Linux x86_64 alone: for it only the linux-x86_64 job runs, and the sums cover its files. The other platforms are built on a push to `main` and by hand: the linux-arm64 and macos-arm64 jobs build, package, run the binary, unpack the hostkeeper package and, on macOS, check the code signature; they run no test of the workspace (`beta.yml` does, below). `sums` waits for them, so their files are summed, signed and released only when they pass. A push to `main` builds every platform, and a run by hand (`gh workflow run artifacts.yml --ref <branch>`) builds and sums every platform of a branch and signs nothing. On a push to `main` it also builds the macOS installer unsigned and signs it with the Developer ID Installer identity (`sign-pkg`, then `check-pkg`; see "The macOS installer"), and signs (build provenance and SBOM attestations); the checks of what it signed are made by `release.yml`'s `verify`, before anything is tagged. The Linux binaries are linked against glibc 2.28 by `cargo zigbuild`, not against the runner's glibc, and each Linux job fails when the binary asks for a newer `GLIBC_` symbol version (see "The glibc floor of the Linux binaries"). On a push to `main` once the variable `MACOS_PACKAGE_ON_FARM` is `true`, the macOS files are made on a Mac of the build farm instead (`macos-arm64-farm`, which calls `macos-farm.yml`), and the hosted macOS job is skipped. |
 | `macos-farm.yml` | called by `artifacts.yml` alone (`workflow_call`) | the macOS job of `artifacts.yml` on a farm Mac: from a hosted Linux runner joined to the farm's network, `cargo xtask mac-farm` runs `cargo xtask release macos-assets` (the hosted job's steps, in order) as one remote action and brings back `dist/` and `pkg/`, which it uploads as the hosted job does. See [docs/mac-farm.md](mac-farm.md). |
@@ -335,16 +335,18 @@ fake.
   `productbuild`. `--stage` must not exist; the
   payload is laid out in it first. The payload is exactly the binary
   `/Library/Application Support/tierstore/bin/tierstore` (0755, the given binary's bytes, so it keeps
-  its code signature), the job `/Library/LaunchDaemons/tierstore.plist` (0644,
-  `packaging/macos-pkg/tierstore.plist`) and the job of the file service
-  `/Library/LaunchDaemons/tierstore-fs.plist` (0644, `packaging/macos-pkg/tierstore-fs.plist`), with
+  its code signature), and the job `/Library/LaunchDaemons/tierstore.plist` (0644,
+  `packaging/macos-pkg/tierstore.plist`), with
   the directories above them (0755), everything `root:wheel`. The `postinstall`
   (`packaging/macos-pkg/postinstall`, 0755) makes the account `_tierstore`, the directories under
   `/usr/local/tierstore` (with `run/fs`) and the mount point `/private/var/tierstore/fs` (left as it
   is while it is mounted: an upgrade runs with the file service's read-only mount on it), and starts
-  nothing: hostkeeper's hook (`tierstore update-hook`) bootstraps the jobs. Each plist is the one of
-  `packaging/hostkeeper/units` (`tierstore.plist`, `tierstore-fs.plist`) but for the program path, and
-  `crates/tierstore/tests/packaging_macos.rs` holds each pair together.
+  nothing: hostkeeper's hook (`tierstore update-hook`) bootstraps the jobs. The plist is the one of
+  `packaging/hostkeeper/units` (`tierstore.plist`) but for the program path, and
+  `crates/tierstore/tests/packaging_macos.rs` holds the pair together. The file system of a Mac is the
+  `fs` interface of the one process, so the package ships no job for it. hostkeeper's activate of
+  it on a Mac that has the earlier `tierstore-fs.plist` removes that file (activate deletes the files
+  the old version shipped and the new one does not); the package itself removes nothing.
 - `cargo xtask release check-macos-pkg <dir> --version <X.Y.Z> --binary <path>` reads the directory
   `pkgutil --expand` made of the pkg and refuses anything but what the builder writes: the
   `Distribution` names the one component with no installer script, installation check or volume
@@ -352,8 +354,8 @@ fake.
   and no other script and no bundle; the component holds `Bom`, `PackageInfo`, `Payload` and
   `Scripts`, which holds the `postinstall` alone (0755, its bytes); the payload
   holds exactly the entries above, with their modes and bytes, each owned by root, group wheel or
-  admin (so nothing is group or other writable, set-id or sticky); each plist's label is its file's
-  name (`tierstore`, `tierstore-fs`) and its program is a file of the payload. Every deviation is listed.
+  admin (so nothing is group or other writable, set-id or sticky); the plist's label is its file's
+  name (`tierstore`) and its program is a file of the payload. Every deviation is listed.
 - `cargo xtask release check-pkg-signature <pkg> --identity "Developer ID Installer: <name> (<team>)"`
   runs `pkgutil --check-signature` and refuses the pkg unless the signature is trusted, carries a
   trusted timestamp, and its certificate chain is exactly the identity, Apple's Developer ID
@@ -366,7 +368,7 @@ package `com.komira.tierstore`, the run label `tierstore`, the hook `/Library/Ap
 Support/tierstore/bin/tierstore update-hook` with the boot step `restore` and the bounds and deadlines
 of `packaging/hostkeeper/manifest.toml.in`, the params `config_file`
 (`/usr/local/tierstore/etc/tierstore.toml`), `service_manager` `launchd` and `launchd_label`
-`tierstore`, `fs_launchd_label` `tierstore-fs`, and the health URL `http://127.0.0.1:9300/readyz`. How a Mac gets the package and the
+`tierstore`, no `fs_launchd_label` (the hook still reads it for the config hook's switch back to two processes), and the health URL `http://127.0.0.1:9300/readyz`. How a Mac gets the package and the
 file it needs is in `packaging/macos/README.md`.
 
 ### The order of a release

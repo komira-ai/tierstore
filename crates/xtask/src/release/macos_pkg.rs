@@ -15,22 +15,22 @@
 //! The payload is exactly these entries, each owned by root and group wheel, directories 0755:
 //! the binary `/Library/Application Support/tierstore/bin/tierstore` (0755, the given binary's
 //! bytes), the job `/Library/LaunchDaemons/tierstore.plist` (0644, the file
-//! `packaging/macos-pkg/tierstore.plist`) and the job of the file service
-//! `/Library/LaunchDaemons/tierstore-fs.plist` (0644, the file
-//! `packaging/macos-pkg/tierstore-fs.plist`), with the directories above them. The one script,
-//! `postinstall` ([`postinstall`], the file `packaging/macos-pkg/postinstall`), makes the account
-//! the jobs run as, `_tierstore`, when it is missing, the directories `/usr/local/tierstore`, its
-//! `etc`, `cache`, `log`, `run` (with `run/fs`) and `put`, and the mount point of `tierstore fs`
+//! `packaging/macos-pkg/tierstore.plist`), with the directories above them: the one job serves the
+//! node's file system itself, through an `[[interface]]` of type `fs` of its file, and the pkg
+//! ships no job of a second process (komira-ai/tierstore#624). The one script, `postinstall`
+//! ([`postinstall`], the file `packaging/macos-pkg/postinstall`), makes the account the job runs
+//! as, `_tierstore`, when it is missing, the directories `/usr/local/tierstore`, its `etc`,
+//! `cache`, `log`, `run` (with `run/fs`) and `put`, and the mount point of the file system
 //! `/private/var/tierstore/fs`, with their owners and modes; it loads no job: hostkeeper's update
-//! hook (`tierstore update-hook`) bootstraps the jobs.
+//! hook (`tierstore update-hook`) bootstraps the job.
 //!
 //! The check takes the directory `pkgutil --expand` made of the product and refuses anything but
 //! what the build writes: it holds exactly the file `Distribution` (the one component, no
 //! installer script or check) and the directory `tierstore.pkg`, which holds exactly `Bom`,
 //! `PackageInfo` (the identifier, the version, the install location `/`, the `postinstall` and no
 //! other script, no action after the install, no bundle), `Payload` (exactly the entries above,
-//! with their modes and bytes, owned by root, group wheel or admin; each plist parses with its
-//! own label, `tierstore` and `tierstore-fs`, and a program that is a file of the payload) and the directory `Scripts`
+//! with their modes and bytes, owned by root, group wheel or admin; the plist parses with the
+//! label `tierstore` and a program that is a file of the payload) and the directory `Scripts`
 //! (the `postinstall` alone, 0755, its bytes).
 //!
 //! [`manifest_json`] is the hostkeeper manifest of this pkg, as the coordinator's targets name
@@ -63,17 +63,11 @@ pub const IDENTIFIER: &str = "com.komira.tierstore";
 /// The job's label, the file stem of its plist, and the manifest's run entry.
 pub const LABEL: &str = "tierstore";
 
-/// The label of the file service's job, and the file stem of its plist.
-pub const FS_LABEL: &str = "tierstore-fs";
-
 /// The binary's path from `/`, in the payload and in the manifest's hook command.
 pub const BINARY_PATH: &str = "/Library/Application Support/tierstore/bin/tierstore";
 
 /// The job's plist path from `/`.
 pub const PLIST_PATH: &str = "/Library/LaunchDaemons/tierstore.plist";
-
-/// The file service's plist path from `/`.
-pub const FS_PLIST_PATH: &str = "/Library/LaunchDaemons/tierstore-fs.plist";
 
 /// The configuration file the update hook has the staged release check: the Mac's, which the
 /// pkg does not install.
@@ -81,9 +75,6 @@ pub const CONFIG_FILE: &str = "/usr/local/tierstore/etc/tierstore.toml";
 
 /// The plist the pkg installs.
 pub const PLIST: &str = include_str!("../../../../packaging/macos-pkg/tierstore.plist");
-
-/// The plist of the file service's job the pkg installs.
-pub const FS_PLIST: &str = include_str!("../../../../packaging/macos-pkg/tierstore-fs.plist");
 
 const DIR_MODE: u32 = 0o755;
 const BINARY_MODE: u32 = 0o755;
@@ -121,8 +112,8 @@ pub fn file_name(version: &str) -> String {
 /// [`super::desired_apt::entry`] writes the manifest of the apt entry: the update hook is the
 /// installed binary's `update-hook`, with the bounds and deadlines of the archive manifest
 /// (`packaging/hostkeeper/manifest.toml.in`), the one run label, the health URL and the params
-/// the hook reads (`service_manager` `launchd`, its `launchd_label` and the file service's
-/// `fs_launchd_label`).
+/// the hook reads (`config_file`, `service_manager` `launchd` and its `launchd_label`); it names
+/// no `fs_launchd_label`, as the one job serves the mount.
 pub fn manifest_json(min_hostkeeper: &str) -> Value {
     json!({
         "package": IDENTIFIER,
@@ -143,7 +134,6 @@ pub fn manifest_json(min_hostkeeper: &str) -> Value {
             "config_file": {"text": CONFIG_FILE},
             "service_manager": {"text": "launchd"},
             "launchd_label": {"text": LABEL},
-            "fs_launchd_label": {"text": FS_LABEL},
         },
         "minHostkeeper": min_hostkeeper,
         "installerBounds": {"stageSecs": "600", "activateSecs": "300", "removeSecs": "300"},
@@ -165,7 +155,6 @@ fn payload(binary: Vec<u8>) -> BTreeMap<String, Want> {
     let files = [
         (BINARY_PATH, BINARY_MODE, binary),
         (PLIST_PATH, PLIST_MODE, PLIST.as_bytes().to_vec()),
-        (FS_PLIST_PATH, PLIST_MODE, FS_PLIST.as_bytes().to_vec()),
     ];
     for (path, mode, bytes) in files {
         let path = path.trim_start_matches('/').to_owned();
@@ -547,13 +536,10 @@ fn dict_values<'a>(dict: roxmltree::Node<'a, 'a>, key: &str) -> Option<roxmltree
         .and_then(|pair| pair.get(1).copied())
 }
 
-/// The label the plist at `path` (from `/`, without the leading `/`) must have, if it is one of
-/// the payload's plists.
+/// The label the plist at `path` (from `/`, without the leading `/`) must have, if it is the
+/// payload's plist.
 fn plist_label(path: &str) -> Option<&'static str> {
-    [(PLIST_PATH, LABEL), (FS_PLIST_PATH, FS_LABEL)]
-        .into_iter()
-        .find(|(plist, _)| plist.trim_start_matches('/') == path)
-        .map(|(_, label)| label)
+    (PLIST_PATH.trim_start_matches('/') == path).then_some(LABEL)
 }
 
 /// What is wrong with the plist `bytes` of `/path`, one line each: it parses as a dictionary
@@ -788,8 +774,7 @@ pub fn check(expanded: &Path, version: &str, binary: &Path) -> Result<Vec<String
     Ok(vec![format!(
         "check-macos-pkg: {} is a product of the one component {COMPONENT} ({IDENTIFIER} \
          {version}), with the one script {}, which installs exactly {BINARY_PATH} \
-         ({BINARY_MODE:o}), {PLIST_PATH} ({PLIST_MODE:o}) and {FS_PLIST_PATH} ({PLIST_MODE:o}), \
-         owned by root",
+         ({BINARY_MODE:o}) and {PLIST_PATH} ({PLIST_MODE:o}), owned by root",
         expanded.display(),
         postinstall::NAME,
     )])

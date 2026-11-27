@@ -20,8 +20,9 @@ use super::Ctx;
 
 /// The mount point when `fs.toml` leaves out `[fs] mountpoint`: the default of `tierstore fs`.
 const DEFAULT_MOUNTPOINT: &str = "/run/tierstore/fs";
-/// The longest `launchctl bootout` of the fs job may run: the 150 s the plist gives the process
-/// to exit (`ExitTimeOut`) and a margin of 30 s.
+/// The longest `launchctl bootout` of the fs job may run: the 150 s its plist gave the process to
+/// exit (`ExitTimeOut`; the packages that shipped that plist, the last one before
+/// komira-ai/tierstore#624) and a margin of 30 s.
 pub(in crate::server::update_hook) const FS_BOOTOUT_TIMEOUT: Duration = Duration::from_secs(180);
 /// How many looks, after that call, the domain is given to let the fs job go.
 pub(in crate::server::update_hook) const FS_GONE_ATTEMPTS: u32 = 30;

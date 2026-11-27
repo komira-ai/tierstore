@@ -9,24 +9,27 @@
 # - `platform` is linux-x86_64, linux-arm64 or macos-arm64; there is one package per platform.
 # - `[units] run`: on Linux the two instances of `units/tierstore@.service` that the update hook
 #   alternates between, a hand-over of the listening sockets from one to the other; on macOS the
-#   one launchd job, by its label, which an update restarts (there is no hand-over on a Mac).
+#   one launchd job, by its label, which an update hands over to the next image of the binary
+#   (SIGUSR2: the process keeps its pid and its mount) when both releases can, and restarts when
+#   they cannot.
 # - `[params]`: `config_file`, the node's configuration file, and `service_manager`, `systemd`
 #   or `launchd` (with `launchd_label` on macOS), as the update hook reads them
 #   (crates/tierstore/docs/update-hook.md, "The params file"). There is no `mode`, so an update
-#   on Linux is a hand-over when both releases can do it and a restart when they cannot, and the
-#   node's configuration may leave `server.handoff_socket` out ("The hand-over socket" there).
+#   on Linux and on a Mac is a hand-over when both releases can do it and a restart when they
+#   cannot, and the node's configuration may leave `server.handoff_socket` out ("The hand-over
+#   socket" there).
 #
 # The bounds are the same on both systems. `cutover` (4000 s) covers, on Linux, the start of the
 # idle instance and the hook's wait for the release to serve (up to 1000 looks a second apart: a
 # new instance answers only once it has opened its local cache, which took minutes on a slow
 # disk) and its probe of the build gauge (60 looks): 1060 looks a second apart at the longest,
 # below the bound (the one process makes the file system's mount itself, so there is no second
-# instance to start or wait for); and, on macOS, the bootout
-# of the file service's job first (ExitTimeOut, 150 s: an unmount of at most four steps of 25 s, see
-# packaging/macos-pkg/tierstore-fs.plist), the bootout of the job (ExitTimeOut, 210 s: the 1 s
-# settle and the 60 s drain deadline, the 120 s at most of an unmount after them, and a margin,
-# see packaging/hostkeeper/units/tierstore.plist), its bootstrap and the same wait: 150 s, 210 s
-# and 1060 looks a second apart are 1420 s, below the bound;
+# instance to start or wait for); and, on macOS, the hand-over of the one job (the copy of the
+# binary and a signal, then the same wait) or a restart (a release without handoff-exec-v1, or a
+# params file with mode = "restart"): the bootout of the job (ExitTimeOut, 210 s: the 1 s settle
+# and the 60 s drain deadline, the 120 s at most of an unmount after them, and a margin, see
+# packaging/hostkeeper/units/tierstore.plist), its bootstrap and the same wait: 210 s and 1060
+# looks a second apart are 1270 s, below the bound;
 # `rollback` (1500 s) covers the same moves back, with no wait for the cache lock.
 # `cleanup` (1300 s) is above the stop timeout of a Linux instance (TimeoutStopSec, 960 s: the
 # 10 s settle, the 15 min drain deadline and a margin). `prepare = 0` is unbounded.

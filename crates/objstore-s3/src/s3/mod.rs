@@ -35,18 +35,23 @@
 //! Every single PUT names itself with a token of its own, and one that got no answer from the
 //! store (its body or its transport failed) is followed by one look at the key, which deletes an
 //! object of the wrong length that the PUT made, and only that one (`cut_put.rs`,
-//! [`S3Store::cut_puts`]). A streamed write can send digests of its body for the store to check
-//! ([`S3Store::put_stream_new_checked`], [`S3Store::put_stream_replacing_checked`]).
+//! [`S3Store::cut_puts`]). The look, and the abort of a multipart upload that failed, run in
+//! tasks of their own, bounded in number and in time, after the write has given its error;
+//! aborts that fail are kept, a bounded list, and sent again when the store answers again
+//! (`cleanup.rs`, [`S3Store::cleanups`]). A streamed write can send digests of its body for the
+//! store to check ([`S3Store::put_stream_new_checked`], [`S3Store::put_stream_replacing_checked`]).
 //!
 //! A copy within the bucket is the store's own (`copy.rs`): [`S3Store::copy_object`] and
 //! [`S3Store::upload_part_copy`], with the source's conditions sent for the store to test.
 
 mod bound;
 mod checksum;
+mod cleanup;
 mod copy;
 mod credentials;
 mod cut_put;
 mod endpoint;
+mod failover;
 #[cfg(feature = "testkit")]
 pub mod fake;
 mod health;
@@ -62,6 +67,7 @@ mod tuning;
 mod xml;
 
 pub use checksum::StoredSha256;
+pub use cleanup::Cleanups;
 pub use copy::{CopyAnswer, CopyConditions, CopySource};
 pub use credentials::{AwsEnv, CredentialSource, Credentials, CredentialsError};
 pub use cut_put::CutPuts;
@@ -238,8 +244,9 @@ pub enum S3ConfigError {
 
 /// One S3 bucket.
 pub struct S3Store {
-    /// Shared with a multipart upload's abort, which may run after its write was
-    /// dropped.
+    /// Shared with the tasks of the work after failed writes (the look after a PUT that got
+    /// no answer, the abort of a multipart upload, a pass over the failed aborts), which run
+    /// after their write has ended; the `Cleaner` in it holds it only weakly.
     conn: Arc<Conn>,
 }
 
@@ -260,6 +267,8 @@ struct Conn {
     tuning: S3Tuning,
     /// What the looks after PUTs that got no answer did (`cut_put.rs`).
     cut: cut_put::CutCounts,
+    /// The work after failed writes, in tasks of its own (`cleanup.rs`).
+    cleaner: cleanup::Cleaner,
 }
 
 impl fmt::Debug for S3Store {
@@ -364,7 +373,7 @@ impl S3Store {
         let seed = RandomState::new().hash_one(targets.len());
         let probe_hold = config.request_timeout.saturating_add(FIRST_ASIDE);
         let health = Arc::new(Health::new(targets.len(), seed, probe_hold));
-        let conn = Conn {
+        let conn = |weak: &std::sync::Weak<Conn>| Conn {
             client,
             targets,
             health,
@@ -376,9 +385,10 @@ impl S3Store {
             min_body_rate: config.min_body_rate,
             tuning,
             cut: cut_put::CutCounts::default(),
+            cleaner: cleanup::Cleaner::new(weak.clone()),
         };
         Ok(Self {
-            conn: Arc::new(conn),
+            conn: Arc::new_cyclic(conn),
         })
     }
 }
@@ -522,57 +532,6 @@ impl Conn {
         #[cfg(test)]
         read_limit_tests::took_head();
         Ok(resp)
-    }
-
-    /// Runs `attempt`, which signs a request with the keys it is given for the endpoint it is
-    /// given (the next in turn, `health.rs`) and sends it, again after a failure that proves the
-    /// store never saw the request ([`Failed::unsent`]), and, for an `idempotent` request, after
-    /// a stall of an endpoint that was then set aside, until the sends are
-    /// [`S3Tuning::endpoint_attempts`] in all. The last failure is the error, as it is for a
-    /// request sent once; any other failure ends the request at once. An answer of any status
-    /// puts its endpoint back in turn; a stall or a failed connect sets it aside unless it is the
-    /// last in turn. With one endpoint the next send after a failed connect is to the same
-    /// address on a new connection, and a stall is the error. The keys are had again for each
-    /// send, so a send never signs with keys that expired; when none can be had, nothing is
-    /// sent and the error is [`ObjectStoreError::Credentials`].
-    pub(super) async fn failing_over<F, Fut>(
-        &self,
-        idempotent: bool,
-        mut attempt: F,
-    ) -> Result<Response, ObjectStoreError>
-    where
-        F: FnMut(Arc<Keys>, &Target) -> Fut,
-        Fut: Future<Output = Result<Response, Failed>>,
-    {
-        let mut sends = 1;
-        loop {
-            let keys = self
-                .credentials
-                .keys()
-                .await
-                .map_err(ObjectStoreError::Credentials)?;
-            let index = self.pick();
-            let failed = match attempt(keys, &self.targets[index]).await {
-                Ok(resp) => {
-                    self.answered(index);
-                    return Ok(resp);
-                }
-                Err(failed) => failed,
-            };
-            let aside =
-                (failed.unsent || failed.stalled) && self.endpoint_failed(index, &failed.error);
-            let again = failed.unsent || (failed.stalled && idempotent && aside);
-            if !again || sends >= self.tuning.endpoint_attempts {
-                return Err(failed.error);
-            }
-            let why = if failed.unsent {
-                "request never reached the store; sending it to the next endpoint"
-            } else {
-                "request got no answer in time; sending it to the next endpoint"
-            };
-            tracing::warn!(error = %failed.error, sends, "{why}");
-            sends += 1;
-        }
     }
 
     /// Runs `step`, failing as a stalled read if it takes longer than `request_timeout`.

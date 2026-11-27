@@ -345,7 +345,8 @@ that is all the capability is for. It is what `tierstore-fs@.service` grants tod
 
 **macOS:** none. The process runs as `_tierstore`; the NFS listener is on an unprivileged loopback port, and `mount_nfs`,
 `umount` and `diskutil unmount force` of a loopback export need no root when the mounting user owns the mount point (read in
-`packaging/macos-pkg/tierstore-fs.plist`; Measured: macos E14 in virtual-build-fs.md).
+the `tierstore-fs.plist` the installer package shipped until komira-ai/tierstore#624; Measured: macos E14 in
+virtual-build-fs.md).
 
 ### 2.2 Unit hardening: what the host's mount namespace rules out
 
@@ -745,7 +746,7 @@ A Mac has no hand-over today, and its file service unmounts when it stops (`nfs/
 boots it out before the main job: `launchd/fs.rs`). So the switch on a Mac is a restart, and it unmounts, as every tierstore
 update on a Mac does today. A job that holds a tree on that Mac during the switch fails. The window therefore drains the
 Mac first: the job agent takes no new job and its jobs end, as for any Mac update today. After the switch, updates are the
-hand-over of 3.4 and no longer unmount.
+hand-over of 3.4 and no longer unmount (section 4.5).
 
 1. M is on the Mac (two jobs). The Mac is drained.
 2. The group's configuration package is updated: `tierstore.toml` with the `fs` interface (1.3), no `fs.toml`, and no
@@ -757,8 +758,9 @@ hand-over of 3.4 and no longer unmount.
 3. The Mac is let take jobs again.
 
 Rollback: the package's previous files, `launchctl enable system/tierstore-fs`, and the old restart (fs job out, main job out
-and in, fs job in), with the Mac still drained. M+1's installer package does not ship `tierstore-fs.plist` and its
-postinstall removes a `tierstore-fs.plist` left by an earlier package.
+and in, fs job in), with the Mac still drained. The installer package no longer ships `tierstore-fs.plist`
+(komira-ai/tierstore#624); hostkeeper's activate of it removes the one an earlier package installed, since it deletes the
+files the old version shipped and the new one does not. Its postinstall does nothing about it.
 
 ### 4.4 What changes where
 
@@ -770,6 +772,45 @@ postinstall removes a `tierstore-fs.plist` left by an earlier package.
 | `mac-build`'s configuration package | `tierstore.toml` with the `fs` interface; no `fs.toml`; params without `fs_launchd_label`; needs M or later | its window |
 | hostkeeper manifest | Linux `run` unchanged (`tierstore@a.service`, `tierstore@b.service`); macOS installer package's params lose `fs_launchd_label` and its payload loses `tierstore-fs.plist` (M+1); the cutover bound (4000 s, which includes the wait for the new store to take the cache lock) and the rollback bound (1500 s) still cover a Linux take (300 s start) and a Mac hand-over (61 s drain, start) | M, M+1 |
 | job agent (jobscheduler) | nothing: the mount-provider socket paths (`/var/lib/tierstore/provider.sock`, `/usr/local/tierstore/run/provider.sock`) and the mount roots do not move. On Linux, the ordering drop-in names `tierstore@a.service tierstore@b.service` | 4.2 step 5 |
+
+### 4.5 Updates of a Mac's release after the switch
+
+komira-ai/tierstore#623, #624. Since 0.3.196 `tierstore fs --config` serves nothing and exits 2; the file system of a Mac is
+served only by the `fs` interface of the node's one process. The macOS package's manifest still named `fs_launchd_label`, so
+an update booted the `tierstore-fs` job out (which unmounts) and in again after the main job served onto a binary that exits
+2, reported success, and nothing was mounted. The decision:
+
+- **A Mac that was switched** (its file has an `fs` interface) is updated by the hand-over of 3.4: the manifest names no
+  fs job, so between releases that both list `handoff-exec-v1` the hook copies the staged binary and sends `SIGUSR2`. The
+  process keeps its pid and its mount, ends its NFS connections as a hand-over does, and executes the new image, which serves
+  the same NFS listening socket and control socket. The jobs on the Mac see their reads of the mount pause for the drain and
+  the exec (the mount is `hard`, so the clients retry) and go on; nothing is unmounted and their files stay open. Before,
+  every update was a restart: a boot-out of the job (the drain of 60 s, then the unmount, up to 120 s) under the running jobs.
+- **A Mac that was not switched** (its file has a `mount-provider` interface and no `fs` interface) is refused in `prepare`
+  with `mode_unsupported`, and the detail says to switch the node to one process first. The refusal is in `prepare` because it
+  runs before `activate` and before anything is recorded, started or stopped: hostkeeper runs `rollback`, which finds
+  nothing in flight, and re-activates the previous package, so the Mac stays on its release with its mount served. A refusal
+  after the cutover would have stopped the one process that serves the mount. The config hook is not refused: its switch (4.3)
+  is the way off the layout.
+- **`verify` proves the volume before the commit.** The hand-over's own check is the build gauge, which says the new image
+  runs, not that it serves the mount. For a release on launchd whose file has an `fs` interface, `verify` requires the mount
+  listed at the interface's mount point (which is the mount provider's root, the loader holds the two equal) and a look-up
+  of `<mount point>/trees` that finds a directory: every mount of the file system has that namespace at its root, a plain
+  directory that is not mounted lacks it, and the look-up needs the server to answer. A failure is `not_ready` and hostkeeper
+  rolls back, which for a hand-over is the hand-over to the previous release by `SIGUSR2`. After the commit `verify` only
+  observes the version.
+- **`fs_launchd_label` is still read**, because the switch's rollback of a config package names it to go back to the
+  two-process layout: a params file that names it is driven as before (the fs job out before the main job, in after),
+  except in an update of the release on a node whose file has an `fs` interface. There every step, the boot step and the
+  rollback included, leaves the fs job alone whatever the params say: on the four switched farm Macs the update to 0.3.203,
+  whose manifest still named the job, failed in `cutover` and again in `rollback` at `launchctl bootstrap` of the disabled
+  `tierstore-fs.plist` (`Bootstrap failed: 5`) after the main job served, and its boot step fails the same way. No
+  release manifest names it, and the package ships no `tierstore-fs.plist`; hostkeeper's activate removes the file from a Mac
+  that has it, and a rollback to the old release lays it down again, where the job stays disabled on a switched Mac.
+- **Failure modes.** A mount that is not listed, or has no `trees`, fails `verify` and rolls the update back. On a hard NFS
+  mount whose server is gone, the look-up waits until the kernel marks the mount dead (`fs.nfs.dead_timeout`) and then fails,
+  so a dead server fails `verify` after that time and not at once. A Mac whose file lacks the `fs` interface stays on its
+  release until its config package switches it.
 
 ## 5. What it deletes (release M+1)
 
@@ -784,9 +825,11 @@ went where. The items marked #624 are the macOS update path, owned by komira-ai/
   system is the `[[interface]]` of type `fs` of the node's file", so a unit left behind fails loudly and its
   `RestartPreventExitStatus=2` stops it from looping. `tierstore fs attachments` becomes `tierstore attachments --config
   <file>`, which reads the control socket from the `fs` interface (decision 8).
-- **`fs.toml`** (#624; nothing on Linux reads it any more): the packaging example `packaging/macos/fs.toml`, the copies in each group's configuration package.
-- **The units and jobs** (`tierstore-fs@.service` deleted; the plists and the installer package's entries are #624): `packaging/hostkeeper/units/tierstore-fs@.service`, `packaging/hostkeeper/units/tierstore-fs.plist`,
-  `packaging/macos-pkg/tierstore-fs.plist`, the installer package's `FS_*` entries (`crates/xtask/src/release/macos_pkg.rs`).
+- **`fs.toml`**: the packaging example `packaging/macos/fs.toml` (deleted in komira-ai/tierstore#624), the copies in each
+  group's configuration package. Nothing on Linux reads it any more (komira-ai/tierstore#524).
+- **The units and jobs**: `packaging/hostkeeper/units/tierstore-fs@.service` (deleted in komira-ai/tierstore#524);
+  `packaging/hostkeeper/units/tierstore-fs.plist`, `packaging/macos-pkg/tierstore-fs.plist` and the installer package's
+  `FS_*` entries (`crates/xtask/src/release/macos_pkg.rs`), deleted in komira-ai/tierstore#624.
 - **The fill socket** (built by komira-ai/tierstore#523): `server/fill_socket/mod.rs` and `request.rs` (listener, sessions, parser, refusals) and their tests,
   `server/treefs/fill_client.rs` and its tests, the socket parts of `server/config_fill.rs`, `Fronts.fill_socket` and the
   task that serves it. Kept, moved beside the provider listener that uses them: `bind_socket`, `SocketFile`, `pause_if`;
