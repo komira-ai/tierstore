@@ -361,6 +361,7 @@ mod tests {
     use super::*;
     use crate::Capabilities;
     use crate::s3::{Addressing, Credentials, S3Config, S3Store};
+    use bytes::Bytes;
 
     /// A store whose every connect is refused.
     fn store() -> S3Store {
@@ -441,10 +442,8 @@ mod tests {
     /// How many aborts the loopback service took.
     fn aborts(s3: &crate::s3::fake::FakeS3) -> usize {
         let taken = s3.requests();
-        let aborts = taken
-            .iter()
-            .filter(|r| r.starts_with("DELETE ") && r.contains("uploadId="));
-        aborts.count()
+        // The test sends no other request with an upload id.
+        taken.iter().filter(|r| r.contains("uploadId=")).count()
     }
 
     /// Asserts what a real pass does with the list: over two kept aborts, it stops at the first
@@ -485,6 +484,59 @@ mod tests {
             ..Cleanups::default()
         };
         assert_eq!(cleaner.read(), dropped);
+    }
+
+    /// Asserts, through the crate's own copy of the write paths, the three ways a failed write
+    /// hands its work over: a PUT that never reached the store (every connect refused) is not
+    /// looked after; a PUT whose connection the store closed without an answer is looked after
+    /// in a task of its own, whose HEAD fails too (counted `failed`); and the abort of an upload
+    /// runs in a task of its own while a place is free, kept when the store fails it and not
+    /// kept when it is done.
+    #[tokio::test]
+    async fn a_failed_write_hands_its_look_or_its_abort_to_a_task() {
+        use crate::ObjectStore as _;
+        use tokio::io::AsyncReadExt as _;
+
+        let body =
+            || futures::StreamExt::boxed(futures::stream::iter([Ok(Bytes::from_static(b"abcd"))]));
+        let never = store();
+        let unsent = never.put_stream(&k(), 4, body()).await;
+        assert!(unsent.is_err());
+        never.cleanups_idle().await;
+        assert_eq!(never.cut_puts(), crate::s3::CutPuts::default());
+
+        // A store that reads each request's head and closes the connection unanswered.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            loop {
+                let (mut sock, _) = listener.accept().await.unwrap();
+                let mut head = [0_u8; 1024];
+                let _ = sock.read(&mut head).await;
+            }
+        });
+        let tuning = crate::s3::S3Tuning {
+            cut_put_look_after: Duration::ZERO,
+            endpoint_attempts: 1,
+            ..crate::s3::S3Tuning::default()
+        };
+        let closing = S3Store::new_tuned(store_config(endpoint), tuning).unwrap();
+        let cut = closing.put_stream(&k(), 4, body()).await;
+        assert!(cut.is_err());
+        closing.cleanups_idle().await;
+        assert_eq!(closing.cut_puts().failed, 1);
+
+        let s3 = crate::s3::fake::FakeS3::start().await;
+        let store = s3.store(Capabilities::default());
+        s3.fail(crate::s3::fake::Failure::Abort);
+        store.conn.cleaner.abort(k(), "u1".to_owned());
+        store.cleanups_idle().await;
+        assert_eq!(store.cleanups().failed_aborts, 1);
+        let other = S3Store::new(s3.config(Capabilities::default())).unwrap();
+        other.conn.cleaner.abort(k(), "u2".to_owned());
+        other.cleanups_idle().await;
+        assert_eq!(other.cleanups(), Cleanups::default());
+        assert_eq!(aborts(&s3), 2);
     }
 
     fn store_config(endpoint: String) -> S3Config {

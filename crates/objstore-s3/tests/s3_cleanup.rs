@@ -209,8 +209,14 @@ async fn a_put_that_never_reached_the_store_is_not_looked_after() {
 }
 
 /// Asserts that a multipart upload whose body fails gives the body's error while its abort is
-/// still held, unanswered, by the store. Catches: a failed upload that holds its caller until
-/// the abort is answered (here the request timeout, an hour: the test would hang).
+/// still held, unanswered, by the store; and that the abort then ends at its own deadline (not
+/// the request timeout of an hour), closing its connection, and is kept to be sent again.
+/// Catches: a failed upload that holds its caller until the abort is answered (the test would
+/// hang), and an abort the store never answers that holds its place for the request timeout or
+/// is lost.
+///
+/// The deadline's wait is not real: the clock is paused once the service holds the abort, and
+/// moves on to the deadline by itself.
 #[tokio::test]
 async fn a_failed_upload_gives_its_error_before_its_abort_is_answered() {
     let s3 = FakeS3::start().await;
@@ -224,6 +230,15 @@ async fn a_failed_upload_gives_its_error_before_its_abort_is_answered() {
     s3.wait_for(|s3| s3.held_aborts() == 1).await;
     assert_eq!(s3.incomplete_uploads(), 1);
     assert_eq!(s3.stats().aborted, 0);
+    tokio::time::pause();
+    store.cleanups_idle().await;
+    let kept = Cleanups {
+        failed_aborts: 1,
+        ..Cleanups::default()
+    };
+    assert_eq!(store.cleanups(), kept);
+    s3.wait_for(|s3| s3.held_aborts() == 0).await;
+    assert_eq!(s3.incomplete_uploads(), 1);
 }
 
 /// Asserts that an abort the store fails is kept (the gauge is 1, the upload still open), and
