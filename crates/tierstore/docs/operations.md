@@ -445,6 +445,25 @@ On a Mac the same entry is served by the NFS front of `tierstore fs` on a Mac (a
 
 The stop: at SIGTERM or SIGINT (a launchd bootout) the fronts drain first, and the NFS front answers throughout; once they have drained, the process unmounts while it still answers (as [the Mac's mount](operations.md#the-macs-mount-a-dead-server-a-stop-and-an-update) says) and exits 0. At SIGUSR2 it hands over to the next image instead, and unmounts nothing (see [drain and restart](operations.md#drain-and-restart)). An NFS server that stops by itself stops the fronts as a signal does, is unmounted, and the process exits 1, so that launchd starts the job again. The switch of a Mac from two jobs to one is a restart, which unmounts (see [the switch to one process](update-hook.md#the-switch-to-one-process)).
 
+### The tree store at a hand-over, and checking an update for killed jobs
+
+The process that takes the node over (on Linux the successor that took the mount, on a Mac the next image) opens its tree store
+at its start, while its cache is still read-only, and the process before it goes on making placements for the mount provider until
+it hands the cache's lock over. When the successor's cache takes the write role (the lock handed over, or taken at a tick) its tree
+store reads the cache directory again before the cache tells the requests that wait for the write role (a read of a file under a
+placement, the mount provider, the fill socket) that it is read-write, so they find the placements made meanwhile (`/readyz` may say
+`read-write` while that read runs). A read that fails is said on stderr, and the store's next pass (`local_cache.pass_interval`, 10 s
+by default) reads it again. Earlier releases (0.3.190 among them) read it again only at that pass: in the window a read of a file the process before
+had opened for a job, under a placement made after the successor's start, was answered `EIO`, and a job that had the file mapped (a
+compiler maps its inputs) was killed by SIGBUS, exit status 135, within seconds of each node's update.
+
+To check an update for this, count the jobs that ended with status 135 on the nodes of the roll, from the first node's `cutover` to
+the last node's `verify`: in the job service's results, or in the log of the build service that sent the jobs, as the runs it sent
+again because the job exited with status 135. The count is 0 when the update hands over without the window. On a node, the log of the process that
+serves the mount has the matching line for every tree it hit, at most one every 10 s for a tree (with the count of the failed reads since the last):
+`tierstore fs: cannot read <path> in the tree <digest> ...: the file was opened by the process before this one, and its tree is gone`;
+none between the node's `cutover` and its `verify` is the same check on the node's side.
+
 ## Keys under a tree placement
 
 A build node can show a node-local tree as objects of its bucket: a placement of the tree at a bucket and a key prefix, kept by the node's tree store (see the `[trees]` table in [configuration](configuration.md#trees)). The `CreateTree` call of the `trees` gRPC interface (a `trees` entry of `[[interface]]`, see [configuration](configuration.md#interface)) is the front that makes placements; until that front is connected to the tree store, its calls answer `NotServing`. While a placement lasts (until its lease ends or it is released), a key under its prefix is a file of the tree on this node, not an ordinary object. Another node does not see the placement: it answers the same keys from its own objects.
