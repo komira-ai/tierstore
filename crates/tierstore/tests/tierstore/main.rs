@@ -38,6 +38,8 @@ mod s3_conditional_delete;
 #[cfg(feature = "server")]
 mod s3_keys;
 #[cfg(feature = "s3")]
+mod s3_multi_endpoint;
+#[cfg(feature = "s3")]
 mod s3_streamed;
 #[cfg(feature = "s3")]
 mod s3_tagged;
