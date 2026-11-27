@@ -132,7 +132,7 @@ pub(super) async fn serve_combined(
 pub(super) async fn serve_combined_until_signalled(
     settings: CombinedSettings,
 ) -> Result<(), Error> {
-    let stop = signals()?;
+    let stop = super::memory_bound::or_reached(signals()?);
     let announce = |bound: Addresses| {
         let listen = joined(&bound.s3_all);
         let mut line = format!("tierstore {VERSION} listen={listen} mode=storage-cache");

@@ -857,7 +857,7 @@ pub(super) async fn serve_cache_until_signalled(
     handed: Option<std::os::fd::OwnedFd>,
 ) -> Result<Option<Image>, Error> {
     let next = Arc::new(NextImage::default());
-    let stop = stop_or_next(Arc::clone(&next))?;
+    let stop = crate::server::memory_bound::or_reached(stop_or_next(Arc::clone(&next))?);
     let mode = if settings.cache.write_through {
         "write-through-cache"
     } else {

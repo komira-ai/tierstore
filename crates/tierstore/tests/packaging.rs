@@ -212,3 +212,43 @@ fn the_unit_is_hardened() {
         assert_eq!(value(&unit, key), want, "{key}");
     }
 }
+
+/// The exit status of a process at its memory bound (`server.memory_bound`): what the binary exits
+/// with (`tests/s3_front/memory_bound.rs` asserts it of the binary).
+const MEMORY_BOUND_STATUS: &str = "75";
+
+/// Asserts that every shipped systemd unit of the server (the hand-placed example, the template of
+/// the deb and rpm packages and hostkeeper's template) starts the process again when it exits at
+/// its memory bound: `RestartForceExitStatus=75`, 75 not among the statuses it does not restart,
+/// and no cgroup memory bound, which would count the page cache; that the unit's command line and
+/// the example file run the process with the default bound of 32 GiB; and that both launchd jobs
+/// start any exit again (`KeepAlive` true). Catches a unit that leaves a node down after the
+/// bound, or one that bounds the page cache of a cache node.
+#[test]
+fn every_unit_starts_the_process_again_at_its_memory_bound() {
+    let units = [
+        "tierstore.service",
+        "tierstore@.service",
+        "hostkeeper/units/tierstore@.service",
+    ];
+    for file in units {
+        let unit = read(file);
+        let forced = value(&unit, "RestartForceExitStatus");
+        assert_eq!(forced, MEMORY_BOUND_STATUS, "{file}");
+        let prevented = value(&unit, "RestartPreventExitStatus");
+        let prevented: Vec<&str> = prevented.split_whitespace().collect();
+        assert!(!prevented.contains(&MEMORY_BOUND_STATUS), "{file}");
+        for key in ["MemoryMax", "MemoryHigh", "MemoryLimit"] {
+            assert_eq!(values(&unit, key), Vec::<String>::new(), "{file}: {key}");
+        }
+        assert_eq!(parse(&unit).memory_bound, 32 << 30, "{file}");
+    }
+    for file in [
+        "hostkeeper/units/tierstore.plist",
+        "macos-pkg/tierstore.plist",
+    ] {
+        let text = read(file);
+        let (_, after) = text.split_once("<key>KeepAlive</key>").expect(file);
+        assert!(after.trim_start().starts_with("<true/>"), "{file}");
+    }
+}

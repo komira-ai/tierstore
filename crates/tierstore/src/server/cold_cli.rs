@@ -141,7 +141,7 @@ pub(in crate::server) fn announce_line(bound: &Addresses) -> String {
 pub(in crate::server) async fn serve_cold_until_signalled(
     settings: ColdSettings,
 ) -> Result<(), Error> {
-    let stop = signals()?;
+    let stop = crate::server::memory_bound::or_reached(signals()?);
     let announce = |bound: Addresses| {
         crate::server::build_info::stderr_log::answer(&announce_line(&bound));
     };

@@ -333,13 +333,13 @@ async fn the_signature_covers_the_bucket_host() {
     assert_eq!(recased.code(), "SignatureDoesNotMatch");
 }
 
-/// Asserts that on a bucket's host a key can be called `healthz`, `readyz`, `usagez` or `metricz`
-/// (it is an object, and the probe is not answered there), and that the probes are still
+/// Asserts that on a bucket's host a key can be called `healthz`, `readyz`, `usagez`, `memoryz` or
+/// `metricz` (it is an object, and the probe is not answered there), and that the probes are still
 /// answered on a host that is not a bucket's.
 #[tokio::test(start_paused = true)]
 async fn the_probe_paths_are_keys_on_a_bucket_host() {
     let rig = hosted_rig().await;
-    for key in ["healthz", "readyz", "usagez", "metricz"] {
+    for key in ["healthz", "readyz", "usagez", "memoryz", "metricz"] {
         let uri = format!("/{key}");
         let put = rig
             .send_on(HOST, "PUT", &uri, &[("if-none-match", "*")], key.as_bytes())

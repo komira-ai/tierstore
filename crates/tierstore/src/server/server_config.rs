@@ -142,6 +142,10 @@ pub struct ServerConfig {
     /// The TLS of the listeners: `Some` serves every connection of [`Server::serve_all`] over
     /// HTTPS, and `None` (the default) serves plain HTTP.
     pub tls: Option<tokio_rustls::TlsAcceptor>,
+    /// The bound on the process's anonymous memory, which `/memoryz` and `/metricz` show: none by
+    /// default, and then `/memoryz` says the memory is not watched. The binary sets the watch of
+    /// its `server.memory_bound` (see `memory_bound.rs`).
+    pub(crate) memory: Option<Arc<super::memory_bound::MemoryWatch>>,
 }
 
 impl ServerConfig {
@@ -192,6 +196,7 @@ impl ServerConfig {
             clock,
             rate_clock: Arc::new(MonotonicClock::new()),
             tls: None,
+            memory: None,
         }
     }
 }

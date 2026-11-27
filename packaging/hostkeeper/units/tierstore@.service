@@ -47,6 +47,13 @@
 # The drain is the defaults of `server.drain_lb_wait` (10 s) and `server.drain_deadline` (15 m),
 # which TimeoutStopSec= is above; the unit passes no flag for it.
 #
+# The unit sets no MemoryMax= or MemoryHigh=: a cgroup bound counts the page cache of the files the
+# process reads and writes, which on a cache node is most of the host's memory, so it would throttle
+# or kill the process for its work. The process bounds its own anonymous memory instead
+# (`server.memory_bound`, 32 GiB by default): at the bound it drains, leaves the mount to the
+# descriptor store, and exits 75, which RestartForceExitStatus= starts again after RestartSec=,
+# whatever Restart= a drop-in sets (crates/tierstore/docs/operations.md, "The memory bound").
+#
 # hostkeeper's own Force, which starts every `run` unit and waits for all of them, finds the
 # standby instance inactive by design and reports it; the service is up all the same.
 #
@@ -85,6 +92,7 @@ TimeoutStopSec=960
 Restart=on-failure
 RestartSec=2
 RestartPreventExitStatus=2 3
+RestartForceExitStatus=75
 # The same value as tierstore-fs@.service: this process serves the node's cache and the fill socket for the mount, whose jobs keep files of it open as long as they run.
 LimitNOFILE=1048576
 UMask=0077

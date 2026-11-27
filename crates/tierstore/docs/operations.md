@@ -12,16 +12,17 @@ With the OCI front on, the line gets ` oci-listen=<address> (https)` or ` (http)
 
 ## Probes
 
-Four paths of the S3 listener answer a GET or HEAD without a signature, so a bucket cannot have any of these names.
+Five paths of the S3 listener answer a GET or HEAD without a signature, so a bucket cannot have any of these names.
 
 | Path | Answer | Use it for |
 |---|---|---|
 | `/healthz` | 200 `ok` while the process runs | liveness |
 | `/readyz` | 200 `ready` until the drain begins, then 503 `draining` | a load balancer's health check |
 | `/usagez` | 200 with the age of the hot tier's published usage, or 503 with the reason | alerting |
+| `/memoryz` | 200 with the process's anonymous memory, its mark and its bound, or 503 over the mark (see [the memory bound](operations.md#the-memory-bound)); not in a release yet | alerting |
 | `/metricz` | 200 with the counters, in the Prometheus text format (see [Metrics](operations.md#metrics)) | scraping |
 
-`/readyz` does not look at the usage: one stopped reconciler would otherwise make every node unready. `/usagez` is for alerting, not for a load balancer.
+`/readyz` does not look at the usage or at the memory: one stopped reconciler would otherwise make every node unready, and a node over its memory mark still serves. `/usagez` and `/memoryz` are for alerting, not for a load balancer.
 
 The 200 of a build node says which mode its cache is in: `ready read-write` or `ready read-only` (see [the cache lock](operations.md#the-cache-lock-and-read-only-mode)). The status is the same in both: a read-only node serves.
 
@@ -100,6 +101,31 @@ To restart for a new binary or a new key file, replace the file, then `systemctl
 During an update two releases share the hot tier (and, on a node with `[local_cache]`, the cache directory), and each reads what the other writes. The objects and files tierstore keeps of its own (the key entries, the registrations, the format object, the markers, the cache sidecars, the update hook's record and the rest), where each lives and the rule that each changes only by adding are in [docs/stored-formats.md](https://github.com/komira-ai/tierstore/blob/main/docs/stored-formats.md).
 
 `hot_store.lock_file` says which of the processes over one node reconciles. A process that holds an exclusive lock on the file runs the reconciler and takes the lease. A process that finds the lock held serves reads and writes through its own proxy at once and does not touch the reconciler's state in the hot tier, the lease included, until it holds the lock; it tries every `hot_store.lock_retry` (one second unless that is set). The system frees the lock when the holder exits or crashes, so a process started beside the one that is draining reconciles as soon as that one has exited and given its lease up. Give both processes the same file, on a local file system, in a directory that nothing removes: a directory under `/run` that systemd removes with the unit would let a third process make a new file and lock it beside the second. The holder looks before each pass at whether the path still leads to the file it locked; if the file was replaced, it gives its lease up and waits for the lock on the new file. A start whose lock file cannot be opened, is a link or is on a network file system exits 1. Without the flag the reconciler works as soon as the process starts, as before.
+
+## The memory bound
+
+`server.memory_bound` (32 GiB by default; `0` for none) bounds the anonymous memory of the process: its heap, its thread stacks and its anonymous mappings. A thread of the process looks once a second: on Linux at `RssAnon` of `/proc/self/status`, which leaves out the page cache of the files the process reads and writes and the files it maps, since the kernel takes those back when it needs them; on macOS at the process's peak resident size, which never goes down. The units set no `MemoryMax=` or `MemoryHigh=`: a cgroup bound counts the page cache too, which on a cache node is most of the host's memory, so it would throttle or kill the process for doing its work.
+
+- At the mark, half the bound, the process is degraded: `/memoryz` says 503 and `tierstore_memory_degraded` is 1 (see [metrics](metrics.md#the-memory-bound)), and stderr says so once. It serves as before, and `/readyz` stays 200. It is no longer degraded once the memory is back under seven eighths of the mark.
+- At the bound, stderr says the sizes, the exit is counted in the file `memory-bound-exits` of the service's state directory (`/var/lib/tierstore` under the units), which the next start shows as `tierstore_memory_bound_exits_total`, and the process drains as on SIGTERM ("Drain and restart" above): `/readyz` says 503, the settle, the requests in flight, and on a build node with an `fs` interface the mount left to the service manager's descriptor store, which the next start takes. The process then exits with status 75, which the units start again (`RestartForceExitStatus=75`; launchd's `KeepAlive` starts any exit again). A drain that has not ended 30 s after the bound is cut: the process exits with status 75 at once, and the descriptor store keeps the mount as on a crash.
+
+```text
+tierstore: anonymous memory <N> bytes is above the mark of <M> bytes, half the memory bound of <B> bytes
+tierstore: memory bound reached: anonymous memory <N> bytes, bound <B> bytes (resident file <F> bytes, shared <S> bytes); draining for at most 30 s, then exiting with status 75
+```
+
+`/memoryz` says one of:
+
+```text
+anonymous memory <N> bytes, mark <M> bytes, bound <B> bytes
+anonymous memory is above the mark: <N> bytes, mark <M> bytes, bound <B> bytes
+anonymous memory reached the bound: <N> bytes, bound <B> bytes; draining
+memory not watched
+```
+
+The first and the last are 200, the other two 503. The last is a process with no bound.
+
+A build node in normal work holds 1.2 to 2.0 GiB of anonymous memory, and the most its configured budgets allow at once is about 10 GiB ([limits](limits.md)), so the default mark (16 GiB) is above both, and the default bound is an eighth of a 252 GiB build host. A process that reaches its bound again within a minute of each start meets the unit's start limit (5 starts in 60 seconds) and is left failed, as for any other failure.
 
 ## Live update by hand-off of the sockets
 
@@ -541,7 +567,7 @@ After that the hot bucket and the marks bucket are read by nothing; delete them 
 
 ## Metrics
 
-`GET /metricz` on the S3 listener (unsigned) answers 200 in the Prometheus text format. It has the hit, miss, byte and cold-read counters of the hot and cold tiers, the counters of the OCI read front, such as `tierstore_oci_requests_total`, and the counters of the cache of a build node with, on a node that serves jobscheduler's mount provider, the histogram of each job's time from its request to its start (`tierstore_request_to_start_seconds`, not in a release yet) and the time of each attach of a tree on a lookup of `tierstore fs`, where its manifests came from and the levels and rounds of fills of each read (`tierstore_fs_tree_attach_seconds`, `tierstore_fs_manifest_fetch_total`, `tierstore_fs_manifest_fill_seconds`, `tierstore_fs_tree_levels_total` and `tierstore_fs_tree_fill_rounds_total`, which the mount reports to the node) and the node's own time for each fill of a manifest (`tierstore_cache_manifest_fill_seconds`) and the cache files each mount holds open and its opens that failed for lack of descriptors (`tierstore_fs_cache_descriptors` and `tierstore_fs_open_descriptor_failures_total`, which the mount reports too) and the time of each open of a file of a tree, from its request to its answer, by `outcome` (`ok`, `error`) and `source` (`cached`, or `filled` when the open waited for the node to fill the file), and the opens waiting for an answer (`tierstore_fs_open_seconds`, a histogram, and `tierstore_fs_opens_waiting`, a gauge, reported the same way) and the tree lists each mount holds mapped, their bytes and its cap, and the lists it released and mapped past the cap (`tierstore_fs_tree_lists_mapped`, `tierstore_fs_tree_list_mapped_bytes`, `tierstore_fs_tree_list_ram_bytes`, `tierstore_fs_tree_list_releases_total` and `tierstore_fs_tree_list_over_cap_total`, reported the same way) and the time of each request of the mount's frontend by its kind (`tierstore_fs_request_seconds`, reported the same way) and the time of each attach of a tree for a run with its fetch, flatten and append, and of each detach of a run (`tierstore_fs_run_attach_seconds`, `tierstore_fs_run_attach_part_seconds` and `tierstore_fs_run_detach_seconds`, reported the same way), and the puts of an object on the S3 listener that failed, by reason, and the objects of the wrong length the cache's S3 upstream was left with by its puts that got no answer (`tierstore_s3_put_failures_total` and `tierstore_cache_upstream_short_objects_total`, not in a release yet), all named `tierstore_` and a word; without an `oci` interface it says the front is not enabled, and a node with no cache says so on a line of its own. The full list of metric names, their labels and queries to alert on is in [metrics](metrics.md).
+`GET /metricz` on the S3 listener (unsigned) answers 200 in the Prometheus text format. It has the hit, miss, byte and cold-read counters of the hot and cold tiers, the counters of the OCI read front, such as `tierstore_oci_requests_total`, and the counters of the cache of a build node with, on a node that serves jobscheduler's mount provider, the histogram of each job's time from its request to its start (`tierstore_request_to_start_seconds`, not in a release yet) and the time of each attach of a tree on a lookup of `tierstore fs`, where its manifests came from and the levels and rounds of fills of each read (`tierstore_fs_tree_attach_seconds`, `tierstore_fs_manifest_fetch_total`, `tierstore_fs_manifest_fill_seconds`, `tierstore_fs_tree_levels_total` and `tierstore_fs_tree_fill_rounds_total`, which the mount reports to the node) and the node's own time for each fill of a manifest (`tierstore_cache_manifest_fill_seconds`) and the cache files each mount holds open and its opens that failed for lack of descriptors (`tierstore_fs_cache_descriptors` and `tierstore_fs_open_descriptor_failures_total`, which the mount reports too) and the time of each open of a file of a tree, from its request to its answer, by `outcome` (`ok`, `error`) and `source` (`cached`, or `filled` when the open waited for the node to fill the file), and the opens waiting for an answer (`tierstore_fs_open_seconds`, a histogram, and `tierstore_fs_opens_waiting`, a gauge, reported the same way) and the tree lists each mount holds mapped, their bytes and its cap, and the lists it released and mapped past the cap (`tierstore_fs_tree_lists_mapped`, `tierstore_fs_tree_list_mapped_bytes`, `tierstore_fs_tree_list_ram_bytes`, `tierstore_fs_tree_list_releases_total` and `tierstore_fs_tree_list_over_cap_total`, reported the same way) and the time of each request of the mount's frontend by its kind (`tierstore_fs_request_seconds`, reported the same way) and the time of each attach of a tree for a run with its fetch, flatten and append, and of each detach of a run (`tierstore_fs_run_attach_seconds`, `tierstore_fs_run_attach_part_seconds` and `tierstore_fs_run_detach_seconds`, reported the same way), and the puts of an object on the S3 listener that failed, by reason, and the objects of the wrong length the cache's S3 upstream was left with by its puts that got no answer (`tierstore_s3_put_failures_total` and `tierstore_cache_upstream_short_objects_total`, not in a release yet), and the four series of the memory bound (`tierstore_memory_anon_bytes`, `tierstore_memory_bound_bytes`, `tierstore_memory_degraded` and `tierstore_memory_bound_exits_total`, not in a release yet; see [the memory bound](operations.md#the-memory-bound)), all named `tierstore_` and a word; without an `oci` interface it says the front is not enabled, and a node with no cache says so on a line of its own. The full list of metric names, their labels and queries to alert on is in [metrics](metrics.md).
 
 ## Handing out read URLs
 
@@ -549,6 +575,7 @@ A job that holds no key reads its objects with presigned GET URLs. The service t
 
 ## Not in a release yet
 
+- **The memory bound** (`server.memory_bound`, `/memoryz`, the `tierstore_memory_` series and exit status 75; see [the memory bound](operations.md#the-memory-bound)).
 - **The pool of the file system's fills** of a build node (`local_cache.fill_socket_concurrency` and `fill_socket_wait`; see [fills for the file system](operations.md#fills-for-the-file-system)), with `local_cache.fill_socket` read and ignored and no `fill.sock` in the state directory. A storage node with a cache takes them too, from its cache with its own proxy as the upstream.
 - **The prefetch queue** of a build node (`local_cache.prefetch_concurrency`, `prefetch_queue`, `prefetch_queue_ttl`, `hydrate_max_trees`, `hydrate_max_blobs`, `hydrate_max_bytes`, `hold_max` and `hold_max_count`; see [the prefetch queue](operations.md#the-prefetch-queue), [holds](operations.md#holds) and [the hydrate call](operations.md#the-hydrate-call)), and the hydrate and release calls (`POST /_tierstore/v1/hydrate` and `/release`). A storage node with a cache has none and refuses the keys.
 - **The virtual build file system** (see [the virtual build file system](operations.md#the-virtual-build-file-system)): `tierstore fs`, its `[fs]` table and its unit, and the pin requests of the file system's calls of the cache.

@@ -800,7 +800,7 @@ instead of running with settings it did not read.
 
 | key | what |
 |---|---|
-| `[[interface]]` of type `s3` | the address the S3 API, `/healthz`, `/readyz` and `/usagez` are served on: `params.addresses`, or `params.port` for the IPv4 wildcard. Further entries or addresses are served by the same server |
+| `[[interface]]` of type `s3` | the address the S3 API, `/healthz`, `/readyz`, `/usagez`, `/memoryz` and `/metricz` are served on: `params.addresses`, or `params.port` for the IPv4 wildcard. Further entries or addresses are served by the same server |
 | `server.proxy_id` | names this process's registration in the hot tier and the entries it holds; give each process over the same tiers one of its own. Or give `server.proxy_id_from_facts = { path, prefix }` instead: the id is the prefix and the `host_id` of the facts file hostkeeper writes (`/var/lib/hostkeeper/facts.json`), read at each start and each `--check-config`; exactly one of the two keys |
 | `server.bucket` | the name of the one bucket clients see |
 | `server.access_key_file`, `server.read_only_key_files` | the full key, and the read-only keys (a list); see above |
@@ -836,7 +836,7 @@ bucket's host and sent to another is `SignatureDoesNotMatch`; a presigned URL fo
 is signed over that host and the path `/<key>`. tierstore does not make the DNS names or the
 certificate: a wildcard record for `*.s3.example.com` must point to the server, and a TLS listener
 needs a certificate that covers `*.s3.example.com`. On a bucket's host `/healthz`, `/readyz`,
-`/usagez` and `/metricz` are keys; the probes are answered on the other hosts.
+`/usagez`, `/memoryz` and `/metricz` are keys; the probes are answered on the other hosts.
 
 ## DeleteObjects
 
@@ -1237,6 +1237,14 @@ after 30 seconds under `tierstore.service` and after 2 seconds under the templat
 path that went, a file that does not load; or two keys with one access key id) is not, since a
 restart cannot mend it. Other combinations of settings and key files refused after parsing exit 1, and are tried again
 in the same way.
+
+The units set no `MemoryMax=` or `MemoryHigh=`: a cgroup bound counts the page cache of the files
+the process reads and writes, which on a cache node is most of the host's memory. The process
+bounds its own anonymous memory (`server.memory_bound`, 32 GiB by default, not in a release yet):
+at half of it `/memoryz` says 503 and `tierstore_memory_degraded` is 1; at the bound it drains as
+on SIGTERM, with at most 30 s for the drain, and exits 75, which every unit starts again
+(`RestartForceExitStatus=75`; launchd's `KeepAlive` starts any exit again). See "The memory
+bound" in `crates/tierstore/docs/operations.md`.
 
 ## What tierstore requires of a store
 

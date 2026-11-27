@@ -227,7 +227,8 @@
 //! the server has run, so that a server that starts before the first pass of the reconciler is
 //! 200 for that long. `/readyz` does not look at the usage (one stopped reconciler would make
 //! every node unready), and the puts are not refused. Without [`ServerConfig::proxy`] it is 200
-//! and says the usage is not watched. A bucket cannot be called `usagez` either.
+//! and says the usage is not watched. Nor can a bucket be called `usagez`, or `memoryz`, the probe
+//! of the memory bound (`memory_bound.rs`): 503 over its mark, which `/readyz` does not look at.
 //!
 //! `GET /metricz` is 200 with the counters of every source the process has, one block after the
 //! other, in the Prometheus text format: the proxy's reads ([`Proxy::metrics`]: hits, misses,
@@ -408,6 +409,7 @@ pub mod local_cache;
 mod lock;
 #[cfg(test)]
 mod lock_tests;
+mod memory_bound;
 mod memory_format;
 #[cfg(test)]
 mod metrics_page_tests;
@@ -946,6 +948,7 @@ impl Server {
             (true, "/readyz", true) => (StatusCode::OK, self.ready_text()),
             (true, "/readyz", false) => (StatusCode::SERVICE_UNAVAILABLE, "draining".to_owned()),
             (true, "/usagez", _) => self.usage_probe().await,
+            (true, "/memoryz", _) => memory_bound::probe(self.config.memory.as_deref()),
             (true, "/metricz", _) => (StatusCode::OK, self.metrics_probe()),
             _ => return None,
         };
@@ -988,7 +991,7 @@ impl Server {
         let late = self.late_requests();
         text.push_str("# TYPE tierstore_drain_late_requests_total counter\n");
         text.push_str(&format!("tierstore_drain_late_requests_total {late}\n"));
-        text.push_str(&self.put_failure_family());
+        text.push_str(&self.own_families());
         let (version, commit) = (build_info::VERSION, build_info::COMMIT);
         text.push_str(&build_info::gauge(version, commit, self.config.slot));
         text

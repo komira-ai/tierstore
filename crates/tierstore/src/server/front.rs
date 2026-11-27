@@ -113,6 +113,8 @@ pub(super) struct FrontSettings {
     pub min_secret_bytes: u32,
     pub drain_lb_wait: Duration,
     pub drain_deadline: Duration,
+    /// `server.memory_bound`: the most anonymous memory of the process, in bytes; 0 for none.
+    pub memory_bound: u64,
     pub tls: S3Tls,
     /// The sockets, the pauses and the piece queue that `[server]` tunes.
     pub io: IoTuning,
@@ -147,6 +149,7 @@ impl Cli {
             min_secret_bytes: self.min_secret_bytes,
             drain_lb_wait: self.drain_lb_wait,
             drain_deadline: self.drain_deadline,
+            memory_bound: self.memory_bound,
             tls: self.tls.clone(),
             io: self.io_tuning,
         }
@@ -180,7 +183,7 @@ pub(super) fn server_config(
 ) -> Result<ServerConfig, Error> {
     if matches!(
         front.bucket.as_str(),
-        "healthz" | "readyz" | "usagez" | "metricz"
+        "healthz" | "readyz" | "usagez" | "memoryz" | "metricz"
     ) {
         let name = &front.bucket;
         return Err(format!("--bucket {name:?} is the name of a probe path").into());
@@ -250,6 +253,7 @@ pub(super) fn server_config(
     server.put_rate_grace = front.put_rate_grace;
     server.drain_lb_wait = front.drain_lb_wait;
     server.drain_deadline = front.drain_deadline;
+    server.memory = super::memory_bound::installed();
     front.io.apply(&mut server);
     Ok(server)
 }

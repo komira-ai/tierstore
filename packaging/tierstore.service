@@ -66,10 +66,13 @@ TimeoutStopSec=960
 # it. Other combinations of settings and key files refused after parsing exit 1 and are tried again
 # every 30 s. Exit 3 is a cache directory whose file system answered the check of the cache wrongly
 # (a node with a local cache): a restart would ask the same file system the same questions, so it
-# is not tried again.
+# is not tried again. Exit 75 is the process at its memory bound (`server.memory_bound`), which
+# drained and is started again (RestartForceExitStatus=75); the unit sets no MemoryMax=, which would
+# count the page cache of the files the process reads and writes.
 Restart=on-failure
 RestartSec=30
 RestartPreventExitStatus=2 3
+RestartForceExitStatus=75
 # The same value as tierstore-fs@.service: this process serves the node's cache and the fill socket for the mount, whose jobs keep files of it open as long as they run.
 LimitNOFILE=1048576
 UMask=0077

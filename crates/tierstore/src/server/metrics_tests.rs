@@ -13,7 +13,7 @@ use crate::Backend;
 pub(super) const BUDGET: u64 = 1 << 20;
 
 /// Every series of `/metricz` with its labels, as the text names it.
-const SERIES: [&str; 35] = [
+const SERIES: [&str; 39] = [
     "tierstore_hits_total{tier=\"hot\",op=\"get\"}",
     "tierstore_hits_total{tier=\"hot\",op=\"head\"}",
     "tierstore_hits_total{tier=\"cold\",op=\"get\"}",
@@ -49,6 +49,10 @@ const SERIES: [&str; 35] = [
     "tierstore_s3_put_failures_total{reason=\"exists\"}",
     "tierstore_s3_put_failures_total{reason=\"upstream\"}",
     "tierstore_s3_put_failures_total{reason=\"other\"}",
+    "tierstore_memory_anon_bytes",
+    "tierstore_memory_bound_bytes",
+    "tierstore_memory_degraded",
+    "tierstore_memory_bound_exits_total",
 ];
 
 async fn metricz(rig: &Rig) -> Reply {
@@ -189,9 +193,9 @@ async fn metricz_names_the_slot_in_the_build_gauge_only_when_there_is_one() {
 }
 
 /// Asserts that a server with no proxy and no OCI front answers `/metricz` 200 with one comment
-/// line that names the sources, and then the server's own series, the late requests of the drain
-/// and the failed puts of each reason, at zero, and (left out here) the build gauge, and nothing
-/// else. It would catch a probe that fails or says nothing when there is nothing to count, and a
+/// line that names the sources, and then the server's own series, the late requests of the drain,
+/// the failed puts of each reason and the four series of the memory bound, at zero, and (left out
+/// here) the build gauge, and nothing else. It would catch a probe that fails or says nothing when there is nothing to count, and a
 /// server whose own series is shown only with a source.
 #[tokio::test]
 async fn metricz_without_a_source_is_the_line_naming_them_and_the_servers_own_series() {
@@ -203,7 +207,7 @@ async fn metricz_without_a_source_is_the_line_naming_them_and_the_servers_own_se
         .lines()
         .filter(|line| !line.contains("tierstore_build_info"))
         .collect();
-    assert_eq!(lines.len(), 12, "{}", reply.body);
+    assert_eq!(lines.len(), 20, "{}", reply.body);
     for name in ["proxy", "OCI read front", "local cache"] {
         assert!(
             lines[0].starts_with('#') && lines[0].contains(name),
@@ -227,10 +231,14 @@ async fn metricz_without_a_source_is_the_line_naming_them_and_the_servers_own_se
         "upstream",
         "other",
     ];
-    for (line, reason) in lines[4..].iter().zip(reasons) {
+    for (line, reason) in lines[4..12].iter().zip(reasons) {
         let want = format!("tierstore_s3_put_failures_total{{reason=\"{reason}\"}} 0");
         assert_eq!(*line, want);
     }
+    assert_eq!(
+        lines[12..].join("\n") + "\n",
+        super::memory_bound::family(None)
+    );
 }
 
 /// Asserts that a server with a proxy and an OCI front shows both blocks, the proxy's first, each

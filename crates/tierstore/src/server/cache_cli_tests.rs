@@ -268,7 +268,7 @@ async fn a_build_node_that_cannot_start_exits_with_the_status_of_the_reason() {
     assert!(why.to_string().contains("--s3-request-timeout"), "{why}");
     assert_eq!(exit_status(&why), 1);
 
-    for name in ["healthz", "readyz", "usagez", "metricz"] {
+    for name in ["healthz", "readyz", "usagez", "memoryz", "metricz"] {
         let text = node.text("", "").replace("tier-bucket", name);
         let settings = settings_from_text(&text, QUICK)
             .unwrap()

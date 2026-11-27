@@ -128,6 +128,7 @@ const FLAGLESS_KEYS: &[&str] = &[
     "server.handoff_wait",
     "server.drain_lb_wait",
     "server.drain_deadline",
+    "server.memory_bound",
     "server.domains",
     "server.delete_concurrency",
     "hot_store.usage_refresh",

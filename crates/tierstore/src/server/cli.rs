@@ -349,6 +349,8 @@ pub struct Cli {
     /// How long the drain waits for requests in flight, for the answers being sent, and for the
     /// connections it closes, once the settle is over.
     pub drain_deadline: Duration,
+    /// `server.memory_bound`: the most anonymous memory of the process, in bytes; 0 for none.
+    pub memory_bound: u64,
     /// The most objects the reconciler copies to the cold tier at once.
     pub copy_parallel: u32,
     /// How long the reconciler's lease lasts without a renewal.
@@ -761,7 +763,7 @@ pub(super) fn signals() -> std::io::Result<impl Future<Output = ()> + Send + 'st
 }
 
 async fn serve_until_signalled(cli: Cli) -> Result<(), Error> {
-    let stop = signals()?;
+    let stop = super::memory_bound::or_reached(signals()?);
     let announce = |bound: Addresses| {
         let mut line = format!("tierstore {VERSION} listen={}", joined(&bound.s3_all));
         if bound.oci.is_some() {
@@ -835,18 +837,22 @@ pub fn main(args: Vec<OsString>) -> ExitCode {
         Ok(handed) => handed,
         Err(status) => return status,
     };
+    let bound = super::memory_bound::bound_of(&settings);
+    super::memory_bound::install(bound, super::launch::state_dir());
     let started = match settings {
         Settings::Storage(cli) => blocking(serve_until_signalled(*cli)),
         Settings::Cache(c) => blocking(serve_cache_until_signalled(*c, handed)).and_then(exec_next),
         Settings::Combined(node) => blocking(serve_combined_until_signalled(*node)),
         Settings::Cold(node) => blocking(super::cli_serve::cold::serve_cold_until_signalled(*node)),
     };
+    // A process that reached its memory bound exits for its unit to start it again, however its
+    // drain ended.
     match started {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(()) => ExitCode::from(super::memory_bound::status(0)),
         Err(why) => {
             // The messages of the checks name flags; the operator wrote keys.
             tracing::error!("tierstore: {}", keys_for_flags(&why.to_string()));
-            ExitCode::from(exit_status(&why))
+            ExitCode::from(super::memory_bound::status(exit_status(&why)))
         }
     }
 }

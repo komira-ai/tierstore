@@ -84,6 +84,7 @@ use super::keys::DEFAULT_MIN_SECRET_BYTES;
 use super::listen::Addrs;
 use super::local_cache::trees::{TreesTable, check_trees};
 use super::lock::check_lock_path;
+use super::memory_bound::DEFAULT_BOUND as DEFAULT_MEMORY_BOUND;
 use cold::ColdSettings;
 pub(super) use fs::Host;
 
@@ -395,6 +396,7 @@ pub(super) struct ServerTable {
     /// the settle is over; the default is `DEFAULT_DRAIN_DEADLINE`.
     #[serde(default)]
     pub drain_deadline: Option<Dur>,
+    pub memory_bound: Option<Size>,
     // The keys of `config_handoff`.
     #[serde(default)]
     pub handoff_socket: Option<PathBuf>,
@@ -795,6 +797,7 @@ pub(super) fn storage(
         grant_max_lifetime: front.grant_max_lifetime,
         drain_lb_wait: front.drain_lb_wait,
         drain_deadline: front.drain_deadline,
+        memory_bound: front.memory_bound,
         tls: front.tls,
         copy_parallel,
         lease_ttl,
@@ -948,6 +951,9 @@ pub(super) fn front_of(
             per_run.drain_deadline,
             DEFAULT_DRAIN_DEADLINE,
         )?,
+        memory_bound: server
+            .memory_bound
+            .map_or(DEFAULT_MEMORY_BOUND, |size| size.0),
         io,
     };
     Ok(Shared {

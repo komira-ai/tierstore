@@ -60,7 +60,7 @@ fn state_dir_of(value: Option<OsString>) -> Option<PathBuf> {
     clippy::disallowed_methods,
     reason = "STATE_DIRECTORY is set by systemd for the unit's StateDirectory=, a platform-set marker (AGENTS.md S2), not configuration"
 )]
-fn state_dir() -> Option<PathBuf> {
+pub(super) fn state_dir() -> Option<PathBuf> {
     state_dir_of(std::env::var_os("STATE_DIRECTORY"))
 }
 

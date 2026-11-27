@@ -171,8 +171,9 @@ tsfuse = { workspace = true, optional = true }
 [target.'cfg(target_os = "macos")'.dependencies]
 fsevent = { workspace = true, optional = true }
 # The `unmount(2)` with `MNT_FORCE` that `tierstore fs` makes itself, the last step of an unmount
-# of its NFS mount (`server::treefs::nfs::mount`).
-nix = { workspace = true, optional = true }
+# of its NFS mount (`server::treefs::nfs::mount`), and the `getrusage(2)` whose peak resident size
+# the memory bound looks at on a Mac (`server::memory_bound`).
+nix = { workspace = true, optional = true, features = ["resource"] }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 # The tests of the tree mount serve a tree from the rig of `tierstore-tree`: the real mount server
