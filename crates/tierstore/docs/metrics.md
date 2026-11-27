@@ -446,6 +446,49 @@ tierstore_provider_prefetch_queued_bytes > 200 * 1024 * 1024
 increase(tierstore_provider_prefetch_skipped_total[10m]) > 0
 ```
 
+### Build node: the sources and preparations of the mount provider
+
+The mount provider holds a source from its `Prepare` to its `Release` or a `Sweep`, at most
+`trees.max_sources` of them: a `Prepare` of a new source past that is answered `UNAVAILABLE`. A
+preparation holds its tree's list whole (at most 256 MiB) and the walk of it while it reads the list
+and makes the tree, so at most `trees.prepare_concurrency` do that at once; the others wait for a
+turn, and a `Mount` of their source waits for them as for any preparation.
+
+| name | type | labels | value |
+|---|---|---|---|
+| `tierstore_provider_sources` | gauge | none | the sources the provider holds now |
+| `tierstore_provider_preparing` | gauge | none | the preparations that read their list or make their tree now |
+| `tierstore_provider_prepare_refused_total` | counter | none | the `Prepare` calls of a new source refused because the provider held `trees.max_sources` |
+
+```promql
+# Sources that jobs prepare and never release or sweep: the table fills toward its bound.
+tierstore_provider_sources > 0.8 * 16384
+# Preparations at their bound: Mounts wait for a turn.
+tierstore_provider_preparing >= 8
+```
+
+### The bounds of the S3 front
+
+The S3 front holds at most `server.max_connections` connections open (past it, it accepts no more
+until one closes), streams at most `server.max_concurrent_reads` GETs of objects at once (past it,
+a GET is answered 503 `SlowDown`), and takes at most `server.max_concurrent_puts` request bodies
+at once, streamed or read whole (past it, a body waits `server.put_permit_wait` and is then
+answered 503 `SlowDown`). Every process with an S3 front has these series.
+
+| name | type | labels | value |
+|---|---|---|---|
+| `tierstore_s3_connections_open` | gauge | none | the connections of the S3 front open now, those waiting for a request included |
+| `tierstore_s3_reads_in_flight` | gauge | none | the GETs of objects whose answers hold a permit now, from before the object is opened until the answer is over |
+| `tierstore_s3_reads_refused_total` | counter | none | the GETs answered 503 `SlowDown` because every permit of the reads was taken |
+| `tierstore_s3_bodies_in_flight` | gauge | none | the request bodies, streamed or read whole, that hold a permit now |
+
+```promql
+# Reads refused for want of a permit: raise server.max_concurrent_reads, or add nodes.
+increase(tierstore_s3_reads_refused_total[5m]) > 0
+# Connections near their bound: new clients wait in the listen queue.
+tierstore_s3_connections_open > 0.9 * 8192
+```
+
 ### Build node: request to start
 
 A build node whose cache has a tree store and serves jobscheduler's mount provider (the

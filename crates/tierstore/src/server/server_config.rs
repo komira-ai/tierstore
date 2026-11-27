@@ -4,6 +4,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use super::bounds::{MAX_CONCURRENT_READS, MAX_CONNECTIONS};
 use super::handover::PIECES_QUEUED;
 use super::local_cache::trees::TreeStore;
 use super::{
@@ -69,6 +70,13 @@ pub struct ServerConfig {
     /// and an S3 tier up to 16 MiB more, so the memory of the puts is bounded by this number
     /// times that.
     pub max_concurrent_puts: usize,
+    /// The most GETs of objects whose answers stream at once (`server.max_concurrent_reads`): a
+    /// GET over it is answered 503 `SlowDown` with a `Retry-After`, before the object is opened.
+    /// Each holds up to two chunks of its read until its answer is over (`bounds`).
+    pub max_concurrent_reads: usize,
+    /// The most connections open at once (`server.max_connections`): the accept loop takes no
+    /// more until one closes, so a client over it waits in the listening socket's queue.
+    pub max_connections: usize,
     /// How long a streamed body that arrives with `max_concurrent_puts` bodies already being
     /// taken waits for one of them to end, before it is answered 503 `SlowDown`. It is the
     /// time of the runtime (`tokio::time`), and the body is not read while the request waits.
@@ -172,6 +180,8 @@ impl ServerConfig {
             body_idle_timeout: Duration::from_secs(30),
             aws_chunked_max_line_bytes: 1024,
             max_concurrent_puts: 32,
+            max_concurrent_reads: MAX_CONCURRENT_READS,
+            max_connections: MAX_CONNECTIONS,
             delete_concurrency: 16,
             put_permit_wait: Duration::from_secs(15),
             put_min_bytes_per_sec: 1024,

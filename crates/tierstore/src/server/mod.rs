@@ -269,6 +269,7 @@ mod auth;
 mod auth_tests;
 #[cfg(test)]
 mod body_stall_tests;
+mod bounds;
 mod bucket;
 #[cfg(test)]
 mod bucket_config_tests;
@@ -589,8 +590,10 @@ pub struct Server {
     /// The connections that are open.
     open: AtomicUsize,
     next_request: AtomicU64,
-    /// One permit for each streamed body that may be taken at once.
+    /// One permit for each body, streamed or held whole, that may be taken at once.
     puts: Arc<Semaphore>,
+    /// One permit for each GET of an object that may be read at once (`bounds`).
+    reads: Arc<Semaphore>,
     /// The front's own counts (`front_counts.rs`).
     counts: front_counts::FrontCounts,
 }
@@ -599,10 +602,10 @@ impl Server {
     /// A server over `backend`.
     #[must_use]
     pub fn new(backend: Arc<dyn Backend>, config: ServerConfig) -> Arc<Self> {
-        let puts = Arc::new(Semaphore::new(config.max_concurrent_puts));
         let drain = Drain::new(config.header_timeout, Arc::default());
         Arc::new(Self {
-            puts,
+            puts: Arc::new(Semaphore::new(config.max_concurrent_puts)),
+            reads: Arc::new(Semaphore::new(config.max_concurrent_reads)),
             backend,
             started: config.clock.now(),
             config,
@@ -706,8 +709,10 @@ impl Server {
         self.finish_by_deadline().await
     }
 
-    /// Takes the next connection `incoming` gives and serves it (see [`Server::take`]).
+    /// Once there is room for one (`bounds`), takes the next connection `incoming` gives and serves
+    /// it (see [`Server::take`]).
     async fn accept_one<I: Incoming>(self: &Arc<Self>, incoming: &mut I) {
+        self.room_for_a_connection().await;
         let accepted = poll_fn(|cx| incoming.poll_incoming(cx)).await;
         self.take(accepted).await;
     }
@@ -913,7 +918,7 @@ impl Server {
         if let Role::Scoped(scopes) = &signed.role {
             scoped::permit(scopes, parts, &target, &query)?;
         }
-        let limit = ops::body_limit(self.config.max_request_bytes, deleting);
+        let limit = ops::body_limit(self.config.max_request_bytes, deleting, parts, &target);
         let limit = signed.presign.as_ref().map_or(limit, |grant| {
             limit.min(usize::try_from(grant.max_object_bytes).unwrap_or(usize::MAX))
         });
@@ -985,10 +990,7 @@ impl Server {
         if text.is_empty() {
             text = "# this server has no proxy, no OCI read front and no local cache\n".to_owned();
         }
-        let late = self.late_requests();
-        text.push_str("# TYPE tierstore_drain_late_requests_total counter\n");
-        text.push_str(&format!("tierstore_drain_late_requests_total {late}\n"));
-        text.push_str(&self.put_failure_family());
+        text.push_str(&self.front_families());
         let (version, commit) = (build_info::VERSION, build_info::COMMIT);
         text.push_str(&build_info::gauge(version, commit, self.config.slot));
         text

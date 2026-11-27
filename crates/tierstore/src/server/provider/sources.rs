@@ -1,7 +1,9 @@
 //! The sources this process prepared, and the four calls of the contract over them.
 //!
 //! A source this process prepared is held in a table, with the stage of its preparation, which a
-//! `Mount` waits on. What a release, a sweep or a mount needs beyond the table it finds in the tree
+//! `Mount` waits on. The table holds at most `trees.max_sources` sources: a `Prepare` of a new
+//! source past that is refused `UNAVAILABLE`, and a `Release` or a `Sweep` makes room. At most `trees.prepare_concurrency` preparations read and make their
+//! tree at once; the others wait for a turn (`local_cache/preparations.rs`). What a release, a sweep or a mount needs beyond the table it finds in the tree
 //! store by the source's path (module `names`), so that after a restart of this process, which
 //! empties the table, a source the agent prepared before is still mounted and released.
 
@@ -18,7 +20,7 @@ use super::names::{SourceId, check_name, source_of};
 use super::prepare::{Job, run};
 use super::{MOUNT_WAIT, ProviderError, ProviderFlags};
 use crate::server::local_cache::trees::{LifeError, PlacementId, PreparePrefetch, TreeStore};
-use crate::server::local_cache::{LocalCache, QueuedReads};
+use crate::server::local_cache::{LocalCache, Preparations, QueuedReads};
 use crate::{MAX_TREE_LIST_BYTES, TreeDigest, tree_list_digest};
 
 /// Where the preparation of a source is.
@@ -95,6 +97,11 @@ pub(super) struct Shared {
     pub fills: Semaphore,
     /// The room of the reads queued, the node's (`local_cache/queued_reads.rs`).
     pub queued: Arc<QueuedReads>,
+    /// The turns of the preparations that read and make their tree: `trees.prepare_concurrency`
+    /// at once. Closed when the process stops, and a preparation waiting for one then fails.
+    pub turns: Semaphore,
+    /// The counts of the sources and the preparations (`local_cache/preparations.rs`).
+    pub counts: Arc<Preparations>,
     sources: Mutex<BTreeMap<SourceId, Held>>,
 }
 
@@ -153,7 +160,9 @@ impl Provider {
     /// The same, with `settings`.
     pub(super) fn with(store: TreeStore, cache: LocalCache, settings: Settings) -> Self {
         let fills = Semaphore::new(store.config().fill_concurrency);
-        let queued = cache.queued_reads();
+        let turns = Semaphore::new(store.config().prepare_concurrency);
+        let (queued, counts) = (cache.queued_reads(), cache.preparations());
+        counts.set_sources(0);
         Self {
             shared: Arc::new(Shared {
                 store,
@@ -161,6 +170,8 @@ impl Provider {
                 settings,
                 fills,
                 queued,
+                turns,
+                counts,
                 sources: Mutex::new(BTreeMap::new()),
             }),
         }
@@ -173,9 +184,11 @@ impl Provider {
             .unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Stops the reads of files that have not begun: the process is stopping.
+    /// Stops the reads of files and the preparations that have not begun: the process is
+    /// stopping.
     pub(in crate::server) fn halt(&self) {
         self.shared.fills.close();
+        self.shared.turns.close();
     }
 
     /// `Prepare`: checks the source, the ref and the mode, and begins the preparation in the
@@ -186,7 +199,8 @@ impl Provider {
     /// # Errors
     /// [`ProviderError::Invalid`] for a source or a ref that is not well formed;
     /// [`ProviderError::Refused`] for a mode other than read-only, or a source prepared with
-    /// another ref.
+    /// another ref; [`ProviderError::Unavailable`] for a new source while the table holds
+    /// `trees.max_sources` sources, counted.
     pub(super) fn prepare(
         &self,
         source: Option<Source>,
@@ -221,6 +235,13 @@ impl Provider {
             self.again_if_failed(&id, held);
             return Ok(());
         }
+        let most = self.shared.store.config().max_sources;
+        if sources.len() >= most {
+            self.shared.counts.refuse();
+            return Err(ProviderError::Unavailable(format!(
+                "the node holds {most} sources (trees.max_sources): release one, or retry"
+            )));
+        }
         let held = Held {
             key: reference.to_owned(),
             digest,
@@ -229,6 +250,7 @@ impl Provider {
         };
         self.start(&id, &held);
         sources.insert(id, held);
+        self.shared.counts.set_sources(sources.len());
         Ok(())
     }
 
@@ -249,7 +271,9 @@ impl Provider {
             stage: Arc::clone(&held.stage),
             released: Arc::clone(&held.released),
         };
-        self.lock().insert(id, held);
+        let mut sources = self.lock();
+        sources.insert(id, held);
+        self.shared.counts.set_sources(sources.len());
         (job, seen)
     }
 
@@ -338,7 +362,12 @@ impl Provider {
     /// Releases `id`: whether there was anything to release.
     fn release_id(&self, id: &SourceId) -> Result<bool, ProviderError> {
         self.shared.cache.run_forgotten(&id.run_dir());
-        let held = self.lock().remove(id);
+        let held = {
+            let mut sources = self.lock();
+            let held = sources.remove(id);
+            self.shared.counts.set_sources(sources.len());
+            held
+        };
         let mut released = false;
         if let Some(held) = held {
             held.released.store(true, Ordering::SeqCst);

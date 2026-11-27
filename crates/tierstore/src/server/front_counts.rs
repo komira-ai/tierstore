@@ -1,6 +1,7 @@
 //! The front's count of the puts of an object whose body it streams to the backend
 //! (`put_streamed`, in `ops`) that failed, by the reason the answer to the client gives, and its
-//! family of `/metricz`; and the front's count of the requests that came too late in a drain.
+//! family of `/metricz`; the front's count of the requests that came too late in a drain; and its
+//! count of the reads refused for want of a permit (`bounds`).
 
 use std::fmt::Write as _;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -67,6 +68,8 @@ impl PutFailure {
 #[derive(Debug, Default)]
 pub(super) struct FrontCounts {
     put_failures: [AtomicU64; REASONS.len()],
+    /// The GETs refused for want of a permit of the reads (`bounds`).
+    pub(super) reads_refused: AtomicU64,
 }
 
 impl Server {
