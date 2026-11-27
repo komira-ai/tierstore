@@ -71,7 +71,7 @@ impl Server {
             // not missed.
             let closed = self.drain.idle.notified();
             let mut closed = std::pin::pin!(closed);
-            closed.as_mut().enable();
+            let _ = closed.as_mut().enable();
             if self.open_connections() < self.config.max_connections {
                 return;
             }

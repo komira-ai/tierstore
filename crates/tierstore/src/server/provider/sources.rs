@@ -2,10 +2,12 @@
 //!
 //! A source this process prepared is held in a table, with the stage of its preparation, which a
 //! `Mount` waits on. The table holds at most `trees.max_sources` sources: a `Prepare` of a new
-//! source past that is refused `UNAVAILABLE`, and a `Release` or a `Sweep` makes room. At most `trees.prepare_concurrency` preparations read and make their
-//! tree at once; the others wait for a turn (`local_cache/preparations.rs`). What a release, a sweep or a mount needs beyond the table it finds in the tree
-//! store by the source's path (module `names`), so that after a restart of this process, which
-//! empties the table, a source the agent prepared before is still mounted and released.
+//! source past that is refused `UNAVAILABLE`, and a `Release` or a `Sweep` makes room. At most
+//! `trees.prepare_concurrency` preparations read and make their tree at once; the others wait for a
+//! turn (`local_cache/preparations.rs`). What a release, a sweep or a mount needs beyond the table
+//! it finds in the tree store by the source's path (module `names`), so that after a restart of
+//! this process, which empties the table, a source the agent prepared before is still mounted and
+//! released.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;

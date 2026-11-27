@@ -16,12 +16,13 @@ use tokio::io::AsyncWriteExt as _;
 
 use super::super::auth::sign;
 use super::super::ops::WHOLE_BODY_LIMIT;
-use super::super::pipes::{Serving, attach, read_answer, status_of, until};
+use super::super::pipes::{Serving, attach, read_response, status_of, until};
 use super::super::testing::{BUCKET, Rig};
 use super::super::xml::{
     COMPLETE_NODES, CREATE_NODES, DELETE_NODES, parse_complete, parse_create, parse_delete,
 };
 use super::bound_families;
+use crate::Backend as _;
 
 /// The line of `family` with `value` in the text of `/metricz` of the rig's server.
 fn shows(rig: &Rig, family: &str, value: u64) -> bool {
@@ -213,7 +214,8 @@ fn part(number: u32) -> String {
     format!(
         "\n  <Part>\n    <PartNumber>{number}</PartNumber>\n    \
          <ETag>&quot;{number:032x}&quot;</ETag>\n    <ChecksumCRC32>{sum}</ChecksumCRC32>\n    \
-         <ChecksumCRC32C>{sum}</ChecksumCRC32C>\n    <ChecksumCRC64NVME>{sum}</ChecksumCRC64NVME>\n    \
+         <ChecksumCRC32C>{sum}</ChecksumCRC32C>\n    \
+         <ChecksumCRC64NVME>{sum}</ChecksumCRC64NVME>\n    \
          <ChecksumSHA1>{sum}</ChecksumSHA1>\n    <ChecksumSHA256>{sum}</ChecksumSHA256>\n  </Part>"
     )
 }
@@ -287,8 +289,9 @@ async fn the_room_for_a_connection_waits_while_the_most_are_open() {
 }
 
 /// Asserts that the accept loop never has more connections open than the bound: three clients
-/// connect at once to a server that holds one, each sends a request that closes its connection,
-/// and each is answered in turn, with never more than one connection open.
+/// connect at once to a server that holds one, each sends a request and keeps its connection
+/// open, and each is answered only once the client before it has closed its connection, with
+/// exactly one connection open while each answer is read.
 #[tokio::test(start_paused = true)]
 async fn the_accept_loop_holds_no_more_connections_than_the_bound() {
     let serving = Serving::start(|config| config.max_connections = 1).await;
@@ -296,14 +299,16 @@ async fn the_accept_loop_holds_no_more_connections_than_the_bound() {
     let mut clients = Vec::new();
     for _ in 0..3 {
         let mut client = serving.connect().expect("a server that takes connections");
-        let probe = "GET /healthz HTTP/1.1\r\nhost: tier.test\r\nconnection: close\r\n\r\n";
+        let probe = "GET /healthz HTTP/1.1\r\nhost: tier.test\r\n\r\n";
         client.write_all(probe.as_bytes()).await.expect("written");
         clients.push(client);
     }
     for mut client in clients {
-        until(&server, |server| server.open_connections() == 1).await;
-        let answer = read_answer(&mut client).await;
+        let answer = read_response(&mut client).await;
         assert_eq!(status_of(&answer), 200, "{answer}");
-        assert!(server.open_connections() <= 1);
+        // This connection is open, kept alive, and the one before it was closed before it was
+        // taken: exactly one.
+        assert_eq!(server.open_connections(), 1);
+        drop(client);
     }
 }

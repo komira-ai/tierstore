@@ -194,9 +194,10 @@ async fn metricz_names_the_slot_in_the_build_gauge_only_when_there_is_one() {
 
 /// Asserts that a server with no proxy and no OCI front answers `/metricz` 200 with one comment
 /// line that names the sources, and then the server's own series, the late requests of the drain,
-/// the failed puts of each reason and the gauges and counter of its bounds (`bounds`), at zero,
-/// and (left out here) the build gauge, and nothing else. It would catch a probe that fails or says nothing when there is nothing to count, and a
-/// server whose own series is shown only with a source.
+/// the failed puts of each reason and the gauges and counter of its bounds (`bounds`), at zero, and
+/// (left out here) the build gauge, and nothing else. It would catch a probe that fails or says
+/// nothing when there is nothing to count, and a server whose own series is shown only with a
+/// source.
 #[tokio::test]
 async fn metricz_without_a_source_is_the_line_naming_them_and_the_servers_own_series() {
     let rig = Rig::with(BUDGET, |config| config.proxy = None).await;

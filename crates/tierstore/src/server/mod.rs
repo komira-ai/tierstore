@@ -129,8 +129,8 @@
 //! ([`Backend::needs_length`](crate::Backend::needs_length): an S3 tier does, and would hold the
 //! body whole otherwise) with 411 `MissingContentLength`; if its `Content-Length` is over
 //! [`ServerConfig::max_request_bytes`], with 413 `EntityTooLarge`, so that nothing is stored and
-//! no upload is begun; and if [`ServerConfig::max_concurrent_puts`] bodies are already being
-//! taken, the request waits for one of them to end, at most [`ServerConfig::put_permit_wait`],
+//! no upload is begun; and if [`ServerConfig::max_concurrent_puts`] bodies (streamed, or read
+//! whole: see `bounds`) are already being taken, the request waits for one of them to end, at most [`ServerConfig::put_permit_wait`],
 //! without reading its body, and is answered 503 `SlowDown` and `Retry-After` only when no slot
 //! was free in that time. A body that then comes in at an average rate
 //! under [`ServerConfig::put_min_bytes_per_sec`], once [`ServerConfig::put_rate_grace`] has

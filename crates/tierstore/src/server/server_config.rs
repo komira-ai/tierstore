@@ -63,10 +63,11 @@ pub struct ServerConfig {
     /// The longest line of an `aws-chunked` body that is held to be read: a chunk header or a
     /// line of the trailer (`server.aws_chunked_max_line_bytes`). The data of a chunk is not held.
     pub aws_chunked_max_line_bytes: usize,
-    /// The most streamed bodies (puts and parts of uploads) taken at once. A request over the
-    /// limit waits up to `put_permit_wait` for one to end, and is then answered 503 `SlowDown`
-    /// with a `Retry-After`; its body is not read either way. Each
-    /// streamed body holds a few pieces (`PIECES_QUEUED`, of the size the connection delivers),
+    /// The most request bodies taken at once: the streamed ones (puts and parts of uploads) and
+    /// those held whole (`bounds`), each at most 8 MiB, which take theirs at their first byte. A
+    /// request over the limit waits up to `put_permit_wait` for one to end, and is then answered
+    /// 503 `SlowDown` with a `Retry-After`; a streamed body is not read either way. Each streamed
+    /// body holds a few pieces (`PIECES_QUEUED`, of the size the connection delivers),
     /// and an S3 tier up to 16 MiB more, so the memory of the puts is bounded by this number
     /// times that.
     pub max_concurrent_puts: usize,
@@ -77,9 +78,10 @@ pub struct ServerConfig {
     /// The most connections open at once (`server.max_connections`): the accept loop takes no
     /// more until one closes, so a client over it waits in the listening socket's queue.
     pub max_connections: usize,
-    /// How long a streamed body that arrives with `max_concurrent_puts` bodies already being
-    /// taken waits for one of them to end, before it is answered 503 `SlowDown`. It is the
-    /// time of the runtime (`tokio::time`), and the body is not read while the request waits.
+    /// How long a request body, streamed or held whole, that arrives with `max_concurrent_puts`
+    /// bodies already being taken waits for one of them to end, before it is answered 503
+    /// `SlowDown`. It is the time of the runtime (`tokio::time`), and the body is not read further
+    /// while the request waits.
     /// Zero answers 503 at once.
     pub put_permit_wait: Duration,
     /// The least average rate, in bytes a second, at which a request body is taken, counted
