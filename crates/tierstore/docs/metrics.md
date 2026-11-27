@@ -620,6 +620,87 @@ A mount whose held lists alone pass its cap, over the last hour:
 increase(tierstore_fs_tree_list_over_cap_total[1h]) > 0
 ```
 
+### Build node: the requests of the mount
+
+`tierstore fs` times every request its frontend answers, from the request's arrival to its answer
+on the mount's clock, to the millisecond, by its kind, for the requests by kind and their latency
+of the Q-B measurement (`docs/design/virtual-build-fs.md`, section 11). Over FUSE a request is
+one the session hands the frontend, by its opcode, answered at once by the reader that read it or
+parked until the node answers; over NFS it is a call of the protocol layer into the file system,
+so the attributes a LOOKUP or a READ also reads are a `getattr` of their own. The mount reports the
+counts to the node's cache, by a call in the process, at each look for idle trees (every quarter of
+`fs.tree_idle_secs`, at most a minute apart: a minute by default) and when its readers stop for a
+hand-over or a restart, as running totals of the process, and only when it answered a request
+since its previous report; the node adds what each process's totals grew by, as for the opens
+above, so a report that was lost loses nothing the next one carries. The family is on every
+process with a cache, with a `# TYPE` line, and stays at zero on a node whose mount reports
+nothing. The buckets are those of the attach histogram above. The node keeps at most 64 mounts, as
+for the descriptors.
+
+| name | type | labels | what it says |
+|---|---|---|---|
+| `tierstore_fs_request_seconds` | histogram | `kind`: `lookup`, `getattr`, `access`, `open`, `read`, `readdir`, `readlink`, `other`; `le` on `_bucket` | one sample per request of the mount's frontend: the seconds from its arrival to its answer, whatever the answer. `lookup` is FUSE's and NFS's LOOKUP; `getattr` FUSE's GETATTR and NFS's GETATTR and the attributes NFS reads for its other procedures; `access` NFS's ACCESS; `open` FUSE's OPEN; `read` FUSE's and NFS's READ; `readdir` FUSE's READDIR and READDIRPLUS and NFS's READDIR and READDIRPLUS; `readlink` FUSE's and NFS's READLINK; `other` any other request: a RELEASE, an OPENDIR, a STATFS, NFS's FSINFO, a change refused with `EROFS`, an opcode the frontend does not serve, a request too short for its opcode |
+| `tierstore_fs_request_seconds_bucket` | counter | `kind`, `le` | the requests of that kind at or under `le` seconds |
+| `tierstore_fs_request_seconds_sum` | counter | `kind` | their seconds |
+| `tierstore_fs_request_seconds_count` | counter | `kind` | the requests of that kind |
+
+What it does not count: a report that was lost, so the histogram may be behind by the requests
+since the last report that arrived; the requests of the put directory (`put/`); FORGET and
+BATCH_FORGET, which have no answer; what the FUSE session or the NFS protocol layer answers itself
+with no call into the file system (INIT, INTERRUPT, an opcode the session does not know, NFS's
+NULL and an unknown procedure); a parked request that is never answered. A node of an earlier
+release answers the report `refused unknown request`, which the mount ignores, and no request
+waits for it: the report is sent by a thread of its own, and a request only adds to counters of
+its process.
+
+The 99th percentile of a request over five minutes, by kind:
+
+```promql
+histogram_quantile(0.99, sum by (kind, le) (rate(tierstore_fs_request_seconds_bucket[5m])))
+```
+
+### Build node: the attaches and detaches of runs
+
+`tierstore fs` times each `attach <digest> for <run>` and each `detach <run>` of its control
+socket, from the request to its answer on the mount's clock, to the millisecond, and splits each
+attach into three parts that add up to it, the `attach_ms` and `detach_ms` of the Q-B measurement
+(`docs/design/virtual-build-fs.md`, section 11): the **fetch**, to the end of the last manifest
+the attach's read of the tree fetched from the cache directory or filled through the cache
+(its `fill-tree` included); the **flatten**, from there to the end of the read (the entries made
+of the manifests, or the tree list mapped); and the **append**, from there to the answer (the
+tree's number in the table of tree numbers, the tree kept in memory, the attachments file
+written). A tree in memory already, or one another request is reading, or one read again into
+memory under the number it has, has its whole read under the fetch; an attach refused before its
+read (a digest or a run that is not one, a process being replaced) has no fetch and no flatten.
+The mount reports each to the node's cache, by a call in the process, when it ends; the families are on
+every process with a cache, with a `# TYPE` line, and stay at zero on a node whose mount reports
+nothing. The buckets are those of the attach histogram above.
+
+| name | type | labels | what it says |
+|---|---|---|---|
+| `tierstore_fs_run_attach_seconds` | histogram | `outcome`: `ok`, `failed`; `le` on `_bucket` | one sample per attach of a tree for a run: the seconds from the request to its answer. `ok` is an attach that answered the run's path, `failed` one refused, whatever the reason |
+| `tierstore_fs_run_attach_seconds_bucket` | counter | `outcome`, `le` | the attaches of that outcome at or under `le` seconds |
+| `tierstore_fs_run_attach_seconds_sum` | counter | `outcome` | their seconds |
+| `tierstore_fs_run_attach_seconds_count` | counter | `outcome` | the attaches of that outcome |
+| `tierstore_fs_run_attach_part_seconds` | histogram | `part`: `fetch`, `flatten`, `append`; `outcome`: `ok`, `failed`; `le` on `_bucket` | one sample of each part per attach of a tree for a run, under the attach's outcome: the seconds of that part. A failed attach has the parts it ran, and 0 for those it did not |
+| `tierstore_fs_run_attach_part_seconds_bucket` | counter | `part`, `outcome`, `le` | those parts at or under `le` seconds |
+| `tierstore_fs_run_attach_part_seconds_sum` | counter | `part`, `outcome` | their seconds |
+| `tierstore_fs_run_attach_part_seconds_count` | counter | `part`, `outcome` | those parts: the attaches of that outcome |
+| `tierstore_fs_run_detach_seconds` | histogram | `outcome`: `ok`, `failed`; `le` on `_bucket` | one sample per detach of a run (and per run that `detach-all-except` detaches): the seconds from the request to its answer, the unpins of the trees it freed included. `ok` is a detach that ended the run's attachments, `failed` one of a run that attached nothing, or refused while the process is being replaced |
+| `tierstore_fs_run_detach_seconds_bucket` | counter | `outcome`, `le` | the detaches of that outcome at or under `le` seconds |
+| `tierstore_fs_run_detach_seconds_sum` | counter | `outcome` | their seconds |
+| `tierstore_fs_run_detach_seconds_count` | counter | `outcome` | the detaches of that outcome |
+
+What they do not count: a report that was lost, as a `started` is lost (above); an attach of a tree
+on a lookup, which is `tierstore_fs_tree_attach_seconds`. A node of an earlier release answers
+the reports `refused unknown request`, which the mount ignores.
+
+The share of an attach's time that is its fetch, over an hour:
+
+```promql
+sum(increase(tierstore_fs_run_attach_part_seconds_sum{part="fetch",outcome="ok"}[1h])) / sum(increase(tierstore_fs_run_attach_seconds_sum{outcome="ok"}[1h]))
+```
+
 ## Cache queries (v1)
 
 All of these use a `5m` window. Every `sum` is outside the `rate`. Shorten the window to see a

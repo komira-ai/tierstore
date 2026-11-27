@@ -9,9 +9,11 @@ use tokio::runtime::Handle;
 
 use crate::server::local_cache::LocalCache;
 use crate::server::local_cache::TreeFilled;
+use crate::server::local_cache::attaches::runs::{RunAttach, RunDetach};
 use crate::server::local_cache::attaches::{Attach, Fetches, Levels};
 use crate::server::local_cache::descriptors::Descriptors;
 use crate::server::local_cache::opens::Opens;
+use crate::server::local_cache::opens::requests::Requests;
 use crate::server::local_cache::tree_lists::TreeLists;
 use crate::server::local_cache::trees::{FlatTree, TreeStore};
 use crate::{Clock, TreeDigest};
@@ -148,6 +150,13 @@ pub(super) enum Report {
     Opens(Box<Opens>),
     /// The tree lists the mount holds mapped (`local_cache/tree_lists.rs`).
     TreeLists(TreeLists),
+    /// How long the requests of the mount's frontend took (`local_cache/requests.rs`); boxed, as
+    /// it is far larger than the others.
+    Requests(Box<Requests>),
+    /// An attach of a tree for a run, and its parts (`local_cache/runs.rs`).
+    RunAttached(RunAttach),
+    /// A detach of a run (`local_cache/runs.rs`).
+    RunDetached(RunDetach),
 }
 
 /// What the cache answered to a fill of a tree's new manifests (`local_cache/tree_fill.rs`).

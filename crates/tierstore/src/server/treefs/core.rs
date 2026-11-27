@@ -36,7 +36,7 @@ use crate::Clock;
 
 use crate::tree_manifest::{EntryKind, TreeDigest, TreeEntry};
 
-use super::attach::{Attachments, Detached, Snapshot, is_run};
+use super::attach::{Attachments, Snapshot};
 #[cfg(any(target_os = "linux", test))]
 use super::backing::{Adopted, Guard};
 #[cfg(any(target_os = "linux", test))]
@@ -278,6 +278,8 @@ pub(in crate::server) struct Core {
     open_files: blob::OpenFiles,
     /// How long the opens took, and how many wait now (`core/opens.rs`): shared with their timings.
     opens: Arc<opens::OpenTimes>,
+    /// How long the requests of the frontend took, by kind (`core/requests.rs`).
+    requests: requests::RequestTimes,
     /// The lines said about the requests that failed, and the counts not said (`core/said.rs`).
     lines: said::Lines,
     /// What the trees in memory held at the last line that said it (`Core::say_memory`).
@@ -308,6 +310,9 @@ pub(super) struct Hooks {
     pub(super) saving: Mutex<Option<Hook>>,
     /// After a tree is marked as removed and before it is taken out of the map.
     pub(super) marked: Mutex<Option<Hook>>,
+    /// In a read of a tree from its manifests, after its entries are made of them and before the
+    /// read ends (`core/placed.rs`).
+    pub(super) flattened: Mutex<Option<Hook>>,
 }
 
 impl Core {
@@ -347,6 +352,7 @@ impl Core {
             next_handle: AtomicU64::new(1),
             open_files: blob::OpenFiles::new(),
             opens: Arc::default(),
+            requests: requests::RequestTimes::default(),
             lines: said::Lines::default(),
             memory_said: Mutex::new(None),
             #[cfg(test)]
@@ -442,71 +448,6 @@ impl Core {
         self.settings.clock.now()
     }
 
-    /// Makes `run` use the tree `digest` (sixty-four hex digits): reads and flattens it, records
-    /// the attachment, and gives the path the job is to be given.
-    ///
-    /// # Errors
-    /// [`AttachError`]: why nothing was attached.
-    pub(super) fn attach(
-        self: &Arc<Self>,
-        digest: &str,
-        run: &str,
-    ) -> Result<PathBuf, AttachError> {
-        self.attach_asking(digest, run, false)
-    }
-
-    /// [`Core::attach`], and, with `prefetch` (`prefetch = "all"`), every blob of the tree is
-    /// filled in the background, in manifest order, without delaying the answer.
-    pub(super) fn attach_asking(
-        self: &Arc<Self>,
-        digest: &str,
-        run: &str,
-        prefetch: bool,
-    ) -> Result<PathBuf, AttachError> {
-        let digest = TreeDigest::from_hex(digest)
-            .filter(|digest| placed::placement_of(digest).is_none())
-            .ok_or(AttachError::Digest)?;
-        if !is_run(run) {
-            return Err(AttachError::Run);
-        }
-        if self.is_held() {
-            return Err(AttachError::Replaced);
-        }
-        // Read before the lifecycle lock, as a lookup that attaches a tree reads it: a slow fill
-        // holds up no attach, no detach and no lookup.
-        let tree = self
-            .read_ahead(&digest, &fetched::Fetched::default())
-            .map_err(|why| AttachError::Tree(why.to_string()))?;
-        let _lifecycle = locked(&self.lifecycle);
-        if self.is_held() {
-            return Err(AttachError::Replaced);
-        }
-        let number = self.table.number_of(&digest)?;
-        if let Some(tree) = tree {
-            let _ = self.keep(number, digest, tree);
-            let _ = self.read_done(number);
-        }
-        let (added, snapshot) = {
-            let mut state = self.state();
-            let added = state.attachments.add(run, number, digest);
-            (added, state.attachments.snapshot())
-        };
-        if let Err(error) = self.write_attachments(&snapshot) {
-            if added {
-                self.state().attachments.remove_one(run, number);
-            }
-            return Err(error.into());
-        }
-        if prefetch {
-            self.start_prefetch(number);
-        }
-        Ok(self
-            .settings
-            .mountpoint
-            .join("trees")
-            .join(digest.to_string()))
-    }
-
     /// The tree `number` in memory, read if it is not.
     fn load_unless_loaded(
         &self,
@@ -518,43 +459,6 @@ impl Core {
         }
         self.load(number, digest)
             .map_err(|why| AttachError::Tree(why.to_string()))
-    }
-
-    /// Ends every attachment of `run`: what its attachments recorded (`Detached`), or none if it
-    /// attached nothing. A tree no run has now and no lookup attached is unpinned, with no lock of
-    /// the core's held but that of its pins (`Core::free_tree`), and leaves memory when the kernel
-    /// forgets its inodes, or at the sweep once no request has named it for `fs.tree_idle_secs`.
-    pub(super) fn detach(&self, run: &str) -> Option<Detached> {
-        let (freed, detached, _freeing) = {
-            let _lifecycle = locked(&self.lifecycle);
-            if self.is_held() {
-                return None;
-            }
-            let freeing = self.freeing();
-            let (freed, detached, snapshot) = {
-                let mut state = self.state();
-                let stall_ms = state.attachments.stall_of(run);
-                let trees = state.attachments.remove(run)?;
-                let (mut failures, mut freed) = (Vec::new(), Vec::new());
-                for (number, digest, mut failed) in trees {
-                    failures.append(&mut failed);
-                    if !state.attachments.is_attached(number) {
-                        freed.push((number, digest));
-                    }
-                }
-                let detached = Detached { failures, stall_ms };
-                (freed, detached, state.attachments.snapshot())
-            };
-            let _ = self.write_attachments(&snapshot);
-            for (number, _) in &freed {
-                let _ = locked(&self.prefetching).remove(number);
-            }
-            (freed, detached, freeing)
-        };
-        for (number, digest) in freed {
-            self.free_tree(number, &digest);
-        }
-        Some(detached)
     }
 
     /// Unpins the tree `number`, `digest`, which a detach has found that nothing attaches, and
@@ -979,7 +883,9 @@ mod pins;
 mod placed;
 mod prefetch;
 mod read;
+mod requests;
 mod restore;
+mod runs;
 mod said;
 
 pub(super) use implicit::look_every;

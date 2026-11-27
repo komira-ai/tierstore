@@ -914,3 +914,6 @@ mod opens;
 
 #[path = "node_fs_fault_tests.rs"]
 mod faults;
+
+#[path = "node_fs_request_tests.rs"]
+mod requests;

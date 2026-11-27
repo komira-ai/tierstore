@@ -466,6 +466,9 @@ impl InProcess {
             Report::Descriptors(descriptors) => self.cache.descriptors_reported(descriptors),
             Report::Opens(opens) => self.cache.opens_reported(*opens),
             Report::TreeLists(lists) => self.cache.tree_lists_reported(lists),
+            Report::Requests(requests) => self.cache.requests_reported(*requests),
+            Report::RunAttached(attach) => self.cache.run_attached(attach),
+            Report::RunDetached(detach) => self.cache.run_detached(detach),
         }
     }
 
