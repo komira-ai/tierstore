@@ -118,19 +118,21 @@ fn same_bytes(work: &Path, check: &SameCheck) -> Result<String, String> {
 /// The files under `root` (or `root` itself, if it is a file) by their path below it, with
 /// their bytes.
 fn files(root: &Path) -> Result<BTreeMap<PathBuf, Vec<u8>>, String> {
-    let fail = |path: &Path, e: std::io::Error| format!("{}: {e}", path.display());
+    tree(root).map_err(|e| format!("{}: {e}", root.display()))
+}
+
+/// [`files`], failing with the I/O error alone.
+fn tree(root: &Path) -> std::io::Result<BTreeMap<PathBuf, Vec<u8>>> {
     let mut found = BTreeMap::new();
     let mut todo = vec![(root.to_path_buf(), PathBuf::new())];
     while let Some((path, name)) = todo.pop() {
-        let meta = fs::metadata(&path).map_err(|e| fail(&path, e))?;
-        if meta.is_dir() {
-            for entry in fs::read_dir(&path).map_err(|e| fail(&path, e))? {
-                let entry = entry.map_err(|e| fail(&path, e))?;
+        if fs::metadata(&path)?.is_dir() {
+            for entry in fs::read_dir(&path)? {
+                let entry = entry?;
                 todo.push((entry.path(), name.join(entry.file_name())));
             }
         } else {
-            let bytes = fs::read(&path).map_err(|e| fail(&path, e))?;
-            found.insert(name, bytes);
+            found.insert(name, fs::read(&path)?);
         }
     }
     Ok(found)

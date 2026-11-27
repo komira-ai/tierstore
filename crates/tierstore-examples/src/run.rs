@@ -146,17 +146,17 @@ pub fn count_objects(
         request_timeout: Duration::from_secs(60),
         min_body_rate: None,
     };
-    let store = S3Store::new(config).map_err(|e| e.to_string())?;
-    let prefix = KeyPrefix::new(prefix).map_err(|e| e.to_string())?;
+    let store = S3Store::new(config).map_err(text)?;
+    let prefix = KeyPrefix::new(prefix).map_err(text)?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .map_err(|e| e.to_string())?;
+        .map_err(text)?;
     runtime.block_on(async {
         let (mut count, mut after): (u64, Option<ListToken>) = (0, None);
         loop {
             let listed = store.list(&prefix, after.as_ref(), page).await;
-            let listed = listed.map_err(|e| e.to_string())?;
+            let listed = listed.map_err(text)?;
             count += u64::try_from(listed.objects.len()).unwrap_or(u64::MAX);
             after = listed.next;
             if after.is_none() {
@@ -164,6 +164,11 @@ pub fn count_objects(
             }
         }
     })
+}
+
+/// An error as the text of a message: one function, so that the errors of each call share it.
+fn text(error: impl std::fmt::Display) -> String {
+    error.to_string()
 }
 
 /// The text of `path`.
@@ -197,9 +202,7 @@ fn free_port(work: &Path) -> Result<(u16, TcpListener), Error> {
 
 /// The `server.bucket` of a tierstore configuration.
 fn bucket_of(config: &str) -> Result<String, String> {
-    let table: toml::Table = config
-        .parse()
-        .map_err(|e: toml::de::Error| e.message().to_owned())?;
+    let table = config.parse::<toml::Table>().map_err(text)?;
     let bucket = table
         .get("server")
         .and_then(|s| s.get("bucket"))

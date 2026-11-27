@@ -80,29 +80,31 @@ pub fn rise(before: &Reading, after: &Reading, series: &str) -> String {
 /// Reads `/metricz` of the S3 front at `addr`.
 ///
 /// # Errors
-/// The connection fails, the answer is not a 200, or its body is not UTF-8.
+/// The connection fails or the answer is not a 200.
 pub fn scrape(addr: SocketAddr) -> Result<Reading, Error> {
     let fail = |why: String| Error::Metrics {
         addr: addr.to_string(),
         why,
     };
-    // One write: a server may close once it has read the request, and bytes of it still unread
-    // then would make the connection reset.
-    let request = format!("GET /metricz HTTP/1.0\r\nHost: {addr}\r\n\r\n");
-    let mut stream = TcpStream::connect(addr).map_err(|e| fail(e.to_string()))?;
-    stream
-        .set_read_timeout(Some(SCRAPE_WAIT))
-        .and_then(|()| stream.write_all(request.as_bytes()))
-        .map_err(|e| fail(e.to_string()))?;
-    let mut answer = Vec::new();
-    stream
-        .read_to_end(&mut answer)
-        .map_err(|e| fail(e.to_string()))?;
-    let text = String::from_utf8(answer).map_err(|e| fail(e.to_string()))?;
-    let (head, body) = text.split_once("\r\n\r\n").unwrap_or((text.as_str(), ""));
+    let answer = fetch(addr).map_err(|e| fail(e.to_string()))?;
+    let text = String::from_utf8_lossy(&answer);
+    let (head, body) = text.split_once("\r\n\r\n").unwrap_or((&*text, ""));
     let status = head.lines().next().unwrap_or_default();
     if status.split_whitespace().nth(1) != Some("200") {
         return Err(fail(format!("the answer is {status:?}")));
     }
     Ok(parse(body))
+}
+
+/// The whole answer to one GET of `/metricz` at `addr`.
+fn fetch(addr: SocketAddr) -> std::io::Result<Vec<u8>> {
+    // One write: a server may close once it has read the request, and bytes of it still unread
+    // then would make the connection reset.
+    let request = format!("GET /metricz HTTP/1.0\r\nHost: {addr}\r\n\r\n");
+    let mut stream = TcpStream::connect(addr)?;
+    stream.set_read_timeout(Some(SCRAPE_WAIT))?;
+    stream.write_all(request.as_bytes())?;
+    let mut answer = Vec::new();
+    stream.read_to_end(&mut answer)?;
+    Ok(answer)
 }
