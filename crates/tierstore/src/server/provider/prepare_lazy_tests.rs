@@ -136,6 +136,7 @@ async fn the_start_line_states_the_mode() {
         socket: rig.bench.rig.dir.path().join("provider.sock"),
         mountpoint: MOUNT.into(),
         fetch_timeout: DEFAULT_FETCH_TIMEOUT,
+        served: true,
     };
     let provider = Provider::new(rig.bench.store.clone(), rig.bench.rig.cache.clone(), &flags);
     assert_eq!(

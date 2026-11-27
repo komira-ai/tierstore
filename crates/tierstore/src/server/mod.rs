@@ -129,8 +129,8 @@
 //! ([`Backend::needs_length`](crate::Backend::needs_length): an S3 tier does, and would hold the
 //! body whole otherwise) with 411 `MissingContentLength`; if its `Content-Length` is over
 //! [`ServerConfig::max_request_bytes`], with 413 `EntityTooLarge`, so that nothing is stored and
-//! no upload is begun; and if [`ServerConfig::max_concurrent_puts`] bodies are already being
-//! taken, the request waits for one of them to end, at most [`ServerConfig::put_permit_wait`],
+//! no upload is begun; and if [`ServerConfig::max_concurrent_puts`] bodies (streamed, or read
+//! whole: see `bounds`) are already being taken, the request waits for one of them to end, at most [`ServerConfig::put_permit_wait`],
 //! without reading its body, and is answered 503 `SlowDown` and `Retry-After` only when no slot
 //! was free in that time. A body that then comes in at an average rate
 //! under [`ServerConfig::put_min_bytes_per_sec`], once [`ServerConfig::put_rate_grace`] has
@@ -269,6 +269,7 @@ mod auth;
 mod auth_tests;
 #[cfg(test)]
 mod body_stall_tests;
+mod bounds;
 mod bucket;
 #[cfg(test)]
 mod bucket_config_tests;
@@ -587,8 +588,10 @@ pub struct Server {
     /// The connections that are open.
     open: AtomicUsize,
     next_request: AtomicU64,
-    /// One permit for each streamed body that may be taken at once.
+    /// One permit for each body, streamed or held whole, that may be taken at once.
     puts: Arc<Semaphore>,
+    /// One permit for each GET of an object that may be read at once (`bounds`).
+    reads: Arc<Semaphore>,
     /// The front's own counts (`front_counts.rs`).
     counts: front_counts::FrontCounts,
 }
@@ -597,14 +600,13 @@ impl Server {
     /// A server over `backend`.
     #[must_use]
     pub fn new(backend: Arc<dyn Backend>, config: ServerConfig) -> Arc<Self> {
-        let puts = Arc::new(Semaphore::new(config.max_concurrent_puts));
-        let drain = Drain::new(config.header_timeout, Arc::default());
         Arc::new(Self {
-            puts,
+            puts: Arc::new(Semaphore::new(config.max_concurrent_puts)),
+            reads: Arc::new(Semaphore::new(config.max_concurrent_reads)),
+            drain: Arc::new(Drain::new(config.header_timeout, Arc::default())),
             backend,
             started: config.clock.now(),
             config,
-            drain: Arc::new(drain),
             drain_requested: Notify::new(),
             inflight: AtomicUsize::new(0),
             open: AtomicUsize::new(0),
@@ -704,8 +706,9 @@ impl Server {
         self.finish_by_deadline().await
     }
 
-    /// Takes the next connection `incoming` gives and serves it (see [`Server::take`]).
+    /// Takes the next connection `incoming` gives, once there is room (`bounds`), and serves it.
     async fn accept_one<I: Incoming>(self: &Arc<Self>, incoming: &mut I) {
+        self.room_for_a_connection().await;
         let accepted = poll_fn(|cx| incoming.poll_incoming(cx)).await;
         self.take(accepted).await;
     }
@@ -907,7 +910,7 @@ impl Server {
         if let Role::Scoped(scopes) = &signed.role {
             scoped::permit(scopes, parts, &target, &query)?;
         }
-        let limit = ops::body_limit(self.config.max_request_bytes, deleting);
+        let limit = ops::body_limit(self.config.max_request_bytes, deleting, parts, &target);
         let limit = signed.presign.as_ref().map_or(limit, |grant| {
             limit.min(usize::try_from(grant.max_object_bytes).unwrap_or(usize::MAX))
         });
@@ -982,7 +985,7 @@ impl Server {
         let late = self.late_requests();
         text.push_str("# TYPE tierstore_drain_late_requests_total counter\n");
         text.push_str(&format!("tierstore_drain_late_requests_total {late}\n"));
-        text.push_str(&self.put_failure_family());
+        text.push_str(&self.front_families());
         let (version, commit) = (build_info::VERSION, build_info::COMMIT);
         text.push_str(&build_info::gauge(version, commit, self.config.slot));
         text

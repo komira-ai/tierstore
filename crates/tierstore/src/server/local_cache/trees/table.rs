@@ -59,6 +59,13 @@ pub(in crate::server) struct TreesTable {
     /// The ranged reads of creates at once, node-wide (1 to 1024, default 8).
     #[serde(default)]
     pub fill_concurrency: Option<u32>,
+    /// The mount provider's preparations that read and make their tree at once, node-wide (1 to
+    /// 1024, default 8).
+    #[serde(default)]
+    pub prepare_concurrency: Option<u32>,
+    /// The sources the mount provider holds (1 to 1000000, default 16384).
+    #[serde(default)]
+    pub max_sources: Option<u32>,
     /// What a create with no `prefetch` did: `none`, `background` or `wait` (default `wait`);
     /// checked, and used by no call.
     #[serde(default)]
@@ -185,6 +192,18 @@ fn trees_config(table: &TreesTable) -> Result<TreesConfig, ConfigError> {
             table.fill_concurrency,
             base.fill_concurrency,
             (1, 1024),
+        )?,
+        prepare_concurrency: count(
+            "prepare_concurrency",
+            table.prepare_concurrency,
+            base.prepare_concurrency,
+            (1, 1024),
+        )?,
+        max_sources: count(
+            "max_sources",
+            table.max_sources,
+            base.max_sources,
+            (1, 1_000_000),
         )?,
         prefetch_default: table.prefetch_default.unwrap_or(base.prefetch_default),
         prepare_prefetch: prepare_prefetch(

@@ -249,7 +249,8 @@ pub(in crate::server) fn refuse_fs_params(
 
 /// Gives the mount provider the `fs` interface's mount point when its own `mountpoint`, at
 /// `given` (the provider's place, `interface[1]`), was left out; one that was given must be it.
-/// Without an `fs` interface the provider keeps its own, or its default, as before.
+/// The provider is then served. Without an `fs` interface the provider keeps its own, or its
+/// default, and is not served: no process of this release serves that mount.
 ///
 /// # Errors
 /// A provider's `mountpoint` that is not the `fs` interface's, naming the provider's param.
@@ -261,6 +262,7 @@ pub(in crate::server) fn provider_mountpoint(
     let (Some(provider), Some(fs)) = (provider, fs) else {
         return Ok(());
     };
+    provider.served = true;
     let mountpoint = fs.mountpoint();
     let Some(at) = given else {
         provider.mountpoint = mountpoint;

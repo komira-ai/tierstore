@@ -26,7 +26,9 @@ params = { addresses = ["127.0.0.1:9300"] }
 
 # The mount provider jobscheduler's agent on this Mac asks for a job's input tree
 # (crates/tierstore/docs/operations.md, "The mount provider"): a Unix socket only, mode 0600, in a
-# directory _tierstore owns; `mountpoint` is the Mac's `fs.mountpoint` of tierstore fs.
+# directory _tierstore owns; `mountpoint` is the Mac's `fs.mountpoint` of tierstore fs. Since 0.3.196
+# no process serves that mount for a file with no `fs` interface, as this one has: the provider then
+# answers every Prepare and Mount UNAVAILABLE (komira-ai/tierstore#623, #624).
 [[interface]]
 type   = "mount-provider"
 params = { socket = "/usr/local/tierstore/run/provider.sock", mountpoint = "/private/var/tierstore/fs" }

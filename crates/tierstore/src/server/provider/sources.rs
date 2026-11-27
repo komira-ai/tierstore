@@ -1,9 +1,13 @@
 //! The sources this process prepared, and the four calls of the contract over them.
 //!
 //! A source this process prepared is held in a table, with the stage of its preparation, which a
-//! `Mount` waits on. What a release, a sweep or a mount needs beyond the table it finds in the tree
-//! store by the source's path (module `names`), so that after a restart of this process, which
-//! empties the table, a source the agent prepared before is still mounted and released.
+//! `Mount` waits on. The table holds at most `trees.max_sources` sources: a `Prepare` of a new
+//! source past that is refused `UNAVAILABLE`, and a `Release` or a `Sweep` makes room. At most
+//! `trees.prepare_concurrency` preparations read and make their tree at once; the others wait for a
+//! turn (`local_cache/preparations.rs`). What a release, a sweep or a mount needs beyond the table
+//! it finds in the tree store by the source's path (module `names`), so that after a restart of
+//! this process, which empties the table, a source the agent prepared before is still mounted and
+//! released.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -18,7 +22,7 @@ use super::names::{SourceId, check_name, source_of};
 use super::prepare::{Job, run};
 use super::{MOUNT_WAIT, ProviderError, ProviderFlags};
 use crate::server::local_cache::trees::{LifeError, PlacementId, PreparePrefetch, TreeStore};
-use crate::server::local_cache::{LocalCache, QueuedReads};
+use crate::server::local_cache::{LocalCache, Preparations, QueuedReads, Unavailable};
 use crate::{MAX_TREE_LIST_BYTES, TreeDigest, tree_list_digest};
 
 /// Where the preparation of a source is.
@@ -30,8 +34,12 @@ pub(super) enum Stage {
     Placed,
     /// What the source names cannot be used: why.
     Refused(String),
-    /// The preparation failed for a reason that may pass: why. The next `Mount` starts it again.
+    /// The preparation could not read the tree's sidecar or list, for a reason that may pass: why.
+    /// The next `Mount` starts it again.
     Failed(String),
+    /// The tree store could not make the tree now (too many placements, trees off or read-only, a
+    /// disk error): why. The next `Mount` starts it again.
+    Unmade(String),
     /// The source was released.
     Released,
 }
@@ -60,8 +68,11 @@ struct Held {
 /// The settings of the provider.
 #[derive(Clone, Debug)]
 pub(super) struct Settings {
-    /// The mount of `tierstore fs`.
+    /// The mount of the node's file system.
     pub mountpoint: PathBuf,
+    /// Whether this process serves the file system at `mountpoint` (the file has an `fs`
+    /// interface); every `Prepare` and `Mount` is [`no_fs`] if not.
+    pub served: bool,
     /// The longest read of a tree's sidecar.
     pub list_timeout: Duration,
     /// The longest read of the bytes of one file.
@@ -83,6 +94,16 @@ pub(super) struct Settings {
 /// (`local_cache/queued_reads.rs`).
 pub(super) const PREFETCH_QUEUE_BYTES: u64 = 256 << 20;
 
+/// The reason of every `Prepare` and `Mount` of a provider whose mount `mountpoint` no process of
+/// this release serves: the node's file has no `fs` interface.
+pub(super) fn no_fs(mountpoint: &std::path::Path) -> String {
+    format!(
+        "no file system serves {}: the node's file has no [[interface]] with type = \"fs\", and \
+         tierstore fs is no longer a process of its own",
+        mountpoint.display()
+    )
+}
+
 /// What the preparations share.
 pub(super) struct Shared {
     /// The node's trees.
@@ -95,6 +116,11 @@ pub(super) struct Shared {
     pub fills: Semaphore,
     /// The room of the reads queued, the node's (`local_cache/queued_reads.rs`).
     pub queued: Arc<QueuedReads>,
+    /// The turns of the preparations that read and make their tree: `trees.prepare_concurrency`
+    /// at once. Closed when the process stops, and a preparation waiting for one then fails.
+    pub turns: Semaphore,
+    /// The counts of the sources and the preparations (`local_cache/preparations.rs`).
+    pub counts: Arc<Preparations>,
     sources: Mutex<BTreeMap<SourceId, Held>>,
 }
 
@@ -140,6 +166,7 @@ impl Provider {
         tracing::info!("{}", mode_line(store.config().prepare_prefetch));
         let settings = Settings {
             mountpoint: flags.mountpoint.clone(),
+            served: flags.served,
             list_timeout: flags.fetch_timeout,
             fill_timeout: flags.fetch_timeout,
             mount_wait: MOUNT_WAIT,
@@ -153,7 +180,9 @@ impl Provider {
     /// The same, with `settings`.
     pub(super) fn with(store: TreeStore, cache: LocalCache, settings: Settings) -> Self {
         let fills = Semaphore::new(store.config().fill_concurrency);
-        let queued = cache.queued_reads();
+        let turns = Semaphore::new(store.config().prepare_concurrency);
+        let (queued, counts) = (cache.queued_reads(), cache.preparations());
+        counts.set_sources(0);
         Self {
             shared: Arc::new(Shared {
                 store,
@@ -161,9 +190,26 @@ impl Provider {
                 settings,
                 fills,
                 queued,
+                turns,
+                counts,
                 sources: Mutex::new(BTreeMap::new()),
             }),
         }
+    }
+
+    /// `UNAVAILABLE` for `reason`, which says `why`, counted once.
+    fn unavailable(&self, reason: Unavailable, why: String) -> ProviderError {
+        self.shared.cache.provider_unavailable(reason);
+        ProviderError::Unavailable(why)
+    }
+
+    /// `UNAVAILABLE` with [`no_fs`] if no process serves the mount.
+    fn served(&self) -> Result<(), ProviderError> {
+        if self.shared.settings.served {
+            return Ok(());
+        }
+        let why = no_fs(&self.shared.settings.mountpoint);
+        Err(self.unavailable(Unavailable::NoFs, why))
     }
 
     fn lock(&self) -> MutexGuard<'_, BTreeMap<SourceId, Held>> {
@@ -173,9 +219,11 @@ impl Provider {
             .unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Stops the reads of files that have not begun: the process is stopping.
+    /// Stops the reads of files and the preparations that have not begun: the process is
+    /// stopping.
     pub(in crate::server) fn halt(&self) {
         self.shared.fills.close();
+        self.shared.turns.close();
     }
 
     /// `Prepare`: checks the source, the ref and the mode, and begins the preparation in the
@@ -186,7 +234,8 @@ impl Provider {
     /// # Errors
     /// [`ProviderError::Invalid`] for a source or a ref that is not well formed;
     /// [`ProviderError::Refused`] for a mode other than read-only, or a source prepared with
-    /// another ref.
+    /// another ref; [`ProviderError::Unavailable`] ([`no_fs`]) if no process serves the mount,
+    /// and for a new source while the table holds `trees.max_sources` sources, counted.
     pub(super) fn prepare(
         &self,
         source: Option<Source>,
@@ -207,6 +256,7 @@ impl Provider {
             let why = "tierstore makes read-only trees: the mode must be READ_ONLY";
             return Err(ProviderError::Refused(why.to_owned()));
         }
+        self.served()?;
         // The first `Prepare` of the run stamps it; a later one keeps the stamp while the cache
         // keeps the run (until a release or a sweep of a source of it, or the cache's bound).
         self.shared.cache.run_requested(&id.run_dir());
@@ -221,6 +271,13 @@ impl Provider {
             self.again_if_failed(&id, held);
             return Ok(());
         }
+        let most = self.shared.store.config().max_sources;
+        if sources.len() >= most {
+            self.shared.counts.refuse();
+            return Err(ProviderError::Unavailable(format!(
+                "the node holds {most} sources (trees.max_sources): release one, or retry"
+            )));
+        }
         let held = Held {
             key: reference.to_owned(),
             digest,
@@ -229,6 +286,7 @@ impl Provider {
         };
         self.start(&id, &held);
         sources.insert(id, held);
+        self.shared.counts.set_sources(sources.len());
         Ok(())
     }
 
@@ -249,13 +307,15 @@ impl Provider {
             stage: Arc::clone(&held.stage),
             released: Arc::clone(&held.released),
         };
-        self.lock().insert(id, held);
+        let mut sources = self.lock();
+        sources.insert(id, held);
+        self.shared.counts.set_sources(sources.len());
         (job, seen)
     }
 
     /// Begins the preparation of `held` again if it failed.
     fn again_if_failed(&self, id: &SourceId, held: &Held) {
-        if matches!(*held.stage.borrow(), Stage::Failed(_)) {
+        if matches!(*held.stage.borrow(), Stage::Failed(_) | Stage::Unmade(_)) {
             self.start(id, held);
         }
     }
@@ -276,18 +336,21 @@ impl Provider {
     /// `Mount`: the directory of the source's tree, once it is placed.
     ///
     /// # Errors
-    /// [`ProviderError::Unavailable`] if the tree is not placed within the wait, or its
-    /// preparation failed (and is begun again), or the source was never prepared here;
+    /// [`ProviderError::Unavailable`] if no process serves the mount ([`no_fs`]), the tree is not
+    /// placed within the wait, or its preparation failed (and is begun again), or the source was
+    /// never prepared here, each counted under its reason;
     /// [`ProviderError::Refused`] if the ref cannot be used, or the source was released.
     pub(super) async fn mount(&self, source: Option<Source>) -> Result<PathBuf, ProviderError> {
         let id = SourceId::of(source)?;
+        self.served()?;
         let path = self.shared.settings.mountpoint.join(id.path());
         let mut stage = {
             let sources = self.lock();
             let Some(held) = sources.get(&id) else {
                 return match self.placement_at(&id) {
                     Some(_) => Ok(path),
-                    None => Err(ProviderError::Unavailable(
+                    None => Err(self.unavailable(
+                        Unavailable::NotPreparedHere,
                         "the source is not prepared here".to_owned(),
                     )),
                 };
@@ -300,7 +363,7 @@ impl Provider {
             stage.wait_for(|stage| *stage != Stage::Preparing),
         )
         .await
-        .map_err(|_| ProviderError::Unavailable("not ready".to_owned()))?;
+        .map_err(|_| self.unavailable(Unavailable::NotReady, "not ready".to_owned()))?;
         // The sender is dropped only after the source's stage was set to released.
         let now = waited.map_or(Stage::Released, |now| (*now).clone());
         match now {
@@ -310,13 +373,15 @@ impl Provider {
                 if let Some(held) = self.lock().get(&id) {
                     self.start(&id, held);
                 }
-                Err(ProviderError::Unavailable(
+                Err(self.unavailable(
+                    Unavailable::TreeGone,
                     "the tree is gone: it is being prepared again".to_owned(),
                 ))
             }
             Stage::Preparing | Stage::Placed => Ok(path),
             Stage::Refused(why) => Err(ProviderError::Refused(why)),
-            Stage::Failed(why) => Err(ProviderError::Unavailable(why)),
+            Stage::Failed(why) => Err(self.unavailable(Unavailable::ReadFailed, why)),
+            Stage::Unmade(why) => Err(self.unavailable(Unavailable::StoreFailed, why)),
             Stage::Released => Err(ProviderError::Refused("the source was released".to_owned())),
         }
     }
@@ -338,7 +403,12 @@ impl Provider {
     /// Releases `id`: whether there was anything to release.
     fn release_id(&self, id: &SourceId) -> Result<bool, ProviderError> {
         self.shared.cache.run_forgotten(&id.run_dir());
-        let held = self.lock().remove(id);
+        let held = {
+            let mut sources = self.lock();
+            let held = sources.remove(id);
+            self.shared.counts.set_sources(sources.len());
+            held
+        };
         let mut released = false;
         if let Some(held) = held {
             held.released.store(true, Ordering::SeqCst);
@@ -355,9 +425,8 @@ impl Provider {
                 .err()
                 .filter(|why| *why != LifeError::UnknownPlacement);
             if let Some(why) = refused {
-                return Err(ProviderError::Unavailable(format!(
-                    "the placement was not released: {why}"
-                )));
+                let why = format!("the placement was not released: {why}");
+                return Err(self.unavailable(Unavailable::NotReleased, why));
             }
             released = true;
         }

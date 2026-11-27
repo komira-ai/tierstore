@@ -110,6 +110,8 @@ const FLAGLESS_KEYS: &[&str] = &[
     "server.door_look",
     "server.put_pieces_queued",
     "server.oci_handshake_timeout",
+    "server.max_connections",
+    "server.max_concurrent_reads",
     "server.s3_chunks_waiting",
     "server.dir_copy_chunk",
     "server.dir_read_chunk",

@@ -114,6 +114,7 @@ fn a_mount_provider_interface_with_its_socket_alone_takes_the_defaults() {
         socket: PathBuf::from(SOCKET),
         mountpoint: PathBuf::from("/run/tierstore/fs"),
         fetch_timeout: Duration::from_secs(60),
+        served: false,
     };
     assert_eq!(provider_of(&[s3(), with_socket("")]), Some(wanted));
 }
@@ -127,6 +128,7 @@ fn the_params_of_a_mount_provider_interface_are_the_provider() {
         socket: PathBuf::from(SOCKET),
         mountpoint: PathBuf::from("/mnt/tierstore"),
         fetch_timeout: Duration::from_secs(5),
+        served: false,
     };
     assert_eq!(provider_of(&[given.clone(), s3()]), Some(wanted));
 }

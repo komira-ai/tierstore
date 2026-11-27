@@ -701,9 +701,10 @@ type   = "mount-provider"
 params = { socket = "/var/lib/tierstore/provider.sock", mountpoint = "/run/tierstore/fs" }
 ```
 
-`mountpoint` is the node's mount of `tierstore fs` (`fs.mountpoint` of `/etc/tierstore/fs.toml`),
-under which the provider places each job's tree; `tierstore fs` must run on the node for a job to
-read it. jobscheduler's agent on the node takes the socket and the provider's directory as a
+`mountpoint` is the node's file system mount, under which the provider places each job's tree:
+the `fs` interface's `params.mountpoint` in the same file. Since 0.3.196 `tierstore fs` is no longer
+a process of its own, so a file with no `fs` interface has no process serving the mount, and the
+provider answers every `Prepare` and `Mount` `UNAVAILABLE` there. jobscheduler's agent on the node takes the socket and the provider's directory as a
 read-only mount root, in flags of its own:
 
 ```text
@@ -813,7 +814,7 @@ instead of running with settings it did not read.
 | `hot_store.budget` | the bytes the hot tier is meant to hold; the water marks are shares of it (`hot_store.high_water`, `hot_store.low_water`, `hot_store.critical`) |
 | `hot_store.usage_stale_after` | how old the usage that the reconciler publishes may be (2m by default, longer than `hot_store.lease_ttl`) before `/usagez` says 503 with the reason |
 | an `oci` interface | the registry front (read-only unless it asks for keys), off unless the file has one; see The OCI read front |
-| a `mount-provider` interface | a build node's mount provider for jobscheduler's agent: `params.socket` and the mount of `tierstore fs`; see The mount provider of a build node |
+| a `mount-provider` interface | a build node's mount provider for jobscheduler's agent: `params.socket` and the mount of the node's `fs` interface; see The mount provider of a build node |
 
 The drain on SIGTERM is two keys of `[server]`: `drain_lb_wait` is how long `/readyz` says 503
 while the server goes on accepting and serving (the settle, `10s`; `1s` on macOS), and `drain_deadline` is how long it
