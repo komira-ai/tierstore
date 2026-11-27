@@ -119,7 +119,8 @@ fn a_release_update_of_the_farms_linux_node_ends_with_the_new_build_serving() {
     fake.drive(&p, &[Verify, Cleanup]);
 
     let end = fake.record();
-    assert!(!end.updating && end.committed());
+    assert!(!end.updating);
+    assert!(end.committed());
     assert_eq!(end.live, Some(Instance::B));
     assert_eq!(fake.running(), [Instance::B]);
     assert_eq!(fake.markers(), [Instance::B]);
@@ -254,7 +255,8 @@ fn the_switch_of_the_farms_linux_node_to_one_process_ends_with_no_fs_instance() 
     node.go(&p, &[Verify, Cleanup]);
 
     let end = node.fake.record();
-    assert!(!end.updating && end.committed());
+    assert!(!end.updating);
+    assert!(end.committed());
     assert_eq!((end.fs_live, end.fs_next), (None, None));
     assert!(node.fake.fs_running().is_empty());
     assert!(node.fake.fs_markers().is_empty());
@@ -506,7 +508,9 @@ fn the_switch_of_the_farms_mac_node_to_one_process_ends_with_the_new_mount_liste
     let disabled = position(&format!("launchd.disable {FS_LABEL}"));
     let main_out = position(&format!("launchd.bootout {LABEL}"));
     let main_in = position(&format!("launchd.bootstrap {LAUNCHD_PLIST}"));
-    assert!(fs_out < disabled && disabled < main_out && main_out < main_in);
+    assert!(fs_out < disabled);
+    assert!(disabled < main_out);
+    assert!(main_out < main_in);
     assert!(!calls.contains(&format!("launchd.bootstrap {FS_LAUNCHD_PLIST}").as_str()));
     assert_eq!(node.fake.disabled(), [FS_LABEL]);
     let cut = node.fake.snapshot();
