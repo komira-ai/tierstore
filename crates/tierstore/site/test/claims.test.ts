@@ -56,8 +56,8 @@ export function code(text: string): string {
   return out.join('\n');
 }
 
-/** The files that export metrics: the OCI front's, the cache's (and its entries by extents', its runs' request to start, its mounts' tree attaches, its mounts' descriptors, its mounts' opens, its mounts' tree lists, its mounts' requests, its mounts' attaches and detaches of runs, its provider's refused tree lists, and its provider's sources and preparations), the tiers', and the S3 front's bounds. */
-const EXPORTERS = new Set(['server/oci/metrics.rs', 'server/local_cache/metrics.rs', 'server/local_cache/extents/counts.rs', 'server/local_cache/starts.rs', 'server/local_cache/attaches.rs', 'server/local_cache/descriptors.rs', 'server/local_cache/opens.rs', 'server/local_cache/tree_lists.rs', 'server/local_cache/requests.rs', 'server/local_cache/runs.rs', 'server/local_cache/list_refusals.rs', 'server/local_cache/provider_unavailable.rs', 'metrics.rs', 'server/build_info.rs', 'server/mod.rs', 'server/front_counts.rs', 'server/bounds.rs', 'server/local_cache/preparations.rs']);
+/** The files that export metrics: the OCI front's, the cache's (and its entries by extents', its runs' request to start, its mounts' tree attaches, its mounts' descriptors, its mounts' opens, its mounts' tree lists, its mounts' requests, its mounts' attaches and detaches of runs, its provider's refused tree lists, and its provider's sources and preparations), the tiers', the S3 front's bounds, the text of /metricz (the drain's late requests) and the process's own figures. */
+const EXPORTERS = new Set(['server/oci/metrics.rs', 'server/local_cache/metrics.rs', 'server/local_cache/extents/counts.rs', 'server/local_cache/starts.rs', 'server/local_cache/attaches.rs', 'server/local_cache/descriptors.rs', 'server/local_cache/opens.rs', 'server/local_cache/tree_lists.rs', 'server/local_cache/requests.rs', 'server/local_cache/runs.rs', 'server/local_cache/list_refusals.rs', 'server/local_cache/provider_unavailable.rs', 'metrics.rs', 'server/build_info.rs', 'server/mod.rs', 'server/front_counts.rs', 'server/bounds.rs', 'server/local_cache/preparations.rs', 'server/metricz.rs', 'server/process.rs']);
 
 /** What in the source no longer matches the pages. Each problem names the pages to change. */
 export function staleClaims(src: ReadonlyMap<string, string>): string[] {
@@ -77,6 +77,7 @@ export function staleClaims(src: ReadonlyMap<string, string>): string[] {
     out.push(`the probe routes in server/mod.rs are ${[...routes].sort().join(', ')}, not ${want.join(', ')}: update docs/operations.md ("Probes") and content/demo.html`);
   }
   const mod = code(src.get('server/mod.rs') ?? '');
+  const metricz = code(src.get('server/metricz.rs') ?? '');
   const cli = code(src.get('server/cli.rs') ?? '');
   const info = code(src.get('server/build_info.rs') ?? '');
   // The start line, as the program formats it: `tierstore {VERSION} listen=...` (not a literal in a test).
@@ -84,8 +85,8 @@ export function staleClaims(src: ReadonlyMap<string, string>): string[] {
     out.push('the start line "tierstore <version> listen=<address>" is no longer built by format!("tierstore {VERSION} listen=... in server/cli.rs: update content/demo.html');
   }
   // The metric names the pages give, as /metricz prints them: the type line and the sample, in code (not a doc comment).
-  if (!/# TYPE tierstore_drain_late_requests_total counter\\n/.test(mod) || !/tierstore_drain_late_requests_total \{/.test(mod)) {
-    out.push('server/mod.rs no longer prints the type line and the sample of tierstore_drain_late_requests_total: update docs/metrics.md');
+  if (!/# TYPE tierstore_drain_late_requests_total counter\\n/.test(metricz) || !/tierstore_drain_late_requests_total \{/.test(metricz)) {
+    out.push('server/metricz.rs no longer prints the type line and the sample of tierstore_drain_late_requests_total: update docs/metrics.md');
   }
   if (!/# TYPE tierstore_build_info gauge\\n/.test(info) || !/tierstore_build_info\{\{version=/.test(info)) {
     out.push('server/build_info.rs no longer prints the type line and the sample of tierstore_build_info: update docs/metrics.md');
@@ -149,8 +150,8 @@ test('the check can fail: a literal in a test or a comment does not stand for wh
   const startLine = with_('server/cli.rs', (s) => s.replace('format!("tierstore {VERSION} listen=', 'format!("tierstore {VERSION} listening=') + '\n#[cfg(test)]\nmod more {\n    const A: &str = "tierstore {version} listen={}";\n}\n');
   assert.match(staleClaims(startLine).join('\n'), /start line.*content\/demo\.html/);
   // The metrics: the exposition goes and the doc comment that names the metric stays.
-  const noDrain = with_('server/mod.rs', (s) => s.replace('# TYPE tierstore_drain_late_requests_total counter', '# TYPE tierstore_other counter').replace('tierstore_drain_late_requests_total {late}', 'tierstore_other {late}'));
-  assert.ok(noDrain.get('server/mod.rs')?.includes('`tierstore_drain_late_requests_total`'), 'the doc comment is still there');
+  const noDrain = with_('server/metricz.rs', (s) => s.replace('# TYPE tierstore_drain_late_requests_total counter', '# TYPE tierstore_other counter').replace('tierstore_drain_late_requests_total {late}', 'tierstore_other {late}'));
+  assert.ok(noDrain.get('server/metricz.rs')?.includes('`tierstore_drain_late_requests_total`'), 'the doc comment is still there');
   assert.match(staleClaims(noDrain).join('\n'), /tierstore_drain_late_requests_total.*docs\/metrics\.md/);
   const noInfo = with_('server/build_info.rs', (s) => s.replace('# TYPE tierstore_build_info gauge', '# TYPE tierstore_info gauge'));
   assert.match(staleClaims(noInfo).join('\n'), /tierstore_build_info.*docs\/metrics\.md/);

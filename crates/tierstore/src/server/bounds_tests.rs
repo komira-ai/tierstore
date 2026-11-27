@@ -21,7 +21,7 @@ use super::super::testing::{BUCKET, Rig};
 use super::super::xml::{
     COMPLETE_NODES, CREATE_NODES, DELETE_NODES, parse_complete, parse_create, parse_delete,
 };
-use super::bound_families;
+use super::{bound_families, limit_families};
 use crate::Backend as _;
 
 /// The line of `family` with `value` in the text of `/metricz` of the rig's server.
@@ -311,4 +311,54 @@ async fn the_accept_loop_holds_no_more_connections_than_the_bound() {
         assert_eq!(server.open_connections(), 1);
         drop(client);
     }
+}
+
+/// Asserts the text of the gauges of the limits in full: three gauges, each with its type line.
+#[test]
+fn the_limits_are_three_gauges_each_with_its_type() {
+    assert_eq!(
+        limit_families(8192, 512, 32),
+        "# TYPE tierstore_s3_connections_limit gauge\n\
+         tierstore_s3_connections_limit 8192\n\
+         # TYPE tierstore_s3_reads_limit gauge\n\
+         tierstore_s3_reads_limit 512\n\
+         # TYPE tierstore_s3_bodies_limit gauge\n\
+         tierstore_s3_bodies_limit 32\n"
+    );
+}
+
+/// Asserts that `/metricz` shows each limit as the server was started with it, beside what is
+/// held: a GET in flight holds one of the two reads, so the reads held stand at one under a limit
+/// of two while its answer is open, and at none once it is dropped, while the limit stays.
+#[tokio::test]
+async fn metricz_shows_each_limit_beside_what_is_held() {
+    let rig = Rig::with(1 << 20, |config| {
+        config.max_connections = 7;
+        config.max_concurrent_reads = 2;
+        config.max_concurrent_puts = 5;
+    })
+    .await;
+    assert_eq!(rig.put("obj", b"abcd").await.status, StatusCode::OK);
+    let text = rig.server.metrics_probe();
+    for line in [
+        "\ntierstore_s3_connections_limit 7\n",
+        "\ntierstore_s3_reads_limit 2\n",
+        "\ntierstore_s3_bodies_limit 5\n",
+        "\ntierstore_s3_reads_in_flight 0\n",
+    ] {
+        assert!(text.contains(line), "{line:?} not in:\n{text}");
+    }
+    let uri = format!("/{BUCKET}/obj");
+    let open = rig
+        .server
+        .handle(sign(&rig.config, "GET", &uri, &[], b""))
+        .await;
+    assert_eq!(open.status(), StatusCode::OK);
+    let held = rig.server.metrics_probe();
+    assert!(held.contains("\ntierstore_s3_reads_in_flight 1\n"), "{held}");
+    assert!(held.contains("\ntierstore_s3_reads_limit 2\n"), "{held}");
+    drop(open);
+    let after = rig.server.metrics_probe();
+    assert!(after.contains("\ntierstore_s3_reads_in_flight 0\n"), "{after}");
+    assert!(after.contains("\ntierstore_s3_reads_limit 2\n"), "{after}");
 }

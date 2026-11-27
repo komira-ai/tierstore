@@ -448,11 +448,12 @@ are first opened, as with `"none"`. A release of a source drops its queued reads
 | name | type | labels | value |
 |---|---|---|---|
 | `tierstore_provider_prefetch_queued_bytes` | gauge | none | the bytes of heap the reads queued by every source's `Prepare` hold now (the reads and their spans; not the pack names they share) |
+| `tierstore_provider_prefetch_queued_bytes_limit` | gauge | none | the bound those bytes are held under, 268435456 (256 MiB); shown once the node's mount provider has started (a node with no `[trees]` table has none) |
 | `tierstore_provider_prefetch_skipped_total` | counter | none | the sources whose reads were not queued because they did not fit under the bound |
 
 ```promql
 # The queued reads near their bound: the upstream is slow to answer the node's reads.
-tierstore_provider_prefetch_queued_bytes > 200 * 1024 * 1024
+tierstore_provider_prefetch_queued_bytes > 0.8 * tierstore_provider_prefetch_queued_bytes_limit
 # Sources prepared with no read queued: their files are read when first opened.
 increase(tierstore_provider_prefetch_skipped_total[10m]) > 0
 ```
@@ -468,14 +469,19 @@ turn, and a `Mount` of their source waits for them as for any preparation.
 | name | type | labels | value |
 |---|---|---|---|
 | `tierstore_provider_sources` | gauge | none | the sources the provider holds now |
+| `tierstore_provider_sources_limit` | gauge | none | the most it holds, `trees.max_sources` as the node started with it |
 | `tierstore_provider_preparing` | gauge | none | the preparations that read their list or make their tree now |
+| `tierstore_provider_preparing_limit` | gauge | none | the most that do at once, `trees.prepare_concurrency` as the node started with it |
 | `tierstore_provider_prepare_refused_total` | counter | none | the `Prepare` calls of a new source refused because the provider held `trees.max_sources` |
+
+The two limits are shown once the node's mount provider has started, as is the limit of the queued
+reads above; a node with no `[trees]` table has none of the three.
 
 ```promql
 # Sources that jobs prepare and never release or sweep: the table fills toward its bound.
-tierstore_provider_sources > 0.8 * 16384
+tierstore_provider_sources > 0.8 * tierstore_provider_sources_limit
 # Preparations at their bound: Mounts wait for a turn.
-tierstore_provider_preparing >= 8
+tierstore_provider_preparing >= tierstore_provider_preparing_limit
 ```
 
 ### The bounds of the S3 front
@@ -489,15 +495,67 @@ answered 503 `SlowDown`). Every process with an S3 front has these series.
 | name | type | labels | value |
 |---|---|---|---|
 | `tierstore_s3_connections_open` | gauge | none | the connections of the S3 front open now, those waiting for a request included |
+| `tierstore_s3_connections_limit` | gauge | none | the most that may be open, `server.max_connections` as the process started with it |
 | `tierstore_s3_reads_in_flight` | gauge | none | the GETs of objects whose answers hold a permit now, from before the object is opened until the answer is over |
+| `tierstore_s3_reads_limit` | gauge | none | the most that may hold one, `server.max_concurrent_reads` as the process started with it |
 | `tierstore_s3_reads_refused_total` | counter | none | the GETs answered 503 `SlowDown` because every permit of the reads was taken |
 | `tierstore_s3_bodies_in_flight` | gauge | none | the request bodies, streamed or read whole, that hold a permit now |
+| `tierstore_s3_bodies_limit` | gauge | none | the most that may hold one, `server.max_concurrent_puts` as the process started with it |
 
 ```promql
 # Reads refused for want of a permit: raise server.max_concurrent_reads, or add nodes.
 increase(tierstore_s3_reads_refused_total[5m]) > 0
+# Reads near their bound: the next GETs will be refused.
+tierstore_s3_reads_in_flight > 0.9 * tierstore_s3_reads_limit
 # Connections near their bound: new clients wait in the listen queue.
-tierstore_s3_connections_open > 0.9 * 8192
+tierstore_s3_connections_open > 0.9 * tierstore_s3_connections_limit
+# Bodies near their bound: the next puts wait for a permit, then are refused.
+tierstore_s3_bodies_in_flight > 0.9 * tierstore_s3_bodies_limit
+```
+
+### The process
+
+The `/metricz` of the `tierstore` binary has the process's own figures, after the families of
+the S3 front and before `tierstore_build_info`, under the names the standard Prometheus clients
+give them, so that any dashboard or alert written for those (the "process" panels of most
+Prometheus and Grafana setups, `process-exporter`-style queries) reads tierstore's. They are not
+`tierstore_` series: a scrape sees them beside the series of every other program that exports them,
+and they need no tierstore-specific rule.
+
+| name | type | labels | value |
+|---|---|---|---|
+| `process_resident_memory_bytes` | gauge | none | the bytes of memory resident now: what the kernel holds for the process in RAM, which a watch on a node's memory reads |
+| `process_virtual_memory_bytes` | gauge | none | the bytes of its virtual address space now (on macOS this includes the shared region every process maps, some GiB) |
+| `process_start_time_seconds` | gauge | none | when it started, in seconds since the Unix epoch, told in whole seconds of the boot or start time and so up to a second early; a change is a restart |
+| `process_cpu_seconds_total` | counter | none | the CPU time it has used, user and system together, in seconds |
+| `process_open_fds` | gauge | none | the file descriptors it has open now |
+
+Where each comes from, and what each system cannot give:
+
+| figure | Linux | macOS |
+|---|---|---|
+| resident memory | `rss` of `/proc/self/stat` (field 24), in pages, times the page size | the task's resident size (`proc_pidinfo`, `PROC_PIDTASKINFO`) |
+| virtual memory | `vsize` of `/proc/self/stat` (field 23) | the task's virtual size, from the same call |
+| start | `starttime` of `/proc/self/stat` (field 22), in clock ticks after the boot, plus `btime` of `/proc/stat` | the start of the process (`PROC_PIDTBSDINFO`), whole seconds |
+| CPU time | `utime` and `stime` of `/proc/self/stat` (fields 14 and 15), in clock ticks | the task's user and system time, from the same call as the memory |
+| open descriptors | the entries of `/proc/self/fd`, the one the list is read through included, as the standard clients count them | the descriptors `proc_pidinfo` lists (`PROC_PIDLISTFDS`) |
+
+A figure that cannot be read (a file of procfs missing or not in the form above, a call that
+fails, a count that does not fit) has no line, neither its `# TYPE` line nor a sample: it is never
+printed as a number it is not. So is a resident or virtual memory or a start of zero, which a
+running process cannot have. On another system there is none of them. A server that a program
+builds with `Server::new` (the library; the tests of this crate) shows none either: the binary's
+servers read their own process.
+
+```promql
+# A tierstore over 20 GiB resident: the watch of a node's memory.
+process_resident_memory_bytes{job="tierstore"} > 20 * 1024 * 1024 * 1024
+# Its growth over an hour, which a leak shows as a slope that does not level off.
+deriv(process_resident_memory_bytes{job="tierstore"}[1h])
+# The cores it keeps busy.
+rate(process_cpu_seconds_total{job="tierstore"}[5m])
+# A restart in the last hour.
+changes(process_start_time_seconds{job="tierstore"}[1h]) > 0
 ```
 
 ### Build node: request to start

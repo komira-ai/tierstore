@@ -290,6 +290,7 @@ const UPSTREAM_SHORT_OBJECTS: &str = "tierstore_cache_upstream_short_objects_tot
 const UPSTREAM_FAILED_ABORTS: &str = "tierstore_cache_upstream_failed_aborts";
 const UPSTREAM_ABORTS_DROPPED: &str = "tierstore_cache_upstream_failed_aborts_dropped_total";
 const PREFETCH_QUEUED_BYTES: &str = "tierstore_provider_prefetch_queued_bytes";
+const PREFETCH_QUEUED_BYTES_LIMIT: &str = "tierstore_provider_prefetch_queued_bytes_limit";
 const PREFETCH_SKIPPED: &str = "tierstore_provider_prefetch_skipped_total";
 
 /// The families of one sample, with their kinds, in the order `/metricz` shows them.
@@ -692,19 +693,27 @@ impl LocalCache {
         text.push_str(&inner.extents.counters.render(entries, filled));
         text.push_str(&inner.starts.render());
         let queued = &inner.queued_reads;
-        text.push_str(&queued_reads(queued.bytes(), queued.skipped()));
+        text.push_str(&queued_reads(queued.bytes(), queued.skipped(), queued.limit()));
         text.push_str(&inner.preparations.render());
         text
     }
 }
 
-/// The two families of the reads the mount provider's preparations queue (`queued_reads`): the
-/// bytes they hold now, a gauge, and the preparations refused room, a counter.
-pub(super) fn queued_reads(bytes: u64, skipped: u64) -> String {
-    format!(
+/// The families of the reads the mount provider's preparations queue (`queued_reads`): the
+/// bytes they hold now, a gauge, and the preparations refused room, a counter; and the bound the
+/// bytes are held under, a gauge, when a provider has said it (`limit`).
+pub(super) fn queued_reads(bytes: u64, skipped: u64, limit: Option<u64>) -> String {
+    let mut text = format!(
         "# TYPE {PREFETCH_QUEUED_BYTES} {GAUGE}\n{PREFETCH_QUEUED_BYTES} {bytes}\n\
          # TYPE {PREFETCH_SKIPPED} {COUNTER}\n{PREFETCH_SKIPPED} {skipped}\n"
-    )
+    );
+    if let Some(limit) = limit {
+        let _ = write!(
+            text,
+            "# TYPE {PREFETCH_QUEUED_BYTES_LIMIT} {GAUGE}\n{PREFETCH_QUEUED_BYTES_LIMIT} {limit}\n"
+        );
+    }
+    text
 }
 
 /// The families of what the upstream did after its writes that failed

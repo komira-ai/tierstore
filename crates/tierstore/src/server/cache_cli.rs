@@ -107,6 +107,7 @@ use super::treefs::Service;
 #[cfg(any(target_os = "macos", test))]
 use super::treefs::{NfsServed, NfsService};
 use super::trees::{TreesSetup, trees_setup_of};
+use super::process::Source;
 use super::{Drained, Server, ServerConfig};
 #[cfg(target_os = "linux")]
 use mount::{Own as Asked, take_mount_and_sockets, with_mount};
@@ -579,7 +580,7 @@ pub(super) async fn serve_front(
     let listen = config.listen;
     // The registry front reads what the S3 front reads: through the cache.
     let backend: Arc<dyn Backend> = Arc::new(cache.clone());
-    let server = Server::new(Arc::clone(&backend), config);
+    let server = Server::with_process(Arc::clone(&backend), config, Source::own());
     let got = handed.map(|taken| Got::Taken(Box::new(taken))).or(sockets);
     let fronts_bound = async {
         bind_fronts(

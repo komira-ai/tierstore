@@ -107,6 +107,10 @@ rustix = "1.1.5"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 sha2 = "0.11.0"
+# The figures of the `tierstore` process on macOS (MIT): its memory, CPU time, start and descriptors,
+# for `/metricz`, through the kernel's calls for a process, which need `unsafe` in any crate. Only
+# its `system` feature; Linux reads procfs by hand and does not build it.
+sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
 thiserror = "2.0.21"
 # gRPC (MIT): the generated service of the trees API, with tonic's own transport and TLS left off;
 # `tierstore` serves it over its own hyper listener. `tonic-prost` is its prost codec and

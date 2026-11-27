@@ -13,7 +13,7 @@ use crate::Backend;
 pub(super) const BUDGET: u64 = 1 << 20;
 
 /// Every series of `/metricz` with its labels, as the text names it.
-const SERIES: [&str; 39] = [
+const SERIES: [&str; 42] = [
     "tierstore_hits_total{tier=\"hot\",op=\"get\"}",
     "tierstore_hits_total{tier=\"hot\",op=\"head\"}",
     "tierstore_hits_total{tier=\"cold\",op=\"get\"}",
@@ -53,6 +53,9 @@ const SERIES: [&str; 39] = [
     "tierstore_s3_reads_in_flight",
     "tierstore_s3_reads_refused_total",
     "tierstore_s3_bodies_in_flight",
+    "tierstore_s3_connections_limit",
+    "tierstore_s3_reads_limit",
+    "tierstore_s3_bodies_limit",
 ];
 
 async fn metricz(rig: &Rig) -> Reply {

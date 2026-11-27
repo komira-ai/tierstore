@@ -22,7 +22,9 @@ use super::names::{SourceId, check_name, source_of};
 use super::prepare::{Job, run};
 use super::{MOUNT_WAIT, ProviderError, ProviderFlags};
 use crate::server::local_cache::trees::{LifeError, PlacementId, PreparePrefetch, TreeStore};
-use crate::server::local_cache::{LocalCache, Preparations, QueuedReads, Unavailable};
+use crate::server::local_cache::{
+    LocalCache, Preparations, ProviderLimits, QueuedReads, Unavailable,
+};
 use crate::{MAX_TREE_LIST_BYTES, TreeDigest, tree_list_digest};
 
 /// Where the preparation of a source is.
@@ -179,12 +181,18 @@ impl Provider {
         Self::with(store, cache, settings)
     }
 
-    /// The same, with `settings`.
+    /// The same, with `settings`. It tells the cache's counts its bounds, which `/metricz` shows
+    /// beside what is held.
     pub(super) fn with(store: TreeStore, cache: LocalCache, settings: Settings) -> Self {
         let fills = Semaphore::new(store.config().fill_concurrency);
         let turns = Semaphore::new(store.config().prepare_concurrency);
         let (queued, counts) = (cache.queued_reads(), cache.preparations());
         counts.set_sources(0);
+        counts.set_limits(ProviderLimits {
+            sources: store.config().max_sources as u64,
+            preparing: store.config().prepare_concurrency as u64,
+        });
+        queued.set_limit(settings.max_queued_bytes);
         Self {
             shared: Arc::new(Shared {
                 store,

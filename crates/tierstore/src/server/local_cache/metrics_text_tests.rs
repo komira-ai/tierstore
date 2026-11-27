@@ -108,17 +108,24 @@ fn the_reader_of_the_text_finds_each_defect() {
     assert_eq!(good, [("a".into(), "counter".into(), vec!["a 1".into()])]);
 }
 
-/// Asserts the text of the two families of the reads the mount provider queues, in full: the
-/// bytes held, a gauge, and the preparations refused room, a counter, each with its type line.
+/// Asserts the text of the families of the reads the mount provider queues, in full: the bytes
+/// held, a gauge, and the preparations refused room, a counter, each with its type line; and,
+/// once a provider has said its bound, the bound, a gauge, after them.
 #[test]
 fn the_queued_reads_are_a_gauge_of_the_bytes_and_a_counter_of_the_refusals() {
+    let unbound = "# TYPE tierstore_provider_prefetch_queued_bytes gauge\n\
+                   tierstore_provider_prefetch_queued_bytes 4096\n\
+                   # TYPE tierstore_provider_prefetch_skipped_total counter\n\
+                   tierstore_provider_prefetch_skipped_total 1\n";
+    assert_eq!(queued_reads(4096, 1, None), unbound);
     assert_eq!(
-        queued_reads(4096, 1),
-        "# TYPE tierstore_provider_prefetch_queued_bytes gauge\n\
-         tierstore_provider_prefetch_queued_bytes 4096\n\
-         # TYPE tierstore_provider_prefetch_skipped_total counter\n\
-         tierstore_provider_prefetch_skipped_total 1\n"
+        queued_reads(4096, 1, Some(268_435_456)),
+        format!(
+            "{unbound}# TYPE tierstore_provider_prefetch_queued_bytes_limit gauge\n\
+             tierstore_provider_prefetch_queued_bytes_limit 268435456\n"
+        )
     );
+    assert!(families(&queued_reads(0, 0, Some(1))).is_ok());
 }
 
 /// Asserts the text of the families of what the S3 upstream did after its failed writes, in full:

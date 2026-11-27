@@ -287,7 +287,7 @@ use index::Index;
 use keep::Sent;
 use layout::{Name, name_of};
 use metrics::{add, bump};
-pub(super) use preparations::{Preparations, Preparing};
+pub(super) use preparations::{Preparations, Preparing, ProviderLimits};
 pub(super) use queued_reads::QueuedReads;
 use revalidate::Verdict;
 pub(super) use source::{Blob, FillError};
