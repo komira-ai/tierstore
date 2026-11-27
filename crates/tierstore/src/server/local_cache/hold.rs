@@ -170,10 +170,18 @@ pub(super) struct Hold {
     /// Whether the process this cache's lock was handed over from still holds a descriptor of
     /// it: until it is gone the lock is offered to no successor (`handing.rs`).
     inherited: AtomicBool,
+    /// What [`Inner::promote`] calls once the cache holds the directory and before it says
+    /// read-write on `mode` ([`LocalCache::before_read_write`]): one for each tree store opened
+    /// over the cache; a call that answers false (its store is gone) is let go.
+    readying: Mutex<Vec<Readying>>,
     /// Calls a test makes at fixed points of the take and of a delete, to order them.
     #[cfg(test)]
     pub(super) trace: Mutex<Trace>,
 }
+
+/// A call [`Inner::promote`] makes before the cache says read-write: whether it is to be made
+/// again at the next promotion.
+pub(in crate::server) type Readying = Box<dyn Fn() -> bool + Send + Sync>;
 
 /// A call a test asks to be made at a point.
 #[cfg(test)]
@@ -222,6 +230,7 @@ impl Hold {
             })
             .0,
             inherited: AtomicBool::new(false),
+            readying: Mutex::new(Vec::new()),
             #[cfg(test)]
             trace: Mutex::new(Trace::default()),
         }
@@ -316,7 +325,9 @@ impl Inner {
     }
 
     /// What taking the lock does to the directory and the index, and then makes the cache
-    /// read-write. After the scan it removes the files of the objects a delete or put through
+    /// read-write: the flag first, then the calls of [`LocalCache::before_read_write`] (the tree
+    /// store reads the directory again), then the mode, which the requests that wait for the
+    /// write role watch. [`LocalCache::mode`] says read-write from the flag on. After the scan it removes the files of the objects a delete or put through
     /// this cache, while it was read-only, said are gone or replaced at the upstream, and leaves
     /// them out of the index; if more were noted than the limit holds, it removes every object
     /// and the index starts empty. Nothing is trusted that the holder left for a name that was
@@ -359,6 +370,22 @@ impl Inner {
                 *locked(&self.index) = index;
                 *forgotten = Forgotten::default();
                 let _ = self.hold.read_write.swap(true, Ordering::SeqCst);
+                // A delete from here on finds the cache read-write and removes the files itself.
+                drop(forgotten);
+                // What reads the directory beside the cache (the tree store) reads it now, so
+                // that whoever waits for the mode finds it as the holder left it. A call that
+                // panics is kept and the take goes on, so the flag set above never stays true
+                // with the lock let go.
+                locked(&self.hold.readying).retain(|call| {
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(call)).unwrap_or_else(
+                        |_| {
+                            tracing::warn!(
+                                "tierstore: a call before the cache said read-write panicked"
+                            );
+                            true
+                        },
+                    )
+                });
                 let _ = self.hold.mode.send_replace(Mode::ReadWrite);
                 return Ok(());
             }
@@ -440,6 +467,15 @@ impl Inner {
 }
 
 impl LocalCache {
+    /// Has `call` made each time the cache takes the write role (a take of the lock at a tick, or
+    /// of a lock handed over), after the cache can write to its directory and before it says
+    /// read-write on [`watch_mode`](Self::watch_mode): a request that waits for the mode finds
+    /// what `call` did done. `call` answers whether it is to be made at the next take as well. It
+    /// runs on the thread of the take, which may block, while the take holds the cache's standing.
+    pub(in crate::server) fn before_read_write(&self, call: Readying) {
+        locked(&self.inner.hold.readying).push(call);
+    }
+
     /// Whether the cache may write to its directory now.
     #[must_use]
     pub fn mode(&self) -> Mode {

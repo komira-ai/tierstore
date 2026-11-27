@@ -10,13 +10,15 @@
 
 use tierstore_fetch_api::ids::PackKey;
 use tierstore_fetch_api::list::{
-    CELL_DIGEST_SHA256, ListVersionUnsupported, NodeIndex, PACK_FULLY_COVERED, PackRecord, Refusal,
+    CELL_DIGEST_SHA256, ListVersionUnsupported, NodeIndex, PACK_FULLY_COVERED, PACK_SHARED,
+    PackRecord, Refusal,
 };
 
 #[test]
 fn the_l2_constants_are_the_documented_values() {
     assert_eq!(CELL_DIGEST_SHA256, 1);
     assert_eq!(PACK_FULLY_COVERED, 1);
+    assert_eq!(PACK_SHARED, 2);
 }
 
 #[test]
