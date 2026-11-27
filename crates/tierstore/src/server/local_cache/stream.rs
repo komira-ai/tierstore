@@ -20,7 +20,7 @@ use std::io;
 use std::os::unix::fs::FileExt as _;
 use std::sync::Arc;
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use futures::StreamExt as _;
 use futures::stream;
 use tokio::sync::watch;
@@ -124,6 +124,15 @@ pub(super) fn same_version_on_disk(root: &std::path::Path, hex: &str, believed: 
         .is_some_and(|sidecar| sidecar.size == believed.size && sidecar.tag == believed.tag)
 }
 
+/// The bytes of `body`, collected: a read held whole.
+pub(super) async fn whole(mut body: ReadBody) -> Result<Bytes, Error> {
+    let mut whole = BytesMut::new();
+    while let Some(chunk) = body.next().await {
+        whole.extend_from_slice(&chunk?);
+    }
+    Ok(whole.freeze())
+}
+
 /// `body` with its first chunk taken, so that a read that fails at once (the object is not
 /// there, the range is past its end) is the error of the call and not of the body.
 pub(super) async fn eager(mut body: ReadBody) -> Result<ReadBody, Error> {
@@ -157,6 +166,23 @@ pub(super) async fn read_within(mut body: ReadBody, want: u64) -> Result<Bytes, 
 }
 
 impl Inner {
+    /// Whether the object the index holds is the one on the disk. A read-only cache's index is
+    /// its scan, and the holder may have put the object again since, so the sidecar is read; a
+    /// read-write cache, and a key named by its content, need no check.
+    pub(super) async fn unchanged(&self, name: &Name, meta: &Meta) -> bool {
+        if self.read_write() || name.content.is_some() {
+            return true;
+        }
+        let believed = Believed {
+            size: meta.size,
+            tag: meta.tag.clone(),
+        };
+        let (root, hex) = (self.config.path.clone(), name.hex.clone());
+        let reading =
+            tokio::task::spawn_blocking(move || same_version_on_disk(&root, &hex, &believed));
+        reading.await.unwrap_or(false)
+    }
+
     /// The bytes a read holds at a time.
     fn chunk(&self) -> u64 {
         self.config.fill_chunk.max(1)

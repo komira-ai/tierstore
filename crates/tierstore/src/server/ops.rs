@@ -9,7 +9,6 @@ use hyper::header::{HeaderMap, HeaderName, HeaderValue};
 use hyper::http::request::Parts;
 use hyper::{Method, StatusCode};
 use objstore_s3::key_rules;
-use tokio::sync::OwnedSemaphorePermit;
 use tokio::task::JoinError;
 
 use crate::journal::is_reserved;
@@ -32,6 +31,17 @@ use super::xml::{
     self, Listing, ListingV1, NULL_VERSION, PartListing, UploadListing, VersionListing,
 };
 
+mod admit;
+mod conditional;
+#[cfg(test)]
+mod conditional_tests;
+pub(super) mod copy;
+#[cfg(test)]
+mod copy_cache_tests;
+#[cfg(test)]
+mod copy_scoped_tests;
+#[cfg(test)]
+mod copy_tests;
 pub(super) mod placed;
 #[cfg(test)]
 mod placed_tests;
@@ -214,8 +224,10 @@ fn encoded(query: &Query) -> Result<bool, S3Error> {
 }
 
 /// Refuses what this front does not do whatever the call is: a query parameter it does not
-/// know, and a copy.
-fn refuse_unsupported(parts: &Parts, query: &Query, presigned: bool) -> Result<(), S3Error> {
+/// know, and a copy that is not a `PUT` of an object signed with a key (a presigned URL has no
+/// right to read the source; see `copy`). A request with no `Authorization` header is presigned.
+fn refuse_unsupported(parts: &Parts, query: &Query, target: &Target) -> Result<(), S3Error> {
+    let presigned = !parts.headers.contains_key("authorization");
     let extra: &[&str] = if presigned { &PRESIGN_PARAMS } else { &[] };
     let overrides = RESPONSE_OVERRIDES.iter().map(|(param, _)| param);
     let allowed: Vec<&str> = SUPPORTED
@@ -229,8 +241,11 @@ fn refuse_unsupported(parts: &Parts, query: &Query, presigned: bool) -> Result<(
             "this query parameter is not supported",
         ));
     }
-    if header(&parts.headers, "x-amz-copy-source").is_some() {
-        return Err(S3Error::unsupported("copying an object is not supported"));
+    let copies = parts.method == Method::PUT && matches!(target, Target::Object(_)) && !presigned;
+    if header(&parts.headers, "x-amz-copy-source").is_some() && !copies {
+        return Err(S3Error::unsupported(
+            "a copy is a PUT of an object, signed with a key",
+        ));
     }
     Ok(())
 }
@@ -365,8 +380,9 @@ fn joined<T>(done: Result<Result<T, Error>, JoinError>) -> Result<T, Error> {
     })
 }
 
-/// Whether a put only creates, which is what it does when it has no `If-Match` and its
-/// `If-None-Match` is absent or `*`: the body of such a put is streamed to the backend.
+/// Whether a put only creates: it has no `If-Match`, and its `If-None-Match` is absent or `*`
+/// (the rule of a scoped key). Which puts stream their body, and how, is decided by
+/// [`conditional::streamed`].
 pub(super) fn creates_only(headers: &HeaderMap) -> bool {
     let conditions = (
         header(headers, "if-match"),
@@ -419,6 +435,9 @@ pub(super) enum Writes<'a> {
     /// ([`Backend::put_stream_replacing`](crate::Backend::put_stream_replacing)); `If-None-Match: *`
     /// creates.
     Full,
+    /// The full key's `PUT` with `If-Match` alone: replaces the object only if it has this tag
+    /// ([`Backend::put_stream_if_match`](crate::Backend::put_stream_if_match)).
+    Swaps(&'a str),
 }
 
 impl<'a> Writes<'a> {
@@ -426,14 +445,14 @@ impl<'a> Writes<'a> {
     fn grant(self) -> Option<&'a Grant> {
         match self {
             Self::Presigned(grant) => Some(grant),
-            Self::Creates | Self::Full => None,
+            Self::Creates | Self::Full | Self::Swaps(_) => None,
         }
     }
 }
 
 impl Server {
     /// Does what a request asks for, once it is signed. The body of a multipart part and that
-    /// of a put with no `If-Match` and no `If-None-Match` other than `*` are streamed to the
+    /// of a put whose conditions are served (see [`conditional::streamed`]) are streamed to the
     /// backend as they arrive; every other call reads its body first.
     pub(super) async fn dispatch<B>(
         &self,
@@ -449,13 +468,11 @@ impl Server {
         B::Data: Send,
         B::Error: Into<BoxError>,
     {
-        // A request with no `Authorization` header is a presigned URL: its SigV4 parameters are
-        // not parameters of the call.
         let method = parts.method.as_str();
         let setting = bucket::asks_setting(method, &target, query);
         let buckets = bucket::asks_buckets(method, &target);
         if setting.is_none() && !buckets {
-            refuse_unsupported(parts, query, !parts.headers.contains_key("authorization"))?;
+            refuse_unsupported(parts, query, &target)?;
         }
         self.refuse_placed_write(method, &target, query)?;
         let deleting = deletes_many(&parts.method, &target, query);
@@ -469,19 +486,23 @@ impl Server {
         if let Some(id) = query.get("versionId") {
             named_version(method, &target, multipart, id)?;
         }
+        if let ("PUT", Target::Object(key)) = (method, &target)
+            && let Some(source) = header(&parts.headers, "x-amz-copy-source")
+        {
+            // A copy has no body; it is read, so that its signed hash is checked.
+            reader.read_all(check).await?;
+            return self
+                .copy(parts, query, key, source, multipart, writes)
+                .await;
+        }
         if let ("PUT", Target::Object(key), true) = (method, &target, multipart) {
             let len = body_len(parts, &check);
             return self.upload_part(query, key, len, reader, check).await;
         }
         if let ("PUT", Target::Object(key), false) = (method, &target, multipart)
-            && creates_only(&parts.headers)
+            && let Some(writes) = conditional::streamed(&parts.headers, writes)
         {
             let len = body_len(parts, &check);
-            // `If-None-Match: *` asks to create, whatever the key may do.
-            let writes = match writes {
-                Writes::Full if parts.headers.contains_key("if-none-match") => Writes::Creates,
-                other => other,
-            };
             let put = self.put_streamed(key, len, reader, check, writes).await;
             return self.counted_put(put);
         }
@@ -506,16 +527,18 @@ impl Server {
             }
             ("GET", Target::Object(key), false) => self.get_object(parts, query, &key).await,
             ("HEAD", Target::Object(key), false) => self.head_object(parts, query, &key).await,
-            ("PUT", Target::Object(key), false) => self.put_conditional(parts, &key).await,
+            ("PUT", Target::Object(key), false) => {
+                refuse_reserved(&key)?;
+                Err(conditional::refused(&parts.headers))
+            }
             ("DELETE", Target::Object(key), false) => self.delete_object(&key).await,
             ("DELETE", Target::Object(key), true) => self.abort_upload(query, &key).await,
             ("POST", Target::Object(key), true) if query.has("uploads") => {
                 self.start_upload(&key).await
             }
             ("POST", Target::Object(key), true) if query.has("uploadId") => {
-                let replaces =
-                    matches!(writes, Writes::Full) && !parts.headers.contains_key("if-none-match");
-                self.complete_upload(query, &key, body, replaces).await
+                let completes = conditional::completes(&parts.headers, writes)?;
+                self.complete_upload(query, &key, body, completes).await
             }
             _ => Err(S3Error::unsupported("this operation is not supported")),
         }
@@ -575,56 +598,14 @@ impl Server {
         ))
     }
 
-    /// A put that is not a plain create (see [`creates_only`]): `If-Match`, which is refused
-    /// because an object cannot be replaced, or an `If-None-Match` other than `*`.
-    async fn put_conditional(&self, parts: &Parts, key: &str) -> Result<Answer, S3Error> {
-        refuse_reserved(key)?;
-        match header(&parts.headers, "if-match") {
-            Some(tag) => self.replace_object(key, tag).await,
-            None => Err(S3Error::unsupported("only If-None-Match: * is supported")),
-        }
-    }
-
-    /// Lets a streamed body in, before any byte of it is read: refuses a body of unknown length
-    /// where the backend needs the length (411), one that says it is longer than the limit
-    /// (413, so that nothing is stored and no upload is begun), and one that comes when the
-    /// server is taking as many as it may and none ends within
-    /// [`put_permit_wait`](super::ServerConfig::put_permit_wait) (503 `SlowDown`, with
-    /// `Retry-After`). The checks of the head come first, so a request that is refused for them
-    /// does not wait; the wait is on the permit alone and no byte of the body is read during it.
-    /// Gives the permit that is held until the body is stored or refused.
-    async fn admit(
-        &self,
-        len: Option<u64>,
-        presign: Option<&Grant>,
-    ) -> Result<OwnedSemaphorePermit, S3Error> {
-        let limit = self.config.max_request_bytes;
-        let cap = presign.map_or(u64::MAX, |grant| grant.max_object_bytes);
-        let limit = limit.min(usize::try_from(cap).unwrap_or(usize::MAX));
-        match len {
-            None if self.backend.needs_length() => return Err(S3Error::length_required()),
-            Some(declared) if declared > limit as u64 => return Err(S3Error::too_large(limit)),
-            _ => {}
-        }
-        if let Ok(permit) = Arc::clone(&self.puts).try_acquire_owned() {
-            return Ok(permit);
-        }
-        let wait = self.config.put_permit_wait;
-        if wait.is_zero() {
-            return Err(S3Error::busy());
-        }
-        match tokio::time::timeout(wait, Arc::clone(&self.puts).acquire_owned()).await {
-            Ok(Ok(permit)) => Ok(permit),
-            _ => Err(S3Error::busy()),
-        }
-    }
-
     /// Stores the object from the body of the request as it arrives: create-only, or for a
     /// plain put of the full key (`Writes::Full`) replacing a key that exists where the backend
-    /// replaces. The body is not held: the pieces are checked against the hashes of the request as
-    /// they pass, and go on through a short queue to the backend's streamed put, which makes the
-    /// object visible only after the last piece. A body that is refused (a hash that does not match, a body
-    /// over the limit, a stalled or cut one) ends the stream with an error, so the backend
+    /// replaces, or for `Writes::Swaps` replacing the object only if it has the tag, which
+    /// answers with the ETag of the new object. The body is not held: the pieces are checked
+    /// against the hashes of the request as they pass, and go on through a short queue to the
+    /// backend's streamed put, which makes the object visible only after the last piece. A body
+    /// that is refused (a hash that does not match, a body over the limit, a stalled or cut one)
+    /// ends the stream with an error, so the backend
     /// stores nothing, and `refused` has the answer to send. `len` is the `Content-Length` of
     /// the request, if it has one. The digests the request named go with the put, for the
     /// store to check the body against.
@@ -651,6 +632,10 @@ impl Server {
         let permit = self.admit(len, writes.grant()).await?;
         let hot_only = matches!(writes, Writes::Presigned(_));
         let claim = matches!(writes, Writes::Full).then(|| check.claim());
+        let swap = match writes {
+            Writes::Swaps(tag) => Some(tag.to_owned()),
+            _ => None,
+        };
         let digests = check.digests();
         let refused = Refused::default();
         let (carry, body) = hand_over(
@@ -660,13 +645,21 @@ impl Server {
         let (backend, name) = (Arc::clone(&self.backend), key.to_owned());
         let mut storing = tokio::spawn(async move {
             let _permit = permit;
-            let kind = match &claim {
-                Some(claim) => PutKind::Replaces(claim),
-                None if hot_only => PutKind::CreatesHotOnly,
-                None => PutKind::Creates,
-            };
-            let put = backend.put_stream_digested(&name, len, body, kind, digests);
-            put.await.map(drop)
+            match (swap, claim) {
+                (Some(tag), _) => backend
+                    .put_stream_if_match(&name, len, body, &tag)
+                    .await
+                    .map(Some),
+                (None, claim) => {
+                    let kind = match &claim {
+                        Some(claim) => PutKind::Replaces(claim),
+                        None if hot_only => PutKind::CreatesHotOnly,
+                        None => PutKind::Creates,
+                    };
+                    let put = backend.put_stream_digested(&name, len, body, kind, digests);
+                    put.await.map(|_| None)
+                }
+            }
         });
         let early = tokio::select! {
             biased;
@@ -681,20 +674,15 @@ impl Server {
         if let Some(error) = refused.take() {
             return Err(error);
         }
-        stored.map_err(S3Error::from)?;
-        Ok(answer(StatusCode::OK, &[], Bytes::new()))
-    }
-
-    /// `If-Match`: an object cannot be replaced, so the answer is that the condition does not
-    /// hold, or that the replacement is not done.
-    async fn replace_object(&self, key: &str, tag: &str) -> Result<Answer, S3Error> {
-        let meta = self.backend.head(key).await?;
-        if meta.tag != tag.trim_matches('"') {
-            return Err(S3Error::from(Error::PreconditionFailed(key.to_owned())));
-        }
-        Err(S3Error::unsupported(
-            "objects are immutable and cannot be replaced",
-        ))
+        let tag = stored.map_err(|error| match writes {
+            Writes::Swaps(_) => conditional::swap_error(error),
+            _ => S3Error::from(error),
+        })?;
+        let headers: Vec<_> = tag
+            .map(|tag| ("etag", format!("\"{tag}\"")))
+            .into_iter()
+            .collect();
+        Ok(answer(StatusCode::OK, &headers, Bytes::new()))
     }
 
     async fn delete_object(&self, key: &str) -> Result<Answer, S3Error> {
@@ -924,17 +912,7 @@ impl Server {
         B::Error: Into<BoxError>,
     {
         refuse_reserved(key)?;
-        let id = query.get("uploadId");
-        let parse = |text: &str| text.parse::<u32>().ok();
-        let number = query.get("partNumber").and_then(parse);
-        let (Some(id), Some(number)) = (id, number) else {
-            return Err(S3Error::invalid(
-                "an upload id and a part number are needed",
-            ));
-        };
-        if !(1..=PART_LIMIT).contains(&number) {
-            return Err(S3Error::invalid("a part number is from 1 to 10000"));
-        }
+        let (id, number) = copy::part_of(query)?;
         let _permit = self.admit(len, None).await?;
         let refused = Refused::default();
         let body = pieces(reader, check, refused.clone());
@@ -947,45 +925,6 @@ impl Server {
         let etag = stored.map_err(upload_error)?;
         let headers = [("etag", format!("\"{etag}\""))];
         Ok(answer(StatusCode::OK, &headers, Bytes::new()))
-    }
-
-    async fn complete_upload(
-        &self,
-        query: &Query,
-        key: &str,
-        body: Bytes,
-        replaces: bool,
-    ) -> Result<Answer, S3Error> {
-        refuse_reserved(key)?;
-        let id = query.get("uploadId").unwrap_or_default();
-        let wanted = xml::parse_complete(&body).filter(|parts| !parts.is_empty());
-        let Some(wanted) = wanted else {
-            let text = "The request body is not a list of parts.";
-            return Err(S3Error::new(StatusCode::BAD_REQUEST, "MalformedXML", text));
-        };
-        let ascending = wanted.windows(2).all(|pair| pair[0].0 < pair[1].0);
-        if !ascending {
-            let text = "The parts must be listed in ascending order of their numbers.";
-            return Err(S3Error::new(
-                StatusCode::BAD_REQUEST,
-                "InvalidPartOrder",
-                text,
-            ));
-        }
-        let (backend, name, upload) = (Arc::clone(&self.backend), key.to_owned(), id.to_owned());
-        let call = async move {
-            if replaces {
-                backend
-                    .complete_upload_replacing(&name, &upload, &wanted)
-                    .await
-            } else {
-                backend.complete_upload(&name, &upload, &wanted).await
-            }
-        };
-        let etag = detached(call).await.map_err(upload_error)?;
-        let etag = format!("\"{etag}\"");
-        let body = xml::completed(&self.config.bucket, key, &etag);
-        Ok(xml_answer(StatusCode::OK, body))
     }
 
     async fn abort_upload(&self, query: &Query, key: &str) -> Result<Answer, S3Error> {

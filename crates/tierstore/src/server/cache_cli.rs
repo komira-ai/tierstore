@@ -34,10 +34,6 @@
 //! than the settings name, or no end of the hand-off within `server.handoff_wait` fails the start
 //! (exit status 1) with nothing bound.
 //!
-//! With `local_cache.fill_socket` (by default `fill.sock` in the state directory) the cache also
-//! answers the fill socket (see [`fill_socket`](super::fill_socket)): bound while the process holds the
-//! lock of the cache directory, through the drain of the S3 front, and closed when the drain ends.
-//!
 //! On a Mac, SIGUSR2 hands the process over to the next image of its own program instead of a stop
 //! (see [`next_image`]): the fronts drain as on SIGTERM with their listening sockets kept open, the
 //! NFS front of an `fs` interface ends its connections and holds its state with the mount left as it
@@ -72,7 +68,7 @@
 //! stops the fronts as a signal does, and the start ends in failure.
 //!
 //! On SIGTERM or SIGINT the process drains as a storage node does; the eviction pass, the lock
-//! task, the scrub and the fill socket are the only things running beside the server, and they stop
+//! task and the scrub are the only things running beside the server, and they stop
 //! with it. Nothing is owed to the upstream: no journal, no lease, no copy in flight.
 //!
 //! A storage node with a cache in front of its own proxy (see
@@ -95,7 +91,6 @@ use super::cli_serve::{Bound, Got, bind_fronts, bind_s3, cut_note, sockets_of, s
 use super::config::fs::not_served;
 use super::config_cache::CacheSettings;
 use super::drain::late_of;
-use super::fill_socket;
 use super::front::{InvalidFlags, server_config};
 use super::handoff::{self, Handed, Handing, Handoff, Image, Own, Want, read_handed};
 use super::listen::{LoopbackBind, bind_set, bind_with, joined};
@@ -361,7 +356,6 @@ pub(super) async fn serve_cache_on(
         beside_halt: Arc::new(Notify::new()),
         beating: None,
         handoff: settings.handoff.as_ref(),
-        fill_socket: settings.fill_socket.as_deref(),
         trees: Some(settings.trees.clone()),
         trees_front,
         provider: settings.provider.as_ref(),
@@ -401,9 +395,6 @@ pub(super) struct Fronts<'a> {
     /// The hand-off of the listening sockets (`server.handoff_socket`), if the settings ask for
     /// one.
     pub(super) handoff: Option<&'a Handoff>,
-    /// The fill socket (`local_cache.fill_socket`), bound while the cache holds the lock of its
-    /// directory (see [`fill_socket`](super::fill_socket)); none for a node without one.
-    pub(super) fill_socket: Option<&'a std::path::Path>,
     /// The node-local trees (`[trees]`), kept beside the cache; none for a node whose file has no
     /// such table (a storage node with a cache).
     pub(super) trees: Option<TreesConfig>,
@@ -673,8 +664,7 @@ pub(super) async fn serve_front(
     let trees_stopped = oci_stopped.clone();
     // One Notify for each loop: `notify_one` wakes one waiter, and keeps the wake for a loop that
     // is not waiting just now.
-    let halts: [Arc<Notify>; 10] = [
-        Arc::new(Notify::new()),
+    let halts: [Arc<Notify>; 9] = [
         Arc::new(Notify::new()),
         Arc::new(Notify::new()),
         Arc::new(Notify::new()),
@@ -689,7 +679,6 @@ pub(super) async fn serve_front(
         halt,
         lock_halt,
         scrub_halt,
-        fill_halt,
         trees_halt,
         provider_halt,
         watch_halt,
@@ -737,12 +726,6 @@ pub(super) async fn serve_front(
             .await;
         tracing::debug!("tierstore: scrub ended");
     };
-    let filling = async {
-        if let Some(path) = fronts.fill_socket {
-            fill_socket::serve((cache.clone(), trees.clone()), path, fill_halt).await;
-            tracing::debug!("tierstore: fill socket ended");
-        }
-    };
     let watching = async {
         cache.watch_fills(watch_halt).await;
         tracing::debug!("tierstore: fill watchdog ended");
@@ -788,13 +771,12 @@ pub(super) async fn serve_front(
         let _unmounted = (fs_halt, failed);
         Ok::<Option<Handing>, Error>(None)
     };
-    let ((drained, (oci_cut, trees_cut)), (), (), (), (), (), (), (), (), (), mounted) = tokio::join!(
+    let ((drained, (oci_cut, trees_cut)), (), (), (), (), (), (), (), (), mounted) = tokio::join!(
         serving,
         beside,
         maintaining,
         holding,
         scrubbing,
-        filling,
         sweeping,
         providing,
         watching,

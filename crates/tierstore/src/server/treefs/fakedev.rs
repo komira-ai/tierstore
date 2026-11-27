@@ -11,7 +11,6 @@ use std::time::Duration;
 use tsfuse::abi::InitFlags;
 
 use super::config::FsSettings;
-use super::fills::Reach;
 use super::handover::{HandoverError, Offer, Paths};
 use super::init_record::{self, Outcome, Record};
 use super::ino;
@@ -214,7 +213,7 @@ pub(in crate::server::treefs) fn instance(
     let (device, kernel) = pair();
     let prepared = Prepared::load(&settings).unwrap();
     let running = Arc::new(
-        Running::adopt((&settings, &Reach::Socket), prepared, device, (None, false)).unwrap(),
+        Running::adopt((&settings, &rig.calls()), prepared, device, (None, false)).unwrap(),
     );
     let mut offer = Offer::bind(
         &settings.handoff_socket,

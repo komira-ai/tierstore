@@ -25,9 +25,9 @@
 //!   (`docs/design/put-without-lock.md`, 5.3 to 5.5). A scoped key and a presigned URL only create
 //!   under every format. A key that exists is `PreconditionFailed`, except that under the format phase `active-marks`
 //!   (`docs/design/put-without-lock.md`, 5.1) a key that a delete is removing, or has just
-//!   removed, is 409 `ConditionalRequestConflict`. `If-Match` is answered `PreconditionFailed` for
-//!   another content tag and `NotImplemented` for the right one (an immutable object cannot be
-//!   replaced);
+//!   removed, is 409 `ConditionalRequestConflict`. `If-Match` on a put or a completion is a
+//!   compare-and-swap where the backend does one and `NotImplemented` over two tiers (see
+//!   `ops/conditional.rs`);
 //! - DeleteObject, which succeeds for a key that is not there, and DeleteObjects (`POST
 //!   /<bucket>?delete`, up to 1000 keys, `Quiet`, `Content-MD5` or an `x-amz-checksum-*` header
 //!   needed), a result for each key (see [`delete_objects`]), for the full key only;
@@ -100,8 +100,8 @@
 //!   and the rest of the table in `bucket`), each as S3 answers a bucket with none set: an empty
 //!   document, the owner's `FULL_CONTROL`, or S3's 404 code. Their writes are `NotImplemented`.
 //!
-//! Every other call, a copy (`x-amz-copy-source`), and a query parameter this front does not
-//! know, is answered `NotImplemented`.
+//! A copy (`x-amz-copy-source`, CopyObject and UploadPartCopy) is a put whose body is another
+//! object (`ops/copy.rs`). Every other call and an unknown query parameter is `NotImplemented`.
 //! A request with a key under `_journal/`, `_tiering/` or `_entries/` is refused with `AccessDenied` by each supported call
 //! before the operation's own processing, including the parsing of the XML body of an upload
 //! completion; a request refused as unsupported (see above) is answered so first.
@@ -120,8 +120,8 @@
 //! client down instead of filling memory. The object becomes visible, and its entry
 //! is made pending, only after the last piece was read and every hash came out right: a hash that
 //! does not match at the last byte, a body over the limit, a stalled body and a connection cut
-//! half way each leave no object and no entry. A put with `If-Match`, or an `If-None-Match`
-//! other than `*`, is refused without being stored. [`ServerConfig::max_request_bytes`] is
+//! half way each leave no object and no entry. A put with `If-Match` alone streams the same way;
+//! any other condition is refused without being stored. [`ServerConfig::max_request_bytes`] is
 //! the most bytes a body may have, not a bound on memory.
 //!
 //! Before the first byte of a streamed body (a put, or a part of an upload) is read, the request
@@ -281,8 +281,6 @@ mod cache_cli;
 #[cfg(test)]
 mod cache_cli_tests;
 #[cfg(test)]
-mod cache_fill_socket_tests;
-#[cfg(test)]
 mod cache_handoff_lock_tests;
 #[cfg(test)]
 mod cache_handoff_sockets_tests;
@@ -362,7 +360,6 @@ mod drain_contract_tests;
 mod drain_switch_tests;
 #[cfg(test)]
 mod drain_tests;
-mod fill_socket;
 mod first_beat;
 mod first_format;
 mod front;

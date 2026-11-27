@@ -1,17 +1,16 @@
-//! The threads that answer the requests of the mount that may wait on the fill socket, so that no
+//! The threads that answer the requests of the mount that may wait on the node's cache, so that no
 //! reader of the connection waits on it (`node_fs.rs`).
 //!
-//! A reader of the connection that meets an open whose bytes the fill socket must be asked for (a
+//! A reader of the connection that meets an open whose bytes the cache must be asked for (a
 //! blob the cache does not hold, a span of a pack the tree has not been given yet, a pin not asked
 //! yet), a read of a handle an earlier process gave out, or a lookup in the namespace, does not
-//! make it: it parks the request here and reads the next one. A node's tierstore that takes fills
-//! and never answers then holds these threads, never the readers, and the mount still serves the
+//! make it: it parks the request here and reads the next one. A cache whose fills never end then holds these threads, never the readers, and the mount still serves the
 //! reads of open files, the opens of files the cache holds and every request of a tree in memory.
 //!
 //! There are as many of these threads as readers (`fs.threads`), so as many fills are asked at
 //! once as before. Requests that find every thread busy wait in a queue, in no thread; each open
 //! is answered by `fs.fetch_timeout` after it was parked (`core/blob.rs`), so one that waited out
-//! its time in the queue fails at once, as `EIO`, without asking the fill socket. The stop of the
+//! its time in the queue fails at once, as `EIO`, without asking the cache. The stop of the
 //! readers (a hand-over, a restart) waits for every request parked to be answered, so none that
 //! this process read is left unanswered when it ends.
 

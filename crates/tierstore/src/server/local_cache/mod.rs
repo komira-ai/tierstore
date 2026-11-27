@@ -47,17 +47,17 @@
 //! into `obj/` with a create-only link, so a name appears whole or not at all (layout:
 //! [`layout`]). A fill that fails is counted by reason and removed.
 //!
-//! # Fills for the fill socket
+//! # Fills for the file system
 //!
-//! The filesystem process of the node asks for blobs over the fill socket (see
-//! [`fill_socket`](crate::server::fill_socket)): `source` fills a blob that lies inside a larger
+//! The file system's core asks for blobs by calling the cache in this process
+//! (`treefs/in_process.rs`): `source` fills a blob that lies inside a larger
 //! upstream object, ranged, as the entry named by `<sha256>` (the entry of the object
 //! `cas/l/<sha256>`, of origin `span`), and a whole `cas/l/<sha256>`, with the same fetch as every
 //! fill. Those fills have their own permits (`fill_socket_concurrency`) and wait for one up to
 //! `fill_socket_wait`; they never take one of `max_concurrent_fills`, and the S3 path never takes
 //! theirs. There is one table of running fills for both paths: a request for a digest that has a
 //! fill running, whichever path started it, joins it and takes no permit. A cache that does not
-//! hold the lock fills nothing for the socket.
+//! hold the lock fills nothing for the core.
 //!
 //! # A read
 //!
@@ -150,6 +150,7 @@ pub(super) mod opens;
 mod pin_set;
 mod pins;
 mod prefetch;
+mod queued_reads;
 mod revalidate;
 mod scrub;
 mod selfcheck;
@@ -161,6 +162,8 @@ pub(super) mod tree_lists;
 pub mod trees;
 mod write;
 
+#[cfg(test)]
+mod copy_through_tests;
 #[cfg(test)]
 mod evict_tests;
 #[cfg(test)]
@@ -232,6 +235,8 @@ mod start_tests;
 #[cfg(test)]
 mod stream_tests;
 #[cfg(test)]
+mod swap_tests;
+#[cfg(test)]
 pub(in crate::server) mod testing;
 #[cfg(test)]
 mod tiered_tests;
@@ -252,15 +257,15 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use bytes::{Bytes, BytesMut};
-use futures::StreamExt as _;
+use bytes::Bytes;
 use tokio::sync::Semaphore;
 
 use crate::journal::is_reserved;
 use crate::server::lock;
 use crate::{
     Backend, BodyDigests, ByteRange, Clock, Error, Listed, Meta, OpenUpload, Opened, PartBody,
-    PutAnswer, PutClaim, PutKind, PutOutcome, ReadBody, TreeDigest, UploadedPart, UploadsAfter,
+    PutAnswer, PutClaim, PutKind, PutOutcome, ReadBody, StoreCopy, TreeDigest, UploadedPart,
+    UploadsAfter,
 };
 
 pub use disk::{Disk, Space, SystemDisk};
@@ -281,6 +286,7 @@ use index::Index;
 use keep::Sent;
 use layout::{Name, name_of};
 use metrics::{add, bump};
+pub(super) use queued_reads::QueuedReads;
 use revalidate::Verdict;
 pub(super) use source::{Blob, FillError};
 pub(super) use source::{TreeFilled, blob_path, is_list, manifest_path};
@@ -307,10 +313,10 @@ pub const PASS_INTERVAL: Duration = Duration::from_secs(10);
 /// otherwise.
 pub const LOCK_INTERVAL: Duration = Duration::from_secs(1);
 
-/// The fills of the fill socket that may run at once, unless the settings say otherwise.
+/// The fills of the core that may run at once, unless the settings say otherwise.
 pub const FILL_SOCKET_CONCURRENCY: usize = 16;
 
-/// How long a request of the fill socket waits for a permit of its pool, unless the settings say
+/// How long a request of the core waits for a permit of its pool, unless the settings say
 /// otherwise.
 pub const FILL_SOCKET_WAIT: Duration = Duration::from_secs(60);
 
@@ -361,11 +367,11 @@ pub struct CacheConfig {
     /// The most fills that run at once. A miss that finds all of them running is served from
     /// the upstream and keeps nothing. At least one (0 is read as 1).
     pub max_concurrent_fills: usize,
-    /// The most fills that the fill socket runs at once: a pool of its own, which the S3 path's
+    /// The most fills that the core's requests run at once: a pool of its own, which the S3 path's
     /// `max_concurrent_fills` never draws on. A request that finds them all running waits for one
     /// (see `fill_socket_wait`). At least one (0 is read as 1).
     pub fill_socket_concurrency: usize,
-    /// The longest a request of the fill socket waits for a permit of its pool before it is
+    /// The longest a request of the core waits for a permit of its pool before it is
     /// answered `busy`.
     pub fill_socket_wait: Duration,
     /// The most create-only puts that are copied to the stage directory at once, apart from the
@@ -507,7 +513,7 @@ pub(super) struct Inner {
     reserved: AtomicU64,
     /// One permit for each fill that may run; a fill holds one until it ends.
     permits: Arc<Semaphore>,
-    /// One permit for each fill of the fill socket that may run; a request waits for one.
+    /// One permit for each fill of the core that may run; a request waits for one.
     source_permits: Arc<Semaphore>,
     /// The blobs that wait to be filled, and the workers that fill them.
     prefetch: prefetch::Prefetch,
@@ -522,6 +528,8 @@ pub(super) struct Inner {
     before_insert: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
     /// The runs between request and start, and what the mounts report for `/metricz`.
     starts: starts::Starts,
+    /// The room of the reads the mount provider queues (`queued_reads`).
+    queued_reads: Arc<queued_reads::QueuedReads>,
     /// Whether a pass of the eviction is running.
     evicting: AtomicBool,
     /// Whether this cache may write to its directory, and the lock that says so.
@@ -651,6 +659,7 @@ impl LocalCache {
             #[cfg(test)]
             before_insert: Mutex::new(None),
             starts: starts::Starts::default(),
+            queued_reads: Arc::default(),
             evicting: AtomicBool::new(false),
             hold: Hold::new(standing),
             large: std::sync::OnceLock::new(),
@@ -702,24 +711,6 @@ impl Inner {
     /// What the cache says of the object, if it holds it.
     fn kept(&self, name: &Name) -> Option<Meta> {
         locked(&self.index).get(&name.hex).map(index::Entry::meta)
-    }
-
-    /// Whether the object the index holds is the one on the disk. A read-only cache's index is
-    /// its scan, and the holder may have put the object again since, so the sidecar is read; a
-    /// read-write cache, and a key named by its content, need no check.
-    async fn unchanged(&self, name: &Name, meta: &Meta) -> bool {
-        if self.read_write() || name.content.is_some() {
-            return true;
-        }
-        let believed = stream::Believed {
-            size: meta.size,
-            tag: meta.tag.clone(),
-        };
-        let (root, hex) = (self.config.path.clone(), name.hex.clone());
-        let reading = tokio::task::spawn_blocking(move || {
-            stream::same_version_on_disk(&root, &hex, &believed)
-        });
-        reading.await.unwrap_or(false)
     }
 }
 
@@ -790,6 +781,11 @@ impl Backend for LocalCache {
         Ok(None)
     }
 
+    /// Sent to the upstream's own copy; the key the copy writes is forgotten (`write`).
+    async fn copy_in_store(&self, copy: &StoreCopy<'_>) -> Result<Option<PutAnswer>, Error> {
+        self.inner.copy_through(copy).await
+    }
+
     /// The put of `kind` through the cache, as `put_stream`, `put_stream_hot_only` and
     /// `put_stream_replacing` make it, with `digests` passed to the upstream's own call.
     async fn put_stream_digested(
@@ -811,6 +807,18 @@ impl Backend for LocalCache {
         Err(Error::Unsupported(READ_ONLY.to_owned()))
     }
 
+    /// `If-Match`: sent to the upstream's own call, which compares and replaces; the cache
+    /// forgets the key (see `swap_through`, in `write`).
+    async fn put_stream_if_match(
+        &self,
+        key: &str,
+        len: Option<u64>,
+        body: PartBody<'_>,
+        etag: &str,
+    ) -> Result<String, Error> {
+        self.inner.swap_through(key, len, body, etag).await
+    }
+
     async fn delete(&self, key: &str) -> Result<(), Error> {
         self.inner.delete_through(key).await
     }
@@ -826,8 +834,7 @@ impl Backend for LocalCache {
         number: u32,
         body: PartBody<'_>,
     ) -> Result<String, Error> {
-        let sent = self.inner.part_through(key, id, number, None, body);
-        sent.await
+        self.inner.part_through(key, id, number, None, body).await
     }
 
     async fn upload_part_with_len(
@@ -838,8 +845,7 @@ impl Backend for LocalCache {
         len: Option<u64>,
         body: PartBody<'_>,
     ) -> Result<String, Error> {
-        let sent = self.inner.part_through(key, id, number, len, body);
-        sent.await
+        self.inner.part_through(key, id, number, len, body).await
     }
 
     async fn complete_upload(
@@ -851,17 +857,23 @@ impl Backend for LocalCache {
         self.inner.complete_through(key, id, parts).await
     }
 
+    /// As `put_stream_if_match`, for a completion (see `complete_swap_through`, in `write`).
+    async fn complete_upload_if_match(
+        &self,
+        key: &str,
+        id: &str,
+        parts: &[(u32, String)],
+        etag: &str,
+    ) -> Result<String, Error> {
+        self.inner.complete_swap_through(key, id, parts, etag).await
+    }
+
     async fn abort_upload(&self, key: &str, id: &str) -> Result<(), Error> {
         self.inner.abort_through(key, id).await
     }
 
     async fn get(&self, key: &str, range: Option<ByteRange>) -> Result<Bytes, Error> {
-        let mut body = self.get_stream(key, range).await?;
-        let mut whole = BytesMut::new();
-        while let Some(chunk) = body.next().await {
-            whole.extend_from_slice(&chunk?);
-        }
-        Ok(whole.freeze())
+        stream::whole(self.get_stream(key, range).await?).await
     }
 
     async fn get_stream(&self, key: &str, range: Option<ByteRange>) -> Result<ReadBody, Error> {

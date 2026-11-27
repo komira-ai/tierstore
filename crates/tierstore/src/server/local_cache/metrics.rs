@@ -228,7 +228,7 @@ pub(super) enum Walked {
 const TREES: [&str; 4] = ["expanded", "refused", "cut", "access_denied"];
 
 /// The label of the path of each read that joined a fill that was running, in the order of
-/// [`Counters::joined`]'s argument: the fill socket (the mount), then the S3 front.
+/// [`Counters::joined`]'s argument: the core (the mount), then the S3 front.
 const JOIN_PATHS: [&str; 2] = ["mount", "s3"];
 
 /// The kind of a family that only goes up (or is set once, when the cache is opened).
@@ -287,6 +287,8 @@ const FILL_SOCKET_RUNNING: &str = "tierstore_cache_fill_socket_running";
 const UPSTREAM_READS_IN_FLIGHT: &str = "tierstore_cache_upstream_reads_in_flight";
 const FILL_SOCKET_BUSY: &str = "tierstore_cache_fill_socket_busy_total";
 const UPSTREAM_SHORT_OBJECTS: &str = "tierstore_cache_upstream_short_objects_total";
+const PREFETCH_QUEUED_BYTES: &str = "tierstore_provider_prefetch_queued_bytes";
+const PREFETCH_SKIPPED: &str = "tierstore_provider_prefetch_skipped_total";
 
 /// The families of one sample, with their kinds, in the order `/metricz` shows them.
 pub(super) const PLAIN: [(&str, &str); 36] = [
@@ -415,11 +417,11 @@ pub struct Counters {
     prefetch_failures: [AtomicU64; PREFETCH_FAILED.len()],
     /// The reads that joined a fill that was running instead of starting one, by path.
     joins: [AtomicU64; JOIN_PATHS.len()],
-    /// The requests of the fill socket that wait for a permit now (a gauge).
+    /// The requests of the core that wait for a permit now (a gauge).
     pub(super) socket_waiting: AtomicU64,
     /// The HEADs and GETs sent to the upstream and not answered yet (a gauge).
     pub(super) upstream_in_flight: AtomicU64,
-    /// The requests of the fill socket answered `busy`.
+    /// The requests of the core answered `busy`.
     pub(super) socket_busy: AtomicU64,
     /// When a line about those answers was last said.
     pub(super) busy_log: Mutex<BusyLog>,
@@ -564,12 +566,12 @@ impl Counters {
     }
 
     /// Counts a read that joined a fill that was running, of the S3 front if `s3`, else of the
-    /// fill socket.
+    /// core.
     pub(super) fn joined(&self, s3: bool) {
         bump(&self.joins[usize::from(s3)]);
     }
 
-    /// The reads of the S3 front (`s3`) or of the fill socket that joined a running fill.
+    /// The reads of the S3 front (`s3`) or of the core that joined a running fill.
     #[cfg(test)]
     pub(super) fn joins(&self, s3: bool) -> u64 {
         read(&self.joins[usize::from(s3)])
@@ -687,8 +689,19 @@ impl LocalCache {
         text.push_str(&short_objects(inner.upstream.short_objects()));
         text.push_str(&inner.extents.counters.render(entries, filled));
         text.push_str(&inner.starts.render());
+        let queued = &inner.queued_reads;
+        text.push_str(&queued_reads(queued.bytes(), queued.skipped()));
         text
     }
+}
+
+/// The two families of the reads the mount provider's preparations queue (`queued_reads`): the
+/// bytes they hold now, a gauge, and the preparations refused room, a counter.
+pub(super) fn queued_reads(bytes: u64, skipped: u64) -> String {
+    format!(
+        "# TYPE {PREFETCH_QUEUED_BYTES} {GAUGE}\n{PREFETCH_QUEUED_BYTES} {bytes}\n\
+         # TYPE {PREFETCH_SKIPPED} {COUNTER}\n{PREFETCH_SKIPPED} {skipped}\n"
+    )
 }
 
 /// The family of what the upstream did about the objects its store kept of its puts that got no

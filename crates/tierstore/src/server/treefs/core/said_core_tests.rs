@@ -2,13 +2,20 @@
 //! the count of those not said. And the report of the requests the look for idle trees sends
 //! (`Core::look_around`, `core/requests.rs`), as the node renders it.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use super::super::{Errno, Opened};
 use super::SAY_EVERY_MS;
-use crate::server::local_cache::opens::requests::{Answered, RequestKind, Requests};
+use crate::server::local_cache::opens::requests::RequestKind;
+use crate::server::local_cache::trees::testing::Bench;
 use crate::server::treefs::ino;
+use crate::server::treefs::live_testing::Live;
 use crate::server::treefs::testing::{Logged, Rig, logged, sample, sha, until};
+
+/// How long the core of the first test waits for the write role the cache does not take: short, as
+/// the cache never takes it.
+const WAIT: Duration = Duration::from_millis(100);
 
 /// The lines said while `run` runs, at warn.
 fn said(run: impl FnOnce()) -> Vec<String> {
@@ -19,25 +26,30 @@ fn said(run: impl FnOnce()) -> Vec<String> {
     log.text().lines().map(str::to_owned).collect()
 }
 
-/// Asserts that a lookup of a placement the fill socket cannot answer is `EIO` said whole, that a
-/// second within ten seconds is not said, and that the next after them carries the count.
-#[test]
-fn a_placement_lookup_that_fails_is_said_once_in_ten_seconds_with_the_count() {
-    let rig = Rig::new("tfs-said-asked", sample());
-    let _ = rig
-        .upstream
-        .answers
-        .lock()
-        .unwrap()
-        .insert("place".to_owned(), "busy".to_owned());
-    let lines = said(|| {
-        for _ in 0..2 {
-            assert_eq!(rig.core.lookup(ino::ROOT, "builds"), Err(Errno::Io));
-        }
-        rig.clock.advance(Duration::from_millis(SAY_EVERY_MS));
-        assert_eq!(rig.core.lookup(ino::ROOT, "builds"), Err(Errno::Io));
-    });
-    let line = r#"tierstore fs: cannot look up the placement at "builds": busy"#;
+/// Asserts that a lookup of a placement the node's cache cannot answer (it stays read-only for the
+/// whole wait: another process holds the lock of its directory) is `EIO` said whole, that a second
+/// within ten seconds is not said, and that the next after them carries the count.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_placement_lookup_that_fails_is_said_once_in_ten_seconds_with_the_count() {
+    let read_only = |bench: &Bench| {
+        let _holder = bench.rig.locked();
+        bench.rig.locked()
+    };
+    let live = Live::in_process_with("tfs-said-asked", read_only, WAIT).await;
+    let clock = Arc::clone(&live.clock);
+    let lines = live
+        .on_core(move |core| {
+            said(|| {
+                for _ in 0..2 {
+                    assert_eq!(core.lookup(ino::ROOT, "builds"), Err(Errno::Io));
+                }
+                clock.advance(Duration::from_millis(SAY_EVERY_MS));
+                assert_eq!(core.lookup(ino::ROOT, "builds"), Err(Errno::Io));
+            })
+        })
+        .await;
+    let line = "tierstore fs: cannot look up the placement at \"builds\": the cache is read-only: \
+                another process holds the lock of its directory";
     assert_eq!(
         lines,
         [
@@ -111,15 +123,15 @@ fn a_lookup_and_an_open_each_land_in_their_kind_of_the_request_seconds_histogram
     core.open_ends(timing, ok);
     core.request_ends(arrival, RequestKind::Open);
     core.look_around();
-    until(|| rig.upstream.asked("requests").len() == 1);
-    let line = rig.upstream.asked("requests").remove(0);
-    let report = Requests::parse(line.strip_prefix("requests ").unwrap()).unwrap();
-    let node = Answered::default();
-    node.reported(report);
-    let rendered = node.render();
+    let lookups = "tierstore_fs_request_seconds_count{kind=\"lookup\"} 1";
+    until(|| rig.node.metrics().lines().any(|line| line == lookups));
+    let rendered = rig.node.metrics();
     let series: Vec<&str> = rendered
         .lines()
-        .filter(|line| line.contains("_sum{") || line.contains("_count{"))
+        .filter(|line| {
+            line.starts_with("tierstore_fs_request_seconds_")
+                && (line.contains("_sum{") || line.contains("_count{"))
+        })
         .collect();
     let mut want = Vec::new();
     for kind in [

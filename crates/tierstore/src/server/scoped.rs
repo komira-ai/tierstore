@@ -28,13 +28,15 @@
 //!   starts with a list prefix, and a header-signed HeadObject of such a key, but never GetObject;
 //! - **write**: a create-only PutObject (no `If-Match`, and `If-None-Match` absent or `*`), and
 //!   the calls of a multipart upload of such a key: CreateMultipartUpload, UploadPart,
-//!   CompleteMultipartUpload, AbortMultipartUpload and ListParts (`GET ?uploadId=`);
+//!   CompleteMultipartUpload, AbortMultipartUpload and ListParts (`GET ?uploadId=`). A copy
+//!   (`x-amz-copy-source`: a create-only CopyObject, or UploadPartCopy) of such a key also needs a
+//!   read prefix that covers its source, as a GetObject of the source would;
 //! - **delete**: DeleteObject of such a key. A delete prefix does not allow an abort: a key that
 //!   can delete an object cannot cancel another client's upload;
 //! - **abort** (a GC key only, never a key file): AbortMultipartUpload of such a key.
 //!
 //! Everything else is `403 AccessDenied`, answered before the body is read: a replacing put
-//! (`If-Match`), a copy (`x-amz-copy-source`, on a put or on a part), a call on the bucket itself
+//! (`If-Match`), a copy whose source no read prefix covers, a call on the bucket itself
 //! other than a listing, any method but `GET`, `HEAD`, `PUT`, `POST` and `DELETE`, a key or a
 //! listing under `_journal/` or `_tiering/` (no prefix of a key can cover them), and a call on a
 //! key outside the list its kind needs: a read prefix does not let the key write, and a write
@@ -63,6 +65,7 @@ use super::ServerConfig;
 use super::auth::Refusal;
 use super::gc::{check_credentials, ensure_ids_distinct};
 use super::keys::{AccessKey, read_private_text};
+use super::ops::copy::copy_source;
 use super::ops::{MULTIPART, creates_only};
 use super::presign::{PresignError, check_name, validate_prefix};
 use super::request::{Query, Target, header};
@@ -72,7 +75,7 @@ const FLAG: &str = "--scoped-key-file";
 
 pub(crate) const NOT_ALLOWED: Refusal = Refusal {
     code: "AccessDenied",
-    message: "Access Denied: this access key may not make this call: it reads, creates and deletes under its prefixes only, and does not replace or copy.",
+    message: "Access Denied: this access key may not make this call: it reads, creates and deletes under its prefixes only, does not replace, and copies only from its read prefixes into its write prefixes.",
 };
 
 pub(crate) const OUT_OF_SCOPE: Refusal = Refusal {
@@ -349,16 +352,20 @@ pub(super) fn ensure_distinct(others: &[&str], scoped: &[ScopedKey]) -> Result<(
 /// Whether the call is one a key with these scopes may do.
 ///
 /// # Errors
-/// [`NOT_ALLOWED`] for a call of another kind, a copy, or a put that replaces; [`OUT_OF_SCOPE`]
-/// for a key or a list prefix that is not inside the list the call needs.
+/// [`NOT_ALLOWED`] for a call of another kind, a put that replaces, or a copy whose source the
+/// header does not name; [`OUT_OF_SCOPE`] for a key or a list prefix that is not inside the list
+/// the call needs, and for the source of a copy that is not inside the read list.
 pub(super) fn permit(
     scopes: &Scopes,
     parts: &Parts,
     target: &Target,
     query: &Query,
 ) -> Result<(), Refusal> {
-    if header(&parts.headers, "x-amz-copy-source").is_some() {
-        return Err(NOT_ALLOWED);
+    if let Some(source) = header(&parts.headers, "x-amz-copy-source") {
+        // A copy reads its source: the read right of a GET of it. The bucket it names is the
+        // front's to check, as for every copy.
+        let (_bucket, from) = copy_source(source).map_err(|_| NOT_ALLOWED)?;
+        covers(&scopes.read, &from, true)?;
     }
     let multipart = query.has_any(&MULTIPART);
     match (&parts.method, target, multipart) {

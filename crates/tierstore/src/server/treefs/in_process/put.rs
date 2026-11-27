@@ -1,7 +1,6 @@
-//! The `put` request of the fill socket: the filesystem process hands over a file it staged, and
-//! the cache puts it to the upstream as a create-only object that names its SHA-256 (see
-//! [`put_stream_sha256`](crate::Backend::put_stream_sha256)), through the cache as a client's
-//! create-only put goes.
+//! The put of a file the put directory of the file system staged: the cache puts it to the
+//! upstream as a create-only object that names its SHA-256 (see
+//! [`put_stream_sha256`](crate::Backend::put_stream_sha256)), as a client's create-only put goes.
 //!
 //! The file is opened without following a link and must be a regular file of the size the
 //! request names; it is read once, in chunks, and hashed as it passes to the upstream, never
@@ -23,17 +22,12 @@ use std::fs::File;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use bytes::BytesMut;
-use futures::StreamExt as _;
-use futures::stream;
 use rustix::fs::{CWD, Mode, OFlags, openat};
-use tokio::io::{AsyncRead, AsyncReadExt as _};
+use tokio::io::AsyncRead;
 
 use crate::server::local_cache::LocalCache;
-use crate::{Backend as _, Error, PartBody, PutOutcome, TreeDigest};
-
-/// The bytes read from the file at a time.
-const CHUNK: usize = 256 << 10;
+use crate::server::put_ingest::chunks::chunks;
+use crate::{Backend as _, Error, PutOutcome, TreeDigest};
 
 /// The answer to a put that made the object.
 const CREATED: &str = r#"{"ok":true,"created":true}"#;
@@ -85,31 +79,8 @@ fn open(path: &Path, size: u64) -> Result<File, Unfit> {
     Ok(file)
 }
 
-/// The bytes of `file` as a body, read once in chunks of [`CHUNK`]. A read that fails ends the
-/// body with an error and sets `broken`. The put ingest reads its files so too.
-pub(in crate::server) fn chunks<'a, R>(file: R, broken: &'a AtomicBool) -> PartBody<'a>
-where
-    R: AsyncRead + Unpin + Send + 'a,
-{
-    stream::unfold(Some(file), move |file| async move {
-        let mut file = file?;
-        let mut chunk = BytesMut::with_capacity(CHUNK);
-        match file.read_buf(&mut chunk).await {
-            Ok(0) => None,
-            Ok(_) => Some((Ok(chunk.freeze()), Some(file))),
-            Err(why) => {
-                broken.store(true, Ordering::Relaxed);
-                let text = format!("the staged file cannot be read: {why}");
-                Some((Err(Error::Other(text)), None))
-            }
-        }
-    })
-    .boxed()
-}
-
-/// Puts the file at `path` as the object `key` (module docs) and gives the answer; a put made in
-/// process is made by it too.
-pub(in crate::server) async fn answer(
+/// Puts the file at `path` as the object `key` (module docs) and gives the answer.
+pub(super) async fn answer(
     cache: &LocalCache,
     key: &str,
     sha256: TreeDigest,

@@ -784,13 +784,13 @@ async fn it_serves_over_two_s3_tiers_and_lands_a_multipart_upload_in_the_hot_one
     let head = store.head(&small).await.unwrap();
     let inner = head.etag.trim_matches('"');
     assert_eq!(head.etag, format!("\"{inner}\""));
-    let swap = store.put_if_match(&small, Bytes::new(), &head.etag);
+    let swap = store.put_if_match(&small, Bytes::from_static(b"x"), &head.etag);
     let same = swap.await.unwrap_err();
     assert!(
         matches!(same, ObjectStoreError::Service { status: 501, .. }),
         "{same:?}"
     );
-    let swap = store.put_if_match(&small, Bytes::new(), "\"stale\"");
+    let swap = store.put_if_match(&small, Bytes::from_static(b"x"), "\"stale\"");
     let stale = swap.await.unwrap_err();
     assert!(
         matches!(stale, ObjectStoreError::Service { status: 412, .. }),

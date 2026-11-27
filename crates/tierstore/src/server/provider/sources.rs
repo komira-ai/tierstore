@@ -17,14 +17,14 @@ use tokio::sync::{Semaphore, watch};
 use super::names::{SourceId, check_name, source_of};
 use super::prepare::{Job, run};
 use super::{MOUNT_WAIT, ProviderError, ProviderFlags};
-use crate::server::local_cache::LocalCache;
 use crate::server::local_cache::trees::{LifeError, PlacementId, PreparePrefetch, TreeStore};
+use crate::server::local_cache::{LocalCache, QueuedReads};
 use crate::{MAX_TREE_LIST_BYTES, TreeDigest, tree_list_digest};
 
 /// Where the preparation of a source is.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum Stage {
-    /// The tree list is being read, or the tree made.
+    /// The tree's sidecar is being read, or the tree made.
     Preparing,
     /// The tree is placed: it can be opened, and its files may still be filling.
     Placed,
@@ -62,7 +62,7 @@ struct Held {
 pub(super) struct Settings {
     /// The mount of `tierstore fs`.
     pub mountpoint: PathBuf,
-    /// The longest read of a tree list.
+    /// The longest read of a tree's sidecar.
     pub list_timeout: Duration,
     /// The longest read of the bytes of one file.
     pub fill_timeout: Duration,
@@ -70,20 +70,31 @@ pub(super) struct Settings {
     pub mount_wait: Duration,
     /// How long a placement lasts unless it is released.
     pub ttl: Duration,
-    /// The largest tree list read.
+    /// The largest sidecar read.
     pub max_list_bytes: usize,
+    /// The most bytes of heap the reads queued by every preparation together hold
+    /// ([`PREFETCH_QUEUE_BYTES`]).
+    pub max_queued_bytes: u64,
 }
+
+/// The most bytes of heap the reads queued by the preparations of the node hold together: about a
+/// hundred bytes for each file, so the reads of two or three million files. A preparation whose
+/// reads do not fit queues none, and its files are read when first opened
+/// (`local_cache/queued_reads.rs`).
+pub(super) const PREFETCH_QUEUE_BYTES: u64 = 256 << 20;
 
 /// What the preparations share.
 pub(super) struct Shared {
     /// The node's trees.
     pub store: TreeStore,
-    /// The node's cache, which the tree lists are read through.
+    /// The node's cache, which the sidecars are read through.
     pub cache: LocalCache,
     pub settings: Settings,
     /// The reads of files of every source together: `trees.fill_concurrency` at once. Closed when
     /// the process stops, and the reads not begun are then not made.
     pub fills: Semaphore,
+    /// The room of the reads queued, the node's (`local_cache/queued_reads.rs`).
+    pub queued: Arc<QueuedReads>,
     sources: Mutex<BTreeMap<SourceId, Held>>,
 }
 
@@ -134,6 +145,7 @@ impl Provider {
             mount_wait: MOUNT_WAIT,
             ttl: store.config().ttl_max,
             max_list_bytes: MAX_TREE_LIST_BYTES,
+            max_queued_bytes: PREFETCH_QUEUE_BYTES,
         };
         Self::with(store, cache, settings)
     }
@@ -141,12 +153,14 @@ impl Provider {
     /// The same, with `settings`.
     pub(super) fn with(store: TreeStore, cache: LocalCache, settings: Settings) -> Self {
         let fills = Semaphore::new(store.config().fill_concurrency);
+        let queued = cache.queued_reads();
         Self {
             shared: Arc::new(Shared {
                 store,
                 cache,
                 settings,
                 fills,
+                queued,
                 sources: Mutex::new(BTreeMap::new()),
             }),
         }
