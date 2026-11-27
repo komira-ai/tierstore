@@ -38,8 +38,8 @@
 //! [`S3Store::cut_puts`]). The look, and the abort of a multipart upload that failed, run in
 //! tasks of their own, bounded in number and in time, after the write has given its error;
 //! aborts that fail are kept, a bounded list, and sent again when the store answers again
-//! (`cleanup.rs`, [`S3Store::cleanups`]). A streamed write can send digests of its body for the store to check
-//! ([`S3Store::put_stream_new_checked`], [`S3Store::put_stream_replacing_checked`]).
+//! (`cleanup.rs`, [`S3Store::cleanups`]). A streamed write can send digests of its body for the
+//! store to check ([`S3Store::put_stream_new_checked`], [`S3Store::put_stream_replacing_checked`]).
 //!
 //! A copy within the bucket is the store's own (`copy.rs`): [`S3Store::copy_object`] and
 //! [`S3Store::upload_part_copy`], with the source's conditions sent for the store to test.
@@ -65,10 +65,7 @@ mod tuning;
 mod xml;
 
 pub use checksum::StoredSha256;
-pub use cleanup::{
-    ABORT_TRIES, CLEANUP_DEADLINE, CLEANUPS_AT_ONCE, Cleanups, FAILED_ABORTS_KEPT, RETRY_CAP,
-    RETRY_FIRST,
-};
+pub use cleanup::Cleanups;
 pub use copy::{CopyAnswer, CopyConditions, CopySource};
 pub use credentials::{AwsEnv, CredentialSource, Credentials, CredentialsError};
 pub use cut_put::CutPuts;
@@ -241,8 +238,9 @@ pub enum S3ConfigError {
 
 /// One S3 bucket.
 pub struct S3Store {
-    /// Shared with a multipart upload's abort, which may run after its write was
-    /// dropped.
+    /// Shared with the tasks of the work after failed writes (the look after a PUT that got
+    /// no answer, the abort of a multipart upload, a pass over the failed aborts), which run
+    /// after their write has ended; the `Cleaner` in it holds it only weakly.
     conn: Arc<Conn>,
 }
 

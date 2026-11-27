@@ -68,7 +68,8 @@ pub struct S3Tuning {
     /// [`part_size_of`](super::part_size_of)).
     pub part_bytes: u64,
     /// How long after a single PUT that got no answer the key is looked at for an object of the
-    /// wrong length the PUT left (`cut_put.rs`). The failed put gives its error after the look.
+    /// wrong length the PUT left (`cut_put.rs`). The look runs in a task of its own; the failed
+    /// put gives its error at once (`cleanup.rs`).
     pub cut_put_look_after: Duration,
 }
 

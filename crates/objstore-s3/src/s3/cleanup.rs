@@ -10,7 +10,8 @@
 //!   it takes before it is spawned; none is spawned without a place, so a store that stalls
 //!   every write has at most that many tasks, whatever the rate of the writes;
 //! - each task ends at [`CLEANUP_DEADLINE`] after its requests began, whatever they are doing
-//!   (a request of the store may take `request_timeout`, which is longer);
+//!   (a request of the store may take `request_timeout`, which is longer); a pass over the failed
+//!   aborts (below) too, as a whole: the abort under way then counts as failed;
 //! - a look that finds every place taken is not made, and is counted
 //!   ([`Cleanups::looks_skipped`]); the object of the wrong length it might have removed stays,
 //!   as one whose look failed does;
@@ -35,7 +36,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::time::Duration;
 
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 use tokio::time::Instant;
 
 use super::Conn;
@@ -43,22 +44,23 @@ use super::multipart::try_abort;
 use crate::ObjectKey;
 
 /// How many tasks of the work after failed writes a store and its clones run at once.
-pub const CLEANUPS_AT_ONCE: usize = 16;
+pub(super) const CLEANUPS_AT_ONCE: usize = 16;
 
-/// How long the requests of one task of that work may take in all.
-pub const CLEANUP_DEADLINE: Duration = Duration::from_secs(10);
+/// How long the requests of one task of that work may take in all (a pass over the failed aborts
+/// as a whole).
+pub(super) const CLEANUP_DEADLINE: Duration = Duration::from_secs(10);
 
 /// The most failed aborts a store keeps to send again.
-pub const FAILED_ABORTS_KEPT: usize = 1024;
+pub(super) const FAILED_ABORTS_KEPT: usize = 1024;
 
 /// How many times an abort is sent before its upload is left to the bucket's lifecycle rule.
-pub const ABORT_TRIES: u32 = 8;
+pub(super) const ABORT_TRIES: u32 = 8;
 
 /// The wait after the first pass over the failed aborts that stopped on a failure.
-pub const RETRY_FIRST: Duration = Duration::from_secs(1);
+pub(super) const RETRY_FIRST: Duration = Duration::from_secs(1);
 
 /// The longest wait between two passes over the failed aborts.
-pub const RETRY_CAP: Duration = Duration::from_secs(60);
+pub(super) const RETRY_CAP: Duration = Duration::from_secs(60);
 
 /// What the work after failed writes did and holds, since the store was made (module docs). An
 /// [`S3Store`](super::S3Store) and its clones count together.
@@ -67,10 +69,10 @@ pub struct Cleanups {
     /// Looks after single PUTs that got no answer that were not made: every place was taken.
     pub looks_skipped: u64,
     /// The multipart uploads whose abort failed (or found no place), kept to be aborted again:
-    /// the size of the list now, at most [`FAILED_ABORTS_KEPT`].
+    /// the size of the list now, at most 1024.
     pub failed_aborts: u64,
     /// Failed aborts dropped from that list, the oldest when it was full or one tried
-    /// [`ABORT_TRIES`] times: left to the bucket's lifecycle rule.
+    /// 8 times: left to the bucket's lifecycle rule.
     pub aborts_dropped: u64,
 }
 
@@ -98,10 +100,11 @@ struct Kept {
 }
 
 impl Kept {
+    /// A list of at most `bound` uploads, and at least one.
     fn new(bound: usize) -> Self {
         Self {
             list: VecDeque::new(),
-            bound,
+            bound: bound.max(1),
             dropped: 0,
             passing: false,
             wait: Duration::ZERO,
@@ -117,10 +120,10 @@ impl Kept {
             self.dropped += 1;
             return;
         }
-        if self.list.len() >= self.bound
-            && let Some(oldest) = self.list.pop_front()
-        {
-            tracing::warn!(key = %oldest.key, "too many failed aborts kept; the oldest is left to the bucket's lifecycle rule");
+        if self.list.len() >= self.bound {
+            // The bound is at least 1, so the list has an oldest.
+            let oldest = self.list.pop_front().map(|oldest| oldest.key);
+            tracing::warn!(key = ?oldest, "too many failed aborts kept; the oldest is left to the bucket's lifecycle rule");
             self.dropped += 1;
         }
         self.list.push_back(upload);
@@ -167,11 +170,28 @@ fn jitter() -> f64 {
     0.5 + drawn as f64 / 2000.0
 }
 
+/// The place a task of the work holds while it runs: given back when the task ends, and then
+/// told to [`Cleaner::idle`].
+struct Place {
+    permit: Option<OwnedSemaphorePermit>,
+    ended: Arc<Notify>,
+}
+
+impl Drop for Place {
+    fn drop(&mut self) {
+        // The place is free before the waiters look at the free places.
+        drop(self.permit.take());
+        self.ended.notify_waiters();
+    }
+}
+
 /// The work after failed writes of a store and its clones (module docs).
 pub(super) struct Cleaner {
     /// The store's connection, for the tasks to send their requests on.
     conn: Weak<Conn>,
     places: Arc<Semaphore>,
+    /// Told each time a task ends.
+    ended: Arc<Notify>,
     kept: Mutex<Kept>,
     looks_skipped: AtomicU64,
 }
@@ -179,14 +199,11 @@ pub(super) struct Cleaner {
 impl Cleaner {
     /// The work of the store whose connection `conn` will be.
     pub(super) fn new(conn: Weak<Conn>) -> Self {
-        Self::bounded(conn, CLEANUPS_AT_ONCE, FAILED_ABORTS_KEPT)
-    }
-
-    fn bounded(conn: Weak<Conn>, places: usize, kept: usize) -> Self {
         Self {
             conn,
-            places: Arc::new(Semaphore::new(places)),
-            kept: Mutex::new(Kept::new(kept)),
+            places: Arc::new(Semaphore::new(CLEANUPS_AT_ONCE)),
+            ended: Arc::new(Notify::new()),
+            kept: Mutex::new(Kept::new(FAILED_ABORTS_KEPT)),
             looks_skipped: AtomicU64::new(0),
         }
     }
@@ -207,10 +224,14 @@ impl Cleaner {
 
     /// A place and the connection and runtime to run a task in, or none: every place is taken,
     /// the store is gone, or this is not on a runtime.
-    fn place(&self) -> Option<(OwnedSemaphorePermit, Arc<Conn>, tokio::runtime::Handle)> {
+    fn place(&self) -> Option<(Place, Arc<Conn>, tokio::runtime::Handle)> {
         let runtime = tokio::runtime::Handle::try_current().ok()?;
         let conn = self.conn.upgrade()?;
-        let place = Arc::clone(&self.places).try_acquire_owned().ok()?;
+        let permit = Arc::clone(&self.places).try_acquire_owned().ok()?;
+        let place = Place {
+            permit: Some(permit),
+            ended: Arc::clone(&self.ended),
+        };
         Some((place, conn, runtime))
     }
 
@@ -243,7 +264,8 @@ impl Cleaner {
             return;
         };
         runtime.spawn(async move {
-            if let Err(upload) = sent(&conn, upload).await {
+            let until = Instant::now() + CLEANUP_DEADLINE;
+            if let Err(upload) = sent(&conn, upload, until).await {
                 conn.cleaner.kept().keep(upload);
             }
             drop(place);
@@ -262,11 +284,12 @@ impl Cleaner {
         };
         runtime.spawn(async move {
             let cleaner = &conn.cleaner;
+            let until = Instant::now() + CLEANUP_DEADLINE;
             let mut failed = None;
             loop {
                 let next = cleaner.kept().list.pop_front();
                 let Some(upload) = next else { break };
-                if let Err(upload) = sent(&conn, upload).await {
+                if let Err(upload) = sent(&conn, upload, until).await {
                     failed = Some(upload);
                     break;
                 }
@@ -276,10 +299,18 @@ impl Cleaner {
         });
     }
 
-    /// Waits until no task of the work runs.
+    /// Waits until no task of the work runs. It takes no place, so it holds up no task.
     pub(super) async fn idle(&self) {
-        let all = u32::try_from(CLEANUPS_AT_ONCE).unwrap_or(u32::MAX);
-        let _all = self.places.acquire_many(all).await;
+        loop {
+            let ended = self.ended.notified();
+            let mut ended = std::pin::pin!(ended);
+            // Registered before the look, so a task that ends in between is not missed.
+            ended.as_mut().enable();
+            if self.places.available_permits() == CLEANUPS_AT_ONCE {
+                return;
+            }
+            ended.await;
+        }
     }
 
     /// Takes every place, until the permit given is dropped.
@@ -307,11 +338,11 @@ impl super::S3Store {
     }
 }
 
-/// Sends the abort of `upload` once, within [`CLEANUP_DEADLINE`]; gives the upload back, its
-/// tries counted, if it failed.
-async fn sent(conn: &Conn, mut upload: Upload) -> Result<(), Upload> {
+/// Sends the abort of `upload` once, ended at `until` (the deadline of its task); gives the
+/// upload back, its tries counted, if it failed.
+async fn sent(conn: &Conn, mut upload: Upload, until: Instant) -> Result<(), Upload> {
     upload.tries += 1;
-    let aborted = tokio::time::timeout(CLEANUP_DEADLINE, try_abort(conn, &upload.key, &upload.id));
+    let aborted = tokio::time::timeout_at(until, try_abort(conn, &upload.key, &upload.id));
     match aborted.await {
         Ok(Ok(())) => Ok(()),
         Ok(Err(error)) => {
@@ -399,11 +430,61 @@ mod tests {
         config.request_timeout = Duration::from_secs(3600);
         let store = S3Store::new(config).unwrap();
         let conn = Arc::clone(&store.conn);
-        let aborting = tokio::spawn(async move { sent(&conn, upload(0, 0)).await });
+        let until = Instant::now() + CLEANUP_DEADLINE;
+        let aborting = tokio::spawn(async move { sent(&conn, upload(0, 0), until).await });
         let (_held, _) = listener.accept().await.unwrap();
         tokio::time::pause();
         let given = aborting.await.unwrap().unwrap_err();
         assert_eq!(given, upload(0, 1));
+    }
+
+    /// How many aborts the loopback service took.
+    fn aborts(s3: &crate::s3::fake::FakeS3) -> usize {
+        let taken = s3.requests();
+        let aborts = taken
+            .iter()
+            .filter(|r| r.starts_with("DELETE ") && r.contains("uploadId="));
+        aborts.count()
+    }
+
+    /// Asserts what a real pass does with the list: over two kept aborts, it stops at the first
+    /// that fails (one abort sent, that upload put back at the end, the wait set); once the wait
+    /// is over it sends both, oldest first, and empties the list (the waits start again); and
+    /// an upload whose abort fails its last try is dropped and counted. Catches: a pass that goes
+    /// on sending to a store that has just refused an abort, that loses the upload it failed, or
+    /// that keeps an upload for ever.
+    #[tokio::test]
+    async fn a_pass_stops_at_its_first_failure_and_drops_an_upload_out_of_tries() {
+        let s3 = crate::s3::fake::FakeS3::start().await;
+        let store = s3.store(Capabilities::default());
+        let cleaner = &store.conn.cleaner;
+        cleaner.kept().keep(upload(0, 1));
+        cleaner.kept().keep(upload(1, 1));
+        s3.fail(crate::s3::fake::Failure::Abort);
+        cleaner.answered();
+        store.cleanups_idle().await;
+        assert_eq!(aborts(&s3), 1);
+        assert_eq!(ids(&cleaner.kept()), ["u1", "u0"]);
+        assert_eq!(cleaner.kept().wait, RETRY_FIRST);
+        cleaner.kept().not_before = None;
+        cleaner.answered();
+        store.cleanups_idle().await;
+        assert_eq!(
+            aborts(&s3),
+            3,
+            "both sent, the store no longer knows either"
+        );
+        assert_eq!(cleaner.read(), Cleanups::default());
+        assert_eq!(cleaner.kept().wait, Duration::ZERO);
+        cleaner.kept().keep(upload(2, ABORT_TRIES - 1));
+        s3.fail(crate::s3::fake::Failure::Abort);
+        cleaner.answered();
+        store.cleanups_idle().await;
+        let dropped = Cleanups {
+            aborts_dropped: 1,
+            ..Cleanups::default()
+        };
+        assert_eq!(cleaner.read(), dropped);
     }
 
     fn store_config(endpoint: String) -> S3Config {
@@ -451,6 +532,10 @@ mod tests {
         assert_eq!(full.list.len(), FAILED_ABORTS_KEPT);
         assert_eq!(full.dropped, 7);
         assert_eq!(full.list.front().map(|u| u.id.as_str()), Some("u7"));
+        let mut one = Kept::new(0);
+        one.keep(upload(0, 1));
+        one.keep(upload(1, 1));
+        assert_eq!((ids(&one), one.dropped), (vec!["u1".to_owned()], 1));
     }
 
     /// Asserts that an upload tried [`ABORT_TRIES`] times is dropped and counted, and one tried
