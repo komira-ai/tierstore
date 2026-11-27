@@ -50,12 +50,13 @@
 //! it forgets it: the request end of `tierstore_request_to_start_seconds`, whose other end is the
 //! first look of `tierstore fs` inside one of the run's trees (`local_cache/starts.rs`).
 //!
-//! The trees are served by the `fs` interface of the node's file, in this process. In a file with
-//! no `fs` interface no process of this release serves the mount (`tierstore fs` is no longer a
-//! process of its own, and a node of the earlier two-process layout keeps its `mountpoint` with
-//! nothing behind it): there every `Prepare` and `Mount` is `UNAVAILABLE` with
-//! the reason `sources::no_fs` gives, and no directory under the mount is answered, so the
-//! agent's start fails `input-unavailable` saying so instead of on a directory that is not there.
+//! The trees are served by the `fs` interface of the node's file, in this process, and the load
+//! refuses a file with a `mount-provider` entry and no `fs` entry (`tierstore fs` is no longer a
+//! process of its own, so a node of the earlier two-process layout would keep its `mountpoint`
+//! with nothing behind it). A provider whose `served` flag is clear anyway, which no file makes,
+//! answers every `Prepare` and `Mount` `UNAVAILABLE` with the reason `sources::no_fs` gives, and
+//! answers no directory under the mount, so the agent's start fails `input-unavailable` saying so
+//! instead of on a directory that is not there.
 //! Every answer `UNAVAILABLE` counts once under its reason in
 //! `tierstore_provider_unavailable_total{reason}` (`local_cache/provider_unavailable.rs`).
 //!
@@ -148,8 +149,8 @@ pub(super) struct ProviderFlags {
     /// How long one read of the store may take.
     pub fetch_timeout: Duration,
     /// Whether this process serves the file system at `mountpoint`: the node's file has an `fs`
-    /// interface. Without one no process of this release serves it (`tierstore fs` is no longer a
-    /// process of its own), and every `Prepare` and `Mount` is `UNAVAILABLE`.
+    /// interface, which every file that loads with a provider has (the load refuses one without).
+    /// A provider whose flag is clear answers every `Prepare` and `Mount` `UNAVAILABLE`.
     pub served: bool,
 }
 

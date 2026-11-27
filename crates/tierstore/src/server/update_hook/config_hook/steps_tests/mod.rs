@@ -467,6 +467,7 @@ fn assert_restarts(serving: Option<&str>, staged_text: &str, params: &Params) {
     assert_eq!(node.fake.record().live, Some(Instance::B));
 }
 
+mod live_configs;
 mod macos;
 mod reload;
 mod stale;
