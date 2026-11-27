@@ -12,5 +12,6 @@ mod fs_job;
 mod lifecycle;
 mod refusals;
 mod rollback;
+mod stale;
 mod takeover;
 mod verb;
