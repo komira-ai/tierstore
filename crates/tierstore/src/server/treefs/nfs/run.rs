@@ -419,11 +419,12 @@ impl Running {
             .listener_fd()
             .map_err(io("copying the control socket"))?;
         let core = Arc::clone(&self._setup.core);
-        // Every request read is answered: the node is told of the opens and the tree lists of this
-        // image.
+        // Every request read is answered: the node is told of the opens, the requests and the tree
+        // lists of this image.
         let held = tokio::task::spawn_blocking(move || {
             core.hold(true);
             core.report_opens();
+            core.report_requests();
             core.report_tree_lists();
         })
         .await;
