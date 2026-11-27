@@ -215,9 +215,10 @@ impl Work {
 
 impl Drop for Work {
     fn drop(&mut self) {
-        if let Some(runtime) = self.0.take() {
-            runtime.shutdown_background();
-        }
+        self.0
+            .take()
+            .into_iter()
+            .for_each(tokio::runtime::Runtime::shutdown_background);
     }
 }
 

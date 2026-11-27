@@ -105,7 +105,7 @@ impl SystemdFake {
     pub fn fs_installed() -> SystemdFake {
         let fake = SystemdFake::installed();
         fake.set_fs_unit(Instance::A, UnitState::Active);
-        fake.set_fs_marker(Instance::A, true);
+        fake.set_fs_marker(Instance::A);
         fake.set_fs_live(Some(Instance::A));
         fake
     }
@@ -115,14 +115,9 @@ impl SystemdFake {
         self.w.borrow_mut().fs.units.insert(instance, state);
     }
 
-    /// Lays down or removes the start marker of the fs instance `instance`.
-    pub fn set_fs_marker(&self, instance: Instance, present: bool) {
-        let mut w = self.w.borrow_mut();
-        if present {
-            w.fs.markers.insert(instance);
-        } else {
-            w.fs.markers.remove(&instance);
-        }
+    /// Lays down the start marker of the fs instance `instance`.
+    pub fn set_fs_marker(&self, instance: Instance) {
+        self.w.borrow_mut().fs.markers.insert(instance);
     }
 
     /// Sets `fs_live` of the record on disk.

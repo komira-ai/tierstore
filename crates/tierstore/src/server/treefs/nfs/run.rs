@@ -36,7 +36,6 @@
 
 use std::os::fd::AsFd as _;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use futures::FutureExt as _;
@@ -113,9 +112,6 @@ pub(super) struct Running {
     stopping: Arc<Notify>,
     /// Says why the server stopped by itself; it keeps the listening socket until `stopping`.
     failed: oneshot::Receiver<String>,
-    /// Whether the next image is given the listening socket, which ended the server: the mount is
-    /// not unmounted.
-    handed: Arc<AtomicBool>,
     /// A copy of the listening socket, for the next image of the process.
     kept: std::net::TcpListener,
     /// Ends the serving for the next image of the process, which gets the listening socket.
@@ -230,7 +226,6 @@ impl Running {
         let (closing, closed) = oneshot::channel();
         let (failing, failed) = oneshot::channel();
         let (next, imaged) = oneshot::channel();
-        let handed = Arc::new(AtomicBool::new(false));
         let server = tokio::spawn(serve_until(
             Served {
                 listener,
@@ -240,7 +235,6 @@ impl Running {
                 stop: Arc::clone(&stopping),
                 failed: failing,
             },
-            Arc::clone(&handed),
             nfs.drain_wait,
         ));
         let numbers = if reopened { "kept" } else { "made afresh" };
@@ -262,7 +256,6 @@ impl Running {
             closing: Some(closing),
             stopping,
             failed,
-            handed,
             kept,
             next: Some(next),
             #[cfg(test)]
@@ -384,9 +377,10 @@ impl Running {
     }
 
     /// How the process leaves, whatever the reason: ends the hand-over to the next image,
-    /// unmounts, then ends the serving; unless the sockets were handed over before it ended, when
-    /// the mount is the next image's. The unmount comes after the hand-over has ended, so that no
-    /// next image is handed the socket (and the mount it would find) while it runs, and before the
+    /// unmounts, then ends the serving. (A hand-over to the next image consumes the instance
+    /// ([`Running::hand_to_image`]), so a leave never follows it.) The unmount comes after the
+    /// hand-over has ended, so that no next image is handed the socket (and the mount it would
+    /// find) while it runs, and before the
     /// serving ends, while the server still answers the clients: a server that has stopped leaves
     /// a busy mount that only a forced unmount clears. An unmount whose every step fails is said
     /// and tried again ([`Mounter::unmount_or_retry`]) while the process serves on: this returns
@@ -402,7 +396,7 @@ impl Running {
         let _ = self.closing.take().map(|closing| closing.send(ack));
         let _ = acked.await;
         let unmounted = match self.mounted.take() {
-            Some(mounter) if !self.handed.load(Ordering::SeqCst) => {
+            Some(mounter) => {
                 tracing::info!(
                     "tierstore fs: unmounting {} before the serving ends",
                     mounter.mountpoint().display()
@@ -448,7 +442,7 @@ struct Served {
 /// lets the connections finish (`NFSTcp::handle_until`), for at most `drain_wait` after that. A
 /// server that fails or panics is caught: the task says why on `failed` and keeps the listening
 /// socket until `stop`, so that the leave unmounts before the socket closes.
-async fn serve_until(served: Served, handed: Arc<AtomicBool>, drain_wait: Duration) {
+async fn serve_until(served: Served, drain_wait: Duration) {
     let Served {
         listener,
         serve,
@@ -474,7 +468,6 @@ async fn serve_until(served: Served, handed: Arc<AtomicBool>, drain_wait: Durati
                 ending_stop.notified().await;
             }
             None => {
-                handed.store(true, Ordering::SeqCst);
                 tracing::info!("tierstore fs: the listening socket was handed to the next image");
             }
         }

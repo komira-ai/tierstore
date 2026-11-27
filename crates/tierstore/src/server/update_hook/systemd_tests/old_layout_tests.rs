@@ -89,7 +89,7 @@ fn prepare_refuses_a_record_that_names_fs_live() {
 #[test]
 fn prepare_refuses_a_lone_run_fs_marker() {
     let fake = SystemdFake::installed();
-    fake.set_fs_marker(Instance::B, true);
+    fake.set_fs_marker(Instance::B);
     let before = fake.record();
     let done = fake.run(Prepare, &params(NEW, Some(OLD)));
     assert_failed(&done, Reason::ModeUnsupported);
@@ -116,7 +116,7 @@ fn the_refusal_comes_before_any_release_is_asked() {
     );
 
     let fake = SystemdFake::empty();
-    fake.set_fs_marker(Instance::A, true);
+    fake.set_fs_marker(Instance::A);
     assert_failed(
         &fake.run(Prepare, &params(NEW, None)),
         Reason::ModeUnsupported,

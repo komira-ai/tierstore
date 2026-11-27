@@ -67,11 +67,9 @@ pub(super) fn refuse(ports: &SystemdPorts<'_>, record: Option<&Record>) -> Resul
 
 /// `Err` when `record` is of an update in flight that moved the fs process (`fs_next`) or gave it
 /// up (`fs_switch`): only an earlier release wrote such a record, and its way back goes through
-/// the fs process, which this release does not touch.
+/// the fs process, which this release does not touch. The callers pass only a record whose update
+/// is in flight.
 pub(super) fn refuse_record(record: &Record) -> Result<(), Done> {
-    if !record.updating {
-        return Ok(());
-    }
     let mut found = Vec::new();
     if let Some(next) = record.fs_next {
         found.push(format!("the update in flight names fs_next {next}"));

@@ -2,6 +2,7 @@
 
 use std::ffi::OsString;
 use std::process::ExitCode;
+use std::time::Duration;
 
 use tierstore_testkit::dir::TestDir;
 
@@ -70,6 +71,24 @@ fn a_hand_over_that_cannot_bind_leaves_the_old_instance_serving() {
     assert_eq!(fake.actions()[before..], ["markers.clear b"]);
     assert_eq!(fake.record(), Record::idle(Some(Instance::A)));
     assert_eq!(fake.running(), [Instance::A]);
+}
+
+/// Asserts that a hand-over to a release that does not list the hand-over word (the new one
+/// cannot take the sockets of the old instance) fails the `cutover` with `probe_failed` while
+/// the old instance still serves, still reversible, and the new instance is left failed with no
+/// `swapped` recorded. Catches a cutover that reports a start that took no sockets as served.
+#[test]
+fn a_hand_over_to_a_release_without_the_hand_over_word_leaves_the_old_instance_serving() {
+    let fake = SystemdFake::installed();
+    let p = params(NEW, Some(OLD));
+    fake.drive(&p, &[Prepare]);
+    fake.set_capabilities(NEW, &[]);
+    let done = fake.run(Cutover, &p);
+    assert_failed(&done, Reason::ProbeFailed);
+    assert!(done.report.reversible);
+    assert_eq!(fake.peek(Instance::A), UnitState::Active);
+    assert_eq!(fake.peek(Instance::B), UnitState::Failed);
+    assert!(!fake.record().has(Marker::Swapped));
 }
 
 /// Asserts that a new release that never answers `/readyz` fails the `cutover` with `not_ready`
@@ -619,6 +638,36 @@ fn update_hook_cutover_on_the_command_line_does_not_wait_for_the_cache_lock() {
     );
     assert!(fake.fs_actions().is_empty(), "{:?}", fake.fs_actions());
     assert!(fake.record().has(Marker::Swapped));
+}
+
+/// What `/readyz` of the instance that serves says, as one line.
+fn readyz(fake: &SystemdFake) -> String {
+    fake.ports()
+        .instances
+        .get(9300, "/readyz")
+        .expect("an instance serves")
+        .body
+}
+
+/// Asserts the cache lock as the clock moves it: with the holder's unit gone and no instance
+/// serving yet, the lock is not taken by anyone; once the new instance serves, `/readyz` says
+/// `ready read-only` through the 3 seconds of its scan of the cache, a second at a time, and
+/// `ready read-write` as the scan ends and it holds the lock. Catches a store that says
+/// read-write while no instance holds the lock, or one that never takes a free lock.
+#[test]
+fn the_new_instance_serves_read_only_until_it_takes_the_released_cache_lock() {
+    let fake = SystemdFake::installed();
+    fake.hold_cache_lock(3);
+    fake.set_unit(Instance::A, UnitState::Deactivating, Some(OLD), false);
+    fake.set_unit(Instance::B, UnitState::Inactive, None, false);
+    fake.pause(Duration::from_secs(1));
+    assert_eq!(fake.peek(Instance::A), UnitState::Inactive);
+    fake.set_unit(Instance::B, UnitState::Active, Some(NEW), true);
+    assert_eq!(readyz(&fake), "ready read-only");
+    fake.pause(Duration::from_secs(2));
+    assert_eq!(readyz(&fake), "ready read-only");
+    fake.pause(Duration::from_secs(1));
+    assert_eq!(readyz(&fake), "ready read-write");
 }
 
 /// Asserts that a hand-over whose new instance opens its cache for 65 looks (as a build node's

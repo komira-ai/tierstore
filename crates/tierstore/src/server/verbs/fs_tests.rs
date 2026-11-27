@@ -56,10 +56,12 @@ fn every_form_of_the_old_verb_exits_2_with_the_same_line() {
 /// is answered by name before the flags of a start are read.
 #[test]
 fn help_of_the_verb_says_where_it_went() {
-    let (code, out, err) = fs(&["--help"]);
-    assert_eq!(code, status(0));
-    assert!(err.is_empty(), "{err}");
-    assert!(out.contains("tierstore attachments"), "{out}");
+    for flag in ["--help", "-h"] {
+        let (code, out, err) = fs(&[flag]);
+        assert_eq!(code, status(0), "{flag}");
+        assert!(err.is_empty(), "{flag}: {err}");
+        assert!(out.contains("tierstore attachments"), "{flag}: {out}");
+    }
     let answered = crate::server::verbs::answer(&args(&["fs", "--help"])).unwrap();
     assert_eq!(format!("{answered:?}"), status(0));
 }

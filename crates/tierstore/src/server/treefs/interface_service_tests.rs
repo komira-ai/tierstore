@@ -652,3 +652,61 @@ async fn a_start_whose_predecessor_dies_after_ack_fails_with_the_mount_in_its_st
     assert_unanswered(&kernel, 1);
     told(&manager, &["FDSTORE=1\nFDNAME=fuse", "BARRIER=1"]);
 }
+
+/// A running instance of the node without a mount, played by the test at `control`: it refuses the
+/// request with the `mount` line as an instance that holds no mount does, offers its S3 socket
+/// `s3` and the lock file `lock` to the request without it, and gives what the taker sent next:
+/// none when the connection ended instead.
+fn played_without_mount(
+    control: &Path,
+    (s3, lock): (std::net::TcpListener, PathBuf),
+) -> JoinHandle<Option<Vec<String>>> {
+    use crate::server::handoff::wire;
+    let socket = tokio::net::UnixListener::bind(control).unwrap();
+    let lines = vec![
+        "offer".to_owned(),
+        format!("s3 {}", s3.local_addr().unwrap()),
+        format!("lock {}", lock.display()),
+    ];
+    tokio::spawn(async move {
+        let (stream, _) = socket.accept().await.unwrap();
+        let request = wire::recv(&stream).await.unwrap();
+        assert_eq!(request.lines, ["take 1", "ready", "mount"]);
+        let refusal = [
+            "refused".to_owned(),
+            "this instance holds no mount".to_owned(),
+        ];
+        wire::send(&stream, &refusal, &[]).await.unwrap();
+        drop(stream);
+        let (stream, _) = socket.accept().await.unwrap();
+        let request = wire::recv(&stream).await.unwrap();
+        assert_eq!(request.lines, ["take 1", "ready"]);
+        let file = std::fs::File::open(&lock).unwrap();
+        let fds = [s3.as_fd(), file.as_fd()];
+        wire::send(&stream, &lines, &fds).await.unwrap();
+        wire::recv(&stream).await.ok().map(|frame| frame.lines)
+    })
+}
+
+/// Asserts that a start whose predecessor holds no mount but offers its sockets, and whose own
+/// mount cannot be made (the path of its runtime directory is a regular file), fails by the mount's
+/// reason, not as a hand-off, and refuses the predecessor's offer with `nak` before it accepts
+/// anything, so that the predecessor serves on with its sockets. Catches a start that accepts the
+/// sockets of a running instance before it has the mount it needs, which leaves the node with
+/// neither.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_start_whose_mount_cannot_be_made_refuses_the_sockets_a_mountless_instance_offered() {
+    let node = FsNode::new("tsfs-svc-nomount");
+    let control = node.dir.path().join("control.sock");
+    std::fs::write(node.runtime(), b"").unwrap();
+    let s3 = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = s3.local_addr().unwrap();
+    let lock = node.node.cache_dir().join(".lock");
+    let old = played_without_mount(&control, (s3, lock));
+    let (error, _manager) = start_failing(&node, &control, addr).await;
+    assert!(!error.starts_with("hand-off: "), "{error}");
+    assert_eq!(
+        within("the taker's answer", old).await.unwrap(),
+        Some(vec!["nak".to_owned()])
+    );
+}

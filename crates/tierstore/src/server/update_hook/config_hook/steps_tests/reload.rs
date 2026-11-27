@@ -63,11 +63,15 @@ pub(super) fn changed(from: u64, to: u64) -> Reload {
 
 /// The same, once `cutover` set it.
 fn set_on_mount(from: u64, to: u64) -> Reload {
-    let mut reload = changed(from, to);
-    if let Some(cap) = &mut reload.tree_list_ram_bytes {
-        cap.mount = Some(MOUNT.to_owned());
+    Reload {
+        guard: false,
+        tree_list_ram_bytes: Some(ListCap {
+            from,
+            to,
+            control_socket: PathBuf::from(DEFAULT_SOCKET),
+            mount: Some(MOUNT.to_owned()),
+        }),
     }
-    reload
 }
 
 /// The config hook's record of a reload `reload` committed and at rest, `A` serving.

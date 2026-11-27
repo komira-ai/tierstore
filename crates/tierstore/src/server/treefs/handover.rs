@@ -43,14 +43,14 @@ pub(super) fn is_fuse(mode: u32, rdev: u64) -> bool {
 /// `InvalidData` when it is not; what the system said when it cannot be asked.
 pub(in crate::server) fn check_device(fd: BorrowedFd<'_>) -> std::io::Result<()> {
     let stat = rustix::fs::fstat(fd)?;
-    if is_fuse(stat.st_mode, stat.st_rdev) {
-        Ok(())
-    } else {
-        Err(std::io::Error::new(
-            ErrorKind::InvalidData,
-            "the offered device is not the FUSE device",
-        ))
-    }
+    is_fuse(stat.st_mode, stat.st_rdev)
+        .then_some(())
+        .ok_or_else(|| {
+            std::io::Error::new(
+                ErrorKind::InvalidData,
+                "the offered device is not the FUSE device",
+            )
+        })
 }
 
 /// What a resume that cannot serve the mount again is told: the error.

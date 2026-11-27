@@ -259,9 +259,10 @@ impl Work {
 
 impl Drop for Work {
     fn drop(&mut self) {
-        if let Some(runtime) = self.0.take() {
-            runtime.shutdown_background();
-        }
+        self.0
+            .take()
+            .into_iter()
+            .for_each(tokio::runtime::Runtime::shutdown_background);
     }
 }
 
@@ -324,9 +325,7 @@ impl Puts {
     /// Lets the waiting puts, and the next ones, go on.
     pub(in crate::server::treefs) fn let_go(&self) {
         let gate = self.gate.lock().unwrap().clone();
-        if let Some(gate) = gate {
-            gate.add_permits(1 << 16);
-        }
+        gate.iter().for_each(|gate| gate.add_permits(1 << 16));
     }
 
     /// Waits until `count` puts are waiting at the upstream.
