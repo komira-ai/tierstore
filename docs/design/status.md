@@ -4,114 +4,145 @@ This page lists every page of `docs/design/`, the items each one plans, and for 
 
 Statuses: **built** (the code on main does it; the pull request and file are named), **partial** (part of it), **unbuilt** (no code), **superseded** (a later design or decision replaced it), **out-of-repo** (another repository's work: the CAS service, jobscheduler, the build frontend, hostkeeper, the deployment's configuration), **not-code** (a decision, a measurement or prose: nothing to build; a measurement whose report is in `docs/measurements/` is built).
 
-A page's own Status line may be out of date. The "Status line" note under each page says what it should say. komira-ai/tierstore#407 (the new cache in the daemon) is one slice of the list below; komira-ai/tierstore#326 (node-local trees) tracks the six node-local-trees.md slices.
+A page's own Status line may be out of date. The "Status line" note under each page says what it should say. komira-ai/tierstore#407 (the new cache in the daemon) is one slice of the list below; komira-ai/tierstore#326 (node-local trees) tracked the six node-local-trees.md slices and is closed (Decisions, 4).
+
+## Decisions
+
+The slices below were decided after this page was first written. Each slice row in "The slices and their issues" carries its decision, and so does each group it affects.
+
+1. **The storage tier, fetch-cache-serve.md sections 10 and 24: not planned (2026-11-26).** komira-ai/tierstore#496 to komira-ai/tierstore#514 are closed, with komira-ai/tierstore#492 and komira-ai/tierstore#495.
+2. **One process (one-service.md): being built.** First komira-ai/tierstore#522 and komira-ai/tierstore#523, then komira-ai/tierstore#524 once the release with both layouts runs on every host. komira-ai/tierstore#479 is mostly done by komira-ai/tierstore#571.
+3. **The new read path (fetch-cache-serve.md): being built, in this order.**
+   1. komira-ai/tierstore#485, which also does komira-ai/tierstore#407.
+   2. komira-ai/tierstore#486.
+   3. komira-ai/tierstore#483.
+   4. komira-ai/tierstore#484.
+   5. komira-ai/tierstore#487.
+   6. komira-ai/tierstore#494 and komira-ai/tierstore#490.
+   7. komira-ai/tierstore#493 last, after the new path has served every host for 48 hours.
+
+   komira-ai/tierstore#488, komira-ai/tierstore#489 and komira-ai/tierstore#491 are closed as not planned.
+4. **The create-tree API of node-local-trees.md: not planned (2026-11-27).** komira-ai/tierstore#326, komira-ai/tierstore#516 to komira-ai/tierstore#519 and komira-ai/tierstore#521 are closed. komira-ai/tierstore#520 is rescoped to the previous-release read test. The unused front is removed by komira-ai/tierstore#590. The tree store and the mount provider path are built and stay.
+5. **Parked, and may return later** (the issues carry the label `parked`):
+   - the two-tier hot plus cold store work: komira-ai/tierstore#534 to komira-ai/tierstore#537 and komira-ai/tierstore#539 to komira-ai/tierstore#543;
+   - the wider S3 semantics: komira-ai/tierstore#525 to komira-ai/tierstore#531 and komira-ai/tierstore#544 to komira-ai/tierstore#551.
+
+   A study of S3-heavy use cases will set their order when they return.
+6. **komira-ai/tierstore#538 was already built by komira-ai/tierstore#198.** The Appendix C row of put-without-lock.md is corrected below.
+7. **Small items:**
+   - being built: komira-ai/tierstore#555, komira-ai/tierstore#556, komira-ai/tierstore#557, komira-ai/tierstore#515 and komira-ai/tierstore#532;
+   - later: komira-ai/tierstore#481, komira-ai/tierstore#533 and komira-ai/tierstore#552;
+   - not scheduled: komira-ai/tierstore#482, komira-ai/tierstore#553 and komira-ai/tierstore#554.
+8. **New since this page was written:** komira-ai/tierstore#591 (a put whose body fails must not leave a short object in the upstream store).
 
 ## Summary
 
 | Page | built | partial | unbuilt | superseded | out-of-repo | not-code | slice issues |
 |---|---|---|---|---|---|---|---|
 | [distribution.md](distribution.md) | 21 | 2 | 2 | 1 | 2 | 2 | 2 |
-| [fetch-cache-serve.md](fetch-cache-serve.md) | 58 | 47 | 54 | 2 | 9 | 7 | 33 |
+| [fetch-cache-serve.md](fetch-cache-serve.md) | 57 | 48 | 54 | 2 | 9 | 7 | 33 |
 | [multi-endpoint-store.md](multi-endpoint-store.md) | 20 | 1 | 3 | 0 | 0 | 0 | 1 |
 | [node-local-trees.md](node-local-trees.md) | 14 | 8 | 4 | 1 | 3 | 2 | 6 |
 | [one-service.md](one-service.md) | 14 | 3 | 5 | 0 | 1 | 2 | 4 |
 | [overwrite.md](overwrite.md) | 5 | 3 | 8 | 11 | 0 | 0 | 7 |
 | [pluggable-interfaces.md](pluggable-interfaces.md) | 10 | 3 | 6 | 0 | 0 | 1 | 1 |
 | [prefetch-api.md](prefetch-api.md) | 14 | 0 | 1 | 1 | 1 | 2 | 1 |
-| [put-without-lock.md](put-without-lock.md) | 19 | 5 | 4 | 1 | 0 | 2 | 5 |
+| [put-without-lock.md](put-without-lock.md) | 20 | 4 | 4 | 1 | 0 | 2 | 5 |
 | [tierstore-design.md](tierstore-design.md) | 37 | 3 | 21 | 2 | 0 | 6 | 13 |
 | [tierstore-handover.md](tierstore-handover.md) | 31 | 2 | 0 | 2 | 1 | 0 | 0 |
 | [tsfuse-conformance.md](tsfuse-conformance.md) | 18 | 0 | 0 | 1 | 2 | 0 | 0 |
 | [tsfuse-kernel-findings.md](tsfuse-kernel-findings.md) | 16 | 5 | 2 | 0 | 1 | 2 | 3 |
-| [virtual-build-fs.md](virtual-build-fs.md) | 41 | 3 | 5 | 10 | 8 | 5 | 2 |
+| [virtual-build-fs.md](virtual-build-fs.md) | 40 | 4 | 5 | 10 | 8 | 5 | 2 |
 
 The counts are of the rows in the tables below (one row per PR-sized item), not of lines of code. fetch-cache-serve.md's section 18 lists, task by task, the work its other sections describe, so some of its items have a row under both.
+
+The 77 slice issues by decision: not planned: 29; parked: 24; being built: 16; later: 3; not scheduled: 3; rescoped to the previous-release read test: 1; already built by komira-ai/tierstore#198: 1. Counted from the Decision column below.
 
 ## The slices and their issues
 
 Each issue says what to build, the failing test to write first (name, file, what it asserts), the further tests with their failure and boundary cases, and what it depends on.
 
-| Issue | Page | Slice |
-|---|---|---|
-| komira-ai/tierstore#481 | distribution.md | release.yml soak passes the coordinator read program, so FARM_SOAK_HOURS above 0 works |
-| komira-ai/tierstore#482 | distribution.md | check-brew also installs the Linux formula targets on a hosted Linux runner (only if the Linux formula needs it) |
-| komira-ai/tierstore#483 | fetch-cache-serve.md | tierstore-plan: rank shared packs first by pack_flags bit 1 and drop the learned first-touch profile |
-| komira-ai/tierstore#484 | fetch-cache-serve.md | fetch engine: pooled cell buffers, in-flight bound and dirty-byte cap before publish |
-| komira-ai/tierstore#485 | fetch-cache-serve.md | Daemon builds the new read-path stack (entry store, journal, evictor, hash pool, budget, engine) and attaches it to LocalCache::route_large |
-| komira-ai/tierstore#486 | fetch-cache-serve.md | Mount provider reads the L2 sidecar and refuses a tree without one |
-| komira-ai/tierstore#487 | fetch-cache-serve.md | Serve job tree mounts from TreeFs over the mount-protocol server, Prepare through the planner and engine, and report tree-lost |
-| komira-ai/tierstore#488 | fetch-cache-serve.md | Create tierstore-client and tierstore-cache, the layering check, and the library-mode suite with tierstore tree cat (T-L) |
-| komira-ai/tierstore#489 | fetch-cache-serve.md | tierstore-tree: read_dir, stat and read straight from the client with no entry on disk, behind a `cache` feature |
-| komira-ai/tierstore#490 | fetch-cache-serve.md | macOS NFS front reads through the in-process entry store and engine |
-| komira-ai/tierstore#491 | fetch-cache-serve.md | Offline tree check: re-derive per-file sha256 from pack bytes and compare with the L2 file-sha table |
-| komira-ai/tierstore#492 | fetch-cache-serve.md | tierstore-client: seed bootstrap from addresses or a membership file, epoch following and return to seeds (T-SB) |
-| komira-ai/tierstore#493 | fetch-cache-serve.md | Delete the old read path after the switch: per-blob path, pinning, the three prefetch mechanisms, extents and their keys (T11c) |
-| komira-ai/tierstore#494 | fetch-cache-serve.md | Register the first-touch metrics and the revision 8 client metrics, and move them into the section 12 table |
-| komira-ai/tierstore#495 | fetch-cache-serve.md | Freeze delta of revision 8 (T-I2): membership route, load header and load fields, per-shard blake3, incarnation, no Role |
-| komira-ai/tierstore#496 | fetch-cache-serve.md | Storage tier configuration: components as sections, the dependency check, membership.toml, and the three examples as tests (T-S1) |
-| komira-ai/tierstore#497 | fetch-cache-serve.md | Placement: rendezvous rank, replica-set writer rule, stripe placement with invariants (Placement impl) |
-| komira-ai/tierstore#498 | fetch-cache-serve.md | Hot store: segment writer, group commit, replication stream and ack rule |
-| komira-ai/tierstore#499 | fetch-cache-serve.md | Hot store replication: ack rule, ballots, majority seal, seal triggers and take-over (T-S4, second part) |
-| komira-ai/tierstore#500 | fetch-cache-serve.md | Hot store: large objects as whole files, startup sweep, hot scrub, reclaim, HotSched and hot-only on_full block-drop |
-| komira-ai/tierstore#501 | fetch-cache-serve.md | DriveSched: per-drive scheduler with streams, classes, write share, slices, small lane, slot release and watchdog (T-S5) |
-| komira-ai/tierstore#502 | fetch-cache-serve.md | Cold tier replicas mode: shard and copy writer, descriptor commit, startup sweep, ColdStore impl (T-S7a) |
-| komira-ai/tierstore#503 | fetch-cache-serve.md | Destage pipeline: eligibility, marks and backpressure, stripe formation, pack assembly (first-fit decreasing), orphan sweep, capacity guard, hot reclaim after commit (T-S7b) |
-| komira-ai/tierstore#504 | fetch-cache-serve.md | Stripe-free protocol and tombstone drop across nodes |
-| komira-ai/tierstore#505 | fetch-cache-serve.md | Peer service and LOCATE: /store/v1 routes, the load table, x-ts-load, StoreUpstream in the client (T-S6a) |
-| komira-ai/tierstore#506 | fetch-cache-serve.md | S3 front with backend = store: PUT routing to writer, key check, 200/412/503/507, GET range, HEAD, DELETE with tombstone, LIST fan-out; conformance target (T-S6b, T-S0) |
-| komira-ai/tierstore#507 | fetch-cache-serve.md | Erasure coding: reed-solomon-simd stripes, parity writers, degraded read, in-place conversion from replicas (T-S8) |
-| komira-ai/tierstore#508 | fetch-cache-serve.md | Promote on read and GC rewrite with expiry classes (T-S10) |
-| komira-ai/tierstore#509 | fetch-cache-serve.md | Repair for replicas mode and the audits: hot and cold-copy re-replication, scrub, margin gauges, live-key audit (T-S9a) |
-| komira-ai/tierstore#510 | fetch-cache-serve.md | Health ledger, incarnations, the amnesia rule, the damper and the membership validator (T-S13) |
-| komira-ai/tierstore#511 | fetch-cache-serve.md | Repair scheduler and operator API: margin-first queue, priorities, shared throttle, commit protocol with Redundancy witness, salvage, layout debt, closed blocking reasons, store verbs (T-S16) |
-| komira-ai/tierstore#512 | fetch-cache-serve.md | Deterministic cluster simulator and the 24.13 scenarios (T-S14) |
-| komira-ai/tierstore#513 | fetch-cache-serve.md | Capacity admission, guard and trash, prober, off-box export and hardware audit, format policy (T-S17 to T-S21) |
-| komira-ai/tierstore#514 | fetch-cache-serve.md | NOW-to-LATER migration: drain state, cluster settings in the membership document, and the re-encode job (T-S12) |
-| komira-ai/tierstore#515 | multi-endpoint-store.md | Test that one multipart upload's parts and completion go to different endpoints of an s3 tier |
-| komira-ai/tierstore#516 | node-local-trees.md | Connect the trees gRPC front to the tree store: CreateTree builds and places a tree, GetPlacement and DeleteTree answer from it |
-| komira-ai/tierstore#517 | node-local-trees.md | CreateTree checks what the design names before any fetch: non-empty S3 location, source under a placement, S3 key length, pin_limit |
-| komira-ai/tierstore#518 | node-local-trees.md | Create-time prefetch: wait, background and none fill the tree's pack spans, pinned once per pack, with a readiness state |
-| komira-ai/tierstore#519 | node-local-trees.md | Deprecate hydrate and count its calls so the release after can remove it |
-| komira-ai/tierstore#520 | node-local-trees.md | One tree, three readers: a cross-interface test and a previous-release test for the cache directory |
-| komira-ai/tierstore#521 | node-local-trees.md | tree show: render a tree record as JSON for debugging |
-| komira-ai/tierstore#522 | one-service.md | One-process start on Linux takes the sockets, the mount, the control socket and the cache lock in one conversation (P3 wiring) |
-| komira-ai/tierstore#523 | one-service.md | Remove the fill socket and the `Fills` trait: the core calls the cache directly |
-| komira-ai/tierstore#524 | one-service.md | Release M+1: delete the two-process layout (tierstore fs exits 2, tierstore attachments, fill_socket ignored, the hook's second arm, the old units and fs.toml) (P9) |
-| komira-ai/tierstore#525 | overwrite.md | Put and completion answer the ETag of the object they landed (G17) |
-| komira-ai/tierstore#526 | overwrite.md | If-Match on PutObject and CompleteMultipartUpload as a compare-and-swap over the markers, and a copy onto an existing key |
-| komira-ai/tierstore#527 | overwrite.md | Completion rejects an x-amz-mp-object-size that differs from the parts' total (400 InvalidRequest) |
-| komira-ai/tierstore#528 | overwrite.md | CopyObject and UploadPartCopy through open_read: copy onto a key, source conditions, self-copy refused |
-| komira-ai/tierstore#529 | overwrite.md | A scoped key overwrites an existing key under its write_prefixes (no delete right) |
-| komira-ai/tierstore#530 | overwrite.md | Local cache keeps the object record and serves hits by the object's Cache-Control, revalidating with a conditional GET |
-| komira-ai/tierstore#531 | overwrite.md | Judge versions by the ETag, not by size: Backend::still_current and the cache fill check |
-| komira-ai/tierstore#532 | pluggable-interfaces.md | reserved_set_is_the_three_prefixes: a key under each reserved prefix is refused and _uploads/x is an ordinary key |
-| komira-ai/tierstore#533 | prefetch-api.md | Merge adjacent spans of one pack into one ranged GET under local_cache.prefetch_merge_gap (default 0 = off) |
-| komira-ai/tierstore#534 | put-without-lock.md | compat: the previous release against markers written by a put, a delete and a copy-back (marks_put.rs, marks_delete.rs, marks_copy_back.rs) |
-| komira-ai/tierstore#535 | put-without-lock.md | Read the lock and marker timing keys from [hot_store]: lock_wait, lock_poll_min/max/factor, lock_refresh, queued_call_margin, marker_deadline |
-| komira-ai/tierstore#536 | put-without-lock.md | Rename or add the 24 tests that 7.4 names and main lacks, or correct 7.4 |
-| komira-ai/tierstore#537 | put-without-lock.md | Remove the entry protocol and rewrite tierstore-design.md and overwrite.md (PR 10 part two) |
-| komira-ai/tierstore#538 | put-without-lock.md | dir tier: names over 255 encoded bytes by a hashed file name with the key in the header (Appendix C row 3) |
-| komira-ai/tierstore#539 | tierstore-design.md | The leader deletes registrations departed for ten departure times that no entry names (hot_store.registration_reap_after) |
-| komira-ai/tierstore#540 | tierstore-design.md | `tierstore entries release --key K`: move a stalled owner's HELD entry to PENDING (dry-run by default) |
-| komira-ai/tierstore#541 | tierstore-design.md | A held verb deletes the old _journal/ and _tiering/checkpoint/ objects (rollout step 6) |
-| komira-ai/tierstore#542 | tierstore-design.md | Export the reconciler's signals on /metricz: leader gauge, entries by op and state, oldest entry age, reaped, entry-vanished, compare-mismatch, strays-adopted, CAS failures by transition |
-| komira-ai/tierstore#543 | tierstore-design.md | Export the proxy's signals: 503 by reason, heartbeat failures, live_until and lease-margin trips, ack-to-cold seconds |
-| komira-ai/tierstore#544 | tierstore-design.md | Add ObjectRecord, Attrs, Landing and DigestSlot, and the dark Backend calls for them, with the memory backend keeping a record |
-| komira-ai/tierstore#545 | tierstore-design.md | Store the object record in a .meta sidecar on the dir: tier, bound to the object's tag and size |
-| komira-ai/tierstore#546 | tierstore-design.md | Send and read object headers, user metadata, tags and the record header on the S3 tier; add tier.single_put_max_bytes |
-| komira-ai/tierstore#547 | tierstore-design.md | S3 front: round-trip Content-*, Cache-Control, Expires, x-amz-meta-* and tags with S3's limits and errors |
-| komira-ai/tierstore#548 | tierstore-design.md | Render the S3 ETag as MD5 (md5-N for multipart) and turn the MD5 on in a later change |
-| komira-ai/tierstore#549 | tierstore-design.md | Store and return checksums: x-amz-checksum-mode, multipart algorithm and type, CRC combine, x-amz-mp-object-size |
-| komira-ai/tierstore#550 | tierstore-design.md | Add tag writes and self-copy REPLACE as a change of the record under the key's lock (the META operation), PUT and DELETE ?tagging |
-| komira-ai/tierstore#551 | tierstore-design.md | Collect superseded OCI tag versions |
-| komira-ai/tierstore#552 | tsfuse-kernel-findings.md | tsfuse: a server killed under load on io_uring ends in-flight requests with ECANCELED and resends none (K14, conformance item 7 uring half) |
-| komira-ai/tierstore#553 | tsfuse-kernel-findings.md | tsfuse: run K10 registration checks against the real kernel (REGISTER before INIT is EAGAIN, ring idle until every CPU's queue is registered, a refused REGISTER turns io_uring off) |
-| komira-ai/tierstore#554 | tsfuse-kernel-findings.md | tsfuse: show on the real kernel that FORGET arrives on /dev/fuse and is not delivered on the ring (K9, K11) |
-| komira-ai/tierstore#555 | virtual-build-fs.md | tierstore fs: detach <run> answers stall_ms, the time the run's requests waited on fills |
-| komira-ai/tierstore#556 | virtual-build-fs.md | tierstore fs: per-request-kind latency and per-attach/detach timing metrics for the Q-B measurement |
-| komira-ai/tierstore#557 | several pages | Correct the Status lines and 'not built' notes of the design pages to match main |
-| komira-ai/tierstore#407 (open before this audit) | fetch-cache-serve.md | The daemon's `[cache]` root and budget keys, the 50% overlap budget and `tierstore gc legacy` (section 13) |
-| komira-ai/tierstore#479 (open before this audit) | one-service.md, tierstore-handover.md | The hand-over's verify defers while the new instance serves read-only |
+| Issue | Page | Slice | Decision |
+|---|---|---|---|
+| komira-ai/tierstore#481 | distribution.md | release.yml soak passes the coordinator read program, so FARM_SOAK_HOURS above 0 works | Later |
+| komira-ai/tierstore#482 | distribution.md | check-brew also installs the Linux formula targets on a hosted Linux runner (only if the Linux formula needs it) | Not scheduled |
+| komira-ai/tierstore#483 | fetch-cache-serve.md | tierstore-plan: rank shared packs first by pack_flags bit 1 and drop the learned first-touch profile | Being built, 3rd |
+| komira-ai/tierstore#484 | fetch-cache-serve.md | fetch engine: pooled cell buffers, in-flight bound and dirty-byte cap before publish | Being built, 4th |
+| komira-ai/tierstore#485 | fetch-cache-serve.md | Daemon builds the new read-path stack (entry store, journal, evictor, hash pool, budget, engine) and attaches it to LocalCache::route_large | Being built, 1st (also does komira-ai/tierstore#407) |
+| komira-ai/tierstore#486 | fetch-cache-serve.md | Mount provider reads the L2 sidecar and refuses a tree without one | Being built, 2nd |
+| komira-ai/tierstore#487 | fetch-cache-serve.md | Serve job tree mounts from TreeFs over the mount-protocol server, Prepare through the planner and engine, and report tree-lost | Being built, 5th |
+| komira-ai/tierstore#488 | fetch-cache-serve.md | Create tierstore-client and tierstore-cache, the layering check, and the library-mode suite with tierstore tree cat (T-L) | Not planned; closed |
+| komira-ai/tierstore#489 | fetch-cache-serve.md | tierstore-tree: read_dir, stat and read straight from the client with no entry on disk, behind a `cache` feature | Not planned; closed |
+| komira-ai/tierstore#490 | fetch-cache-serve.md | macOS NFS front reads through the in-process entry store and engine | Being built, 6th |
+| komira-ai/tierstore#491 | fetch-cache-serve.md | Offline tree check: re-derive per-file sha256 from pack bytes and compare with the L2 file-sha table | Not planned; closed |
+| komira-ai/tierstore#492 | fetch-cache-serve.md | tierstore-client: seed bootstrap from addresses or a membership file, epoch following and return to seeds (T-SB) | Not planned (storage tier); closed |
+| komira-ai/tierstore#493 | fetch-cache-serve.md | Delete the old read path after the switch: per-blob path, pinning, the three prefetch mechanisms, extents and their keys (T11c) | Being built, last: after the new path has served every host for 48 hours |
+| komira-ai/tierstore#494 | fetch-cache-serve.md | Register the first-touch metrics and the revision 8 client metrics, and move them into the section 12 table | Being built, 6th |
+| komira-ai/tierstore#495 | fetch-cache-serve.md | Freeze delta of revision 8 (T-I2): membership route, load header and load fields, per-shard blake3, incarnation, no Role | Not planned (storage tier); closed |
+| komira-ai/tierstore#496 | fetch-cache-serve.md | Storage tier configuration: components as sections, the dependency check, membership.toml, and the three examples as tests (T-S1) | Not planned (storage tier); closed |
+| komira-ai/tierstore#497 | fetch-cache-serve.md | Placement: rendezvous rank, replica-set writer rule, stripe placement with invariants (Placement impl) | Not planned (storage tier); closed |
+| komira-ai/tierstore#498 | fetch-cache-serve.md | Hot store: segment writer, group commit, replication stream and ack rule | Not planned (storage tier); closed |
+| komira-ai/tierstore#499 | fetch-cache-serve.md | Hot store replication: ack rule, ballots, majority seal, seal triggers and take-over (T-S4, second part) | Not planned (storage tier); closed |
+| komira-ai/tierstore#500 | fetch-cache-serve.md | Hot store: large objects as whole files, startup sweep, hot scrub, reclaim, HotSched and hot-only on_full block-drop | Not planned (storage tier); closed |
+| komira-ai/tierstore#501 | fetch-cache-serve.md | DriveSched: per-drive scheduler with streams, classes, write share, slices, small lane, slot release and watchdog (T-S5) | Not planned (storage tier); closed |
+| komira-ai/tierstore#502 | fetch-cache-serve.md | Cold tier replicas mode: shard and copy writer, descriptor commit, startup sweep, ColdStore impl (T-S7a) | Not planned (storage tier); closed |
+| komira-ai/tierstore#503 | fetch-cache-serve.md | Destage pipeline: eligibility, marks and backpressure, stripe formation, pack assembly (first-fit decreasing), orphan sweep, capacity guard, hot reclaim after commit (T-S7b) | Not planned (storage tier); closed |
+| komira-ai/tierstore#504 | fetch-cache-serve.md | Stripe-free protocol and tombstone drop across nodes | Not planned (storage tier); closed |
+| komira-ai/tierstore#505 | fetch-cache-serve.md | Peer service and LOCATE: /store/v1 routes, the load table, x-ts-load, StoreUpstream in the client (T-S6a) | Not planned (storage tier); closed |
+| komira-ai/tierstore#506 | fetch-cache-serve.md | S3 front with backend = store: PUT routing to writer, key check, 200/412/503/507, GET range, HEAD, DELETE with tombstone, LIST fan-out; conformance target (T-S6b, T-S0) | Not planned (storage tier); closed |
+| komira-ai/tierstore#507 | fetch-cache-serve.md | Erasure coding: reed-solomon-simd stripes, parity writers, degraded read, in-place conversion from replicas (T-S8) | Not planned (storage tier); closed |
+| komira-ai/tierstore#508 | fetch-cache-serve.md | Promote on read and GC rewrite with expiry classes (T-S10) | Not planned (storage tier); closed |
+| komira-ai/tierstore#509 | fetch-cache-serve.md | Repair for replicas mode and the audits: hot and cold-copy re-replication, scrub, margin gauges, live-key audit (T-S9a) | Not planned (storage tier); closed |
+| komira-ai/tierstore#510 | fetch-cache-serve.md | Health ledger, incarnations, the amnesia rule, the damper and the membership validator (T-S13) | Not planned (storage tier); closed |
+| komira-ai/tierstore#511 | fetch-cache-serve.md | Repair scheduler and operator API: margin-first queue, priorities, shared throttle, commit protocol with Redundancy witness, salvage, layout debt, closed blocking reasons, store verbs (T-S16) | Not planned (storage tier); closed |
+| komira-ai/tierstore#512 | fetch-cache-serve.md | Deterministic cluster simulator and the 24.13 scenarios (T-S14) | Not planned (storage tier); closed |
+| komira-ai/tierstore#513 | fetch-cache-serve.md | Capacity admission, guard and trash, prober, off-box export and hardware audit, format policy (T-S17 to T-S21) | Not planned (storage tier); closed |
+| komira-ai/tierstore#514 | fetch-cache-serve.md | NOW-to-LATER migration: drain state, cluster settings in the membership document, and the re-encode job (T-S12) | Not planned (storage tier); closed |
+| komira-ai/tierstore#515 | multi-endpoint-store.md | Test that one multipart upload's parts and completion go to different endpoints of an s3 tier | Being built |
+| komira-ai/tierstore#516 | node-local-trees.md | Connect the trees gRPC front to the tree store: CreateTree builds and places a tree, GetPlacement and DeleteTree answer from it | Not planned (create-tree API); closed |
+| komira-ai/tierstore#517 | node-local-trees.md | CreateTree checks what the design names before any fetch: non-empty S3 location, source under a placement, S3 key length, pin_limit | Not planned (create-tree API); closed |
+| komira-ai/tierstore#518 | node-local-trees.md | Create-time prefetch: wait, background and none fill the tree's pack spans, pinned once per pack, with a readiness state | Not planned (create-tree API); closed |
+| komira-ai/tierstore#519 | node-local-trees.md | Deprecate hydrate and count its calls so the release after can remove it | Not planned (create-tree API); closed |
+| komira-ai/tierstore#520 | node-local-trees.md | One tree, three readers: a cross-interface test and a previous-release test for the cache directory | Rescoped to the previous-release read test |
+| komira-ai/tierstore#521 | node-local-trees.md | tree show: render a tree record as JSON for debugging | Not planned (create-tree API); closed |
+| komira-ai/tierstore#522 | one-service.md | One-process start on Linux takes the sockets, the mount, the control socket and the cache lock in one conversation (P3 wiring) | Being built |
+| komira-ai/tierstore#523 | one-service.md | Remove the fill socket and the `Fills` trait: the core calls the cache directly | Being built |
+| komira-ai/tierstore#524 | one-service.md | Release M+1: delete the two-process layout (tierstore fs exits 2, tierstore attachments, fill_socket ignored, the hook's second arm, the old units and fs.toml) (P9) | Being built, after the release with both layouts runs on every host |
+| komira-ai/tierstore#525 | overwrite.md | Put and completion answer the ETag of the object they landed (G17) | Parked |
+| komira-ai/tierstore#526 | overwrite.md | If-Match on PutObject and CompleteMultipartUpload as a compare-and-swap over the markers, and a copy onto an existing key | Parked |
+| komira-ai/tierstore#527 | overwrite.md | Completion rejects an x-amz-mp-object-size that differs from the parts' total (400 InvalidRequest) | Parked |
+| komira-ai/tierstore#528 | overwrite.md | CopyObject and UploadPartCopy through open_read: copy onto a key, source conditions, self-copy refused | Parked |
+| komira-ai/tierstore#529 | overwrite.md | A scoped key overwrites an existing key under its write_prefixes (no delete right) | Parked |
+| komira-ai/tierstore#530 | overwrite.md | Local cache keeps the object record and serves hits by the object's Cache-Control, revalidating with a conditional GET | Parked |
+| komira-ai/tierstore#531 | overwrite.md | Judge versions by the ETag, not by size: Backend::still_current and the cache fill check | Parked |
+| komira-ai/tierstore#532 | pluggable-interfaces.md | reserved_set_is_the_three_prefixes: a key under each reserved prefix is refused and _uploads/x is an ordinary key | Being built |
+| komira-ai/tierstore#533 | prefetch-api.md | Merge adjacent spans of one pack into one ranged GET under local_cache.prefetch_merge_gap (default 0 = off) | Later |
+| komira-ai/tierstore#534 | put-without-lock.md | compat: the previous release against markers written by a put, a delete and a copy-back (marks_put.rs, marks_delete.rs, marks_copy_back.rs) | Parked |
+| komira-ai/tierstore#535 | put-without-lock.md | Read the lock and marker timing keys from [hot_store]: lock_wait, lock_poll_min/max/factor, lock_refresh, queued_call_margin, marker_deadline | Parked |
+| komira-ai/tierstore#536 | put-without-lock.md | Rename or add the 24 tests that 7.4 names and main lacks, or correct 7.4 | Parked |
+| komira-ai/tierstore#537 | put-without-lock.md | Remove the entry protocol and rewrite tierstore-design.md and overwrite.md (PR 10 part two) | Parked |
+| komira-ai/tierstore#538 | put-without-lock.md | dir tier: names over 255 encoded bytes by a hashed file name with the key in the header (Appendix C row 3) | Already built by komira-ai/tierstore#198 |
+| komira-ai/tierstore#539 | tierstore-design.md | The leader deletes registrations departed for ten departure times that no entry names (hot_store.registration_reap_after) | Parked |
+| komira-ai/tierstore#540 | tierstore-design.md | `tierstore entries release --key K`: move a stalled owner's HELD entry to PENDING (dry-run by default) | Parked |
+| komira-ai/tierstore#541 | tierstore-design.md | A held verb deletes the old _journal/ and _tiering/checkpoint/ objects (rollout step 6) | Parked |
+| komira-ai/tierstore#542 | tierstore-design.md | Export the reconciler's signals on /metricz: leader gauge, entries by op and state, oldest entry age, reaped, entry-vanished, compare-mismatch, strays-adopted, CAS failures by transition | Parked |
+| komira-ai/tierstore#543 | tierstore-design.md | Export the proxy's signals: 503 by reason, heartbeat failures, live_until and lease-margin trips, ack-to-cold seconds | Parked |
+| komira-ai/tierstore#544 | tierstore-design.md | Add ObjectRecord, Attrs, Landing and DigestSlot, and the dark Backend calls for them, with the memory backend keeping a record | Parked |
+| komira-ai/tierstore#545 | tierstore-design.md | Store the object record in a .meta sidecar on the dir: tier, bound to the object's tag and size | Parked |
+| komira-ai/tierstore#546 | tierstore-design.md | Send and read object headers, user metadata, tags and the record header on the S3 tier; add tier.single_put_max_bytes | Parked |
+| komira-ai/tierstore#547 | tierstore-design.md | S3 front: round-trip Content-*, Cache-Control, Expires, x-amz-meta-* and tags with S3's limits and errors | Parked |
+| komira-ai/tierstore#548 | tierstore-design.md | Render the S3 ETag as MD5 (md5-N for multipart) and turn the MD5 on in a later change | Parked |
+| komira-ai/tierstore#549 | tierstore-design.md | Store and return checksums: x-amz-checksum-mode, multipart algorithm and type, CRC combine, x-amz-mp-object-size | Parked |
+| komira-ai/tierstore#550 | tierstore-design.md | Add tag writes and self-copy REPLACE as a change of the record under the key's lock (the META operation), PUT and DELETE ?tagging | Parked |
+| komira-ai/tierstore#551 | tierstore-design.md | Collect superseded OCI tag versions | Parked |
+| komira-ai/tierstore#552 | tsfuse-kernel-findings.md | tsfuse: a server killed under load on io_uring ends in-flight requests with ECANCELED and resends none (K14, conformance item 7 uring half) | Later |
+| komira-ai/tierstore#553 | tsfuse-kernel-findings.md | tsfuse: run K10 registration checks against the real kernel (REGISTER before INIT is EAGAIN, ring idle until every CPU's queue is registered, a refused REGISTER turns io_uring off) | Not scheduled |
+| komira-ai/tierstore#554 | tsfuse-kernel-findings.md | tsfuse: show on the real kernel that FORGET arrives on /dev/fuse and is not delivered on the ring (K9, K11) | Not scheduled |
+| komira-ai/tierstore#555 | virtual-build-fs.md | tierstore fs: detach <run> answers stall_ms, the time the run's requests waited on fills | Being built |
+| komira-ai/tierstore#556 | virtual-build-fs.md | tierstore fs: per-request-kind latency and per-attach/detach timing metrics for the Q-B measurement | Being built |
+| komira-ai/tierstore#557 | several pages | Correct the Status lines and 'not built' notes of the design pages to match main | Being built |
+| komira-ai/tierstore#407 (open before this audit) | fetch-cache-serve.md | The daemon's `[cache]` root and budget keys, the 50% overlap budget and `tierstore gc legacy` (section 13) | Done by komira-ai/tierstore#485 (Decisions, 3) |
+| komira-ai/tierstore#479 (open before this audit) | one-service.md, tierstore-handover.md | The hand-over's verify defers while the new instance serves read-only | Mostly done by komira-ai/tierstore#571 |
 
 Not filed, with the reason:
 
@@ -160,6 +191,8 @@ Slices of this page: komira-ai/tierstore#481, komira-ai/tierstore#482.
 
 ## [fetch-cache-serve.md](fetch-cache-serve.md)
 
+**Decisions.** The new read path is being built (Decisions, 3). The storage tier of sections 10 and 24 is not planned (Decisions, 1).
+
 ### Sections 1 to 9: data model, L2 tree list, fetch engine, serving, prefetch, eviction, journal
 
 **Status line.** No. Line 3 says "proposed, for the owner's review (revision 8); not built, and nothing in it was run." On main the interface freeze (komira-ai/tierstore#352) and nearly every library crate of sections 2 to 8 are built and tested: tierstore-list, -fetch, -budget, -hashpool, -plan, -entry, -journal, -evict, -mount-client, -mount-server, -tree, -metrics, -harness and tsfuse. Farm measurements exist in docs/measurements (T0, T0-F-a, T10b, fsbench V3 to V5, uring takeover). tsfuse already serves the node mount and the put directory in production (komira-ai/tierstore#412), and the S3 front's large-object routing is written. What is still true is that the read path is not yet the daemon's. The daemon (crates/tierstore) has no production dependency on tierstore-fetch, -entry, -budget, -evict, -journal, -plan or -mount-server. LocalCache::route_large and TreeFs::new are called only from tests. The CAS service, the storage tier (section 10) and the T-L crates tierstore-client and tierstore-cache are not built. Suggested status: "revision 8; the read-path libraries (L2 list, fetch engine, budget, entry store, journal, evictor, mount protocol, tree reader, tsfuse) are built and tested but not yet wired into the daemon's production path; the CAS service work, the storage tier and the T-L crate split are not built." The task table in section 18 does not say which rows have landed, so the page cannot be read as a status report. The "Measured farm facts" heading and the line "nothing in it was run" are stale for the same reason.
@@ -203,6 +236,8 @@ Slices of this page: komira-ai/tierstore#481, komira-ai/tierstore#482.
 
 ### Section 10 (the storage tier) and section 24 (operations and repair)
 
+**Decision: not planned (2026-11-26).** The storage tier of sections 10 and 24 is not planned; its slices are closed (Decisions, 1).
+
 **Status line.** No. Line 3 says "proposed ... revision 8; not built, and nothing in it was run". On main the store's contracts and part of its data layer are built: the frozen traits and fakes (tierstore-store-api, komira-ai/tierstore#352), the formats (tierstore-format, komira-ai/tierstore#359), the index on fjall/redb with recovery, tombstone log, index-sync and LIST merge (tierstore-index, komira-ai/tierstore#367), the section 14 fakes and seal/locate/evict models (tierstore-harness, komira-ai/tierstore#365), the metric families (tierstore-metrics), and measurements run on the farm (docs/measurements/2026-11-t0.md, 2026-11-storage-tier-t0-f-a.md, komira-ai/tierstore#371, komira-ai/tierstore#386). Nothing of the store's runtime is built: no hot store, cold store, drive scheduler, peer service, S3 front with backend = "store", membership/config parsing, destage, EC, promote, GC, repair or ledger. It should say: "proposed (revision 8); T-I, T-S2, T-S3, T10a and the measurements T0 and T0-F-a are built; the store itself (T-S0, T-S1, T-S4 to T-S21) is not, and nothing of it ran on a cluster."
 
 | Section | Item | Status | Built by | Unbuilt |
@@ -210,7 +245,7 @@ Slices of this page: komira-ai/tierstore#481, komira-ai/tierstore#482.
 | 10.1 | Components as config sections, dependency table, startup validation, tierstore_components metric | unbuilt |  | No [hot]/[cold]/[peer]/[s3 backend=store]/[client] sections, no dependency check, no 'settings section without its component' refusal, no node-config unknown-key refusal for the store sections. |
 | 10.1/10.14 | Examples docs/examples/{later-storage,later-build,now-combined}.toml parsed as tests (T-S1) | partial | komira-ai/tierstore#358 (files exist) | The three files exist but no Rust test or parser reads them; only site tests of .md examples exist. |
 | 10.2 | Units, ids (node-id + counter, never reused), HLC cluster stamp, record, block, trailer, chains, shard footer, stripe descriptor, seal and free formats (T-S2) | built | komira-ai/tierstore#359; frozen in komira-ai/tierstore#352 |  |
-| 10.2/24.14 | Additive format deltas of revision 8: per-shard blake3 in the descriptor, incarnation in NODE file, x-ts-ledger-epoch and x-ts-load headers, NodeLoad (T-I2 remainder) | partial | komira-ai/tierstore#352 (store-api); membership route and x-ts-mem-epoch in crates/tierstore-store-api/src/proto.rs | No blake3-per-shard field in StripeDescriptor, no incarnation in NodeIdentity, no LOAD or LEDGER_EPOCH header constants, no NodeLoad. |
+| 10.2/24.14 | Additive format deltas of revision 8: per-shard blake3 in the descriptor, incarnation in NODE file, x-ts-ledger-epoch and x-ts-load headers, NodeLoad (T-I2 remainder) | partial | komira-ai/tierstore#352 (store-api); the x-ts-mem-epoch header (MEM_EPOCH) in crates/tierstore-store-api/src/proto.rs | No blake3-per-shard field in StripeDescriptor, no incarnation in NodeIdentity, no LOAD or LEDGER_EPOCH header constants, no NodeLoad, no membership route. |
 | 10.2 | Index and block table on fjall (redb alternative), liveness rule, replay mark and replay, tombstone log and one drop rule, recovery from trailers/blk idx/cold shard trailers, index-sync, LIST merge with prefix seek, live counts (T-S3) | built | komira-ai/tierstore#367 |  |
 | 10.2 | Majority-committed records (seal, stripe descriptor, stripe free) as real storage and agreement code | partial | komira-ai/tierstore#365 (seal model), komira-ai/tierstore#359 (formats) | Formats and a model exist; no durable acceptor state, no commit path on NVMe, no POST /store/v1/seal or /descriptor handlers. |
 | 10.3 | Hot tier: write and cache segments, group commit, replication with ballots and ack rule, majority seal, seal-and-roll, seal triggers, large-file tee, startup sweep, hot scrub, reclaim, HotSched (T-S4) | unbuilt | komira-ai/tierstore#352 (HotStore trait and fake), komira-ai/tierstore#365 (seal and evict models only) | No segment writer, fdatasync committer, replication stream, seal driver, big/ files, scrub, HotSched. Only the trait (crates/tierstore-store-api/src/hot.rs) and models exist. |
@@ -226,7 +261,7 @@ Slices of this page: komira-ai/tierstore#481, komira-ai/tierstore#482.
 | 10.6 | Read path: LOCATE with load-ordered copies and reconstructor, definitive-miss rule, negative cache, hot/cold/degraded GET routes | partial | komira-ai/tierstore#352 (routes, Locate types), komira-ai/tierstore#365 (locate model), definitive_miss_answers in store-api view.rs | No server handlers, no load table, no negative cache, no degraded read service. |
 | 10.6 | Peer service routes (private listener, cluster token) and x-ts-load / ping between storage nodes | unbuilt |  | No HTTP server or client for /store/v1/*; StoreUpstream exists only as a fake and in the fetch engine's tests. |
 | 10.7 | Per-drive scheduler DriveSched (streams, classes, write share, slices, preemption, small lane, read-ahead/slot release, watchdog, EIO to failed) and HotSched (T-S5) | partial | komira-ai/tierstore#352 (trait, config structs), komira-ai/tierstore#365 (fake drive in harness), tierstore-metrics drive group | No scheduler implementation or dedicated I/O threads. |
-| 10.8 | Membership document (epoch, cluster settings, per-node and per-drive in\|drain\|out), validator at startup, wrong-mount guard | partial | komira-ai/tierstore#352 and komira-ai/tierstore#358 (View/NodeView types, MEMBERSHIP route) | View types only; no TOML parse of membership.toml, no drive identity check at start. |
+| 10.8 | Membership document (epoch, cluster settings, per-node and per-drive in\|drain\|out), validator at startup, wrong-mount guard | partial | komira-ai/tierstore#352 and komira-ai/tierstore#358 (View/NodeView types) | View types only; no membership route, no TOML parse of membership.toml, no drive identity check at start. |
 | 10.8 | Seed bootstrap and epoch following in a client (tierstore-client::membership), membership_* metrics (T-SB) | unbuilt |  | No tierstore-client crate, no seeds/membership [client] section, no MembershipUnavailable. |
 | 10.8 | Audit: stripe margin gauges, hot_blocks_by_copies, `tierstore store audit --keys`, placement audit | partial | tierstore-metrics (families only) | Metric families are declared; nothing computes or emits them; no `store audit` verb, no placement audit. |
 | 10.9 | S3 subset for the store: PUT/GET range/HEAD/DELETE/LIST, ETag = blake3 generation, 501 for the rest; ObjectStore conformance target | partial | komira-ai/tierstore#367 (LIST merge), objstore-conformance (komira-ai/tierstore#465 area, docs/measurements/2026-11-objstore-conformance.md) | LIST/index half only. The S3 front with backend = store, writer routing and the conformance run against it (T-S0 tierstore target) do not exist. |
@@ -306,6 +341,8 @@ Slices of this page: komira-ai/tierstore#481, komira-ai/tierstore#482.
 
 ### Section 18: the work breakdown, task by task
 
+**Decisions.** The storage-tier rows (T-I2, T-S0 to T-S21, T-SB, T-B5) are not planned (Decisions, 1). The read-path rows are being built in the order of Decisions, 3. T-L (komira-ai/tierstore#488) is not planned.
+
 **Status line.** No. Line 3 says "proposed, for the owner's review (revision 8); not built, and nothing in it was run." Main has built the whole client-side read path as crates (tsfuse komira-ai/tierstore#357/#366/#387/#388/#390/#391/#392/#395/#398; tierstore-entry komira-ai/tierstore#360/#384; tierstore-journal komira-ai/tierstore#362; tierstore-evict komira-ai/tierstore#382; tierstore-hashpool komira-ai/tierstore#355; tierstore-fetch komira-ai/tierstore#369; tierstore-budget komira-ai/tierstore#376; tierstore-mount-server komira-ai/tierstore#363; tierstore-mount-client komira-ai/tierstore#368; tierstore-plan komira-ai/tierstore#354; tierstore-list komira-ai/tierstore#383; tierstore-metrics komira-ai/tierstore#356; tierstore-harness komira-ai/tierstore#365), the storage tier's frozen traits and formats (tierstore-store-api, tierstore-format komira-ai/tierstore#359, tierstore-index komira-ai/tierstore#367), the ObjectStore conformance suite (komira-ai/tierstore#361), the farm measurements, the node's mount on tsfuse with fuser removed (T-R, komira-ai/tierstore#412), and the deletions T11a (komira-ai/tierstore#411) and T11b (komira-ai/tierstore#375). Not built: every storage-node component (hot tier T-S4, drive scheduler T-S5, peer service/S3 front/StoreUpstream T-S6, cold tier T-S7, EC T-S8, repair, promote/GC, ledger, simulator), the T-I2 delta, T-S1 validator, T-SB, the tierstore-client and tierstore-cache crates of T-L, and the daemon's use of the new cache/engine/mount-server in production. A truthful status line would say: "revision 8; the build-node read path of sections 2 to 9 is built as library crates and the node's FUSE mount runs on tsfuse (T-I to T-R, T11a, T11b); the daemon does not yet read through the new engine or shared cache (issue 407); the storage tier has its frozen interfaces, formats and key index (T-I, T-S2, T-S3) and none of its node components (T-S4 onward); revision 8's T-I2 and sections 23 and 24 are not built."
 
 | Section | Item | Status | Built by | Unbuilt |
@@ -328,7 +365,7 @@ Slices of this page: komira-ai/tierstore#481, komira-ai/tierstore#482.
 | 18 / 5.3 | T-F9 put-directory Fs (PutFs) | built | komira-ai/tierstore#398 |  |
 | 18 / 2,5.1 | T1 Linux entry store (sparse file, sealed state memfd, counter memfds with remap, lifeline, claim CAS, holds, flock) | built | komira-ai/tierstore#360 (crates/tierstore-entry) |  |
 | 18 / 8 | T1b journal and snapshot (batched PUNCH, durable bit, boot_id, recheck, crash tests) | built | komira-ai/tierstore#362 (crates/tierstore-journal) |  |
-| 18 / 2 | T-M1 macOS in-process EntryStore, NFS front read, F_FULLFSYNC, conformance suite; T-M2 macOS run on demand | built | komira-ai/tierstore#384 (+ komira-ai/tierstore#463 macOS one-process); T-M2 runs in beta.yml |  |
+| 18 / 2 | T-M1 macOS in-process EntryStore, NFS front read, F_FULLFSYNC, conformance suite; T-M2 macOS run on demand | partial | komira-ai/tierstore#384: the in-process EntryStore, F_FULLFSYNC and its conformance suite (crates/tierstore-entry/src/inproc); komira-ai/tierstore#463 (macOS one process); T-M2 runs in beta.yml | The NFS front does not read through the in-process entry store: crates/tierstore/src/server/treefs/nfs/fs.rs reads blobs through the core, whose core/blob.rs calls fills.fill_blob (the 5.6 row). |
 | 18 / 3.3,4.7 | T2 hash pool (Verifier) | built | komira-ai/tierstore#355 (crates/tierstore-hashpool) |  |
 | 18 / 4 | T3 fetch engine (single flight, claims, DRR queue, ramp, demand sub-range, stall retry, hedge, LOCATE, pinned generation, lost path) | built | komira-ai/tierstore#369 (crates/tierstore-fetch) | Crate layout differs from section 23 (one crate tierstore-fetch, not split between tierstore-client and tierstore-cache); the in-process LOCATE of a co-located client has no node to run against yet |
 | 18 / 4.3 | T4 budget (per-drive permits, per-node level, client ceiling, controller, ladder, demand reserve, scheduler hint) | built | komira-ai/tierstore#376 (crates/tierstore-budget) |  |
@@ -402,6 +439,8 @@ Slices of this page: komira-ai/tierstore#515.
 
 ## [node-local-trees.md](node-local-trees.md)
 
+**Decision: the create-tree API is not planned (2026-11-27).** The tree store and the mount provider path are built and stay. komira-ai/tierstore#326 is closed, and komira-ai/tierstore#520 is rescoped to the previous-release read test (Decisions, 4).
+
 **Status line.** No. It says "proposed ... not built" and section 15 says "none started". Tasks 1 to 5 are mostly built (komira-ai/tierstore#321, komira-ai/tierstore#322, komira-ai/tierstore#325, komira-ai/tierstore#328, komira-ai/tierstore#330, komira-ai/tierstore#332, komira-ai/tierstore#334). Not built: the connection of the trees gRPC front to the tree store (every call that passes the key check answers UNAVAILABLE NotServing; crates/tierstore/src/server/trees/mod.rs:14), create-time prefetch (wait/background), the create-time location-not-empty and source-under-location checks, retiring hydrate, and the build-frontend and measurement tasks (6, 7), which are out of repo or not code. A fair status line is: "partly built: the record, the tree store, extents-v1 cache entries, the trees gRPC front (refusing and key-checking, not yet connected to the store), the S3 and fs readers of placements are on main; the create call itself with prefetch is not connected; the build frontend change and measurements are open (komira-ai/tierstore#326)". The page also now uses the mount provider (komira-ai/tierstore#337) as the real producer of placements, which the design never mentions.
 
 | Section | Item | Status | Built by | Unbuilt |
@@ -443,6 +482,8 @@ Slices of this page: komira-ai/tierstore#516, komira-ai/tierstore#517, komira-ai
 
 ## [one-service.md](one-service.md)
 
+**Decision: being built** (Decisions, 2).
+
 **Status line.** No, it is stale. It says "No code changes come with this document; the build plan of section 6 builds it", but P1, P1b, P2, P4, P5, P6 and P7 are merged (komira-ai/tierstore#445, komira-ai/tierstore#446, komira-ai/tierstore#448, komira-ai/tierstore#450, komira-ai/tierstore#452, komira-ai/tierstore#454, komira-ai/tierstore#456, komira-ai/tierstore#458, komira-ai/tierstore#462, komira-ai/tierstore#463), and section 3.4 already says "What P5 built". It should say: release M (phase 1) is built except that the Linux start does not yet use the one conversation (P3's wiring: `take_service`, `Offer::with_mount`, `written::follow` and `treefs::handover::offered` are still `expect(dead_code)`; the start asks `take 1` and `take-fs 1` separately, so the cache lock is not passed, issue 479). P8 is in the deployment's repo. Phase 2 (P9, M+1) is unbuilt.
 
 | Section | Item | Status | Built by | Unbuilt |
@@ -476,6 +517,8 @@ Slices of this page: komira-ai/tierstore#516, komira-ai/tierstore#517, komira-ai
 Slices of this page: komira-ai/tierstore#522, komira-ai/tierstore#523, komira-ai/tierstore#524.
 
 ## [overwrite.md](overwrite.md)
+
+**Decision: parked** (the wider S3 semantics; Decisions, 5).
 
 **Status line.** No. It says "decided, designed here, not built" and "the code is write-once until the pull requests of section 14 land". On main an overwrite is built, but by put-without-lock.md (marker and lock, not the `replace` entry flag), and it is live only under format phase `active-marks`. The front's plain PUT and CompleteMultipartUpload replace an existing key through `Backend::put_stream_replacing` / `complete_upload_replacing` (backend.rs:492, :880; ops.rs:482-516, :651; PRs komira-ai/tierstore#209, komira-ai/tierstore#220, komira-ai/tierstore#222, komira-ai/tierstore#223, komira-ai/tierstore#226). A plain PUT through a write-through cache overwrites (komira-ai/tierstore#226). A proposed line: "Decided 2026-11-05; sections 1, 3, 5.1-5.3, 5.6, 6, 9-12, 13 (config, metrics, proto 3) and 14 (PR order) are superseded by put-without-lock.md (10.2) and are built there under `active-marks`. Still the plan and unbuilt: version identity and the ETag conditionals (4, 5.4), If-Match on put and completion, x-amz-mp-object-size, CopyObject (5.5), scoped-key overwrite (8), and the Cache-Control freshness of the local cache (7)." The ETag, record and Cache-Control round trip that sections 4 and 7 rely on (tierstore-design.md section 16, PR komira-ai/tierstore#173) is also not built: no code under crates/tierstore/src reads or stores Cache-Control, a record or an MD5 ETag.
 
@@ -570,6 +613,8 @@ Slices of this page: komira-ai/tierstore#533.
 
 ## [put-without-lock.md](put-without-lock.md)
 
+**Decision: parked** (the two-tier hot plus cold store work; Decisions, 5). komira-ai/tierstore#538 was already built (Decisions, 6).
+
 **Status line.** No. It says "proposed (owner direction, 2026-11-05), not built ... the code is the entry protocol ... until the pull requests of section 10 land". Pull requests 1 to 9, 10, 10a, 11 and 12 of 10.4 are on main. PR 7 is komira-ai/tierstore#213, PR 6 is komira-ai/tierstore#209, PR 11 is komira-ai/tierstore#220, komira-ai/tierstore#222 and komira-ai/tierstore#226, PR 10 is komira-ai/tierstore#223, and PR 10a is komira-ai/tierstore#227. The markers code (marker.rs, marks*.rs, tiered/marked_put.rs, marks_delete.rs, overwrite.rs, entry_reconciler/marks.rs) and the verbs (server/verbs/format_epoch/marks.rs) exist, and operations.md and limits.md document the rollout. It should say: built and gated behind the format phase `active-marks`, with the entry protocol still in the tree. Not built: client `If-Match` (501), the tier-independent ETag (Q4), part two of PR 10 (rewrite tierstore-design.md and overwrite.md, remove the entry protocol), the compat tests for the markers, five config keys, and about 24 test names in 7.4 that name no function on main.
 
 | Section | Item | Status | Built by | Unbuilt |
@@ -602,7 +647,7 @@ Slices of this page: komira-ai/tierstore#533.
 | 7.4 tests by name | 24 test names in the 7.4 tables that name no function on main | partial |  | Absent by exact name: a_read_between_the_object_and_the_marker_of_a_recreate_never_returns_the_deleted_cold_copy, a_streamed_put_that_loses_a_creation_race_with_other_bytes_is_503 / ..._same_bytes_is_200, a_replayable_put_that_loses_a_creation_race_becomes_an_overwrite, a_same_bytes_put_that_changes_content_type_or_metadata_is_an_overwrite, a_delete_during_a_copy_is_acknowledged_at_once_and_the_late_cold_publish_is_deleted_by_the_tombstone_pass, a_head_and_a_list_after_an_acknowledged_delete_do_not_show_the_key_while_cold_holds_it, a_put_after_an_acknowledged_delete_is_served_not_the_old_cold_copy, a_put_of_a_key_during_its_eviction_waits_for_the_lock_and_lands_dirty, a_want_marker_is_left_alone, a_presigned_put_is_create_only_and_hot_only_and_503_when_hot_answers_full, the_oci_front_pushes_blobs_manifests_and_tags_on_the_fast_path_and_discards_by_delete, a_cache_hit_older_than_revalidate_after_is_checked_by_a_head_and_dropped_when_the_key_changed, a_completion_over_an_existing_key_replaces_it_under_the_lock, and the If-Match group (if_match_is_404..., of_n_racing_if_match_puts..., an_if_match_put_whose_tag_changed..., if_match_is_501_until_the_tier_independent_etag_exists, a_completion_with_if_match_replaces_only_the_matching_version, an_if_match_put_of_an_evicted_key...). Many are probably built under another name (a_get_after_an_acknowledged_delete_may_not_answer_the_deleted_bytes, an_upload_begun_in_cold_is_not_completed_on_markers exist). Two are marked 'not built' by the page itself (a_connection_reset_on_a_create_only_put_is_checked_by_a_head_not_reported, a_put_never_refreshes_the_format_or_the_level_on_the_ack_path) and need no work. |
 | 5.1, 7.4 | Reset on a create-only put re-checked by HEAD; refresh of format/level off the ack path | superseded |  |  |
 | 10.3 stale comments (P10) | evict.rs:24-27, tags.rs, limits.md l.9, overview.md:30, server/mod.rs:15-23, tiered.rs, backend.rs:341, cache.rs:188, lib.rs:3, presign.rs header corrected | partial | komira-ai/tierstore#211 (tags.rs); docs limits.md rewritten | evict.rs:20-30 still describes eviction under an entry (true only for the entry protocol); lib.rs:3 still says 'objects are immutable byte strings' and 'create-only put'. Not checked line by line for the rest. |
-| Appendix C rows 1-4 / 10.4 item -1 | dot-segment error code, presign name check narrowed to whole segments, dir tier long names | partial | server/presign.rs:181 | Row 4 built: check_name refuses only a '.' or '..' segment and XML-forbidden characters. Row 3 not built: dir tier still answers KeyTooLong on long encoded names (dir.rs). Row 1 (reqwest removes dot segments) is not tierstore-only. Row 2 is a choice with a stated cost. |
+| Appendix C rows 1-4 / 10.4 item -1 | dot-segment error code, presign name check narrowed to whole segments, dir tier long names | built | Row 3: komira-ai/tierstore#198 (a key whose file name passes 255 bytes is stored under a hashed name on a dir tier; crates/tierstore/src/dir.rs, dir_long_tests.rs). Row 4: server/presign.rs:181 | Row 1 (reqwest removes dot segments) is not tierstore-only. Row 2 is a choice with a stated cost. |
 | Q10, Q14, Q16, Q11 measurement | Open questions: silo conditional_delete, share of create-only puts, re-put share (queries not run) | not-code |  |  |
 | A22 / 8.1 | Stale-phase nodes and registration fields not in the model (Appendix B 'Not modelled') | not-code |  |  |
 
@@ -611,6 +656,8 @@ Slices of this page: komira-ai/tierstore#534, komira-ai/tierstore#535, komira-ai
 ## [tierstore-design.md](tierstore-design.md)
 
 ### Sections 1 to 13
+
+**Decision: parked** (the two-tier hot plus cold store work; Decisions, 5).
 
 **Status line.** No (line 3 is stale in three places). (1) It says the removal of the start-up store probes (section 9, decision 9) is "decided and not built" and that the binary "still runs its start-up self-test (probe_tiers)". It is built: komira-ai/tierstore#113 removed the self-test, `git grep probe_tiers -- crates` finds nothing, and crates/tierstore/docs/operations.md:248 says "This release does neither". `cold_store.skip_checks` and `server.backend_check_wait` are only accepted and ignored (config.rs:171-172, configuration.md:716). (2) It says the entry protocol is "the only protocol in the code". Since the put-without-lock work (komira-ai/tierstore#210, komira-ai/tierstore#213, komira-ai/tierstore#220, komira-ai/tierstore#222, komira-ai/tierstore#223) the code also has the marker protocol (`active-marks`, epoch 3, `marks*.rs`, `entry_reconciler/marks.rs`, `tiered/marked_put.rs`), and section 13.1 itself makes an `s3:` hot tier start at `active-marks`. (3) Sections 1 (req. 2, line 17) and 2 (line 50) say overwrite is "not built". Under `active-marks` a plain PUT overwrites (komira-ai/tierstore#220, komira-ai/tierstore#222, komira-ai/tierstore#226; limits.md:10), and section 3 (line 74) says the OCI pull-through is "decided and planned", but it is built (komira-ai/tierstore#139, komira-ai/tierstore#150). The line is right that section 16 (the object record) is not built, and the header of section 13 is right that step 6 is not built.
 
@@ -652,6 +699,8 @@ Slices of this page: komira-ai/tierstore#534, komira-ai/tierstore#535, komira-ai
 
 ### Sections 14 onward: future work, decisions, object metadata and checksums
 
+**Decision: parked** (the wider S3 semantics; Decisions, 5).
+
 **Status line.** No. (1) The intro (line 3) says the removal of the start-up store probes is 'decided and not built: the current binary still runs its start-up self-test (probe_tiers)'. It is built: git grep probe_tiers finds nothing in crates/; crates/tierstore/src/server/cli.rs:67-74 says tierstore 'does not test or probe the tiers', and server.backend_check_wait / cold_store.skip_checks are deprecated and ignored (cli.rs:447-450, 705). The same stale claim sits in 14(d) item 5 only as 'withdrawn', which is right. (2) Intro says the entry protocol 'is the only protocol in the code'. Not any more: put-without-lock.md's marker protocol (marks.rs, tiered/marked_put.rs, tiered/overwrite.rs, format phase active-marks, format-epoch --activate-marks/--restore-entries, PRs 1-13 of its 10.4, e.g. komira-ai/tierstore#209, komira-ai/tierstore#213, komira-ai/tierstore#220, komira-ai/tierstore#222, komira-ai/tierstore#223) runs beside entries and is the way a plain PUT overwrites. The page never mentions markers. (3) Intro says section 16 is 'designed and not built'. Mostly true (no ObjectRecord, no sidecar, no ETag/metadata/tag/copy), but 16.13 change 1 (CRC-64/NVME and the one-pass accumulator, server/digests.rs, komira-ai/tierstore#181) is built, as 16.13 itself says. Suggested status: 'entries are the base protocol; markers (put-without-lock.md) are built behind active-marks and carry overwrite; section 16 is designed, with change 1 built.'
 
 | Section | Item | Status | Built by | Unbuilt |
@@ -685,7 +734,7 @@ Slices of this page: komira-ai/tierstore#534, komira-ai/tierstore#535, komira-ai
 | 16.13 change 4 | S3 tier headers, x-amz-meta-tierstore-record, native tags, per-part checksums, single_put_max_bytes, objstore-s3 sends object headers | unbuilt | objstore-s3 has checksum.rs (checksum-mode on reads) and parts.rs only | No system headers or x-amz-meta-* sent by objstore-s3 put; no x-amz-tagging; tier still splits at 16 MiB multipart; no single_put_max_bytes. |
 | 16.13 change 5 | S3 front round trip of Content-*/Cache-Control/Expires/x-amz-meta-*, limits and errors, reserved tierstore- prefix, x-amz-tagging, GET ?tagging | unbuilt | nothing; ops.rs:141-144 answers etag=meta.tag and Content-Type application/octet-stream always; bucket.rs:76 lists 'tagging' only as an allowed-subresource name for refusal | All of it: 16.1's table is still today's behaviour. |
 | 16.13 change 6 | Local cache sidecar record, fills with x-amz-checksum-mode: ENABLED, write-through forwards headers and declared checksum, chained proxies show one ETag | unbuilt | nothing in tierstore local_cache; objstore-s3 supports reading checksum-mode (crates/objstore-s3/tests/s3_checksum.rs) as a client feature | Cache sidecar has no record field; no checksum-mode on fills; no header forwarding. |
-| 16.13 changes 7 and 7b | ETag as MD5 (put answer ETag from record, md5-N multipart, part ETag as MD5, If-Match on rendered ETag), then digests.always default md5 | unbuilt | put and completion answers already send etag (ops.rs:945-946, 983-985) but the tier's tag, not an MD5 | Rendering rule, MD5 part ETags, md5-N, If-Match against rendered ETag, config relation max_request_bytes <= single_put_max_bytes. |
+| 16.13 changes 7 and 7b | ETag as MD5 (put answer ETag from record, md5-N multipart, part ETag as MD5, If-Match on rendered ETag), then digests.always default md5 | unbuilt | UploadPart and multipart completion answer an ETag, the tier's tag, not an MD5 (crates/tierstore/src/server/ops.rs:945-946, 983-985) | The PutObject answer has no ETag (put_streamed answers 200 with no headers, ops.rs:683). Rendering rule, MD5 part ETags, md5-N, If-Match against the rendered ETag, config relation max_request_bytes <= single_put_max_bytes. |
 | 16.13 change 8 | Stored and returned checksums: x-amz-checksum-mode on GET/HEAD, Create's algorithm and type, Complete part check, composite and full-object, x-amz-mp-object-size, CRC combine | unbuilt | nothing in the front; digests.rs verifies a claimed checksum on put only | git grep -n 'checksum.mode\\|x-amz-checksum-algorithm\\|mp-object-size' -- crates/tierstore/src found nothing; no crc combine in digests.rs |
 | 16.13 change 9 | CopyObject and UploadPartCopy with metadata/tagging directives, copy-source conditions, copy.max_object_bytes | unbuilt | nothing; the front refuses with 501 | All of it. |
 | 16.13 change 10 | META entry op for tag writes and self-copy REPLACE; PUT/DELETE ?tagging | unbuilt | nothing | No META op in entry.rs or marker body; no ?tagging routes (bucket.rs:76 refuses them). |
@@ -812,7 +861,7 @@ Slices of this page: komira-ai/tierstore#552, komira-ai/tierstore#553, komira-ai
 | 6.1 | Tree manifest v1 format (children sorted by name, dir/file/symlink, exec, sha256, size, source{key,offset}, fixed-name refusals) | built | komira-ai/tierstore (many; first in the tree-fs PRs); crates/tierstore/src/tree_manifest.rs; docs/tree-manifest.md |  |
 | 6.1 | Manifest limits: 2^24-1 entries ('tree too large'), 64 MiB manifest, depth 4096 | built | crates/tierstore/src/tree_manifest.rs |  |
 | 6.1 | Child manifests and blobs fetched from cas/l/<sha256>; source fill publishes an entry with origin 'span' that the S3 front never serves | built | crates/tierstore/src/server/local_cache/fill.rs, fill/, tree_fill.rs, source.rs |  |
-| 6.1 | Client writes a manifest by create-only put (create-tree API) | built | crates/tierstore-trees-api (CreateTree rpc); crates/tierstore/src/server/local_cache/trees/create.rs |  |
+| 6.1 | Client writes a manifest by create-only put (create-tree API) | partial | The manifest convention: a client writes the manifest by a create-only S3 PUT (crates/tierstore/src/tree_manifest.rs). The CreateTree rpc is defined (crates/tierstore-trees-api) and the tree store builds trees (crates/tierstore/src/server/local_cache/trees/create.rs) | The CreateTree rpc does not create a tree: production setup gives the trees front no core (crates/tierstore/src/server/trees/setup.rs:99), so it answers NotServing (server/trees/service.rs). The create-tree API is not planned (Decisions, 4). |
 | 6.2 | Protocol-independent core with trait-based fills (Fills: fill socket client and in-process calls) | built | komira-ai/tierstore#445; crates/tierstore/src/server/treefs/core.rs, fills.rs, fill_client.rs, in_process.rs |  |
 | 6.2 | Fill socket verbs fill, touch, pin, unpin, pins-live, place, unplace, places-live with own permits (fill_socket_concurrency 16) and wait (fill_socket_wait) | built | crates/tierstore/src/server/fill_socket/request.rs, mod.rs, mount.rs; config_cache.rs |  |
 | 6.2 | fs interface type ([[interface]] type='fs'), build-node-only, params as the fs.toml [fs] table; params.owner {subids_of,id} | built | komira-ai/tierstore#448, komira-ai/tierstore#450 |  |
