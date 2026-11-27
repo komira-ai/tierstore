@@ -323,8 +323,8 @@ impl Provider {
     /// source without an attempt, which a provider before attempts placed for it.
     fn placed_path(&self, id: &SourceId) -> Option<PathBuf> {
         let unnumbered = id.unnumbered();
-        let placed = std::iter::once(id).chain((id.attempt != 0).then_some(&unnumbered));
-        placed
+        std::iter::once(id)
+            .chain((id.attempt != 0).then_some(&unnumbered))
             .find(|id| self.placement_at(id).is_some())
             .map(|id| self.shared.settings.mountpoint.join(id.path()))
     }
