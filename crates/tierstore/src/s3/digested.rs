@@ -3,9 +3,9 @@
 //! sending the digests the request named on its PUT for the store to check (`Content-MD5`,
 //! `x-amz-checksum-sha256`), so that a store that checks them refuses a body cut short; and
 //! [`Backend::short_objects`](crate::Backend::short_objects), the counts of the store's look at
-//! the key after a PUT that got no answer.
+//! the key after a PUT that got no answer and of its aborts that failed.
 
-use objstore_s3::s3::{CutPuts, PutChecksums};
+use objstore_s3::s3::{Cleanups, CutPuts, PutChecksums};
 
 use super::{S3Backend, map_error, object_key, put_answer, streamed};
 use crate::{BodyDigests, Error, PartBody, PutAnswer, PutKind, ShortObjects};
@@ -43,16 +43,33 @@ pub(super) async fn put(
     Ok(put_answer(answer))
 }
 
-/// The counts of the store's looks (module docs).
+/// The counts of the store's looks and failed aborts (module docs).
 pub(super) fn short_objects(backend: &S3Backend) -> ShortObjects {
     let CutPuts {
         removed,
         left,
         failed,
     } = backend.store.cut_puts();
+    let Cleanups {
+        looks_skipped,
+        failed_aborts,
+        aborts_dropped,
+    } = backend.store.cleanups();
     ShortObjects {
         removed,
         left,
         failed,
+        skipped: looks_skipped,
+        failed_aborts,
+        aborts_dropped,
+    }
+}
+
+impl S3Backend {
+    /// Waits until no task of the store's work after failed writes (the look after a PUT that
+    /// got no answer, the abort of a failed upload) runs: for a test that must see what that work
+    /// came to.
+    pub async fn cleanups_idle(&self) {
+        self.store.cleanups_idle().await;
     }
 }

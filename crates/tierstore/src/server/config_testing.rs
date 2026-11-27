@@ -115,3 +115,6 @@ kind = "memory"
 pub(crate) fn oci_interface(listen: &str, more: &str) -> String {
     format!("\n[[interface]]\ntype = \"oci\"\nparams = {{ addresses = [\"{listen}\"]{more} }}\n")
 }
+
+#[path = "live_configs.rs"]
+pub(in crate::server) mod live_configs;

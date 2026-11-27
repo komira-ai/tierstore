@@ -172,26 +172,25 @@ fn a_node_without_an_fs_interface_restarts_as_before() {
     );
 }
 
-/// Asserts that a Mac whose params name the fs job restarts as before even when both releases
-/// list `handoff-exec-v1` and the file has an `fs` interface: `prepare` is not refused, asks no
-/// release, and `cutover` boots the main job out and in with no signal. Catches a hand-over of a
-/// node whose fs job would lose its mount.
+/// Asserts that a Mac whose file has an `fs` interface hands over when both releases list
+/// `handoff-exec-v1`, even when the params name the fs job (as the manifests before
+/// komira-ai/tierstore#624 did): `prepare` asks the releases and has the staged one check the
+/// file, `cutover` is the look at the job and `SIGUSR2`, and no call names the fs job. Catches a
+/// release update that restarts a node that serves its own mount, or boots in a job the switch
+/// disabled.
 #[test]
-fn a_mac_with_an_fs_job_restarts_as_before() {
+fn a_mac_whose_file_has_an_fs_interface_hands_over_whatever_its_params_name() {
     let fake = capable();
-    fake.with_fs(true);
+    fake.with_fs(false);
     fake.set_config(CONFIG, Some(WITH_MOUNT));
     fake.advance(&[Prepare, Cutover]);
-    let calls = fake.launchd_calls();
-    assert!(calls.contains(&bootout()));
-    assert!(calls.contains(&bootstrap()));
-    assert!(!calls.contains(&kill()));
+    assert_eq!(fake.launchd_calls(), [loaded(), kill()]);
     assert!(
-        !fake
-            .log()
+        fake.log()
             .iter()
             .any(|line| line.starts_with("host.capabilities"))
     );
+    assert!(!fake.log().iter().any(|line| line.contains("tierstore-fs")));
 }
 
 /// Asserts that a first install is never refused for a file with an `fs` interface and asks no

@@ -496,6 +496,22 @@ impl Host for SystemHost<'_> {
             .any(|line| marks.iter().any(|mark| line.contains(mark.as_str()))))
     }
 
+    /// Looks `path` up under the root (`stat`): a directory is `true`, anything else or nothing
+    /// there `false`. On a hard NFS mount whose server is gone the look-up waits until the kernel
+    /// marks the mount dead (its `deadtimeout`, `fs.nfs.dead_timeout` of the node's file), and
+    /// then fails.
+    fn is_dir(&self, path: &Path) -> Result<bool, PortError> {
+        let at = under(&self.root, path);
+        match fs::metadata(&at) {
+            Ok(meta) => Ok(meta.is_dir()),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(PortError::failed(
+                KIND,
+                format!("stat {}: {error}", at.display()),
+            )),
+        }
+    }
+
     /// Reads the node's configuration file `path` under the root: at most [`CONFIG_MAX`] bytes of
     /// UTF-8. A file that is not there is `None`.
     fn config(&self, path: &Path) -> Result<Option<String>, PortError> {

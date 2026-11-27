@@ -33,9 +33,10 @@ pub enum PutKind<'a> {
     Replaces(&'a PutClaim),
 }
 
-/// What a backend over an S3 store did about the objects the store kept of its single PUTs that
-/// got no answer, since it was made: one look at the key after each such PUT (`objstore-s3`'s
-/// `s3/cut_put.rs`).
+/// What a backend over an S3 store did after its writes that failed, since it was made: about the
+/// objects the store kept of its single PUTs that got no answer, one look at the key after each
+/// such PUT (`objstore-s3`'s `s3/cut_put.rs`); and about the multipart uploads whose abort failed
+/// (`s3/cleanup.rs`). Both run in tasks of their own, after the write has given its error.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ShortObjects {
     /// Objects of the wrong length the PUT had made, deleted.
@@ -43,6 +44,15 @@ pub struct ShortObjects {
     /// Objects of the wrong length the PUT had not made (one there before it began, or another
     /// writer's), left as they are.
     pub left: u64,
-    /// Looks that could not be made or finished, so an object of the wrong length may have stayed.
+    /// Looks that could not be made or finished (in their deadline), so an object of the wrong
+    /// length may have stayed.
     pub failed: u64,
+    /// Looks not made: as many were running as may run at once.
+    pub skipped: u64,
+    /// The multipart uploads whose abort failed, kept to be aborted again when the store answers:
+    /// the size of that list now, a gauge.
+    pub failed_aborts: u64,
+    /// Failed aborts dropped from that list (it was full, or the abort was tried every time it
+    /// may be), left to the bucket's lifecycle rule.
+    pub aborts_dropped: u64,
 }

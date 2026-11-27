@@ -110,6 +110,7 @@ async fn cut_and_kept(s3: &FakeS3, k: &ObjectKey, len: u64, pieces: &[&'static [
     let failed = store.put_stream(k, len, cut(pieces)).await.unwrap_err();
     assert!(matches!(failed, ObjectStoreError::Body(_)), "{failed}");
     s3.wait_for(|s| s.object_len(k).is_some()).await;
+    store.cleanups_idle().await;
     assert_eq!(store.cut_puts().failed, 1);
 }
 

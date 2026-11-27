@@ -246,6 +246,7 @@ async fn a_cut_put_leaves_nothing_and_the_put_sent_again_makes_the_object() {
     let k = "cas/b/1/n/pack";
     let failed = backend.put_stream_sha256(k, len, cut(&bytes, 1 << 20), digest);
     assert!(matches!(failed.await, Err(Error::Unavailable(_))));
+    backend.cleanups_idle().await;
     let missing = backend.head(k).await.unwrap_err();
     assert_eq!(missing, Error::NotFound(k.to_owned()));
     let made = backend.put_stream_sha256(k, len, body(&bytes), digest);
@@ -284,6 +285,7 @@ async fn a_cut_multipart_put_leaves_nothing_and_the_put_sent_again_makes_the_obj
     let k = "cas/b/1/n/L1";
     let failed = backend.put_stream_sha256(k, len, cut(&bytes, 7 << 20), digest);
     assert!(matches!(failed.await, Err(Error::Unavailable(_))));
+    backend.cleanups_idle().await;
     assert_eq!(open_uploads(&store).await, 0, "the upload was aborted");
     let missing = backend.head(k).await.unwrap_err();
     assert_eq!(missing, Error::NotFound(k.to_owned()));
@@ -303,6 +305,7 @@ async fn a_cut_multipart_put_leaves_nothing_and_the_put_sent_again_makes_the_obj
         differs.await.unwrap_err(),
         Error::AlreadyExists(k.to_owned())
     );
+    backend.cleanups_idle().await;
     assert_eq!(open_uploads(&store).await, 0);
 }
 

@@ -116,6 +116,7 @@ async fn a_put_cut_before_its_first_byte_leaves_no_object() {
         async move { store.put_stream(&k, 10, cut(&[])).await }
     };
     let failed = cut_put(&s3, 1, put).await;
+    store.cleanups_idle().await;
     assert!(matches!(failed, ObjectStoreError::Body(_)), "{failed}");
     assert_eq!(s3.object_len(&k), None);
     assert_eq!(store.cut_puts(), counts(1, 0, 0));
@@ -143,6 +144,7 @@ async fn a_plain_put_cut_part_way_removes_the_short_object_it_made() {
         }
     };
     cut_put(&s3, 1, put).await;
+    store.cleanups_idle().await;
     assert_eq!(s3.object_len(&k), None);
     assert_eq!(store.cut_puts(), counts(1, 0, 0));
 }
@@ -163,6 +165,7 @@ async fn a_put_cut_over_an_object_there_before_leaves_it() {
         async move { store.put_stream(&k, 10, cut(&[])).await }
     };
     cut_put(&s3, 1, put).await;
+    store.cleanups_idle().await;
     assert_eq!(s3.object_len(&k), Some(8));
     assert_eq!(store.cut_puts(), counts(0, 1, 0));
 
@@ -171,6 +174,7 @@ async fn a_put_cut_over_an_object_there_before_leaves_it() {
         async move { store.put_stream(&k, 8, cut(&[b"eight"])).await }
     };
     cut_put(&s3, 2, put).await;
+    store.cleanups_idle().await;
     assert_eq!(s3.object_len(&k), Some(8));
     assert_eq!(store.cut_puts(), counts(0, 1, 0));
     assert_eq!(taken(&s3, "DELETE"), 0);
@@ -189,6 +193,7 @@ async fn a_short_object_of_another_put_is_left() {
     let failed = other.put_stream(&k, 10, cut(&[])).await.unwrap_err();
     assert!(matches!(failed, ObjectStoreError::Body(_)), "{failed}");
     s3.wait_for(|s| s.object_len(&k) == Some(0)).await;
+    other.cleanups_idle().await;
     assert_eq!(other.cut_puts(), counts(0, 0, 1));
 
     let store = store(&s3);
@@ -197,6 +202,7 @@ async fn a_short_object_of_another_put_is_left() {
         async move { store.put_stream(&k, 10, cut(&[])).await }
     };
     cut_put(&s3, 2, put).await;
+    store.cleanups_idle().await;
     assert_eq!(s3.object_len(&k), Some(0));
     assert_eq!(store.cut_puts(), counts(0, 1, 0));
 }
@@ -214,6 +220,7 @@ async fn a_look_that_cannot_delete_counts_a_failure() {
         async move { store.put_stream(&k, 10, cut(&[])).await }
     };
     cut_put(&s3, 1, put).await;
+    store.cleanups_idle().await;
     assert_eq!(s3.object_len(&k), Some(0));
     assert_eq!(store.cut_puts(), counts(0, 0, 1));
 }
@@ -230,6 +237,7 @@ async fn a_cut_put_the_store_kept_nothing_of_counts_nothing() {
         matches!(failed, Err(ObjectStoreError::Body(_))),
         "{failed:?}"
     );
+    store.cleanups_idle().await;
     assert_eq!(s3.object_len(&k), None);
     assert_eq!(store.cut_puts(), CutPuts::default());
     assert_eq!((taken(&s3, "HEAD"), taken(&s3, "DELETE")), (1, 0));
@@ -280,6 +288,7 @@ async fn a_put_that_names_its_digests_is_refused_cut_short_and_taken_whole() {
         }
     };
     cut_put(&s3, 1, put).await;
+    store.cleanups_idle().await;
     let plain = key("ac/checked-plain");
     let put = {
         let (store, plain) = (store.clone(), plain.clone());
@@ -292,6 +301,7 @@ async fn a_put_that_names_its_digests_is_refused_cut_short_and_taken_whole() {
         }
     };
     cut_put(&s3, 2, put).await;
+    store.cleanups_idle().await;
     assert_eq!((s3.object_len(&new), s3.object_len(&plain)), (None, None));
     assert_eq!(store.cut_puts(), CutPuts::default());
 
@@ -347,6 +357,7 @@ async fn a_content_bound_write_cut_short_leaves_nothing_to_remove() {
         }
     };
     let failed = cut_put_after(&s3, 1, 1, put).await;
+    store.cleanups_idle().await;
     assert!(matches!(failed, ObjectStoreError::Body(_)), "{failed}");
     assert_eq!(s3.object_len(&k), None);
     assert_eq!(taken(&s3, "HEAD"), 2);

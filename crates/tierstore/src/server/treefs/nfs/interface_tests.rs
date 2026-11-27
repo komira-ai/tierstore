@@ -170,9 +170,26 @@ fn start_logged(
     (next, handed): (Option<Arc<NextImage>>, Option<OwnedFd>),
     log: Option<&Logged>,
 ) -> Started {
+    let disk: Arc<dyn Disk> = Arc::new(SystemDisk);
+    start_over(
+        settings,
+        (upstream, disk),
+        (system, runner),
+        (next, handed),
+        log,
+    )
+}
+
+/// [`start_logged`] over `disk`, the file system under the node's cache.
+fn start_over(
+    settings: CacheSettings,
+    (upstream, disk): (Arc<dyn Backend>, Arc<dyn Disk>),
+    (system, runner): (OnSystem, Arc<Recorder>),
+    (next, handed): (Option<Arc<NextImage>>, Option<OwnedFd>),
+    log: Option<&Logged>,
+) -> Started {
     let (stop, stopped) = oneshot::channel::<()>();
     let (told, bound) = oneshot::channel();
-    let disk: Arc<dyn Disk> = Arc::new(SystemDisk);
     let node = async move {
         let asking = next.clone();
         let stopped = async move {
@@ -662,3 +679,6 @@ async fn an_nfs_server_that_stops_by_itself_unmounts_and_ends_the_node_in_failur
     );
     assert_eq!(programs(&runner), [LISTING, MOUNT_NFS, LISTING, UMOUNT]);
 }
+
+#[path = "live_config_tests.rs"]
+mod live_config;

@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use crate::server::update_hook::{Instance, Marker, Mode, Reason, Record, Step};
+use crate::server::update_hook::{Instance, Marker, Mode, Params, Previous, Reason, Record, Step};
 
 use super::fake::{
     NEW, NEWER, OLD, SystemdFake, assert_failed, assert_ok, detail, params, version_of,
@@ -122,7 +122,10 @@ fn cutover_after_the_commit_is_out_of_order() {
 
 /// Asserts that a step after `prepare` whose params name another release, or the same release
 /// with another version, than the update on record fails with `bad_params` and does nothing,
-/// while the update is in flight and after it is committed.
+/// while the update is in flight and after it is committed. A `rollback` is asked with params
+/// that name the staged release on record as the release the host runs, as an order that races
+/// the update does: one whose params name the release that update started from rolls it back
+/// (`stale_tests`).
 #[test]
 fn params_of_another_update_are_refused_with_bad_params() {
     let fake = SystemdFake::installed();
@@ -130,8 +133,20 @@ fn params_of_another_update_are_refused_with_bad_params() {
     fake.drive(&p, &[Prepare]);
     let mut other_version = p.clone();
     other_version.target_version = "9.9.9".to_owned();
+    let racing = |mut other: Params| {
+        other.previous = Some(Previous {
+            release: NEW.into(),
+            version: version_of(NEW),
+        });
+        other
+    };
     for other in [params(NEWER, Some(OLD)), other_version] {
-        for step in [Cutover, Verify, Rollback, Cleanup] {
+        for (step, other) in [
+            (Cutover, other.clone()),
+            (Verify, other.clone()),
+            (Rollback, racing(other.clone())),
+            (Cleanup, other),
+        ] {
             let before = fake.log().len();
             assert_failed(&fake.run(step, &other), Reason::BadParams);
             assert!(fake.actions().is_empty(), "{step}");

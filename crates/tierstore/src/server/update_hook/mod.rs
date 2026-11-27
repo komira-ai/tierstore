@@ -27,10 +27,14 @@
 //!   `SIGUSR2` and executes the next image of its program, keeping its sockets and its mount.
 //!   Any other update is a restart with a gap: `bootout`, then `bootstrap` of the linked plist
 //!   ([`LAUNCHD_PLIST`]), which unmounts, so a node whose file has an `fs` interface refuses it
-//!   ([`Reason::ModeUnsupported`]) unless the params say `mode = "restart"`. When the params name
-//!   the job of `tierstore fs` (`fs_launchd_label`, plist [`FS_LAUNCHD_PLIST`]), the update is a
-//!   restart; that job is booted out before the main one, the update goes on only when its mount
-//!   is gone, and it is booted in after the main job serves.
+//!   ([`Reason::ModeUnsupported`]) unless the params say `mode = "restart"`. An update of a node
+//!   whose file has a mount provider and no `fs` interface (the two-process layout, whose
+//!   `tierstore fs` job no release runs since 0.3.196) is refused too, and `verify` requires the
+//!   mount of a node's `fs` interface listed and answering. When the params name the job of
+//!   `tierstore fs` (`fs_launchd_label`, plist [`FS_LAUNCHD_PLIST`]; the config hook's switch
+//!   names it for its rollback, and no release's manifest does), the update is a restart; that
+//!   job is booted out before the main one, the update goes on only when its mount is gone, and it
+//!   is booted in after the main job serves.
 //!
 //! hostkeeper switches the release link `current` before `cutover` and back before `rollback`;
 //! the hook never moves it. hostkeeper keeps every package closed to every user but root, so the
@@ -45,7 +49,7 @@
 
 mod args;
 pub mod config_hook;
-mod launchd;
+pub(super) mod launchd;
 mod look;
 pub mod machine;
 mod params;

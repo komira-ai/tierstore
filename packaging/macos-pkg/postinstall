@@ -18,11 +18,9 @@
 #   _tierstore:_tierstore, and its put 0755 _tierstore:_tierstore (the root of the put ingest,
 #   under which the job runtime makes each job's put directory), and its run/fs 0700
 #   _tierstore:_tierstore (the runtime directory of the file system, which launchd does not make:
-#   `fs.runtime_dir` of `tierstore fs`, and `runtime_dir` of the job's fs interface in
-#   docs/design/one-service.md section 1.3).
+#   `runtime_dir` of the job's fs interface in docs/design/one-service.md section 1.3).
 # - On the target volume, the mount point of the file system, /private/var/tierstore/fs
-#   (whichever process serves it: `tierstore fs`, or the one process of
-#   docs/design/one-service.md): made when missing, with its parent /private/var/tierstore 0755
+#   (the mountpoint of the fs interface of the one process, docs/design/one-service.md): made when missing, with its parent /private/var/tierstore 0755
 #   root:wheel, and set to _tierstore:_tierstore 0755 on every install unless it is a mount point
 #   at that moment (a line of the listing `mount` has " on <path> ("). An upgrade runs while the file service's NFS mount is there, a
 #   read-only file system on which chown and chmod fail, so a mounted mount point is left as it is.

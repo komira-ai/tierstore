@@ -11,20 +11,28 @@
 //! rather than does things once, so that a run after a crash converges. A record that names a
 //! systemd instance (`live`, `next` or `mode`) is not this arm's and is refused.
 //!
+//! The update hook of a release ([`run_step_with`] with `releases`) refuses in `prepare` a node of
+//! the two-process layout and proves the node's volume in `verify`, as [`volume`] describes.
+//!
 //! When the params name the job of `tierstore fs` (`fs_launchd_label`), the arm drives it too, as
-//! [`fs`] describes: every boot-out of the main job (`cutover` of an update or of a first install
-//! over a loaded job, `rollback`, `uninstall`) is preceded by the boot-out of the fs job and a
-//! check that its mount is gone (a first install looks at the fs job even when the main job is
-//! not loaded), and the fs job is booted in after the main job serves (`cutover`, `rollback`) or
-//! after it is loaded (`restore`). A mount that stays ends the step with `not_ready`, with the
-//! main job untouched.
+//! [`fs`] describes, except in an update of the release on a node whose file has an `fs`
+//! interface: that node's one process serves the mount, its fs job is booted out and disabled by
+//! the switch, and every step (the boot step too) leaves it alone, whatever the params say. The macOS package's manifest does not name it: that job serves nothing since
+//! 0.3.196 (`tierstore fs --config` exits 2). The config hook's switch of a Mac names it for its
+//! rollback, which goes back to the two-process layout. Every boot-out of the main job (`cutover`
+//! of an update or of a first install over a loaded job, `rollback`, `uninstall`) is then
+//! preceded by the boot-out of the fs job and a check that its mount is gone (a first install
+//! looks at the fs job even when the main job is not loaded), and the fs job is booted in after
+//! the main job serves (`cutover`, `rollback`) or after it is loaded (`restore`). A mount that
+//! stays ends the step with `not_ready`, with the main job untouched.
 //!
 //! - `prepare` needs the node's configuration file to exist (it does not need a hand-over
 //!   socket), and records the update: `from` the previous release (none on a first install),
 //!   `to` the staged release and its `version`; the way is not recorded. Where the params leave
 //!   it open it asks the two releases what they list. It refuses a restart of a node whose file
-//!   has an `fs` interface (`mode_unsupported`), and has the staged release check the file before
-//!   a hand-over. Nothing is started or stopped.
+//!   has an `fs` interface (`mode_unsupported`), and, for a release, a node whose file has a mount
+//!   provider and no `fs` interface (`mode_unsupported`, [`volume`]), and has the staged release
+//!   check the file before a hand-over. Nothing is started or stopped.
 //! - `cutover` of a restart boots the fs job out first when there is one and it is loaded, boots
 //!   the job out and in, waits for `/readyz` and for the build of the target version, boots the
 //!   fs job in when there is one and it is not loaded, and records `swapped`. Of a hand-over, a
@@ -34,9 +42,11 @@
 //!   or nothing, is taken over as an update would take it over. A run that finds the job loaded
 //!   and serving the target only records `swapped`. A failure is reported; hostkeeper then runs
 //!   `rollback`.
-//! - `verify` observes the target version served by the loaded job and records `verified`; a job
-//!   that serves read-only (its cache has not taken the write role yet) defers with `not_ready`
-//!   and records nothing. After the commit it only observes.
+//! - `verify` observes the target version served by the loaded job and, for a release whose node
+//!   has an `fs` interface, the volume served at its mount point ([`volume`]), and records
+//!   `verified`; a job that serves read-only (its cache has not taken the write role yet) defers
+//!   with `not_ready` and records nothing, and a volume that is not served fails with
+//!   `not_ready`. After the commit it only observes the version.
 //! - `rollback` boots the fs job out first when there is one, then, for an update, puts the
 //!   previous binary in place and boots the job out and in again (a hand-over of a loaded job
 //!   sends `SIGUSR2` instead), waits for the previous version and boots the fs job in; a first
@@ -52,9 +62,15 @@
 //!   the record directory, as they are.
 //! - `restore`, the boot step, puts the current release's binary in place and boots the job in
 //!   when it is not loaded, then boots the fs job in when there is one and it is not loaded.
+//!
+//! A record of another update, in flight and not committed, that returns the host to the params'
+//! previous release is one whose updater is gone: a `prepare` that finds it past its cutover, and
+//! a `rollback`, roll it back first with the params it was written under, then do their own step
+//! (`Record::stale`).
 
 mod exec;
-pub(super) mod fs;
+pub(in crate::server) mod fs;
+mod volume;
 
 use std::cell::Cell;
 use std::path::Path;
@@ -64,7 +80,7 @@ use super::args::Step;
 use super::look::{Look, verified, writable};
 use super::params::Params;
 use super::ports::LaunchdPorts;
-use super::record::{Marker, Record};
+use super::record::{Marker, Record, Stale, Written};
 use super::report::{Done, Reason};
 
 /// What a step works with.
@@ -104,19 +120,88 @@ impl Ctx<'_, '_> {
 
 /// Refuses params that name another release or version than the update on record.
 fn same_update(record: &Record, params: &Params) -> Result<(), Done> {
-    let to = record.to.as_deref();
-    let version = record.version.as_deref();
-    if to == Some(params.staged_release.as_path()) && version == Some(&params.target_version) {
+    if record.is_of(params) {
         return Ok(());
     }
-    Err(Done::fail(
+    Err(another_update(record, params))
+}
+
+/// The refusal of params that name another update than the one on record.
+fn another_update(record: &Record, params: &Params) -> Done {
+    Done::fail(
         Reason::BadParams,
         format!(
-            "the params name {} {}, and the update on record is {to:?} {version:?}",
+            "the params name {} {}, and the update on record is {:?} {:?}",
             params.staged_release.display(),
             params.target_version,
+            record.to.as_deref(),
+            record.version.as_deref(),
         ),
-    ))
+    )
+}
+
+/// A `prepare` that finds another update past its cutover, or a `rollback` that finds another
+/// update in flight, neither committed, whose updater is gone ([`Stale::Own`]): that update is
+/// rolled back first with the params it was written under, then `step` runs on the record at
+/// rest. Both details are said, the rollback's first.
+fn roll_back_first(
+    c: &Ctx<'_, '_>,
+    step: Step,
+    params: &Params,
+    record: &mut Record,
+    own: &Written,
+) -> Result<Done, Done> {
+    let whose = format!(
+        "the record is of the update to {} {}, not {} {}",
+        own.params.staged_release.display(),
+        own.params.target_version,
+        params.staged_release.display(),
+        params.target_version
+    );
+    let back = roll_back_own(c, own, record).map_err(|done| {
+        led_by(
+            done,
+            &format!("{whose}, and its rollback with its own target and releases is not done"),
+        )
+    })?;
+    let note = format!(
+        "{whose}: rolled back with its own target and releases ({})",
+        back.report.detail.as_deref().unwrap_or_default()
+    );
+    let done = if step == Step::Prepare {
+        prepare(c, params, record)
+    } else {
+        rollback(c, params, record)
+    };
+    done.map(|done| led_by(done, &note))
+        .map_err(|done| led_by(done, &note))
+}
+
+/// The rollback of the update on record with the params it was written under. A job that is
+/// loaded and already serves the release that update started from (the boot step loaded it
+/// again, with the binary `current` names) has nothing of that update running: the binary is
+/// put back, the fs job is booted in when it is not loaded, and only the record changes. The
+/// staged release of that update is then not read, so a release directory that is gone does not
+/// matter. Any other state is `rollback`'s with those params.
+fn roll_back_own(c: &Ctx<'_, '_>, own: &Written, record: &mut Record) -> Result<Done, Done> {
+    let version = own.previous.version.as_str();
+    if c.ports.launchd.loaded(c.label)? && c.look().observed(version).is_ok() {
+        c.ports.host.install_binary(&own.previous.release)?;
+        c.start_fs()?;
+        c.save(record, Record::idle(None))?;
+        return Ok(Done::ok(format!(
+            "{} already serves {version}: nothing of that update runs",
+            c.label
+        )));
+    }
+    rollback(c, &own.params, record)
+}
+
+/// `done` with `first` and `; ` before its detail.
+fn led_by(mut done: Done, first: &str) -> Done {
+    let rest = done.report.detail.take().unwrap_or_default();
+    done.report.detail = Some(format!("{first}; {rest}"));
+    done
 }
 
 /// Refuses a record that names a systemd instance or a mode.
@@ -174,10 +259,14 @@ fn attempt(
     };
     record.check()?;
     launchd_record(&record)?;
+    let fs = match params.fs_launchd_label() {
+        Some(fs) if !(releases && volume::serves_its_mount(ports, params)?) => Some(fs),
+        _ => None,
+    };
     let c = Ctx {
         ports,
         label,
-        fs: params.fs_launchd_label(),
+        fs,
         releases,
         commit_written: Cell::new(false),
     };
@@ -211,6 +300,9 @@ fn attempt(
 
 fn prepare(c: &Ctx<'_, '_>, params: &Params, record: &mut Record) -> Result<Done, Done> {
     if record.updating && !record.markers.is_empty() {
+        if let Stale::Own(own) = record.stale(params) {
+            return roll_back_first(c, Step::Prepare, params, record, &own);
+        }
         return Err(Done::fail(
             Reason::OutOfOrder,
             "an update is past its cutover: finish or roll it back first",
@@ -228,6 +320,7 @@ fn prepare(c: &Ctx<'_, '_>, params: &Params, record: &mut Record) -> Result<Done
             format!("there is no configuration file at {}", config.display()),
         ));
     };
+    c.one_process(config, &text)?;
     // The way is not recorded: `cutover` and `rollback` decide it again from the same inputs.
     let hands_over = c.plan(params, config, &text)?;
     let from = params.previous.as_ref().map(|p| p.release.clone());
@@ -321,6 +414,7 @@ fn verify(c: &Ctx<'_, '_>, params: &Params, record: &mut Record) -> Result<Done,
     }
     let observed = c.look().observed(target)?;
     let mode = writable(observed, c.label, params.verify_retry_secs)?;
+    c.volume_served(params)?;
     // `verified` follows its act: everything above was observed.
     if !record.has(Marker::Verified) {
         let marked = record.with(Marker::Verified);
@@ -342,7 +436,16 @@ fn rollback(c: &Ctx<'_, '_>, params: &Params, record: &mut Record) -> Result<Don
     if !record.updating {
         return Ok(Done::ok("no update in flight: nothing to roll back"));
     }
-    same_update(record, params)?;
+    match record.stale(params) {
+        Stale::Not => same_update(record, params)?,
+        Stale::Own(own) => return roll_back_first(c, Step::Rollback, params, record, &own),
+        Stale::Kept(why) => {
+            let mut done = another_update(record, params);
+            let said = done.report.detail.take().unwrap_or_default();
+            done.report.detail = Some(format!("{said}: {why}"));
+            return Err(done);
+        }
+    }
     if record.from.is_none() {
         // A first install: what `cutover` started is stopped, and there is nothing to start in
         // its place; the copy of the binary goes too. The update stays on record, without

@@ -392,7 +392,9 @@ short as an object of the bytes that came, 0 of them for a body that failed befo
 | name | type | labels | increments when |
 |---|---|---|---|
 | `tierstore_s3_put_failures_total` | counter | `reason`: `timeout`, `incomplete`, `bad_digest`, `too_large`, `busy`, `exists`, `upstream`, `other` | a `PUT` of an object on the S3 listener whose body the front streams (no `If-Match`, no `If-None-Match` but `*`) was answered with an error, by the code of the answer |
-| `tierstore_cache_upstream_short_objects_total` | counter | `result`: `removed`, `left`, `failed` | a single PUT the cache sent its S3 upstream got no answer (its body or its connection failed) and the one HEAD of the key after it found an object of another length than the put declared, or could not be made |
+| `tierstore_cache_upstream_short_objects_total` | counter | `result`: `removed`, `left`, `failed`, `skipped` | a single PUT the cache sent its S3 upstream got no answer (its body or its connection failed) and the one HEAD of the key after it found an object of another length than the put declared, or could not be made, or was not made |
+| `tierstore_cache_upstream_failed_aborts` | gauge | none | the multipart uploads of the cache's S3 upstream whose abort failed (or found no room to run), kept to be aborted again when the store next answers; at most 1024 |
+| `tierstore_cache_upstream_failed_aborts_dropped_total` | counter | none | a failed abort was dropped from that list (it was full, or the abort was sent 8 times) and is left to the bucket's lifecycle rule (`AbortIncompleteMultipartUpload`) |
 
 The reasons of a failed put on the front:
 
@@ -409,11 +411,20 @@ The results of the look after a single PUT that got no answer:
 
 - `removed`: the object carried the token that PUT sent as its metadata `x-amz-meta-write-token`, so the PUT made it; it was deleted on its entity tag.
 - `left`: the object did not carry that token: it was there before the put began (the store refused a create-only PUT on it), or another writer made it. It is left as it is.
-- `failed`: the HEAD or the DELETE failed, or the object had no entity tag; an object of the wrong length may have stayed.
+- `failed`: the HEAD or the DELETE failed, they did not end within 10 s, or the object had no entity tag; an object of the wrong length may have stayed.
+- `skipped`: the look was not made: 16 looks and aborts after failed writes were running already. An object of the wrong length may have stayed.
 
 An object of the length the put declared, or no object, counts nothing. A put the store answered
-(even with an error) is not looked after, and a body sent as a multipart upload never leaves an
-object of a failed put. The series stay 0 for an upstream that is not an S3 store.
+(even with an error) is not looked after, nor is one that never reached it (the connection could not
+be made), and a body sent as a multipart upload never leaves an object of a failed put. The series
+stay 0 for an upstream that is not an S3 store.
+
+The look, and the abort of a multipart upload that failed, run after the put has given its error, so
+the put's write permit is free as soon as the error is known: at most 16 of them run at once, each
+ends within 10 s, and an abort that fails is kept, at most 1024 of them, and sent again when the store
+next answers a request (after a pass that failed, the next waits 1 s, doubling to at most 60 s).
+A `tierstore_cache_upstream_failed_aborts` that stays above 0 says the store answers other requests
+but refuses the aborts.
 
 ### Build node: the reads the mount provider queues
 
@@ -570,13 +581,14 @@ provider.
 
 | name | type | labels | what it says |
 |---|---|---|---|
-| `tierstore_provider_unavailable_total` | counter | `reason`: `no_fs`, `not_ready`, `not_prepared_here`, `tree_gone`, `read_failed`, `store_failed`, `not_released` | the provider's answers `UNAVAILABLE`: a `Prepare` or `Mount` on a node whose file has no `fs` interface, so no process serves the mount (`no_fs`); a `Mount` whose tree was not placed within its wait (`not_ready`), of a source this process has no preparation and finds no placement of, as after a restart between the agent's `Prepare` and `Mount` (`not_prepared_here`), whose placement ended without a release (`tree_gone`), whose preparation could not read the tree's sidecar or list (`read_failed`) or whose tree the store could not make now, such as at `trees.max_placements` (`store_failed`); a `Release` or `Sweep` whose placement the store could not remove now (`not_released`). A `Prepare` refused at `trees.max_sources` is counted in `tierstore_provider_prepare_refused_total` instead |
+| `tierstore_provider_unavailable_total` | counter | `reason`: `no_fs`, `not_ready`, `not_prepared_here`, `tree_gone`, `read_failed`, `store_failed`, `not_released` | the provider's answers `UNAVAILABLE`: a `Prepare` or `Mount` of a provider whose mount no process serves (`no_fs`; a file with a mount provider and no `fs` interface is refused at load, so a node that started does not count it); a `Mount` whose tree was not placed within its wait (`not_ready`), of a source this process has no preparation and finds no placement of, as after a restart between the agent's `Prepare` and `Mount` (`not_prepared_here`), whose placement ended without a release (`tree_gone`), whose preparation could not read the tree's sidecar or list (`read_failed`) or whose tree the store could not make now, such as at `trees.max_placements` (`store_failed`); a `Release` or `Sweep` whose placement the store could not remove now (`not_released`). A `Prepare` refused at `trees.max_sources` is counted in `tierstore_provider_prepare_refused_total` instead |
 
 What it does not count: a start the agent fails on its own look at the directory the provider
 answered (the agent's failure text says so), and the waits a `Mount` ends with its directory.
 
-Starts held by a node whose file has no `fs` interface, over an hour (any value above zero means
-every start through that node's provider fails):
+Starts held by a provider whose mount no process serves, over an hour (a node whose file has a
+mount provider and no `fs` interface does not start, so this stays at zero; any value above zero
+would mean every start through that node's provider fails):
 
 ```promql
 sum by (instance) (increase(tierstore_provider_unavailable_total{reason="no_fs"}[1h]))

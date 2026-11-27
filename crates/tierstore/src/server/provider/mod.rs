@@ -34,19 +34,29 @@
 //!   inodes; one the mount has to read again is `ENOENT`. The tree goes, and its packs are
 //!   unpinned and stay in the cache to be evicted in their turn, unless another source's placement
 //!   has it.
-//! - **`Sweep(agent, keep)`** releases every source of the agent whose run is not in `keep`, both
-//!   those this process prepared and the placements it finds under the agent's path.
+//! - **`Sweep(agent, keep, keep_attempts)`** releases every source of the agent whose run is not
+//!   kept, both those this process prepared and the placements it finds under the agent's path; a
+//!   run kept from an attempt on also loses its sources of earlier attempts.
+//!
+//! A source may name its attempt (`Source.attempt`, 1 or more: the agent counts the times it was
+//! given the same job). Two attempts of a run are two sources, each at a path of its own (module
+//! `names`), so a late `Release` of an earlier attempt, which the agent retries for a while, never
+//! removes the tree of a later attempt of the same job. A source that names no attempt (an agent
+//! that does not count them) is at the path it always was, and every call of it is as before; a
+//! `Mount` or a `Release` of a source that names its attempt also finds the same source placed
+//! without one, as a provider before attempts placed it.
 //!
 //! The first `Prepare` of a run stamps it in the cache, and a `Release` or a `Sweep` of a source of
 //! it forgets it: the request end of `tierstore_request_to_start_seconds`, whose other end is the
 //! first look of `tierstore fs` inside one of the run's trees (`local_cache/starts.rs`).
 //!
-//! The trees are served by the `fs` interface of the node's file, in this process. In a file with
-//! no `fs` interface no process of this release serves the mount (`tierstore fs` is no longer a
-//! process of its own, and a node of the earlier two-process layout keeps its `mountpoint` with
-//! nothing behind it): there every `Prepare` and `Mount` is `UNAVAILABLE` with
-//! the reason `sources::no_fs` gives, and no directory under the mount is answered, so the
-//! agent's start fails `input-unavailable` saying so instead of on a directory that is not there.
+//! The trees are served by the `fs` interface of the node's file, in this process, and the load
+//! refuses a file with a `mount-provider` entry and no `fs` entry (`tierstore fs` is no longer a
+//! process of its own, so a node of the earlier two-process layout would keep its `mountpoint`
+//! with nothing behind it). A provider whose `served` flag is clear anyway, which no file makes,
+//! answers every `Prepare` and `Mount` `UNAVAILABLE` with the reason `sources::no_fs` gives, and
+//! answers no directory under the mount, so the agent's start fails `input-unavailable` saying so
+//! instead of on a directory that is not there.
 //! Every answer `UNAVAILABLE` counts once under its reason in
 //! `tierstore_provider_unavailable_total{reason}` (`local_cache/provider_unavailable.rs`).
 //!
@@ -66,6 +76,8 @@ mod service;
 mod socket;
 mod sources;
 
+#[cfg(test)]
+mod attempts_tests;
 #[cfg(test)]
 mod groups_tests;
 #[cfg(test)]
@@ -128,8 +140,8 @@ pub(super) struct ProviderFlags {
     /// How long one read of the store may take.
     pub fetch_timeout: Duration,
     /// Whether this process serves the file system at `mountpoint`: the node's file has an `fs`
-    /// interface. Without one no process of this release serves it (`tierstore fs` is no longer a
-    /// process of its own), and every `Prepare` and `Mount` is `UNAVAILABLE`.
+    /// interface, which every file that loads with a provider has (the load refuses one without).
+    /// A provider whose flag is clear answers every `Prepare` and `Mount` `UNAVAILABLE`.
     pub served: bool,
 }
 

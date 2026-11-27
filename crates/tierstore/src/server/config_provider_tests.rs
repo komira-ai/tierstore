@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use super::super::config::settings_from_text;
+use super::super::config_interface::NO_FS;
 use super::super::config_testing::DEFAULTS;
 use super::super::provider::ProviderFlags;
 
@@ -92,8 +93,27 @@ fn with_socket(more: &str) -> String {
     provider(&format!("socket = \"{SOCKET}\"{more}"))
 }
 
+/// An `fs` interface with `params` after its two needed ones: a file with a provider needs one,
+/// for the provider is served by it.
+fn fs(params: &str) -> String {
+    format!(
+        "[[interface]]\ntype = \"fs\"\n[interface.params]\nclient_group = \"1\"\nowner = \"1:1\"\n{params}\n\n"
+    )
+}
+
+/// The provider of the file with these entries and the default `fs` interface.
 fn provider_of(entries: &[String]) -> Option<ProviderFlags> {
-    let text = format!("{}{}", entries.concat(), build_node("", ""));
+    provider_with_fs(entries, "")
+}
+
+/// The provider of the file with these entries and an `fs` interface with these params.
+fn provider_with_fs(entries: &[String], fs_params: &str) -> Option<ProviderFlags> {
+    let text = format!(
+        "{}{}{}",
+        entries.concat(),
+        fs(fs_params),
+        build_node("", "")
+    );
     let settings = settings_from_text(&text, DEFAULTS).expect("a build node");
     settings.into_cache().expect("a build node").provider
 }
@@ -106,7 +126,8 @@ fn refusal(node: &str, entries: &[String]) -> String {
 }
 
 /// Asserts that a node with no `mount-provider` interface has no provider, and that one that gives
-/// its socket alone answers under `/run/tierstore/fs` with reads bounded at a minute.
+/// its socket alone answers under `/run/tierstore/fs`, the mount of the file's `fs` interface,
+/// which serves it, with reads bounded at a minute.
 #[test]
 fn a_mount_provider_interface_with_its_socket_alone_takes_the_defaults() {
     assert_eq!(provider_of(&[s3()]), None);
@@ -114,13 +135,13 @@ fn a_mount_provider_interface_with_its_socket_alone_takes_the_defaults() {
         socket: PathBuf::from(SOCKET),
         mountpoint: PathBuf::from("/run/tierstore/fs"),
         fetch_timeout: Duration::from_secs(60),
-        served: false,
+        served: true,
     };
     assert_eq!(provider_of(&[s3(), with_socket("")]), Some(wanted));
 }
 
 /// Asserts the mount and the bound an interface gives are the provider's, wherever the entry is
-/// in the list.
+/// in the list; the mount it gives is the `fs` interface's, as the file must say.
 #[test]
 fn the_params_of_a_mount_provider_interface_are_the_provider() {
     let given = with_socket(", mountpoint = \"/mnt/tierstore\", fetch_timeout = \"5s\"");
@@ -128,9 +149,13 @@ fn the_params_of_a_mount_provider_interface_are_the_provider() {
         socket: PathBuf::from(SOCKET),
         mountpoint: PathBuf::from("/mnt/tierstore"),
         fetch_timeout: Duration::from_secs(5),
-        served: false,
+        served: true,
     };
-    assert_eq!(provider_of(&[given.clone(), s3()]), Some(wanted));
+    let mounted = "mountpoint = \"/mnt/tierstore\"";
+    assert_eq!(
+        provider_with_fs(&[given.clone(), s3()], mounted),
+        Some(wanted)
+    );
 }
 
 /// Asserts the refusals of the params of a `mount-provider` interface, each by its exact message:
@@ -235,20 +260,25 @@ fn the_providers_params_are_not_the_other_types() {
 }
 
 /// Asserts a mount provider is a build node's alone: a storage node, with or without a cache, has
-/// no tree store, and is refused with the exact words naming what it is.
+/// no tree store, and is refused with the exact words naming what it is (the file has the `fs`
+/// interface a provider needs, so that this is the refusal it reaches); and that the provider of
+/// such a node with no `fs` interface is refused for that first, as a file's interfaces are read
+/// before its node is known.
 #[test]
 fn a_mount_provider_interface_needs_a_build_node() {
     let tail = "has no tree store: a mount-provider interface needs a build node ([local_cache] and [cold_store] without [hot_store]), whose [trees] keep the trees";
-    let why = refusal(COMBINED_NODE, &[s3(), with_socket("")]);
+    let why = refusal(COMBINED_NODE, &[s3(), with_socket(""), fs("")]);
     assert_eq!(
         why,
         format!("mount-provider interface: a storage node with a cache {tail}")
     );
-    let why = refusal(STORAGE_NODE, &[s3(), with_socket("")]);
+    let why = refusal(STORAGE_NODE, &[s3(), with_socket(""), fs("")]);
     assert_eq!(
         why,
         format!("mount-provider interface: a storage node {tail}")
     );
+    let why = refusal(STORAGE_NODE, &[s3(), with_socket("")]);
+    assert_eq!(why, format!("interface[1].type: {NO_FS}"));
 }
 
 /// Asserts the provider's socket is not the hand-off socket and not inside the cache directory,
@@ -258,20 +288,20 @@ fn a_mount_provider_interface_needs_a_build_node() {
 fn the_providers_socket_is_not_another_socket_of_the_node() {
     let handoff = build_node(&format!("handoff_socket = \"{SOCKET}\""), "");
     assert_eq!(
-        refusal(&handoff, &[s3(), with_socket("")]),
+        refusal(&handoff, &[s3(), with_socket(""), fs("")]),
         format!(
             "mount-provider interface params.socket: \"{SOCKET}\" is server.handoff_socket too; the two sockets are two files"
         )
     );
     let inside = provider("socket = \"/var/lib/tierstore-cache/provider.sock\"");
     assert_eq!(
-        refusal(&build_node("", ""), &[s3(), inside]),
+        refusal(&build_node("", ""), &[s3(), inside, fs("")]),
         "mount-provider interface params.socket: \"/var/lib/tierstore-cache/provider.sock\" is inside local_cache.path: it is not a place for the cache's files"
     );
     let apart = build_node("", "fill_socket = \"/var/lib/tierstore/fill.sock\"");
-    let text = format!("{}{}{apart}", s3(), with_socket(""));
+    let text = format!("{}{}{}{apart}", s3(), with_socket(""), fs(""));
     assert!(settings_from_text(&text, DEFAULTS).is_ok());
     let same = build_node("", &format!("fill_socket = \"{SOCKET}\""));
-    let text = format!("{}{}{same}", s3(), with_socket(""));
+    let text = format!("{}{}{}{same}", s3(), with_socket(""), fs(""));
     assert!(settings_from_text(&text, DEFAULTS).is_ok());
 }
