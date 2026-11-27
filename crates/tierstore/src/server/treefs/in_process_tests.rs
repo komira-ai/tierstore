@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use tokio::runtime::Handle;
 
-use super::InProcess;
+use super::{InProcess, Missed};
 use crate::server::local_cache::attaches::runs::{RunAttach, RunDetach, RunOutcome};
 use crate::server::local_cache::attaches::{Attach, Fetches, Levels, Outcome};
 use crate::server::local_cache::descriptors::Descriptors;
@@ -291,6 +291,31 @@ async fn a_fill_waits_for_the_write_role_then_fills() {
     assert_eq!(waiting.tick().unwrap(), Tick::Took);
     assert_eq!(filled.await.unwrap(), Ok(()));
     assert_eq!(fills(&waiting), 1);
+}
+
+/// Asserts that a request watches the mode of the cache only while it waits for the write role:
+/// its work, run once the cache is read-write, sees no more watchers than there were before the
+/// request, so once a caller has its answer the request is no watcher (a test that counts the
+/// requests waiting for the role counts it no more); and that a request that got no write role in
+/// its wait is no watcher once it is answered either. Catches a request whose task keeps its
+/// receiver of the mode until after it sends the answer.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_request_stops_watching_the_mode_when_its_wait_ends() {
+    let rig = Rig::new("tfs-in-unwatched");
+    assert_eq!(rig.cache.mode(), Mode::ReadWrite);
+    let watchers = rig.cache.mode_watchers();
+    let over = in_process(&rig.cache, None, LONG);
+    let cache = rig.cache.clone();
+    let seen = off_runtime(move || over.call(LONG, async move { cache.mode_watchers() })).await;
+    assert_eq!(seen, Ok(watchers));
+    assert_eq!(rig.cache.mode_watchers(), watchers);
+    let _holder = rig.locked();
+    let waiting = rig.locked();
+    assert_eq!(waiting.mode(), Mode::ReadOnly);
+    let watchers = waiting.mode_watchers();
+    let over = in_process(&waiting, None, Duration::ZERO);
+    assert_eq!(off_runtime(move || over.writer()).await, Err(Missed::ReadOnly));
+    assert_eq!(waiting.mode_watchers(), watchers);
 }
 
 /// Asserts that every request that waits for the write role fails once `fetch_timeout` has passed
