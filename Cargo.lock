@@ -3281,6 +3281,7 @@ dependencies = [
  "tsfuse 0.1.0",
  "vm-memory",
  "x509-parser",
+ "xtask",
 ]
 
 [[package]]
