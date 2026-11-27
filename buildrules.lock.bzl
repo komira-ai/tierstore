@@ -7,7 +7,7 @@ TARGET = "x86_64-unknown-linux-gnu"
 CARGO_LOCK_SHA256 = "719a854cf1148b5de839b2a46e28cff317c3380103d822c138ed2622d3e09996"
 MANIFEST_SHA256 = {
     "Cargo.toml": "909abaced2fca57a3a39b0efc3df34e0e9f82086b0b33b92075ad3aa9226cff2",
-    "crates/compat/Cargo.toml": "71d04e1194bf4558661b2cf5b6e1974d0b7117517e6f948cdeb62d395644adc5",
+    "crates/compat/Cargo.toml": "1ff86baa8ad287c6f9107d0ac41d43b4e91cf9e3d0759895eace5d33b58b6ff6",
     "crates/coverage-gate/Cargo.toml": "bb00915e8794b425cba2f2a40d749eecc891c65939d260904969d052ac138b95",
     "crates/fsbench/Cargo.toml": "e6b927e5ad2d2127014fb0e339f0eeb4c854ff4a846ab16680cdca255aeba75e",
     "crates/objstore-conformance/Cargo.toml": "f44ac79f50952b4ebe2cb6b07257a1df3ec001c22c287a5ae28b187a0c5c7d88",
