@@ -119,7 +119,9 @@ impl Service {
         // which are worked out on the runtime: it runs on a thread of its own.
         let started = tokio::task::spawn_blocking(move || {
             let mut steps = Steps::new(Arc::clone(&platform.clock));
-            runtime.block_on(launch::start((&mine, &reach), &platform, &mut steps))
+            let started = runtime.block_on(launch::start((&mine, &reach), &platform, &mut steps));
+            tracing::info!("tierstore fs: the start of the mount took {} ms", steps.total());
+            started
         })
         .await
         .unwrap_or_else(|panicked| std::panic::resume_unwind(panicked.into_panic()))?;

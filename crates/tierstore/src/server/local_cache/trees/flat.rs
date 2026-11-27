@@ -1,6 +1,7 @@
-//! What the mount (`tierstore fs`) asks of the tree store, by calling the cache in this process (`treefs/in_process.rs`): where a path of
-//! the mount is among the fs locations of the placements, the paths of those locations, and the
-//! tree of a placement whole, flattened in the order the mount numbers its inodes.
+//! What the mount asks of the tree store, by calling the cache in this process
+//! (`treefs/in_process.rs`): where a path of the mount is among the fs locations of the
+//! placements, the paths of those locations, and the tree of a placement whole, flattened in the
+//! order the mount numbers its inodes.
 //!
 //! The mount numbers the entries of a tree by their place in the tree as it is given, the root
 //! being 0 (`server/treefs/ino.rs`), so that the number of an entry is a function of the tree
@@ -11,9 +12,7 @@
 //! numbers the tree at each location apart), flattened depth first in name order: every record of
 //! the tree is read once at each place it is held (a directory a tree holds twice, by one digest,
 //! is listed at each place), and each file says where its bytes are, by the pack and the offset
-//! that [`TreeStore::fetch_span`] makes readable. A mount of a release before the images asks for
-//! the [`FlatTree`] of an image too ([`TreeStore::flat`]): its entries are then in the order of
-//! their indices, so that both releases number an image's entries alike.
+//! that [`TreeStore::fetch_span`] makes readable.
 
 use std::collections::HashMap;
 
@@ -21,8 +20,7 @@ use serde::{Deserialize, Serialize};
 
 use super::TreeStore;
 use super::location::{Location, PlacementId};
-use super::read::{ReadError, image_span};
-use crate::tree_image_list::{ImageKind, ListImage};
+use super::read::ReadError;
 use crate::{RecordChild, TreeDigest, TreeRecord};
 
 /// The most entries a flattened tree may have, its root included: what the 24 bits of the index
@@ -246,23 +244,6 @@ impl TreeStore {
         Ok(paths)
     }
 
-    /// The tree of the placement `id`, flattened for the mount at its fs locations: a tree of
-    /// records depth first in name order, an image in the order of its indices.
-    ///
-    /// # Errors
-    /// [`ReadError::NoPlacement`] for a placement that is not alive (one that was released and
-    /// that something still holds is alive, and is flattened for its holder) or has no fs location,
-    /// [`ReadError::Corrupt`] for a tree whose files are damaged, and [`FlatError::TooLarge`] for
-    /// a tree of more entries than [`MAX_FLAT_ENTRIES`].
-    pub(in crate::server) fn flat(&self, id: &PlacementId) -> Result<FlatTree, FlatError> {
-        let paths = self.fs_paths(id)?;
-        let snapshot = self.snapshot(id)?;
-        match snapshot.image() {
-            Some(image) => Ok(flat_image(image, paths)),
-            None => self.flatten(&snapshot, paths),
-        }
-    }
-
     /// The tree of records of `snapshot`, flattened depth first in name order.
     fn flatten(
         &self,
@@ -339,51 +320,6 @@ impl TreeStore {
             packs: packs.keys,
             entries,
         })
-    }
-}
-
-/// The image `image`, flattened in the order of its indices, at the fs locations `paths`.
-fn flat_image(image: &ListImage, paths: Vec<String>) -> FlatTree {
-    let mut packs = Packs::default();
-    let entries = (0..image.len() as u32)
-        .filter_map(|index| image.entry(index))
-        .map(|entry| {
-            let (mode, kind) = match entry.kind {
-                ImageKind::Dir { mode, .. } => (mode.bits(), FlatKind::Dir),
-                ImageKind::File {
-                    mode,
-                    size,
-                    sha256,
-                    span,
-                } => {
-                    let span = image_span(span);
-                    let (pack, offset) = span.map_or((None, 0), |span| {
-                        (Some(packs.place(span.pack)), span.offset)
-                    });
-                    let kind = FlatKind::File {
-                        size,
-                        sha256: sha256.to_string(),
-                        pack,
-                        offset,
-                    };
-                    (mode.bits(), kind)
-                }
-                ImageKind::Symlink { target } => {
-                    (crate::Mode::SYMLINK.bits(), FlatKind::Symlink { target })
-                }
-            };
-            FlatEntry {
-                parent: entry.parent,
-                name: entry.name,
-                mode,
-                kind,
-            }
-        })
-        .collect();
-    FlatTree {
-        paths,
-        packs: packs.keys,
-        entries,
     }
 }
 

@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use super::super::unread;
 use super::{MOUNT, after, ask, shared};
-use crate::server::local_cache::trees::testing::{Bench, fs_at, s3_at};
+use crate::server::local_cache::trees::testing::{Bench, flat_of, fs_at, s3_at};
 use crate::server::local_cache::trees::{
     FlatError, ImageRequest, Location, PlacementId, ReadError, placement_id,
 };
@@ -131,7 +131,7 @@ async fn mounted_gives_the_fs_locations_sorted_and_none_while_there_are_none() {
 #[tokio::test(flavor = "multi_thread")]
 async fn the_image_of_a_records_placement_is_its_flat_tree_none_or_damaged() {
     let (bench, id, over) = placed("tfs-in-flat").await;
-    let flat = bench.store.flat(&id).unwrap();
+    let flat = flat_of(&bench.store, &id).unwrap();
     assert_eq!(flat.entries.len(), 10);
     assert_eq!(image(&over, &id).await, Ok(PlacedTree::Flat(flat)));
     assert_eq!(image(&over, &unknown()).await, Err("none".to_owned()));

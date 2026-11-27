@@ -5,7 +5,7 @@
 use bytes::Bytes;
 
 use super::files::{IMAGE, READY, RECORDS, placement_file, trees_dir};
-use super::flat::{FlatEntry, FlatError, FlatKind, MountTree};
+use super::flat::{FlatError, MountTree};
 use super::read::{FileSpan, Kind, Listing, Resolved, Stat};
 use super::testing::{Bench, built, fs_at, open_image, s3_at, tree_path};
 use super::{CreateRequest, ImageRequest, Location, PlacementId, ReadError, StagedImage};
@@ -435,72 +435,6 @@ async fn mount_tree_is_the_image_for_an_image_and_the_flat_tree_for_records() {
         bench.store.mount_tree(&s3_only.placement),
         Err(FlatError::Read(ReadError::NoPlacement))
     );
-}
-
-/// Asserts that an image flattened for a mount of a release before the images has its entries in
-/// the order of their indices (breadth first, the children of a directory in name order), each
-/// naming its parent's index, with modes as stored, the pack listed once and every file's offset,
-/// the empty file with no pack, and the fs paths only.
-#[tokio::test]
-async fn flat_of_an_image_is_in_index_order_with_packs_and_offsets() {
-    let bench = Bench::new("image-flat").await;
-    let made = bench
-        .store
-        .create_image(bench.image_request(vec![fs_at("i"), s3_at("i/")]))
-        .unwrap();
-    let flat = bench.store.flat(&made.placement).unwrap();
-    assert_eq!(flat.paths, vec!["i".to_owned()]);
-    assert_eq!(flat.packs, vec![bench.pack.key.clone()]);
-    let dir = |parent: Option<u32>, name: &str, mode: u16| FlatEntry {
-        parent,
-        name: name.to_owned(),
-        mode,
-        kind: FlatKind::Dir,
-    };
-    let file = |parent: u32, name: &str, mode: u16, blob: usize| {
-        let (sha256, offset, size) = &bench.pack.blobs[blob];
-        FlatEntry {
-            parent: Some(parent),
-            name: name.to_owned(),
-            mode,
-            kind: FlatKind::File {
-                size: *size,
-                sha256: sha256.clone(),
-                pack: Some(0),
-                offset: *offset,
-            },
-        }
-    };
-    let expected = vec![
-        dir(None, "", 0o755),
-        dir(Some(0), "bin", 0o755),
-        dir(Some(0), "empty", 0o755),
-        dir(Some(0), "lib", 0o755),
-        FlatEntry {
-            parent: Some(0),
-            name: "link".to_owned(),
-            mode: 0o777,
-            kind: FlatKind::Symlink {
-                target: "bin/tool".to_owned(),
-            },
-        },
-        FlatEntry {
-            parent: Some(0),
-            name: "zero".to_owned(),
-            mode: 0o644,
-            kind: FlatKind::File {
-                size: 0,
-                sha256: TreeDigest::of(b"").to_string(),
-                pack: None,
-                offset: 0,
-            },
-        },
-        file(1, "other", 0o644, 1),
-        file(1, "tool", 0o4755, 0),
-        dir(Some(3), "deep", 0o755),
-        file(8, "data", 0o644, 2),
-    ];
-    assert_eq!(flat.entries, expected);
 }
 
 /// Asserts that a restart keeps an image tree and its placement: the placement is found by

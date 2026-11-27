@@ -320,9 +320,15 @@ async fn a_mount_made_from_another_address_is_cleared_and_made_again() {
         ..loopback()
     };
     let kept = Recorder::mounted_at(&rig.mountpoint);
-    let again = Running::start(&settings(&rig, same), kept.clone(), euid(), None, EPOCH)
-        .await
-        .unwrap();
+    let again = Running::start(
+        (&settings(&rig, same), &rig.calls()),
+        kept.clone(),
+        euid(),
+        None,
+        EPOCH,
+    )
+    .await
+    .unwrap();
     assert_eq!(kept.programs(), ["/sbin/mount"]);
     again.leave(Leaving::Signal).await.unwrap();
 
