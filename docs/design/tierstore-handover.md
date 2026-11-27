@@ -121,7 +121,9 @@ have a third line, `mount`: an instance that holds the mount offers it after the
 `/dev/fuse` descriptor, `control <path>` with the control socket), quiesces it at `ack` (`Mount::quiesce`), resumes it when the
 taker goes before `ready`, and gives it up at `ready` (its store entry removed) before it says `bye`; an instance that holds
 none refuses the line (`this instance holds no mount`) and the taker asks again without it, and an instance that holds one
-refuses a taker that does not ask for it. A cache instance offers its lock (`lock <path>`, a descriptor of `<cache>/.lock`) to a
+refuses a taker that does not ask for it: at the request of one that asks `take 1` alone, and at the `ready` of one that
+asked for that step (`refused` in place of `bye`), unless the mount was taken meanwhile on the instance's `take-fs 1`, as the
+start of the previous release takes it (the two conversations share a claim of the mount, `handoff/mount.rs`). A cache instance offers its lock (`lock <path>`, a descriptor of `<cache>/.lock`) to a
 taker that asked for `ready`, starts no cache write from `ready` on, and says `written` after `bye` once its writes in flight
 have ended; the taker takes the write role then, or when the connection ends (`handoff/written.rs`). Its cache tells
 the requests that wait for the write role that it is read-write only after its tree store has read the cache directory again
@@ -132,9 +134,11 @@ maps the file would take as SIGBUS
 (`a_handed_lock_is_taken_with_the_placements_the_holder_made_after_the_store_opened`,
 `a_file_opened_before_the_hand_over_under_a_newer_placement_is_read_by_the_successor`). The taker checks that
 the running instance is its own user and the kind of each descriptor (the sockets listen, the lock is the regular file at
-its path) before `ack`. A build node's instance takes part in all but the mount today (`serve_front`); the Linux start of a node with a cache asks for the lock
-with the sockets (komira-ai/tierstore#571, `handoff::offered_with_lock`, `handoff::follow`), and the start of the one process that asks for
-the mount in the same conversation is not built (P3 of the design's build plan, komira-ai/tierstore#522). The frames are read one at a time
+its path) before `ack`. A build node's instance takes part in all of it (`serve_front`), offering the mount where its file
+has an `fs` interface; the Linux start of a node with a cache asks for the lock with the sockets (komira-ai/tierstore#571,
+`handoff::follow`), and the start of the one process asks for the mount, the sockets and the lock in this one conversation
+(`cache_cli_mount.rs`, komira-ai/tierstore#522), falling back to `take-fs 1` for the mount only where the instance holds
+none. The frames are read one at a time
 (`frames_sent_together_are_read_one_at_a_time`), as `bye` and `written` may come back to back.
 
 Two processes must not write the table of tree numbers and the attachments file, which the taker reads after `done`. The offer

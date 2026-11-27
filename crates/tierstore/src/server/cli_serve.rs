@@ -18,8 +18,8 @@ use super::drain::late_of;
 use super::first_beat::wait_first_beat;
 use super::first_format::first_format;
 use super::handoff::{
-    Front, Handoff, HandoffError, Inherited, MAX_SOCKETS, Offer, Offered, Predecessor, Socket,
-    Want, check_control_path, offered_with_lock, take,
+    Ask, Front, Handoff, HandoffError, Inherited, MAX_SOCKETS, MountWant, Offer, Offered,
+    Predecessor, Socket, Want, check_control_path, offered_with, take,
 };
 use super::listen::{bind_all_with, duplicates, local_addrs};
 use super::lock::Received;
@@ -348,28 +348,41 @@ pub(super) enum Got {
     /// once it holds the mount, [`ask_sockets`]), or those of the offer the image this start was
     /// executed from handed over, read and checked as a taker checks an offer.
     Taken(Box<Inherited>),
+    /// The sockets of the running instance, taken with its mount in the one hand-over, which has
+    /// said `ready` already and read its `bye` (the start of the mount says it, before it reads the
+    /// device): the connection after the `bye`, for the lock it handed over.
+    Said(Box<Inherited>, Option<Predecessor>),
 }
 
-/// The running instance's offer of its sockets, asked for on `handoff` with the `ready` step and
-/// the cache lock at `lock`, checked against `s3` and `oci`, and not yet answered (`None` where no
-/// instance answers): the start of a node whose file has an `fs` interface holds it while it takes
-/// the mount from the other process, so that it has checked both offers before it accepts either
-/// (`docs/design/one-service.md` section 4.2). The checks [`bind_fronts`] makes before it asks are
-/// made first. Once accepted, [`bind_fronts`] says `ready` on it before this start serves, and the
-/// lock it handed over makes the cache the writer at that instance's `written`, not after its
-/// drain; a running instance that takes no `ready` step is asked as before, with `take 1` alone.
+/// The running instance's offer of its sockets, asked for on `handoff` with the `ready` step, the
+/// mount `mount` names (`take 1`, `ready`, `mount`) and the cache lock at `lock`, checked against
+/// `s3` and `oci` (and the mount's paths), and not yet answered (`None` where no instance answers):
+/// what the start of a node whose file has an `fs` interface asks. An offer with the mount
+/// ([`Offered::has_mount`]) is the one hand-over: `mount`'s `prepare` ran with its device. One
+/// without it (an instance that holds no mount refused the line, and was asked again without it)
+/// is held while the start takes the mount from the other process, so that it has checked both
+/// offers before it accepts either (`docs/design/one-service.md` section 4.2). The checks
+/// [`bind_fronts`] makes before it asks are made first. Once accepted, `ready` is said on it
+/// before this start serves, and the lock it handed over makes the cache the writer at that
+/// instance's `written`, not after its drain; a running instance that takes no `ready` step is
+/// asked as before, with `take 1` alone.
 ///
 /// # Errors
 /// As [`bind_fronts`], for what is found before the `ack`.
 pub(super) async fn ask_sockets(
     handoff: &Handoff,
-    s3: &[SocketAddr],
-    oci: &[SocketAddr],
+    (s3, oci): (&[SocketAddr], &[SocketAddr]),
     lock: &Path,
+    mount: Option<MountWant<'_>>,
 ) -> Result<Option<Offered>, HandingError> {
     before_asking(handoff, s3.len() + oci.len())?;
     let want = Want { s3, oci, nfs: &[] };
-    Ok(offered_with_lock(handoff, &want, lock).await?)
+    let ask = Ask {
+        mount,
+        lock: Some(lock),
+        leaves_another_lock: true,
+    };
+    Ok(offered_with(handoff, &want, ask).await?)
 }
 
 /// What is checked before a running instance is asked for its sockets: that `sockets` fit in one
@@ -404,7 +417,8 @@ fn before_asking(handoff: &Handoff, sockets: usize) -> Result<(), HandingError> 
 /// so that it is not handed over before it restarts.
 ///
 /// Sockets taken with the `ready` step ([`ask_sockets`]) are told `ready` here, before the control
-/// socket is made and before anything is served: the running instance serves on until then. When
+/// socket is made and before anything is served: the running instance serves on until then; those
+/// taken with the mount ([`Got::Said`]) were told it by the start of the mount. When
 /// it answers `bye`, the lock it handed over goes to [`Bound::follow`] with the connection. When it
 /// does not (it gave up first, and serves on as it was, on its own control socket, with its lock),
 /// the start fails with nothing served: the one point after `done` that does, as two instances
@@ -437,10 +451,11 @@ pub(super) async fn bind_fronts(
         oci: &oci_addrs,
         nfs: &[],
     };
-    let taken = match (got, handoff) {
-        (Some(Got::Taken(inherited)), _) => Some(*inherited),
-        (None, Some(handoff)) => take(handoff, &want).await?,
-        (None, None) => None,
+    let (taken, said) = match (got, handoff) {
+        (Some(Got::Taken(inherited)), _) => (Some(*inherited), None),
+        (Some(Got::Said(inherited, predecessor)), _) => (Some(*inherited), predecessor),
+        (None, Some(handoff)) => (take(handoff, &want).await?, None),
+        (None, None) => (None, None),
     };
     let front = oci.as_mut().map(|setup| oci_front(setup, backend));
     let Some(inherited) = taken else {
@@ -482,12 +497,15 @@ pub(super) async fn bind_fronts(
     // A running instance that took part in the `ready` step serves on until it is told `ready`,
     // and one that does not answer it gave up first and serves on: this start must not serve
     // beside it, and fails before anything is served.
-    let (lock, follow) = match ready {
+    let predecessor = match ready {
+        None => said,
+        Some(ready) => Some(ready.send_keeping().await?),
+    };
+    // A lock taken from a running instance is the cache's at its `written`; one handed over by
+    // the image this one was executed from (no connection), at once.
+    let (lock, follow) = match predecessor {
         None => (lock, None),
-        Some(ready) => {
-            let predecessor = ready.send_keeping().await?;
-            (None, lock.map(|lock| (predecessor, lock)))
-        }
+        Some(predecessor) => (None, lock.map(|lock| (predecessor, lock))),
     };
     let oci = match (oci, front) {
         (Some(setup), Some(front)) => Some(OciListener::over(

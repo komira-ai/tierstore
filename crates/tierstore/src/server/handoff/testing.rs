@@ -125,10 +125,19 @@ pub(crate) type Steps = std::sync::Arc<std::sync::Mutex<Vec<&'static str>>>;
 pub(crate) fn fake_mount(
     dir: &std::path::Path,
 ) -> (super::Mount, Steps, std::os::unix::net::UnixDatagram) {
+    fake_mount_at(dir, "fs")
+}
+
+/// [`fake_mount`], with its control socket at `<name>-control.sock` in `dir`, so that a test makes
+/// two in one directory.
+pub(crate) fn fake_mount_at(
+    dir: &std::path::Path,
+    name: &str,
+) -> (super::Mount, Steps, std::os::unix::net::UnixDatagram) {
     use std::sync::{Arc, Mutex};
     let (device, kernel) = std::os::unix::net::UnixDatagram::pair().expect("a pair");
-    let control =
-        std::os::unix::net::UnixListener::bind(dir.join("fs-control.sock")).expect("bound");
+    let at = dir.join(format!("{name}-control.sock"));
+    let control = std::os::unix::net::UnixListener::bind(&at).expect("bound");
     let steps: Steps = Arc::new(Mutex::new(Vec::new()));
     let step = |name: &'static str| -> super::mount::Step {
         let steps = Arc::clone(&steps);
@@ -136,7 +145,7 @@ pub(crate) fn fake_mount(
     };
     let mount = super::Mount {
         mountpoint: dir.join("mnt"),
-        control: dir.join("fs-control.sock"),
+        control: at,
         share: Arc::new(move || {
             let device = device.as_fd().try_clone_to_owned()?;
             Ok((device, control.as_fd().try_clone_to_owned()?))
@@ -144,6 +153,8 @@ pub(crate) fn fake_mount(
         quiesce: step("quiesce"),
         resume: step("resume"),
         give_up: step("give up"),
+        wait: std::time::Duration::from_secs(3600),
+        claim: Arc::default(),
     };
     (mount, steps, kernel)
 }

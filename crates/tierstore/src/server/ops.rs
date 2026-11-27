@@ -13,7 +13,7 @@ use tokio::sync::OwnedSemaphorePermit;
 use tokio::task::JoinError;
 
 use crate::journal::is_reserved;
-use crate::{Error, Meta, Opened, ReadBody, Span, Window};
+use crate::{Error, Meta, Opened, PutKind, ReadBody, Span, Window};
 
 use super::Server;
 use super::bucket;
@@ -484,7 +484,8 @@ impl Server {
             && let Some(writes) = conditional::streamed(&parts.headers, writes)
         {
             let len = body_len(parts, &check);
-            return self.put_streamed(key, len, reader, check, writes).await;
+            let put = self.put_streamed(key, len, reader, check, writes).await;
+            return self.counted_put(put);
         }
         let body = reader.read_all(check).await?;
         if let Some(setting) = &setting {
@@ -621,7 +622,8 @@ impl Server {
     /// that is refused (a hash that does not match, a body over the limit, a stalled or cut one)
     /// ends the stream with an error, so the backend
     /// stores nothing, and `refused` has the answer to send. `len` is the `Content-Length` of
-    /// the request, if it has one.
+    /// the request, if it has one. The digests the request named go with the put, for the
+    /// store to check the body against.
     ///
     /// The backend's call runs on a task of its own, so that a client that goes away after
     /// the whole body was handed over leaves the put to be carried to its end, with its
@@ -649,6 +651,7 @@ impl Server {
             Writes::Swaps(tag) => Some(tag.to_owned()),
             _ => None,
         };
+        let digests = check.digests();
         let refused = Refused::default();
         let (carry, body) = hand_over(
             pieces(reader, check, refused.clone()),
@@ -662,15 +665,15 @@ impl Server {
                     .put_stream_if_match(&name, len, body, &tag)
                     .await
                     .map(Some),
-                (None, Some(claim)) => backend
-                    .put_stream_replacing(&name, len, body, &claim)
-                    .await
-                    .map(|_| None),
-                (None, None) if hot_only => backend
-                    .put_stream_hot_only(&name, len, body)
-                    .await
-                    .map(|()| None),
-                (None, None) => backend.put_stream(&name, len, body).await.map(|()| None),
+                (None, claim) => {
+                    let kind = match &claim {
+                        Some(claim) => PutKind::Replaces(claim),
+                        None if hot_only => PutKind::CreatesHotOnly,
+                        None => PutKind::Creates,
+                    };
+                    let put = backend.put_stream_digested(&name, len, body, kind, digests);
+                    put.await.map(|_| None)
+                }
             }
         });
         let early = tokio::select! {

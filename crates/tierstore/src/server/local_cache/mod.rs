@@ -218,6 +218,8 @@ mod scrub_tests;
 #[cfg(test)]
 mod selfcheck_tests;
 #[cfg(test)]
+mod short_object_tests;
+#[cfg(test)]
 mod size_tests;
 #[cfg(test)]
 mod source_tests;
@@ -259,8 +261,8 @@ use tokio::sync::Semaphore;
 use crate::journal::is_reserved;
 use crate::server::lock;
 use crate::{
-    Backend, ByteRange, Clock, Error, Listed, Meta, OpenUpload, Opened, PartBody, PutAnswer,
-    PutClaim, PutOutcome, ReadBody, TreeDigest, UploadedPart, UploadsAfter,
+    Backend, BodyDigests, ByteRange, Clock, Error, Listed, Meta, OpenUpload, Opened, PartBody,
+    PutAnswer, PutClaim, PutKind, PutOutcome, ReadBody, TreeDigest, UploadedPart, UploadsAfter,
 };
 
 pub use disk::{Disk, Space, SystemDisk};
@@ -703,24 +705,6 @@ impl Inner {
     fn kept(&self, name: &Name) -> Option<Meta> {
         locked(&self.index).get(&name.hex).map(index::Entry::meta)
     }
-
-    /// Whether the object the index holds is the one on the disk. A read-only cache's index is
-    /// its scan, and the holder may have put the object again since, so the sidecar is read; a
-    /// read-write cache, and a key named by its content, need no check.
-    async fn unchanged(&self, name: &Name, meta: &Meta) -> bool {
-        if self.read_write() || name.content.is_some() {
-            return true;
-        }
-        let believed = stream::Believed {
-            size: meta.size,
-            tag: meta.tag.clone(),
-        };
-        let (root, hex) = (self.config.path.clone(), name.hex.clone());
-        let reading = tokio::task::spawn_blocking(move || {
-            stream::same_version_on_disk(&root, &hex, &believed)
-        });
-        reading.await.unwrap_or(false)
-    }
 }
 
 #[async_trait]
@@ -788,6 +772,23 @@ impl Backend for LocalCache {
         let sent = Sent::Replaces(claim);
         self.inner.put_through(key, len, body, sent).await?;
         Ok(None)
+    }
+
+    /// The put of `kind` through the cache, as `put_stream`, `put_stream_hot_only` and
+    /// `put_stream_replacing` make it, with `digests` passed to the upstream's own call.
+    async fn put_stream_digested(
+        &self,
+        key: &str,
+        len: Option<u64>,
+        body: PartBody<'_>,
+        kind: PutKind<'_>,
+        digests: BodyDigests,
+    ) -> Result<Option<PutAnswer>, Error> {
+        let sent = Sent::of(kind);
+        let put = self
+            .inner
+            .put_through_digested(key, len, body, (sent, digests));
+        put.await.map(|_| None)
     }
 
     async fn put_if_match(&self, _key: &str, _body: Bytes, _etag: &str) -> Result<String, Error> {
