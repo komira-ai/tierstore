@@ -61,8 +61,12 @@ pub fn main(
     let cli = match Cli::try_parse_from(args) {
         Ok(cli) => cli,
         Err(usage) => {
-            let to = if usage.use_stderr() { err } else { out };
-            let _ = write!(to, "{}", usage.render());
+            let text = usage.render().to_string();
+            let _ = if usage.use_stderr() {
+                err.write_all(text.as_bytes())
+            } else {
+                out.write_all(text.as_bytes())
+            };
             return u8::try_from(usage.exit_code()).unwrap_or(2);
         }
     };
