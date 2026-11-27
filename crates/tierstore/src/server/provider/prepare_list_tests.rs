@@ -65,8 +65,9 @@ fn counted(rig: &Rig, missing: u64, fallback: u64) {
 
 /// Asserts that a tree whose version 2 list is in the store and whose sidecar is not is placed
 /// from the list: the tree is named by the id, its image is the list byte for byte, every file is
-/// read and the tree marked ready; the sidecar's key is asked once and the list read once; and the
-/// preparation is counted as a missing sidecar and a tree placed from its list, not as a refusal.
+/// read and the tree marked ready; the upstream is asked for the sidecar and the list is read once;
+/// and the preparation is counted as a missing sidecar and a tree placed from its list, not as a
+/// refusal.
 #[tokio::test]
 async fn a_v2_list_with_no_sidecar_is_placed_as_its_list_and_counted() {
     let rig = Rig::new("prov-fallback-v2").await;
@@ -81,7 +82,11 @@ async fn a_v2_list_with_no_sidecar_is_placed_as_its_list_and_counted() {
     assert_eq!(image, v2);
     assert!(store.placement(&located.placement).unwrap().ready);
     assert!((0..3).all(|blob| rig.holds(blob)));
-    assert_eq!(gets(&rig, &sidecar_key_of(&key)), 1);
+    // The cache asks the upstream for the sidecar (the kind of call a miss makes is the cache's
+    // own), and is told there is none.
+    let sidecar = sidecar_key_of(&key);
+    let log = rig.bench.rig.upstream.call_log();
+    assert!(log.iter().any(|(_, asked)| *asked == sidecar), "{log:?}");
     assert_eq!(gets(&rig, &key), 1);
     counted(&rig, 1, 1);
 }
