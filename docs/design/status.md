@@ -30,7 +30,7 @@ The slices below were decided after this page was first written. Each slice row 
    A study of S3-heavy use cases will set their order when they return.
 6. **komira-ai/tierstore#538 was already built by komira-ai/tierstore#198.** The Appendix C row of put-without-lock.md is corrected below.
 7. **Small items:**
-   - being built: komira-ai/tierstore#555, komira-ai/tierstore#557, komira-ai/tierstore#515 and komira-ai/tierstore#532;
+   - being built: komira-ai/tierstore#555, komira-ai/tierstore#556, komira-ai/tierstore#557, komira-ai/tierstore#515 and komira-ai/tierstore#532;
    - later: komira-ai/tierstore#481, komira-ai/tierstore#533 and komira-ai/tierstore#552;
    - not scheduled: komira-ai/tierstore#482, komira-ai/tierstore#553 and komira-ai/tierstore#554.
 8. **New since this page was written:** komira-ai/tierstore#591 (a put whose body fails must not leave a short object in the upstream store).
@@ -52,7 +52,7 @@ The slices below were decided after this page was first written. Each slice row 
 | [tierstore-handover.md](tierstore-handover.md) | 31 | 2 | 0 | 2 | 1 | 0 | 0 |
 | [tsfuse-conformance.md](tsfuse-conformance.md) | 18 | 0 | 0 | 1 | 2 | 0 | 0 |
 | [tsfuse-kernel-findings.md](tsfuse-kernel-findings.md) | 16 | 5 | 2 | 0 | 1 | 2 | 3 |
-| [virtual-build-fs.md](virtual-build-fs.md) | 41 | 3 | 5 | 10 | 8 | 5 | 2 |
+| [virtual-build-fs.md](virtual-build-fs.md) | 40 | 4 | 5 | 10 | 8 | 5 | 2 |
 
 The counts are of the rows in the tables below (one row per PR-sized item), not of lines of code. fetch-cache-serve.md's section 18 lists, task by task, the work its other sections describe, so some of its items have a row under both.
 
@@ -139,7 +139,7 @@ Each issue says what to build, the failing test to write first (name, file, what
 | komira-ai/tierstore#553 | tsfuse-kernel-findings.md | tsfuse: run K10 registration checks against the real kernel (REGISTER before INIT is EAGAIN, ring idle until every CPU's queue is registered, a refused REGISTER turns io_uring off) | Not scheduled |
 | komira-ai/tierstore#554 | tsfuse-kernel-findings.md | tsfuse: show on the real kernel that FORGET arrives on /dev/fuse and is not delivered on the ring (K9, K11) | Not scheduled |
 | komira-ai/tierstore#555 | virtual-build-fs.md | tierstore fs: detach <run> answers stall_ms, the time the run's requests waited on fills | Being built |
-| komira-ai/tierstore#556 | virtual-build-fs.md | tierstore fs: per-request-kind latency and per-attach/detach timing metrics for the Q-B measurement | Done by komira-ai/tierstore#592 |
+| komira-ai/tierstore#556 | virtual-build-fs.md | tierstore fs: per-request-kind latency and per-attach/detach timing metrics for the Q-B measurement | Being built |
 | komira-ai/tierstore#557 | several pages | Correct the Status lines and 'not built' notes of the design pages to match main | Being built |
 | komira-ai/tierstore#407 (open before this audit) | fetch-cache-serve.md | The daemon's `[cache]` root and budget keys, the 50% overlap budget and `tierstore gc legacy` (section 13) | Done by komira-ai/tierstore#485 (Decisions, 3) |
 | komira-ai/tierstore#479 (open before this audit) | one-service.md, tierstore-handover.md | The hand-over's verify defers while the new instance serves read-only | Mostly done by komira-ai/tierstore#571 |
@@ -896,7 +896,7 @@ Slices of this page: komira-ai/tierstore#552, komira-ai/tierstore#553, komira-ai
 
 ### Sections 6.6 to the end: writes, runtimes, failure, macOS, measurement, phases, decisions
 
-**Status line.** No. It says "nothing here is built, and no code changes come with this document" and "phase 1 starts now". Main has the Linux FUSE frontend, the NFSv3 frontend, crash recovery and hand-over, pins and the fill socket. It should say: the design is largely built (phase 1 pull requests 2-5 and 7, phase 2 12a-12d, the one-process reversal of C5, the Q-B request and attach instruments of section 11 by komira-ai/tierstore#592); passthrough (PR 6) was built () and then deleted (komira-ai/tierstore#346); the fuser fork was replaced by tsfuse (komira-ai/tierstore#412); the core's views (6.6, PR 11) were dropped by C9; what is open is the producers (jobscheduler PR 9, executor PRs 8 and 10, the macOS client of PR 13), stall_ms in the detach answer, the Q-A and Q-B measurement runs and soak, NFSv4.0 (not planned), and FSKit (blocked on signing).
+**Status line.** No. It says "nothing here is built, and no code changes come with this document" and "phase 1 starts now". Main has the Linux FUSE frontend, the NFSv3 frontend, crash recovery and hand-over, pins and the fill socket. It should say: the design is largely built (phase 1 pull requests 2-5 and 7, phase 2 12a-12d, the one-process reversal of C5); passthrough (PR 6) was built () and then deleted (komira-ai/tierstore#346); the fuser fork was replaced by tsfuse (komira-ai/tierstore#412); the core's views (6.6, PR 11) were dropped by C9; what is open is the producers (jobscheduler PR 9, executor PRs 8 and 10, the macOS client of PR 13), stall_ms in the detach answer, the Q-B request and attach instruments, the Q-A and Q-B measurement runs and soak, NFSv4.0 (not planned), and FSKit (blocked on signing).
 
 | Section | Item | Status | Built by | Unbuilt |
 |---|---|---|---|---|
@@ -926,7 +926,7 @@ Slices of this page: komira-ai/tierstore#552, komira-ai/tierstore#553, komira-ai
 | 8 | FSKit frontend (M2) and probe MP6; Unix-socket NFS transport (MP1 direct mount(2)); VirtioFS probe MP5 | not-code |  | Blocked on a signing team, a console-user click, and probe results; no code to write until then. |
 | 10 | Compatibility: inode layout 1 in the table header, cross-release table test; source fills renamed from _tiering/fill/ at start; pins file ignored by older release; capability gating of hand-over | built | komira-ai/tierstore#277, komira-ai/tierstore#278, komira-ai/tierstore#283 |  |
 | 11 | Q-A instruments in the executor (input root bytes, fanotify watch) and the Q-A results | out-of-repo |  | executor change (PR 8) |
-| 11 | Q-B per-request instruments: attach_ms split into manifest fetch/flatten/table append, detach_ms, requests by kind (lookup, getattr, open, NFS RPC by procedure) with latency, first-touch latency, backing ids | built | komira-ai/tierstore#402, komira-ai/tierstore#467, komira-ai/tierstore#469, komira-ai/tierstore#345, komira-ai/tierstore#592 (tierstore_fs_request_seconds{kind}, tierstore_fs_run_attach_seconds{outcome}, tierstore_fs_run_attach_part_seconds{part,outcome}, tierstore_fs_run_detach_seconds{outcome}; crates/tierstore/src/server/treefs/core/requests.rs, core/runs.rs, local_cache/requests.rs, local_cache/runs.rs); also tierstore_fs_tree_attach_seconds{outcome}, manifest fetch/fill seconds, tree_levels, tierstore_fs_open_seconds{outcome,source}, opens_waiting, descriptor gauges, crates/fsbench | Over NFS a request is a call of the protocol layer into the file system, not a whole RPC: the `nfsserve` fork has no hook around a procedure. |
+| 11 | Q-B per-request instruments: attach_ms split into manifest fetch/flatten/table append, detach_ms, requests by kind (lookup, getattr, open, NFS RPC by procedure) with latency, first-touch latency, backing ids | partial | komira-ai/tierstore#402, komira-ai/tierstore#467, komira-ai/tierstore#469, komira-ai/tierstore#345 | Built: tierstore_fs_tree_attach_seconds{outcome}, manifest fetch/fill seconds, tree_levels, tierstore_fs_open_seconds{outcome,source}, opens_waiting, descriptor gauges, crates/fsbench. Missing: per-run attach and detach times, flatten and table-append split, and a latency histogram by request kind (FUSE op and NFS procedure). |
 | 11/12 | Q-B arms A-D runs and the soak/fault runs; MP/SP spike write-ups | not-code | docs/measurements/2026-11-fuse-baseline.md, 2026-11-fuse-results.md, 2026-11-fuse-v3-v4.md, 2026-11-fuse-v5-storm.md, 2026-11-zig-tree-after-441-442.md |  |
 | 12 | PR 2: tree manifest format, reader and flattener with refusal tests and 2^24-1 boundary | built | komira-ai/tierstore (tree library; later TreeListV2 in crates/tierstore-tree) |  |
 | 12 | PR 3: fill socket (source fills, own permits, lock-holder only) and PR 4: pins (pin_limit, pins file, eviction skip, scrub) | built | komira-ai/tierstore#277, komira-ai/tierstore#278, komira-ai/tierstore#305, komira-ai/tierstore#325 |  |
