@@ -439,6 +439,42 @@ async fn an_overwrite_before_the_rest_of_a_resumed_read_ends_the_body_with_an_er
     assert!(joined(&chunks).len() < SIZE);
 }
 
+/// Asserts that a reader given bytes of a fill before the fill ends without an object (a link the
+/// file system refuses) goes on from the upstream only on the version it was given: the object
+/// written over (the same size, other bytes) before the rest is read ends the body with an
+/// `Unavailable` error, and every byte given after the first chunk is of the first version. The
+/// reader takes its first chunk while the fill is held after one read, so the rest is always a
+/// resumed read that asks the upstream for the version it had, whatever the order of the tasks.
+#[tokio::test]
+async fn a_reader_given_bytes_before_its_fill_failed_refuses_the_rest_of_another_version() {
+    let rig = rig("tsstream-overwrite-resumed");
+    let old = pattern(SIZE);
+    rig.put("cas/b/obj", &old).await;
+    rig.disk
+        .set(Quirk::LinkFails(std::io::ErrorKind::PermissionDenied));
+    let gate = rig.tamper.hold();
+    open(&gate, 1);
+    let mut body = rig.cache.get_stream("cas/b/obj", None).await.unwrap();
+    assert_eq!(take(&mut body, 100).await, &old[..100]);
+    open(&gate, 64);
+    let counters = rig.cache.counters();
+    until("the fill failed", || {
+        counters.failures(FailedFill::LocalIo) >= 1
+    })
+    .await;
+    rig.replace("cas/b/obj", &vec![3u8; SIZE]).await;
+    let (chunks, error) = drain(body).await;
+    let error = error.expect("a body of two versions does not end cleanly");
+    assert!(error.is_unavailable(), "{error}");
+    let rest = joined(&chunks);
+    assert!(
+        rest.len() < SIZE - 100,
+        "{} bytes after the first chunk",
+        rest.len()
+    );
+    assert_eq!(rest, &old[100..100 + rest.len()]);
+}
+
 /// Asserts that a pass-through whose upstream gives fewer bytes than the object has is the
 /// error of the call, not a short body that ends well.
 #[tokio::test]

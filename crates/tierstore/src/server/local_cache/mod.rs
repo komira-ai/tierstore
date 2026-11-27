@@ -290,6 +290,7 @@ pub(super) use queued_reads::QueuedReads;
 use revalidate::Verdict;
 pub(super) use source::{Blob, FillError};
 pub(super) use source::{TreeFilled, blob_path, is_list, manifest_path};
+pub(super) use starts::provider_unavailable::Unavailable;
 use stream::eager;
 
 /// The most an uncached object may be, for a ranged read of it to fill the whole of it.

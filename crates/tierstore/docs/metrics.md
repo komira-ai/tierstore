@@ -535,6 +535,31 @@ again:
 sum(increase(tierstore_l2_sidecar_missing_total[1h])) - sum(increase(tierstore_l2_sidecar_fallback_total[1h]))
 ```
 
+### Build node: the mount provider's answers UNAVAILABLE
+
+The job agent asks the mount provider again after each `UNAVAILABLE` until its
+--mount-provider-wait has passed (120 s by default), and then fails the start
+`input-unavailable` with the last reason it was given. The family counts every such answer of
+the provider once, under its reason, so a node's own `/metricz` says why its starts wait or fail
+on the provider's side without a look at the jobs
+([operations](operations.md#the-mount-provider)). It is in the cache's block, with a `# TYPE`
+line and every reason, on every process with a cache, and stays at zero on one that serves no
+provider.
+
+| name | type | labels | what it says |
+|---|---|---|---|
+| `tierstore_provider_unavailable_total` | counter | `reason`: `no_fs`, `not_ready`, `not_prepared_here`, `tree_gone`, `read_failed`, `store_failed`, `not_released` | the provider's answers `UNAVAILABLE`: a `Prepare` or `Mount` on a node whose file has no `fs` interface, so no process serves the mount (`no_fs`); a `Mount` whose tree was not placed within its wait (`not_ready`), of a source this process has no preparation and finds no placement of, as after a restart between the agent's `Prepare` and `Mount` (`not_prepared_here`), whose placement ended without a release (`tree_gone`), whose preparation could not read the tree's sidecar or list (`read_failed`) or whose tree the store could not make now, such as at `trees.max_placements` (`store_failed`); a `Release` or `Sweep` whose placement the store could not remove now (`not_released`) |
+
+What it does not count: a start the agent fails on its own look at the directory the provider
+answered (the agent's failure text says so), and the waits a `Mount` ends with its directory.
+
+Starts held by a node whose file has no `fs` interface, over an hour (any value above zero means
+every start through that node's provider fails):
+
+```promql
+sum by (instance) (increase(tierstore_provider_unavailable_total{reason="no_fs"}[1h]))
+```
+
 ### Build node: tree attach on a lookup
 
 A lookup of `trees/<digest>` that no run has attached reads the tree's manifests (or the one tree
