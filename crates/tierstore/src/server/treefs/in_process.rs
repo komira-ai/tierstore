@@ -269,7 +269,7 @@ impl InProcess {
     /// Pins `blobs` for `tree` of `mount`, once the cache is read-write: `ok <pinned> <refused>
     /// <absent>` (the blobs now pinned by the tree, the blobs refused for the cache's
     /// `pin_limit`, the blobs the cache does not hold), or the words of the refusal (`read-only`,
-    /// or that the mount id `hold`, which the cache's holds pin under, is reserved).
+    /// or that the mount id `hold`, which the cache reserves, may not be named).
     ///
     /// # Errors
     /// The cache did not become read-write in `fetch_timeout`.
@@ -500,7 +500,7 @@ impl InProcess {
 }
 
 /// The answer to a pin request: `ok` and the numbers, or the words of the failure: a read-only
-/// cache, or the mount id of the holds.
+/// cache, or the reserved mount id `hold`.
 fn pinned(done: Result<String, PinError>) -> String {
     match done {
         Ok(numbers) => format!("ok {numbers}"),

@@ -825,7 +825,7 @@ fn a_tree_attached_again_pins_the_blobs_it_opens_again() {
 }
 
 /// Asserts that a pin the cache refuses is not recorded as done: a core whose mount id is the one
-/// the cache's holds pin under (`hold`, which no mount may name) has every pin refused, the opens
+/// the cache reserves (`hold`, which no mount may name) has every pin refused, the opens
 /// still succeed, and each open of the blob asks again, where one the cache accepts is asked once
 /// (`a_blob_in_the_cache_is_not_filled_again_and_is_pinned_once_per_tree`).
 #[test]
