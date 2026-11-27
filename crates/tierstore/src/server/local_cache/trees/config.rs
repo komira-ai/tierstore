@@ -3,8 +3,9 @@
 //! Every key has a default and none is required. The keys that the tree store itself holds a
 //! request to are `enabled`, `ttl`, `ttl_max`, `max_placements` and `max_bytes`; `max_entries`,
 //! `max_depth` and `max_dir_entries` are the limits [`TreesConfig::limits`] hands the builder of a
-//! tree. `fill_concurrency` and `prepare_prefetch` are read by the mount provider's `Prepare`
-//! (`server/provider`). The others (`max_request_bytes`, `prefetch_default`, `create_timeout`,
+//! tree. `fill_concurrency`, `prepare_concurrency` and `prepare_prefetch` are read by the mount
+//! provider's `Prepare` (`server/provider`), which also holds its table of sources to
+//! `max_sources`. The others (`max_request_bytes`, `prefetch_default`, `create_timeout`,
 //! `max_failures`) are read and checked at start and held here for the create call that fetches
 //! the files of a tree; nothing in this module uses them.
 
@@ -78,6 +79,12 @@ pub struct TreesConfig {
     pub max_placements: usize,
     /// The most ranged reads of creates that run at once, node-wide.
     pub fill_concurrency: usize,
+    /// The most preparations of the mount provider that read and make their tree at once,
+    /// node-wide: each holds its tree's list (at most 256 MiB) and the walk of it meanwhile.
+    pub prepare_concurrency: usize,
+    /// The most sources the mount provider holds, from their `Prepare` to their `Release` or a
+    /// `Sweep`: a `Prepare` of a new source past it is refused `UNAVAILABLE`.
+    pub max_sources: usize,
     /// What a create with no `prefetch` does.
     pub prefetch_default: Prefetch,
     /// What the mount provider's `Prepare` does about the bytes of the tree's files.
@@ -102,6 +109,8 @@ impl Default for TreesConfig {
             max_bytes: 32 << 30,
             max_placements: 1024,
             fill_concurrency: 8,
+            prepare_concurrency: 8,
+            max_sources: 16_384,
             prefetch_default: Prefetch::Wait,
             prepare_prefetch: PreparePrefetch::Background,
             create_timeout: Duration::from_secs(120),

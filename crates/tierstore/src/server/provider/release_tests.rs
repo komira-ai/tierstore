@@ -131,7 +131,7 @@ async fn a_sweep_removes_the_placements_the_mount_holds_at_once() {
     held(&rig, "js.1", 0, &rig.key).await;
     held(&rig, "js.2", 0, &rig.key).await;
     assert_eq!(rig.bench.store.sizes(), (2, 1));
-    assert_eq!(rig.provider.sweep(AGENT, &[]), Ok(2));
+    assert_eq!(rig.provider.sweep(AGENT, &[], &[]), Ok(2));
     assert_eq!(rig.bench.store.sizes(), (0, 0));
 }
 

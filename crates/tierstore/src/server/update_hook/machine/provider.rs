@@ -124,6 +124,8 @@ impl ProviderSocket {
             agent: AGENT.to_owned(),
             run: RUN.to_owned(),
             index,
+            // The check's sources have one attempt each, as an agent's that counts none.
+            attempt: 0,
         })
     }
 }

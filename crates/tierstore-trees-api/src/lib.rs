@@ -47,7 +47,9 @@ pub mod v1 {
 /// jobscheduler's protocol of a node-local mount provider (komira-ai/jobscheduler,
 /// `docs/design/mount-providers.md` section 3): `proto/jobscheduler/provider/v1/provider.proto`,
 /// package `jobscheduler.provider.v1`, service `MountProvider` with `Prepare`, `Mount`, `Release`
-/// and `Sweep`. It is jobscheduler's contract, copied here as it is there; tierstore serves it.
+/// and `Sweep`. It is jobscheduler's contract, copied here; tierstore serves it. The copy here is
+/// ahead of jobscheduler's by the attempt of a source (`Source.attempt`,
+/// `SweepRequest.keep_attempts`), which jobscheduler takes from it.
 pub mod provider {
     /// The gRPC package of the protocol.
     pub const PACKAGE: &str = "jobscheduler.provider.v1";

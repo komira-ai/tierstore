@@ -13,5 +13,6 @@ mod lifecycle;
 mod mount_check;
 mod refusals;
 mod rollback;
+mod stale;
 mod takeover;
 mod verb;

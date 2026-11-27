@@ -35,7 +35,10 @@
 //!
 //! A record committed and still in flight (a `cleanup` that ended before it finished, or one of
 //! an earlier release that gave up while the old instance drained) is finished by the next
-//! `cleanup`, `prepare` or `restore`, whichever comes first.
+//! `cleanup`, `prepare` or `restore`, whichever comes first. A record of another update, in flight
+//! and not committed, that returns the host to the params' previous release is one whose updater
+//! is gone: a `prepare` that finds it past its cutover, and a `rollback`, roll it back first with
+//! the params it was written under, then do their own step (`Record::stale`).
 //!
 //! The second unit, `tierstore-fs@a` and `tierstore-fs@b` ([`fs`]), is handed over in the same
 //! steps on a node where an instance of it runs, between releases that both list
@@ -71,7 +74,7 @@ use super::args::Step;
 use super::look::Look;
 use super::params::Params;
 use super::ports::{Instance, Lock, SystemdPorts};
-use super::record::Record;
+use super::record::{Record, Stale};
 use super::report::{Done, Reason};
 
 /// Whether the steps hand the fs process over to the other instance with the store.
@@ -139,19 +142,24 @@ fn next_of(record: &Record) -> Result<Instance, Done> {
 
 /// Refuses params that name another release or version than the update on record.
 fn same_update(record: &Record, params: &Params) -> Result<(), Done> {
-    let to = record.to.as_deref();
-    let version = record.version.as_deref();
-    if to == Some(params.staged_release.as_path()) && version == Some(&params.target_version) {
+    if record.is_of(params) {
         return Ok(());
     }
-    Err(Done::fail(
+    Err(another_update(record, params))
+}
+
+/// The refusal of params that name another update than the one on record.
+fn another_update(record: &Record, params: &Params) -> Done {
+    Done::fail(
         Reason::BadParams,
         format!(
-            "the params name {} {}, and the update on record is {to:?} {version:?}",
+            "the params name {} {}, and the update on record is {:?} {:?}",
             params.staged_release.display(),
             params.target_version,
+            record.to.as_deref(),
+            record.version.as_deref(),
         ),
-    ))
+    )
 }
 
 /// Refuses params of another update, while one is in flight or committed.
@@ -246,6 +254,11 @@ fn dispatch(
     params: &Params,
     record: Option<&Record>,
 ) -> Result<Done, Done> {
+    if let Some(record) = record
+        && let Some(done) = past_a_stale(c, step, params, record)
+    {
+        return done;
+    }
     match (step, record) {
         (Step::Prepare, record) => prepare::prepare(c, params, record),
         (Step::Restore, record) => boot::restore(c, params, record),
@@ -275,4 +288,79 @@ fn dispatch(
             cleanup::cleanup(c, params, record)
         }
     }
+}
+
+/// A `prepare` that finds another update past its cutover, and a `rollback` that finds another
+/// update in flight, neither committed, whose updater is gone ([`Stale::Own`]): that update is
+/// rolled back first, by `rollback` with the params it was written under, and the step then runs
+/// on the record at rest. `None` lets the step go by its own rules: a record of the update the
+/// params name, at rest, or committed (a committed one is finished, never rolled back), a
+/// `prepare` over a record whose `cutover` never swapped (it prepares over it, as before), a
+/// `cutover`, `verify` or `cleanup` (hostkeeper runs them only after a `prepare` of their own
+/// update succeeded, so another update's record there is a second order racing the first), and a
+/// record that [`Stale::Kept`] keeps, which a `rollback` refuses with why.
+fn past_a_stale(
+    c: &Ctx<'_, '_>,
+    step: Step,
+    params: &Params,
+    record: &Record,
+) -> Option<Result<Done, Done>> {
+    let asked = match step {
+        Step::Prepare => !record.markers.is_empty(),
+        Step::Rollback => true,
+        _ => false,
+    };
+    if !asked {
+        return None;
+    }
+    match record.stale(params) {
+        Stale::Not => None,
+        Stale::Kept(why) => (step == Step::Rollback).then(|| {
+            let mut done = another_update(record, params);
+            let said = done.report.detail.take().unwrap_or_default();
+            done.report.detail = Some(format!("{said}: {why}"));
+            Err::<Done, Done>(done)
+        }),
+        Stale::Own(own) => Some(roll_back_first(c, step, params, record, &own.params)),
+    }
+}
+
+/// Rolls the update on record back with `own`, the params it was written under, then runs `step`
+/// on the record at rest. Both details are said, the rollback's first.
+fn roll_back_first(
+    c: &Ctx<'_, '_>,
+    step: Step,
+    params: &Params,
+    record: &Record,
+    own: &Params,
+) -> Result<Done, Done> {
+    let whose = format!(
+        "the record is of the update to {} {}, not {} {}",
+        own.staged_release.display(),
+        own.target_version,
+        params.staged_release.display(),
+        params.target_version
+    );
+    let back = rollback::rollback(c, own, record).map_err(|done| {
+        led_by(
+            done,
+            &format!("{whose}, and its rollback with its own target and releases is not done"),
+        )
+    })?;
+    let note = format!(
+        "{whose}: rolled back with its own target and releases ({})",
+        back.report.detail.as_deref().unwrap_or_default()
+    );
+    // `rollback` saved the record at rest.
+    let at_rest = Record::decode(&c.ports.state.load()?.unwrap_or_default())?;
+    dispatch(c, step, params, Some(&at_rest))
+        .map(|done| led_by(done, &note))
+        .map_err(|done| led_by(done, &note))
+}
+
+/// `done` with `first` and `; ` before its detail.
+fn led_by(mut done: Done, first: &str) -> Done {
+    let rest = done.report.detail.take().unwrap_or_default();
+    done.report.detail = Some(format!("{first}; {rest}"));
+    done
 }

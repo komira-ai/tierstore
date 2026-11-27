@@ -17,4 +17,5 @@ mod prepare_tests;
 mod rollback_tests;
 mod service_tests;
 mod session_tests;
+mod stale_tests;
 mod update_tests;
