@@ -12,7 +12,7 @@ use objstore_s3::key_rules;
 use tokio::task::JoinError;
 
 use crate::journal::is_reserved;
-use crate::{Error, Meta, Opened, PutKind, ReadBody, Span, Window};
+use crate::{Error, Meta, Opened, PutAnswer, PutKind, ReadBody, Span, Window};
 
 use super::Server;
 use super::bucket;
@@ -32,6 +32,9 @@ use super::xml::{
 };
 
 mod admit;
+mod conditional;
+#[cfg(test)]
+mod conditional_tests;
 pub(super) mod copy;
 #[cfg(test)]
 mod copy_cache_tests;
@@ -378,8 +381,9 @@ fn joined<T>(done: Result<Result<T, Error>, JoinError>) -> Result<T, Error> {
     })
 }
 
-/// Whether a put only creates, which is what it does when it has no `If-Match` and its
-/// `If-None-Match` is absent or `*`: the body of such a put is streamed to the backend.
+/// Whether a put only creates: it has no `If-Match`, and its `If-None-Match` is absent or `*`
+/// (the rule of a scoped key). Which puts stream their body, and how, is decided by
+/// [`conditional::streamed`].
 pub(super) fn creates_only(headers: &HeaderMap) -> bool {
     let conditions = (
         header(headers, "if-match"),
@@ -432,6 +436,9 @@ pub(super) enum Writes<'a> {
     /// ([`Backend::put_stream_replacing`](crate::Backend::put_stream_replacing)); `If-None-Match: *`
     /// creates.
     Full,
+    /// The full key's `PUT` with `If-Match` alone: replaces the object only if it has this tag
+    /// ([`Backend::put_stream_if_match`](crate::Backend::put_stream_if_match)).
+    Swaps(&'a str),
 }
 
 impl<'a> Writes<'a> {
@@ -439,14 +446,14 @@ impl<'a> Writes<'a> {
     fn grant(self) -> Option<&'a Grant> {
         match self {
             Self::Presigned(grant) => Some(grant),
-            Self::Creates | Self::Full => None,
+            Self::Creates | Self::Full | Self::Swaps(_) => None,
         }
     }
 }
 
 impl Server {
     /// Does what a request asks for, once it is signed. The body of a multipart part and that
-    /// of a put with no `If-Match` and no `If-None-Match` other than `*` are streamed to the
+    /// of a put whose conditions are served (see [`conditional::streamed`]) are streamed to the
     /// backend as they arrive; every other call reads its body first.
     pub(super) async fn dispatch<B>(
         &self,
@@ -494,14 +501,9 @@ impl Server {
             return self.upload_part(query, key, len, reader, check).await;
         }
         if let ("PUT", Target::Object(key), false) = (method, &target, multipart)
-            && creates_only(&parts.headers)
+            && let Some(writes) = conditional::streamed(&parts.headers, writes)
         {
             let len = body_len(parts, &check);
-            // `If-None-Match: *` asks to create, whatever the key may do.
-            let writes = match writes {
-                Writes::Full if parts.headers.contains_key("if-none-match") => Writes::Creates,
-                other => other,
-            };
             let put = self.put_streamed(key, len, reader, check, writes).await;
             return self.counted_put(put);
         }
@@ -526,16 +528,18 @@ impl Server {
             }
             ("GET", Target::Object(key), false) => self.get_object(parts, query, &key).await,
             ("HEAD", Target::Object(key), false) => self.head_object(parts, query, &key).await,
-            ("PUT", Target::Object(key), false) => self.put_conditional(parts, &key).await,
+            ("PUT", Target::Object(key), false) => {
+                refuse_reserved(&key)?;
+                Err(conditional::refused(&parts.headers))
+            }
             ("DELETE", Target::Object(key), false) => self.delete_object(&key).await,
             ("DELETE", Target::Object(key), true) => self.abort_upload(query, &key).await,
             ("POST", Target::Object(key), true) if query.has("uploads") => {
                 self.start_upload(&key).await
             }
             ("POST", Target::Object(key), true) if query.has("uploadId") => {
-                let replaces =
-                    matches!(writes, Writes::Full) && !parts.headers.contains_key("if-none-match");
-                self.complete_upload(query, &key, body, replaces).await
+                let completes = conditional::completes(&parts.headers, writes)?;
+                self.complete_upload(query, &key, body, completes).await
             }
             _ => Err(S3Error::unsupported("this operation is not supported")),
         }
@@ -595,22 +599,14 @@ impl Server {
         ))
     }
 
-    /// A put that is not a plain create (see [`creates_only`]): `If-Match`, which is refused
-    /// because an object cannot be replaced, or an `If-None-Match` other than `*`.
-    async fn put_conditional(&self, parts: &Parts, key: &str) -> Result<Answer, S3Error> {
-        refuse_reserved(key)?;
-        match header(&parts.headers, "if-match") {
-            Some(tag) => self.replace_object(key, tag).await,
-            None => Err(S3Error::unsupported("only If-None-Match: * is supported")),
-        }
-    }
-
     /// Stores the object from the body of the request as it arrives: create-only, or for a
     /// plain put of the full key (`Writes::Full`) replacing a key that exists where the backend
-    /// replaces. The body is not held: the pieces are checked against the hashes of the request as
-    /// they pass, and go on through a short queue to the backend's streamed put, which makes the
-    /// object visible only after the last piece. A body that is refused (a hash that does not match, a body
-    /// over the limit, a stalled or cut one) ends the stream with an error, so the backend
+    /// replaces, or for `Writes::Swaps` replacing the object only if it has the tag, which
+    /// answers with the ETag of the new object. The body is not held: the pieces are checked
+    /// against the hashes of the request as they pass, and go on through a short queue to the
+    /// backend's streamed put, which makes the object visible only after the last piece. A body
+    /// that is refused (a hash that does not match, a body over the limit, a stalled or cut one)
+    /// ends the stream with an error, so the backend
     /// stores nothing, and `refused` has the answer to send. `len` is the `Content-Length` of
     /// the request, if it has one. The digests the request named go with the put, for the
     /// store to check the body against. The answer has the object's `ETag` (see [`landed`]).
@@ -637,6 +633,10 @@ impl Server {
         let permit = self.admit(len, writes.grant()).await?;
         let hot_only = matches!(writes, Writes::Presigned(_));
         let claim = matches!(writes, Writes::Full).then(|| check.claim());
+        let swap = match writes {
+            Writes::Swaps(tag) => Some(tag.to_owned()),
+            _ => None,
+        };
         let digests = check.digests();
         let refused = Refused::default();
         let (carry, body) = hand_over(
@@ -646,13 +646,22 @@ impl Server {
         let (backend, name) = (Arc::clone(&self.backend), key.to_owned());
         let mut storing = tokio::spawn(async move {
             let _permit = permit;
-            let kind = match &claim {
-                Some(claim) => PutKind::Replaces(claim),
-                None if hot_only => PutKind::CreatesHotOnly,
-                None => PutKind::Creates,
-            };
-            let put = backend.put_stream_digested(&name, len, body, kind, digests);
-            put.await
+            match (swap, claim) {
+                (Some(tag), _) => {
+                    let put = backend.put_stream_if_match(&name, len, body, &tag);
+                    let modified = None;
+                    put.await.map(|tag| Some(PutAnswer { tag, modified }))
+                }
+                (None, claim) => {
+                    let kind = match &claim {
+                        Some(claim) => PutKind::Replaces(claim),
+                        None if hot_only => PutKind::CreatesHotOnly,
+                        None => PutKind::Creates,
+                    };
+                    let put = backend.put_stream_digested(&name, len, body, kind, digests);
+                    put.await
+                }
+            }
         });
         let early = tokio::select! {
             biased;
@@ -667,20 +676,11 @@ impl Server {
         if let Some(error) = refused.take() {
             return Err(error);
         }
-        let answered = stored.map_err(S3Error::from)?;
+        let answered = stored.map_err(|error| match writes {
+            Writes::Swaps(_) => conditional::swap_error(error),
+            _ => S3Error::from(error),
+        })?;
         Ok(landed::answer_put(self.backend.as_ref(), key, answered).await)
-    }
-
-    /// `If-Match`: an object cannot be replaced, so the answer is that the condition does not
-    /// hold, or that the replacement is not done.
-    async fn replace_object(&self, key: &str, tag: &str) -> Result<Answer, S3Error> {
-        let meta = self.backend.head(key).await?;
-        if meta.tag != tag.trim_matches('"') {
-            return Err(S3Error::from(Error::PreconditionFailed(key.to_owned())));
-        }
-        Err(S3Error::unsupported(
-            "objects are immutable and cannot be replaced",
-        ))
     }
 
     async fn delete_object(&self, key: &str) -> Result<Answer, S3Error> {
@@ -923,45 +923,6 @@ impl Server {
         let etag = stored.map_err(upload_error)?;
         let headers = [("etag", format!("\"{etag}\""))];
         Ok(answer(StatusCode::OK, &headers, Bytes::new()))
-    }
-
-    async fn complete_upload(
-        &self,
-        query: &Query,
-        key: &str,
-        body: Bytes,
-        replaces: bool,
-    ) -> Result<Answer, S3Error> {
-        refuse_reserved(key)?;
-        let id = query.get("uploadId").unwrap_or_default();
-        let wanted = xml::parse_complete(&body).filter(|parts| !parts.is_empty());
-        let Some(wanted) = wanted else {
-            let text = "The request body is not a list of parts.";
-            return Err(S3Error::new(StatusCode::BAD_REQUEST, "MalformedXML", text));
-        };
-        let ascending = wanted.windows(2).all(|pair| pair[0].0 < pair[1].0);
-        if !ascending {
-            let text = "The parts must be listed in ascending order of their numbers.";
-            return Err(S3Error::new(
-                StatusCode::BAD_REQUEST,
-                "InvalidPartOrder",
-                text,
-            ));
-        }
-        let (backend, name, upload) = (Arc::clone(&self.backend), key.to_owned(), id.to_owned());
-        let call = async move {
-            if replaces {
-                backend
-                    .complete_upload_replacing(&name, &upload, &wanted)
-                    .await
-            } else {
-                backend.complete_upload(&name, &upload, &wanted).await
-            }
-        };
-        let etag = detached(call).await.map_err(upload_error)?;
-        let etag = format!("\"{etag}\"");
-        let body = xml::completed(&self.config.bucket, key, &etag);
-        Ok(xml_answer(StatusCode::OK, body))
     }
 
     async fn abort_upload(&self, query: &Query, key: &str) -> Result<Answer, S3Error> {
