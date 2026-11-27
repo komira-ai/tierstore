@@ -28,12 +28,15 @@
 //!
 //! A PUT, and the parts of an upload begun with `x-amz-checksum-algorithm: SHA256`, are checked
 //! against the `x-amz-checksum-sha256` they carry, the checksum is kept, and a HEAD gives it when
-//! asked; `x-amz-meta-*` headers are kept with the object (`fake/checksums.rs`). A test can make
-//! the service ignore checksums ([`FakeS3::ignore_checksums`]).
+//! asked; a PUT that carries `Content-MD5` is checked against it; `x-amz-meta-*` headers are kept
+//! with the object (`fake/checksums.rs`). A test can make the service ignore checksums
+//! ([`FakeS3::ignore_checksums`]).
 //!
 //! A request whose body ends before its `Content-Length` (the client went away) reaches nothing,
 //! unless a test makes the service keep the bytes that came of a PUT cut short, as SeaweedFS 4.54
-//! can ([`FakeS3::keep_cut_bodies`], `fake/cut.rs`).
+//! can ([`FakeS3::keep_cut_bodies`], `fake/cut.rs`). A test can hold every HEAD until it lets
+//! them go ([`FakeS3::hold_heads`], `fake/held.rs`), so that the service has taken such a PUT
+//! before it answers the HEAD a client sends after it.
 //!
 //! It keeps what a test asks about: the uploads begun and not yet completed or aborted
 //! ([`FakeS3::incomplete_uploads`]), how many single PUTs and parts it took and the
@@ -64,6 +67,7 @@ mod checksums;
 mod cut;
 mod dates;
 mod escape;
+mod held;
 mod kept;
 mod tls;
 mod uploads;
@@ -240,6 +244,8 @@ struct State {
     hold_abort: bool,
     /// AbortMultipartUpload requests held and not yet dropped.
     held_aborts: usize,
+    /// HEADs wait unanswered until a test lets them go ([`FakeS3::hold_heads`]).
+    hold_heads: bool,
 }
 
 /// An S3 service on loopback (module docs). It serves until the runtime it was
@@ -393,6 +399,19 @@ impl FakeS3 {
         self.lock().held_aborts
     }
 
+    /// Holds every HEAD from now on, read and not yet handled, until [`FakeS3::release_heads`]:
+    /// for a test that must have the service take a request (a PUT cut short) before it answers
+    /// a HEAD that the client sends after it, on another connection.
+    pub fn hold_heads(&self) {
+        self.lock().hold_heads = true;
+    }
+
+    /// Lets the HEADs held by [`FakeS3::hold_heads`] be handled, and every one after them.
+    pub fn release_heads(&self) {
+        self.lock().hold_heads = false;
+        self.changed.notify_waiters();
+    }
+
     /// Multipart uploads begun and neither completed nor aborted.
     #[must_use]
     pub fn incomplete_uploads(&self) -> usize {
@@ -484,22 +503,11 @@ async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
         let rest = buf.split_off(head_end + len);
         request.body = buf.split_off(head_end);
         buf = rest;
-        let held = {
-            let mut state = state.lock().unwrap_or_else(PoisonError::into_inner);
-            let abort = request.method == "DELETE" && request.query.contains_key("uploadId");
-            let held = abort && std::mem::take(&mut state.hold_abort);
-            state.held_aborts += usize::from(held);
-            held
-        };
-        if held {
-            changed.notify_waiters();
-            // Until the caller closes the connection; then the request is lost.
-            let _ = tokio::io::copy(&mut sock, &mut tokio::io::sink()).await;
-            let mut state = state.lock().unwrap_or_else(PoisonError::into_inner);
-            state.held_aborts -= 1;
-            drop(state);
-            changed.notify_waiters();
+        if held::abort_dropped(&mut sock, &state, &changed, &request).await {
             return None;
+        }
+        if request.method == "HEAD" {
+            held::heads_let_go(&state, &changed).await;
         }
         let answer = {
             let mut state = state.lock().unwrap_or_else(PoisonError::into_inner);
