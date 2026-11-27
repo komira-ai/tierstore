@@ -160,7 +160,7 @@ jobs:
       # The compiler-cache example (examples/build-cache), which crates/tierstore/tests/examples
       # runs, drives sccache with its S3 backend against tierstore: the release binary, checked
       # against its SHA-256. `make` and `cc` are the runner image's. Without sccache on PATH the
-      X
+      # example's two tests say so on stderr and end.
       - name: Install sccache for the compiler-cache example (pinned version and checksum)
         run: cargo "+$COVERAGE_TOOLCHAIN" xtask fetch --url "https://github.com/mozilla/sccache/releases/download/v$EXAMPLE_SCCACHE_VERSION/sccache-v$EXAMPLE_SCCACHE_VERSION-x86_64-unknown-linux-musl.tar.gz" --sha256 "$EXAMPLE_SCCACHE_SHA256" --out "$HOME/.cargo/bin/sccache" --extract tar.gz --member "sccache-v$EXAMPLE_SCCACHE_VERSION-x86_64-unknown-linux-musl/sccache"
       # This job's own cache key: no other job's cache is restored here (the lint job's holds a
