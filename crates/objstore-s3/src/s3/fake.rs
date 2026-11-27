@@ -50,7 +50,9 @@
 //!
 //! It serves plain HTTP ([`FakeS3::start`]) or HTTPS with a certificate a test makes
 //! ([`FakeS3::start_tls`]), and takes a request in path style or, through a store that reaches
-//! it by a host name ([`FakeS3::store_resolving`]), in virtual-hosted style (`fake/tls.rs`).
+//! it by a host name ([`FakeS3::store_resolving`]), in virtual-hosted style (`fake/tls.rs`). More
+//! fronts of one service, each on a port of its own, hold the same objects and uploads and keep
+//! their own log of requests ([`FakeS3::start_front`]).
 
 use std::collections::BTreeMap;
 use std::collections::hash_map::DefaultHasher;
@@ -219,7 +221,10 @@ struct State {
     next: u64,
     failures: Vec<Failure>,
     stats: FakeStats,
-    requests: Vec<String>,
+    /// Every request so far, with the front that took it (0 is the first, [`FakeS3::start_front`]).
+    requests: Vec<(usize, String)>,
+    /// How many fronts were started beside the first.
+    fronts: usize,
     /// The only key pair a request may be signed with, when a test set one.
     credentials: Option<(String, String)>,
     /// The host name under which a request is virtual-hosted style ([`FakeS3::store_resolving`]).
@@ -260,6 +265,8 @@ pub struct FakeS3 {
     state: Arc<Mutex<State>>,
     /// Woken each time a request changed what the service holds ([`FakeS3::wait_for`]).
     changed: Arc<Notify>,
+    /// Which front of the service this is: 0 for the first, [`FakeS3::start_front`].
+    front: usize,
 }
 
 impl FakeS3 {
@@ -402,26 +409,6 @@ impl FakeS3 {
         self.lock().held_aborts
     }
 
-    /// How many requests so far the service has read the head of, whatever came of their body:
-    /// for a test that must fail a body only once its request has reached the service.
-    #[must_use]
-    pub fn requests_begun(&self) -> u64 {
-        self.lock().begun
-    }
-
-    /// Holds every HEAD from now on but the next `after`, read and not yet handled, until
-    /// [`FakeS3::release_heads`]: for a test that must have the service take a request (a PUT cut
-    /// short) before it answers a HEAD that the client sends after it, on another connection.
-    pub fn hold_heads(&self, after: u32) {
-        self.lock().hold_heads = Some(after);
-    }
-
-    /// Lets the HEADs held by [`FakeS3::hold_heads`] be handled, and every one after them.
-    pub fn release_heads(&self) {
-        self.lock().hold_heads = None;
-        self.changed.notify_waiters();
-    }
-
     /// Multipart uploads begun and neither completed nor aborted.
     #[must_use]
     pub fn incomplete_uploads(&self) -> usize {
@@ -457,31 +444,27 @@ impl FakeS3 {
         self.lock().objects.get(key.as_str()).map(|o| o.kept.len)
     }
 
-    /// The metadata `name` (an `x-amz-meta-*` header, in lower case) of the object under `key`,
-    /// if there is an object and it keeps one.
-    #[must_use]
-    pub fn object_meta(&self, key: &ObjectKey, name: &str) -> Option<String> {
-        let state = self.lock();
-        let meta = &state.objects.get(key.as_str())?.sums.meta;
-        let found = meta.iter().find(|(held, _)| held == name);
-        found.map(|(_, value)| value.clone())
-    }
-
     /// From now on stamps the objects it takes with this time, in seconds since the Unix
     /// epoch, instead of the system clock's.
     pub fn set_time(&self, seconds: u64) {
         self.lock().time = Some(seconds);
     }
 
-    /// Every request so far, as `METHOD /path?query`.
+    /// Every request this front took so far, as `METHOD /path?query`.
     #[must_use]
     pub fn requests(&self) -> Vec<String> {
-        self.lock().requests.clone()
+        let state = self.lock();
+        let own = state
+            .requests
+            .iter()
+            .filter(|(front, _)| *front == self.front);
+        own.map(|(_, line)| line.clone()).collect()
     }
 }
 
-/// One request: method, path, query pairs, lowercase headers, body.
+/// One request: the front that took it, method, path, query pairs, lowercase headers, body.
 struct Request {
+    front: usize,
     method: String,
     path: String,
     query: BTreeMap<String, String>,
@@ -494,6 +477,7 @@ async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
     mut sock: S,
     state: Arc<Mutex<State>>,
     changed: Arc<Notify>,
+    front: usize,
 ) -> Option<()> {
     let mut buf = Vec::new();
     let mut chunk = vec![0u8; RUN];
@@ -506,7 +490,7 @@ async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
         }
         let head_end = head_end?;
         let head = String::from_utf8_lossy(&buf[..head_end]).into_owned();
-        let mut request = parse_head(&head)?;
+        let mut request = parse_head(&head, front)?;
         state.lock().unwrap_or_else(PoisonError::into_inner).begun += 1;
         changed.notify_waiters();
         let len: usize = request
@@ -546,7 +530,7 @@ fn end_of_head(buf: &[u8]) -> Option<usize> {
     blank.map(|at| at + 4)
 }
 
-fn parse_head(head: &str) -> Option<Request> {
+fn parse_head(head: &str, front: usize) -> Option<Request> {
     let mut lines = head.split("\r\n");
     let mut first = lines.next()?.split(' ');
     let method = first.next()?.to_owned();
@@ -565,6 +549,7 @@ fn parse_head(head: &str) -> Option<Request> {
         .map(|(k, v)| (k.trim().to_ascii_lowercase(), v.trim().to_owned()))
         .collect();
     Some(Request {
+        front,
         method,
         path: path.to_owned(),
         query,
@@ -602,7 +587,7 @@ fn handle(state: &mut State, request: &Request) -> Vec<u8> {
         .map(|(k, v)| format!("{k}={v}"))
         .collect();
     let line = format!("{} {}?{}", request.method, request.path, query.join("&"));
-    state.requests.push(line);
+    state.requests.push((request.front, line));
     let signed_region = request
         .headers
         .get("authorization")

@@ -1,13 +1,15 @@
 //! The requests the service holds for a test: the next AbortMultipartUpload, which it drops
 //! unhandled when its caller goes away ([`FakeS3::hold_next_abort`](super::FakeS3::hold_next_abort)),
-//! and every HEAD while a test holds them ([`FakeS3::hold_heads`](super::FakeS3::hold_heads)).
+//! and every HEAD while a test holds them ([`FakeS3::hold_heads`]); and what a test asks of the
+//! requests the service has begun and of an object's metadata.
 
 use std::sync::{Mutex, PoisonError};
 
 use tokio::io::AsyncRead;
 use tokio::sync::Notify;
 
-use super::{Request, State};
+use super::{FakeS3, Request, State};
+use crate::ObjectKey;
 
 /// Whether `request` is the AbortMultipartUpload to hold: if it is, it waits until its caller
 /// closes the connection and is then dropped, never having reached the store.
@@ -55,5 +57,38 @@ pub(super) async fn heads_let_go(state: &Mutex<State>, changed: &Notify) {
             }
         }
         released.await;
+    }
+}
+
+/// The calls of a test on what the service holds and has begun.
+impl FakeS3 {
+    /// How many requests so far the service has read the head of, whatever came of their body:
+    /// for a test that must fail a body only once its request has reached the service.
+    #[must_use]
+    pub fn requests_begun(&self) -> u64 {
+        self.lock().begun
+    }
+
+    /// Holds every HEAD from now on but the next `after`, read and not yet handled, until
+    /// [`FakeS3::release_heads`]: for a test that must have the service take a request (a PUT cut
+    /// short) before it answers a HEAD that the client sends after it, on another connection.
+    pub fn hold_heads(&self, after: u32) {
+        self.lock().hold_heads = Some(after);
+    }
+
+    /// Lets the HEADs held by [`FakeS3::hold_heads`] be handled, and every one after them.
+    pub fn release_heads(&self) {
+        self.lock().hold_heads = None;
+        self.changed.notify_waiters();
+    }
+
+    /// The metadata `name` (an `x-amz-meta-*` header, in lower case) of the object under `key`,
+    /// if there is an object and it keeps one.
+    #[must_use]
+    pub fn object_meta(&self, key: &ObjectKey, name: &str) -> Option<String> {
+        let state = self.lock();
+        let meta = &state.objects.get(key.as_str())?.sums.meta;
+        let found = meta.iter().find(|(held, _)| held == name);
+        found.map(|(_, value)| value.clone())
     }
 }

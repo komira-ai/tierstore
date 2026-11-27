@@ -1,6 +1,7 @@
 //! `S3Store::new_rotating`: one store reached through several endpoints, each request going to the
 //! next endpoint in turn, against S3 services on loopback that check the signature of every
-//! request against the `Host` they received.
+//! request against the `Host` they received; and the fronts of one such service, the endpoints of
+//! one store, with which other crates test a store reached through several endpoints.
 
 #![allow(
     clippy::unwrap_used,
@@ -13,7 +14,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use objstore_s3::s3::fake::FakeS3;
 use objstore_s3::s3::{Addressing, Credentials, S3Config, S3ConfigError, S3Store, S3Tuning};
-use objstore_s3::{Capabilities, ObjectKey, ObjectStore};
+use objstore_s3::{ByteRange, Capabilities, ObjectKey, ObjectStore};
 
 fn config(endpoint: &str) -> S3Config {
     S3Config {
@@ -125,5 +126,45 @@ async fn a_repeated_or_malformed_endpoint_in_the_list_is_refused() {
     assert_eq!(
         refusal(std::slice::from_ref(&ftp)),
         (ftp, "the scheme must be http or https")
+    );
+}
+
+/// Asserts that fronts of one service, each started from the one before, hold one set of objects
+/// and one key pair: an object put through the second is read through the third and listed as held
+/// by the first, a put through the third signed with another secret is refused, and each front
+/// logs only the requests it took (the first none).
+#[tokio::test]
+async fn fronts_of_one_service_share_its_objects_and_keep_their_own_logs() {
+    let first = FakeS3::start().await;
+    first.require_credentials("fake-key", "fake-secret");
+    let second = first.start_front().await;
+    let third = second.start_front().await;
+    assert_ne!(first.endpoint(), second.endpoint());
+    assert_ne!(second.endpoint(), third.endpoint());
+    let through = |fake: &FakeS3| S3Store::new_tuned(config(fake.endpoint()), S3Tuning::default());
+    let writer = through(&second).unwrap();
+    writer
+        .put_new(&key(0), Bytes::from_static(b"abcd"), None)
+        .await
+        .unwrap();
+    let reader = through(&third).unwrap();
+    let got = reader
+        .get_range(&key(0), ByteRange::new(0, 4).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(&got[..], b"abcd");
+    let mut wrong = config(third.endpoint());
+    wrong.credentials = Credentials::new("fake-key", "another-secret");
+    let refused = S3Store::new_tuned(wrong, S3Tuning::default()).unwrap();
+    let put = refused
+        .put_new(&key(1), Bytes::from_static(b"x"), None)
+        .await;
+    assert!(put.is_err(), "{put:?}");
+    assert_eq!(first.keys(), ["k0"]);
+    assert_eq!(first.requests(), Vec::<String>::new());
+    assert_eq!(second.requests(), ["PUT /tierstore-fake/k0?"]);
+    assert_eq!(
+        third.requests(),
+        ["GET /tierstore-fake/k0?", "PUT /tierstore-fake/k1?"]
     );
 }
