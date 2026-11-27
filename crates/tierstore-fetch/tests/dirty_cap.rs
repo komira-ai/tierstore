@@ -26,6 +26,7 @@ use tierstore_fetch::config::{
     DEFAULT_CEILING_BYTES, DIRTY_CAP_MAX_BYTES, buffer_bytes_for, dirty_cap_for,
 };
 use tierstore_fetch::{EngineConfig, GetKind, TimerKind};
+use tierstore_fetch_api::budget::Observation;
 use tierstore_fetch_api::cell::CellState;
 use tierstore_fetch_api::engine::{Engine, WaitOutcome};
 use tierstore_fetch_api::fake::MemEntryStore;
@@ -321,4 +322,75 @@ async fn a_cap_below_one_cell_publishes_one_cell_at_a_time() {
         .await;
     assert_eq!(stats.dirty_bytes_peak, MIB);
     assert_eq!(rig.entry_bytes(&pack, 0, 3 * MIB), pack.bytes.to_vec());
+}
+
+/// A wait for a cell buffer is local time, not the drive's. With a pool of one buffer, held by a
+/// cell whose publish is held, a part waits 5 s for a buffer after its headers: it is not taken
+/// for stalled (its pre-first-byte timeout of 2 s is moved on by the wait), and the first-byte
+/// time the controller is told leaves the wait out. A second wait of 3 s, for the buffer of its
+/// second cell after its first byte, is left out of the network time the controller is told.
+#[tokio::test]
+async fn a_wait_for_a_cell_buffer_is_neither_a_stall_nor_a_time_told_to_the_controller() {
+    let config = EngineConfig {
+        buffer_bytes: MIB,
+        ..EngineConfig::default()
+    };
+    let (rig, gate) = gated(config);
+    let holder = pack_on(&rig, "dirty/buffer-holder", MIB, 21);
+    let waiter = Pack::new("dirty/buffer-waiter", 2 * MIB, 22);
+    rig.upstream.add(
+        &waiter,
+        location(generation(1), 2 * MIB, vec![hot(2, 2 * MIB)]),
+    );
+    let body = Arc::new(Semaphore::new(0));
+    rig.upstream.script(hot_dev(2), Script::Gated(body.clone()));
+
+    // The holder's one cell takes the only buffer and keeps it while its publish is held.
+    prepare(&rig, &holder);
+    gate.until(|p| p.in_flight == 1).await;
+    rig.until(|s| s.buffers == 1).await;
+
+    // The waiter's part has its headers and waits for a buffer, with no timer armed.
+    prepare(&rig, &waiter);
+    let s = rig.until(|s| s.buffers_waiting == 1).await;
+    assert_eq!(s.armed(TimerKind::FirstByte), 0);
+    rig.clock.advance(5_000);
+    gate.release(1);
+    rig.until(|s| s.armed(TimerKind::FirstByte) == 1 && s.buffers_waiting == 0)
+        .await;
+
+    // Its first byte: cell 0 goes to its (held) publish and keeps the buffer, so the buffer of
+    // cell 1 is waited for again.
+    body.add_permits(1);
+    gate.until(|p| p.in_flight == 1 && p.returned == 1).await;
+    rig.until(|s| s.buffers_waiting == 1).await;
+    rig.clock.advance(3_000);
+    gate.open();
+    let stats = rig.until(|s| s.cells_published == 3).await;
+
+    assert_eq!((stats.stall_retries, stats.gets(GetKind::Retry)), (0, 0));
+    assert_eq!(rig.entry_bytes(&waiter, 0, 2 * MIB), waiter.bytes.to_vec());
+    let observations = rig.budget.observations();
+    let first_bytes: Vec<Option<u32>> = observations
+        .iter()
+        .filter_map(|o| match o {
+            Observation::Response {
+                device,
+                first_byte_ms,
+                ..
+            } if *device == hot_dev(2) => Some(*first_byte_ms),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(first_bytes, vec![Some(0)]);
+    let network: Vec<u32> = observations
+        .iter()
+        .filter_map(|o| match o {
+            Observation::Network { node, ms_per_mib } if *node == Some(NodeId(2)) => {
+                Some(*ms_per_mib)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(network, vec![0]);
 }
