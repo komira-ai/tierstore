@@ -27,6 +27,13 @@ fn headers(pairs: &[(&'static str, &str)]) -> HeaderMap {
     map
 }
 
+/// The headers of a put, and how the full key and a key that only creates store it.
+type Case = (
+    &'static [(&'static str, &'static str)],
+    &'static str,
+    &'static str,
+);
+
 /// How a streamed put is stored, as text.
 fn stored(writes: Option<Writes<'_>>) -> String {
     match writes {
@@ -46,7 +53,7 @@ fn stored(writes: Option<Writes<'_>>) -> String {
 /// `If-None-Match` together where the request has both.
 #[test]
 fn the_conditions_of_a_put_decide_how_it_is_stored() {
-    let cases: [(&[(&str, &str)], &str, &str); 9] = [
+    let cases: [Case; 9] = [
         (&[], "full", "creates"),
         (&[("if-none-match", "*")], "creates", "creates"),
         (&[("if-match", "\"abc\"")], "swaps abc", "refused"),

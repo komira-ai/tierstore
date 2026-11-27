@@ -25,13 +25,9 @@
 //!   (`docs/design/put-without-lock.md`, 5.3 to 5.5). A scoped key and a presigned URL only create
 //!   under every format. A key that exists is `PreconditionFailed`, except that under the format phase `active-marks`
 //!   (`docs/design/put-without-lock.md`, 5.1) a key that a delete is removing, or has just
-//!   removed, is 409 `ConditionalRequestConflict`. `If-Match` alone, from the full key, replaces
-//!   the object only if it has that ETag ([`Backend::put_stream_if_match`]), and the answer
-//!   carries the new `ETag`: another ETag is `PreconditionFailed`, a key with no object
-//!   `NoSuchKey`. A backend of two tiers does not replace on a tag: `NotImplemented`, with the
-//!   reason, for the right ETag. The completion of a multipart upload takes `If-Match` the same
-//!   way ([`Backend::complete_upload_if_match`]; an upload that is not open is `NoSuchUpload`).
-//!   `If-Match` beside `If-None-Match` is `NotImplemented` (see `ops/conditional.rs`);
+//!   removed, is 409 `ConditionalRequestConflict`. `If-Match` on a put or a completion is a
+//!   compare-and-swap where the backend does one and `NotImplemented` over two tiers (see
+//!   `ops/conditional.rs`);
 //! - DeleteObject, which succeeds for a key that is not there, and DeleteObjects (`POST
 //!   /<bucket>?delete`, up to 1000 keys, `Quiet`, `Content-MD5` or an `x-amz-checksum-*` header
 //!   needed), a result for each key (see [`delete_objects`]), for the full key only;
@@ -124,9 +120,8 @@
 //! client down instead of filling memory. The object becomes visible, and its entry
 //! is made pending, only after the last piece was read and every hash came out right: a hash that
 //! does not match at the last byte, a body over the limit, a stalled body and a connection cut
-//! half way each leave no object and no entry. A put with `If-Match` alone streams the same way,
-//! to [`Backend::put_stream_if_match`]; one with an `If-None-Match` other than `*`, or with both
-//! headers, is refused without being stored. [`ServerConfig::max_request_bytes`] is
+//! half way each leave no object and no entry. A put with `If-Match` alone streams the same way;
+//! any other condition is refused without being stored. [`ServerConfig::max_request_bytes`] is
 //! the most bytes a body may have, not a bound on memory.
 //!
 //! Before the first byte of a streamed body (a put, or a part of an upload) is read, the request

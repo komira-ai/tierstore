@@ -74,7 +74,11 @@ impl Front {
     /// A call to `target` (a key, with its query) signed with the full key.
     async fn call(&self, method: &str, target: &str, extra: &[(&str, &str)], body: &[u8]) -> Reply {
         let uri = format!("/{BUCKET}/{target}");
-        let request: Request<Full<Bytes>> = sign(&self.config, method, &uri, extra, body);
+        // The bucket needs the length of a put before it is sent, so the front asks for it.
+        let len = body.len().to_string();
+        let mut headers = extra.to_vec();
+        headers.push(("content-length", len.as_str()));
+        let request: Request<Full<Bytes>> = sign(&self.config, method, &uri, &headers, body);
         let response = self.server.handle(request).await;
         let (parts, body) = response.into_parts();
         let bytes = body.collect().await.unwrap().to_bytes();
