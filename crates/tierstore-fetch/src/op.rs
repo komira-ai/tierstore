@@ -165,6 +165,8 @@ pub(crate) async fn run(
         publishes: Vec::new(),
     };
     let end = op.start(d.source, kind, permit, rx).await;
+    // Nothing reads the attempts' events any more: they stop now, not after the publishes.
+    op.stop();
     op.settle().await;
     op.finish(end);
 }
@@ -681,13 +683,17 @@ impl Op {
         self.launch(cells, source, GetKind::Hedge, Class::Demand, None, true);
     }
 
-    fn finish(mut self, end: End) {
+    /// Aborts the running attempts and the timers.
+    fn stop(&self) {
         for r in self.running.values() {
             r.task.abort();
         }
         for t in &self.timers {
             t.abort();
         }
+    }
+
+    fn finish(mut self, end: End) {
         let hedges = self.running.values().filter(|r| r.hedge).count();
         let tokens = std::mem::take(&mut self.tokens);
         let left: Vec<u32> = tokens.keys().copied().collect();

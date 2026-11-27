@@ -248,6 +248,7 @@ fn late_headers_rig() -> (Rig, Arc<Semaphore>, Arc<Semaphore>) {
         store,
         upstream,
         budget,
+        cache: tierstore_metrics::Metrics::new("test").node_cache().cache,
         engine,
     };
     (rig, gate, delivered)
