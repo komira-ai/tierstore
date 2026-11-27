@@ -103,7 +103,23 @@ fn stale(key: &str) -> Error {
     retry(key, "the lock was held too long to be used")
 }
 
+/// Why the proxy does not replace an object on its tag (`If-Match`), which the client is told.
+const NO_SWAP: &str = "If-Match is not supported over a hot and a cold tier: the \
+     ETag of an object is that of the tier that holds it and changes when the object moves \
+     between the tiers, so it does not name one version of the object";
+
 impl Inner {
+    /// A put or a completion with `If-Match`: [`Error::NotFound`] for a key no tier holds and
+    /// [`Error::PreconditionFailed`] for another tag, as a HEAD finds them, and otherwise
+    /// [`Error::Unsupported`] with [`NO_SWAP`]. Nothing is written.
+    pub(super) async fn refuse_swap(&self, key: &str, etag: &str) -> Result<String, Error> {
+        let meta = self.head_object(key).await?;
+        if meta.tag != etag {
+            return Err(Error::PreconditionFailed(key.to_owned()));
+        }
+        Err(Error::Unsupported(NO_SWAP.to_owned()))
+    }
+
     /// The meta of the hot object, or `None` where the hot tier does not hold the key.
     pub(super) async fn head_hot(&self, key: &str) -> Result<Option<Meta>, Error> {
         match self.hot.head(key).await {
