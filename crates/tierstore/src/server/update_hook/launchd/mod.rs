@@ -11,20 +11,28 @@
 //! rather than does things once, so that a run after a crash converges. A record that names a
 //! systemd instance (`live`, `next` or `mode`) is not this arm's and is refused.
 //!
+//! The update hook of a release ([`run_step_with`] with `releases`) refuses in `prepare` a node of
+//! the two-process layout and proves the node's volume in `verify`, as [`volume`] describes.
+//!
 //! When the params name the job of `tierstore fs` (`fs_launchd_label`), the arm drives it too, as
-//! [`fs`] describes: every boot-out of the main job (`cutover` of an update or of a first install
-//! over a loaded job, `rollback`, `uninstall`) is preceded by the boot-out of the fs job and a
-//! check that its mount is gone (a first install looks at the fs job even when the main job is
-//! not loaded), and the fs job is booted in after the main job serves (`cutover`, `rollback`) or
-//! after it is loaded (`restore`). A mount that stays ends the step with `not_ready`, with the
-//! main job untouched.
+//! [`fs`] describes, except in an update of the release on a node whose file has an `fs`
+//! interface: that node's one process serves the mount, its fs job is booted out and disabled by
+//! the switch, and every step (the boot step too) leaves it alone, whatever the params say. The macOS package's manifest does not name it: that job serves nothing since
+//! 0.3.196 (`tierstore fs --config` exits 2). The config hook's switch of a Mac names it for its
+//! rollback, which goes back to the two-process layout. Every boot-out of the main job (`cutover`
+//! of an update or of a first install over a loaded job, `rollback`, `uninstall`) is then
+//! preceded by the boot-out of the fs job and a check that its mount is gone (a first install
+//! looks at the fs job even when the main job is not loaded), and the fs job is booted in after
+//! the main job serves (`cutover`, `rollback`) or after it is loaded (`restore`). A mount that
+//! stays ends the step with `not_ready`, with the main job untouched.
 //!
 //! - `prepare` needs the node's configuration file to exist (it does not need a hand-over
 //!   socket), and records the update: `from` the previous release (none on a first install),
 //!   `to` the staged release and its `version`; the way is not recorded. Where the params leave
 //!   it open it asks the two releases what they list. It refuses a restart of a node whose file
-//!   has an `fs` interface (`mode_unsupported`), and has the staged release check the file before
-//!   a hand-over. Nothing is started or stopped.
+//!   has an `fs` interface (`mode_unsupported`), and, for a release, a node whose file has a mount
+//!   provider and no `fs` interface (`mode_unsupported`, [`volume`]), and has the staged release
+//!   check the file before a hand-over. Nothing is started or stopped.
 //! - `cutover` of a restart boots the fs job out first when there is one and it is loaded, boots
 //!   the job out and in, waits for `/readyz` and for the build of the target version, boots the
 //!   fs job in when there is one and it is not loaded, and records `swapped`. Of a hand-over, a
@@ -34,9 +42,11 @@
 //!   or nothing, is taken over as an update would take it over. A run that finds the job loaded
 //!   and serving the target only records `swapped`. A failure is reported; hostkeeper then runs
 //!   `rollback`.
-//! - `verify` observes the target version served by the loaded job and records `verified`; a job
-//!   that serves read-only (its cache has not taken the write role yet) defers with `not_ready`
-//!   and records nothing. After the commit it only observes.
+//! - `verify` observes the target version served by the loaded job and, for a release whose node
+//!   has an `fs` interface, the volume served at its mount point ([`volume`]), and records
+//!   `verified`; a job that serves read-only (its cache has not taken the write role yet) defers
+//!   with `not_ready` and records nothing, and a volume that is not served fails with
+//!   `not_ready`. After the commit it only observes the version.
 //! - `rollback` boots the fs job out first when there is one, then, for an update, puts the
 //!   previous binary in place and boots the job out and in again (a hand-over of a loaded job
 //!   sends `SIGUSR2` instead), waits for the previous version and boots the fs job in; a first
@@ -60,6 +70,7 @@
 
 mod exec;
 pub(in crate::server) mod fs;
+mod volume;
 
 use std::cell::Cell;
 use std::path::Path;
@@ -248,10 +259,14 @@ fn attempt(
     };
     record.check()?;
     launchd_record(&record)?;
+    let fs = match params.fs_launchd_label() {
+        Some(fs) if !(releases && volume::serves_its_mount(ports, params)?) => Some(fs),
+        _ => None,
+    };
     let c = Ctx {
         ports,
         label,
-        fs: params.fs_launchd_label(),
+        fs,
         releases,
         commit_written: Cell::new(false),
     };
@@ -305,6 +320,7 @@ fn prepare(c: &Ctx<'_, '_>, params: &Params, record: &mut Record) -> Result<Done
             format!("there is no configuration file at {}", config.display()),
         ));
     };
+    c.one_process(config, &text)?;
     // The way is not recorded: `cutover` and `rollback` decide it again from the same inputs.
     let hands_over = c.plan(params, config, &text)?;
     let from = params.previous.as_ref().map(|p| p.release.clone());
@@ -398,6 +414,7 @@ fn verify(c: &Ctx<'_, '_>, params: &Params, record: &mut Record) -> Result<Done,
     }
     let observed = c.look().observed(target)?;
     let mode = writable(observed, c.label, params.verify_retry_secs)?;
+    c.volume_served(params)?;
     // `verified` follows its act: everything above was observed.
     if !record.has(Marker::Verified) {
         let marked = record.with(Marker::Verified);

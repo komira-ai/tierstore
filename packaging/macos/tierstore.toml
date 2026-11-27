@@ -1,9 +1,10 @@
 # /usr/local/tierstore/etc/tierstore.toml: tierstore on a Mac, as hostkeeper/units/tierstore.plist
 # starts it. root:_tierstore, mode 0640. crates/tierstore/docs/configuration.md says what every key does.
 #
-# On a Mac tierstore is a local cache on loopback: no hot tier, no server role, no hand-off socket and
-# no firewall redirect. The jobs' trees are one NFS mount of this same process (the `fs` interface
-# below), on loopback too. Reads that miss the cache go to the tierstore S3 servers of the storage
+# One process serves the whole Mac: the S3 cache on loopback and, from the `fs` interface below, the
+# trees as a file system, NFS on loopback mounted at /private/var/tierstore/fs. No other process
+# serves that mount: `tierstore fs` serves nothing since 0.3.196. There is no hot tier, no server
+# role, no hand-off socket and no firewall redirect. Reads that miss the cache go to the tierstore S3 servers of the storage
 # nodes, port 9300. It writes one kind of object there: the objects the Mac's jobs commit into their
 # put directories under the put ingest's root (crates/tierstore/docs/operations.md, "The put
 # ingest"), so the node takes writes (write_through) and its upstream key may write cas/b/.
@@ -25,31 +26,28 @@
 type   = "s3"
 params = { addresses = ["127.0.0.1:9300"] }
 
+# The trees of the node as a file system, served by this process (crates/tierstore/docs/operations.md,
+# "The fs interface on a Mac"): the NFS export is on loopback only, at a fixed port so that a restart
+# or a hand-over finds the clients' hard mount waiting at the same address, and the process mounts it
+# at `mountpoint`, a directory _tierstore owns (the installer package makes it), and unmounts it when
+# it stops. The params are those of an fs interface (crates/tierstore/docs/configuration.md);
+# `fill_socket` and `cache_path` are refused by name: the interface calls the cache of `local_cache.path` in this
+# process. `client_group` is the group of the control socket; `owner` is the user and group every
+# entry of every tree reports, by name because the numeric id of _tierstore differs from Mac to Mac;
+# `runtime_dir` holds the state that outlives the process (the table of tree numbers, the control
+# socket), in the directory the package makes for it, which launchd does not make. `nfs.mount_user`
+# is left out: the user of the process owns the mount point.
+[[interface]]
+type   = "fs"
+params = { mountpoint = "/private/var/tierstore/fs", client_group = "_tierstore", owner = "_tierstore:_tierstore", runtime_dir = "/usr/local/tierstore/run/fs", nfs = { listen = "127.0.0.1:12049" } }
+
 # The mount provider jobscheduler's agent on this Mac asks for a job's input tree
 # (crates/tierstore/docs/operations.md, "The mount provider"): a Unix socket only, mode 0600, in a
-# directory _tierstore owns. `mountpoint` is the `fs` interface's below, which serves the trees the
-# provider places; a file with this entry and no `fs` interface is refused at load.
+# directory _tierstore owns. It answers with trees under the mount of the `fs` interface above, whose
+# `mountpoint` it is (left out, it is taken from that interface; a different one is refused).
 [[interface]]
 type   = "mount-provider"
 params = { socket = "/usr/local/tierstore/run/provider.sock", mountpoint = "/private/var/tierstore/fs" }
-
-# The virtual build file system, in this process: the trees of the node's tree store over NFSv3 on
-# loopback, mounted by the process itself at `mountpoint` (crates/tierstore/docs/configuration.md,
-# "The fs interface"). The jobs run as _tierstore, so its group is the group of the control socket
-# and _tierstore:_tierstore the owner every entry reports; names, because the numeric id of
-# _tierstore differs from Mac to Mac. `runtime_dir` is named because launchd gives the job no
-# RuntimeDirectory: it is the directory the installer package makes for the file system's state.
-# The NFS port is fixed, so that a restart finds its mount and the clients' hard mount waits for the
-# same address. `mount_user` is left out: the user of the process, _tierstore, owns the mount point.
-[[interface]]
-type = "fs"
-[interface.params]
-mountpoint   = "/private/var/tierstore/fs"
-client_group = "_tierstore"
-owner        = "_tierstore:_tierstore"
-runtime_dir  = "/usr/local/tierstore/run/fs"
-[interface.params.nfs]
-listen = "127.0.0.1:12049"
 
 [server]
 proxy_id_from_facts = { path = "/var/lib/hostkeeper/facts.json", prefix = "tierstore-cache-" }

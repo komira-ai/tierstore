@@ -16,7 +16,9 @@
 //! - `launchd_label` (required with `service_manager = "launchd"`): the label of the one job;
 //! - `fs_launchd_label` (optional, read only with `service_manager = "launchd"`; with systemd it
 //!   is ignored like any other scalar key): the label of the launchd job of `tierstore fs`, which
-//!   the steps boot out before the main job and boot in after it;
+//!   the steps boot out before the main job and boot in after it. The config hook's switch of a
+//!   Mac names it for its rollback to the two-process layout; the macOS package's manifest does
+//!   not, since that job serves nothing from 0.3.196 on;
 //! - `config_file` (optional here, required by the `prepare` that reads it): the path of the
 //!   node's tierstore configuration;
 //! - `verify_retry_secs` (optional, default [`DEFAULT_VERIFY_RETRY_SECS`]): the seconds

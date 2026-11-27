@@ -37,6 +37,10 @@ use futures::StreamExt;
 use http_body_util::BodyExt;
 use sha2::Digest;
 
+// The puts to an S3 tier that never answers; a file of its own, declared here.
+#[path = "stream_put_stall_tests.rs"]
+mod stall;
+
 /// The size of a piece of a generated body.
 const PIECE: usize = 32 << 10;
 
@@ -843,7 +847,8 @@ async fn a_rate_cut_over_s3_aborts_the_upload_and_frees_the_permit() {
     config.max_concurrent_puts = 1;
     config.put_min_bytes_per_sec = 1_000_000;
     config.put_rate_grace = Duration::from_secs(10);
-    let server = Server::new(s3_backend(&s3), config.clone());
+    let backend = s3_backend(&s3);
+    let server = Server::new(backend.clone(), config.clone());
     let (claim, _) = truth(PIECES);
     let length = (PIECES * PIECE).to_string();
     let told = [("content-length", length.as_str())];
@@ -853,6 +858,7 @@ async fn a_rate_cut_over_s3_aborts_the_upload_and_frees_the_permit() {
 
     assert_eq!(cut.status, StatusCode::BAD_REQUEST);
     assert_eq!(cut.code(), "RequestTimeout");
+    backend.cleanups_idle().await;
     assert_eq!(s3.keys(), Vec::<String>::new());
     assert_eq!(s3.incomplete_uploads(), 0);
     assert_eq!(s3.stats().completed, 0);

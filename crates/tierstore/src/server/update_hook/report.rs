@@ -111,7 +111,9 @@ pub enum Reason {
     /// (the two releases do not both list the capability, or a configuration update moves the
     /// mount point, the control socket or the runtime directory): a restart would drop the mount
     /// under running jobs. The params' `mode = "restart"` overrides it, for an operator who has
-    /// drained the node's jobs.
+    /// drained the node's jobs. On a Mac, also an update of the release on a node whose file has a
+    /// `mount-provider` interface and no `fs` interface: nothing would serve the provider's mount,
+    /// and the node is switched to one process first; no mode overrides that.
     ModeUnsupported,
 }
 

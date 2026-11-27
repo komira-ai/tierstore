@@ -38,6 +38,8 @@ const TEN: &[u8] = b"0123456789";
 /// loopback S3 service, which keeps the bytes that came of a PUT cut short.
 struct Node {
     s3: FakeS3,
+    /// The upstream backend, kept to wait for the look after a cut PUT (a task of its own).
+    backend: Arc<S3Backend>,
     server: Arc<Server>,
     config: ServerConfig,
     _dir: TestDir,
@@ -56,15 +58,17 @@ impl Node {
         let clock = Arc::new(TestClock::new());
         clock.set(NOW);
         let disk = Arc::new(SystemDisk);
-        let cache = LocalCache::open(cache, s3_backend(&s3), disk, clock.clone()).unwrap();
+        let backend = s3_backend(&s3);
+        let cache = LocalCache::open(cache, backend.clone(), disk, clock.clone()).unwrap();
         let mut config = ServerConfig::new(BUCKET, KEY_ID, SECRET, clock.clone());
         config.rate_clock = clock;
         config.cache = Some(cache.clone());
         config.cache_writes = true;
-        let backend: Arc<dyn Backend> = Arc::new(cache);
-        let server = Server::new(backend, config.clone());
+        let front: Arc<dyn Backend> = Arc::new(cache);
+        let server = Server::new(front, config.clone());
         Self {
             s3,
+            backend,
             server,
             config,
             _dir: dir,
@@ -109,7 +113,9 @@ impl Node {
         gone.send(()).unwrap();
         self.s3.wait_for(|s| s.cut_requests() == cuts + 1).await;
         self.s3.release_heads();
-        answer.await.unwrap()
+        let answered = answer.await.unwrap();
+        self.backend.cleanups_idle().await;
+        answered
     }
 
     /// The sample of `series` on `/metricz`.
