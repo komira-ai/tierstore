@@ -13,7 +13,7 @@ the owner's decisions and sets out the macOS frontend (C9, decided 2026-11-10: N
 
 **The `fuser` crate was replaced by `tsfuse`** (row T-R of `docs/design/fetch-cache-serve.md`): the Linux frontend speaks the FUSE protocol through `tsfuse`, the FUSE library of this repository, which serves an initialised connection without a handshake and sends `FUSE_NOTIFY_RESEND` itself, and the `fuser` fork is retired. Where this document speaks of the `fuser` crate or its patch (sections 3, 6.2, 7.1 and the plan of section 12), it records the design as built before that change.
 
-**One process, one unit, one configuration file** (the owner's decision of 2026-11-23, design in [one-service.md](one-service.md)): the file system becomes the `[[interface]]` of type `fs` of the build node's `tierstore`, and `tierstore fs` as a process of its own, its unit or launchd job, `fs.toml`, the fill socket between the two and the second hand-over go. Section 6.2 is rewritten for it, and decision C5 is reversed. Where this document speaks of `tierstore fs` as a process, of the fill socket, of `fs.toml` or of the hand-over of `tierstore fs` (sections 5, 6.3, 6.5, 6.8, 7, 8 and 12), it describes the two-process path, which ships beside the one process's `fs` interface (P3 and P5 have landed) until P9 removes it (komira-ai/tierstore#524).
+**One process, one unit, one configuration file** (the owner's decision of 2026-11-23, design in [one-service.md](one-service.md)): the file system becomes the `[[interface]]` of type `fs` of the build node's `tierstore`, and `tierstore fs` as a process of its own, its unit or launchd job, `fs.toml`, the fill socket between the two (removed by komira-ai/tierstore#523: the core calls the node's cache in the process, and `tierstore fs` serving exits 2) and the second hand-over go. Section 6.2 is rewritten for it, and decision C5 is reversed. Where this document speaks of `tierstore fs` as a process, of the fill socket (which no release serves after komira-ai/tierstore#523), of `fs.toml` or of the hand-over of `tierstore fs` (sections 5, 6.3, 6.5, 6.8, 7, 8 and 12), it describes the two-process path, which ships beside the one process's `fs` interface (P3 and P5 have landed) until P9 removes it (komira-ai/tierstore#524).
 
 **What this document starts from.** An earlier proposal, built on researched findings, preceded it and recommended: one tierstore
 filesystem core in Rust with thin frontends (FUSE with passthrough on Linux, an NFSv4.0 loopback server on macOS, FSKit
@@ -309,7 +309,7 @@ only (union with an APFS volume as the upper, `mount_apfs -s` and `hdiutil attac
  │   control: attach / detach (Unix socket);  state in a runtime directory (7.1)                 │
  │ frontends: FUSE (Linux)  |  NFS on loopback (macOS)  |  FSKit (macOS, if C9 chooses it)       │
  └────────────┬───────────────────────────────────────────────────┬──────────────────────────────┘
-              │ /dev/fuse  or  NFS                                │ fill socket (Unix): fill, touch, pin, unpin
+              │ /dev/fuse  or  NFS                                │ calls of the cache, in process: fill, touch, pin, unpin
               ▼                                                   ▼
   Linux job: overlayfs /work = upper (run dir)            tierstore (build node, as today)
              over /run/tierstore/fs/trees/<digest>          [local_cache]: one writer; pins; LRU
@@ -391,8 +391,8 @@ with `type = "fs"` in the node's one configuration file, whose `params` are what
 the shape that has a tree store. One unit on Linux (`tierstore@.service`, instances `a` and `b`), one launchd job on
 macOS.
 
-- **Calls, not a socket.** The core asks the node's cache and tree store directly for what it asks over the fill socket
-  today: a source fill (`fill <sha256> <size> from <key> @ <offset>`: fetch that range from upstream, check that it hashes
+- **Calls, not a socket.** The core asks the node's cache and tree store directly for what it asked over the fill socket
+  of the earlier releases (the socket is gone, komira-ai/tierstore#523): a source fill (`fill <sha256> <size> from <key> @ <offset>`: fetch that range from upstream, check that it hashes
   to `<sha256>`, publish it as the cache entry of `<sha256>`, whose sidecar says its origin is `span`, so the S3 front never
   serves it as the object `cas/l/<sha256>`; `local_cache/names_tests.rs`: `span_entry_is_not_an_s3_object`), the fill of a
   whole tree manifest, `touch`, the pins of 6.5, the puts of the put directory, the placements of the mount provider and
@@ -425,12 +425,11 @@ text, and the `fs` front of `docs/design/pluggable-interfaces.md` section 4 is a
 **What main holds** is the one process's `fs` interface (P3 and P5 of one-service.md section 6, in process) beside the two-process design, which stays until P9 (komira-ai/tierstore#524) deletes it. The two-process design is:
 `tierstore fs`, a subcommand of the same binary with its own unit (`tierstore-fs@.service`, instances `a` and `b`) or
 launchd job (`tierstore-fs`), its own file (`fs.toml`, the `[fs]` table), holding `CAP_SYS_ADMIN` as its only capability
-with `RestrictAddressFamilies=AF_UNIX`, and talking to the node's `tierstore` over the fill socket (`local_cache.fill_socket`,
-a Unix socket, mode 0600, its own user only, bound only by the instance that holds the cache lock: `server/fill_socket/`).
-The core asks through one internal trait (`Fills`, `server/treefs/fills.rs`) with two implementations: the fill socket's
-client (`server/treefs/fill_client.rs`), which `tierstore fs` uses, and the calls in process (`server/treefs/in_process.rs`),
-which answer each request as the socket does and wait for the write role as above; the start of the one process's `fs`
-interface uses them, on Linux (one-service.md section 6, P3, `server/treefs/interface.rs`) and on macOS
+with `RestrictAddressFamilies=AF_UNIX`, and, in the earlier releases, talking to the node's `tierstore` over a fill socket (`local_cache.fill_socket`,
+a Unix socket, mode 0600, its own user only, bound only by the instance that holds the cache lock), which no process serves now.
+The core calls the node's cache and tree store in the process (`InProcess`, `server/treefs/in_process.rs`; the trait that
+stood between the core and the socket's client is gone), which answers each request with the words the socket used and waits
+for the write role as above; the start of the one process's `fs` interface uses it, on Linux (one-service.md section 6, P3, `server/treefs/interface.rs`) and on macOS
 (`server/treefs/nfs/interface.rs`).
 `crates/tierstore/docs/configuration.md` and `operations.md` describe it as it runs.
 
@@ -598,7 +597,7 @@ On an `OPEN` of a non-empty file of an attached tree:
    that id and count the open.
 2. Else, if the cache file of the digest `<sha256>` exists, open it read-only, register it
    (`FUSE_DEV_IOC_BACKING_OPEN`), record blob, id and count in the backing table (7.1), send `touch <sha256>` (and `pin`,
-   6.5) on the fill socket, and reply as in step 1. From then on the job's `read`, `mmap` and `splice` go to the cache
+   6.5) to the cache (a call in process), and reply as in step 1. From then on the job's `read`, `mmap` and `splice` go to the cache
    file in the kernel and never reach `tierstore fs` [S1].
 3. Else send `fill` for it and wait, then step 2. Concurrent opens of one blob share one fill.
 4. If the fill fails, the open fails with `EIO`, and the run's attachment records the path, the digest and the reason
@@ -635,7 +634,7 @@ the image and dentry caches were dropped and not a global `drop_caches`, so abso
 (Inferred: cached opens have no shared backing file). What it risks: a crash with requests in flight, 7.2.
 
 **Prefetch** (for arm D of section 11, not before): an attachment may ask for `prefetch = "all"`, and every blob of the
-tree is filled in the background, in manifest order, on the fill socket's permits, without delaying the attach's answer;
+tree is filled in the background, in manifest order, on the permits of the file system's fill pool, without delaying the attach's answer;
 it is the proposal's warm-up before the job starts, done without delaying the start. Learning what an action opens and
 prefetching that, as Buildbarn's file system access cache does with a Bloom filter of paths per action [S7], is phase 3.
 
@@ -676,9 +675,9 @@ one writer and one budget:
 - **Pins never outlive their mount or their attachment.** At every start of either process, and after a hand-over of
   either, `tierstore fs` sends `pins-live <mount id> <trees>`, the trees attached now (by runs and by lookups), and the cache drops every pin of
   another mount id or of a tree not in the list. A reboot makes a new mount id, so the old mount's pins go at the first
-  `pins-live`. A start does not wait for it: after a boot the node's tierstore reads its whole cache before it binds the
-  fill socket (1:57 to 2:59 for 360,000 to 515,000 objects on the farm's nodes), longer than the unit's start timeout. A
-  thread of `tierstore fs` sends `pins-live` and then `places-live` once the socket answers, asking again until it
+  `pins-live`. A start does not wait for it: after a boot the node's tierstore reads its whole cache before it answers the
+  file system's calls (1:57 to 2:59 for 360,000 to 515,000 objects on the farm's nodes), longer than the unit's start timeout. A
+  thread of `tierstore fs` sends `pins-live` and then `places-live` once the cache answers, asking again until it
   does, and every `pin`, `unpin`, `place` and `unplace` of the mount waits for those answers first, so none of them is
   undone by a `pins-live` that comes after it (`core/live.rs`).
 - Eviction skips a pinned entry and counts it in a new counter, `tierstore_cache_pin_skips_total`; the existing
@@ -1043,10 +1042,10 @@ socket listens, before `ack`.
 - Capability: a release that can do this lists `handoff-fs-v1` in `tierstore --capabilities`; the hook hands the process
   over only when both releases list it, and otherwise leaves it on its release (a restart without `FUSE_HAS_RESEND` can fail
   jobs). A restart of `tierstore fs` is 7.2 without the crash: the descriptor store carries the session across it.
-- **The S3 instance's update** does not interrupt fills: the fill socket is bound only by the instance that holds the
-  cache lock (6.2), so the old instance answers fills through its drain, and the new one binds the socket in the tick (one
-  second, `local_cache/hold.rs`) in which it takes the lock after the old one exits. `tierstore fs` retries a fill that
-  meets a closed socket within `fs.fetch_timeout`, and re-sends its pins to the new holder.
+- **The S3 instance's update** does not interrupt fills: the cache is written only by the instance that holds the
+  cache lock (6.2), so the old instance answers fills through its drain, and the new one writes in the tick (one
+  second, `local_cache/hold.rs`) in which it takes the lock after the old one exits. The core retries a fill that
+  finds the cache read-only within `fs.fetch_timeout`, and re-sends its pins to the new holder.
 
 ### 7.4 Failures a job sees, and how its runtime tells them from build errors
 
@@ -1178,7 +1177,7 @@ So the core's views (6.6) move out of the Linux design altogether and stay on ma
   and no per-run mount: the cost moves to first touch. **Root is not needed**: `mount_nfs` of a loopback export by an unprivileged user succeeded when the mount point
   was owned by that user (the mount shows `nodev, nosuid, mounted by <user>`) and failed `Operation not permitted` on a root-owned one; a root mount has no `nodev,nosuid`, so a root-run mount gives setuid binaries a chance (Measured: macos E14, where the unprivileged test was run as the admin user `adi` only). Per-user mounts get `nosuid`, which suits a build tree.
   **Who mounts at boot is a config key.** A boot mount made by root loses `nosuid`, so the mount is made by the user the launchd job of `tierstore fs` runs as, which owns the mount point. That user is `fs.nfs.mount_user` (default: the user of the process; a name or a number); the job runs as
-  `_tierstore`, the store's account (the fill socket answers only its own user), and its file leaves the key out, so the
+  `_tierstore`, the store's account (the fill socket of the earlier layout answered only its own user), and its file leaves the key out, so the
   mount user is `_tierstore`. The mount point must be owned by it, which the process checks at start and refuses with the owner it found. A root-run process mounts as that user, not as root. The mount helper runs `mount_nfs -o vers=3,tcp,ro,rdirplus,locallocks,actimeo=3600,hard,deadtimeout=<fs.nfs.dead_timeout>,port=<fs.nfs.port>,mountport=<fs.nfs.port>` (`deadtimeout`, more than `fs.fetch_timeout`, so that a mount whose server is gone ends instead of making everything that touches it wait; operations.md, "The Mac's mount")
   against `127.0.0.1` once the server listens, and is a retry loop bounded by `fs.nfs.mount_wait`; the key names, defaults and the mount at login-less boot are settled by the pull request that builds them and the farm Mac smoke test (Unmeasured: a boot mount without a login session).
 - **Attribute caching.** The macOS client does not take cache times from replies (Buildbarn's mount code notes that NFSv4
@@ -1527,7 +1526,7 @@ owner has not confirmed it, and on 2026-11-23 the owner reversed C5 (one process
     `/dev/fuse`), `ProtectKernelTunables`, `ProtectKernelModules`, `ProtectKernelLogs` and `ProtectControlGroups` (no writes
     to `/proc/sys`, no module loading, no kernel log, no cgroup tree), `PrivateTmp` and `RestrictNamespaces`. What it
     keeps: no network (`AF_UNIX` only), no new privileges, no writable and executable memory, a system-call filter. Its
-    inputs are FUSE requests from the kernel, answers on the fill socket, and tree manifests that clients wrote,
+    inputs are FUSE requests from the kernel, answers of the node's cache, and tree manifests that clients wrote,
     hash-checked and limited before they are parsed (6.1). A member of `fs.client_group` can attach any tree whose
     manifests it can name, which makes those trees readable by digest on the host (6.8), and nothing more.
   - Recommendation: **yes.** The alternatives are the network-facing S3 process holding the capability, which is worse,

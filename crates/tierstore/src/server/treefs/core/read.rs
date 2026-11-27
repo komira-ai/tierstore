@@ -73,7 +73,7 @@ pub(in crate::server::treefs) fn read_file(
 
 impl Core {
     /// Reads up to `size` bytes at `offset` of the file `ino`; fewer at its end, none past it. A
-    /// blob the cache does not hold is filled first through the fill socket; a fill that fails
+    /// blob the cache does not hold is filled first through the cache; a fill that fails
     /// is `Errno::Io` and is recorded on the attachments of the tree, as for an open.
     ///
     /// The bytes are asked for by the manifest's size, so that a request for more than the file
@@ -110,7 +110,7 @@ impl Core {
             .map_err(|error| self.unreadable(ino, offset, &error.to_string()))
     }
 
-    /// The bytes of the file `ino` and its length, filled first through the fill socket if the
+    /// The bytes of the file `ino` and its length, filled first through the cache if the
     /// cache does not hold them; `None` for a file of no bytes, which has no blob. A frontend
     /// that keeps descriptors open reads them with [`FileBytes::read`], and does not come back for
     /// as long as it keeps the descriptor. The fills are answered by `fs.fetch_timeout` after the

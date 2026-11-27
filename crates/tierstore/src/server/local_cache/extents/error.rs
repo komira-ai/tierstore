@@ -32,7 +32,7 @@ pub enum RangeError {
     /// The range does not fit the budget, or would take the cache past its critical mark.
     #[error("no space")]
     NoSpace,
-    /// No permit of the fill socket's pool came free in time.
+    /// No permit of the pool of `fill_socket_concurrency` came free in time.
     #[error("busy")]
     Busy,
     /// This process does not hold the lock of the cache directory, or lost it during the fill.

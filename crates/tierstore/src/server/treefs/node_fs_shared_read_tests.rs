@@ -6,10 +6,17 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Barrier};
+use std::time::Duration;
+
+use bytes::Bytes;
 
 use super::*;
-use crate::server::local_cache::trees::image_path;
-use crate::{BlobSource, ListEntry, ListKind, Mode, TreeList};
+use crate::server::local_cache::trees::testing::{fs_at, open_image};
+use crate::server::local_cache::trees::{ImageRequest, TreeStore, TreesConfig};
+use crate::server::treefs::core::Core;
+use crate::server::treefs::in_process::InProcess;
+use crate::server::treefs::table::TreeTable;
+use crate::{Backend as _, BlobSource, ListEntry, ListKind, Mode, TreeList};
 
 /// How many handles read at once: the reader threads of the mount.
 const READERS: usize = 16;
@@ -136,6 +143,9 @@ fn handles_of_one_cache_file_read_their_own_offsets_at_once_on_the_shared_descri
     }
 }
 
+/// The key of the pack of [`pack_image`] in the node's upstream: an object the cache keeps.
+const PACK_KEY: &str = "cas/pack/one";
+
 /// The names of the files of the pack of [`pack_image`], their sizes, and where each begins in the
 /// pack.
 pub(super) const PACKED: [(&str, usize, u64); 4] = [
@@ -145,7 +155,7 @@ pub(super) const PACKED: [(&str, usize, u64); 4] = [
     ("d", 5_000, 600_000),
 ];
 
-/// The tree list of the files of [`PACKED`] as spans of the pack `p0`, and the pack file's bytes:
+/// The tree list of the files of [`PACKED`] as spans of the pack [`PACK_KEY`], and the pack's bytes:
 /// each file's own content at its place and the bytes of no file between.
 pub(super) fn pack_image() -> (Vec<u8>, Vec<u8>) {
     let mut pack = content(99, 700_000);
@@ -161,7 +171,7 @@ pub(super) fn pack_image() -> (Vec<u8>, Vec<u8>) {
                     mode: Mode::new(0o644).unwrap(),
                     size: size as u64,
                     source: Some(BlobSource {
-                        key: Arc::from("p0"),
+                        key: Arc::from(PACK_KEY),
                         offset,
                     }),
                     sha256: Some(TreeDigest::of(&bytes)),
@@ -172,27 +182,46 @@ pub(super) fn pack_image() -> (Vec<u8>, Vec<u8>) {
     (TreeList { entries }.encode_v2().unwrap(), pack)
 }
 
+/// A frontend whose core calls the node's tree store as well as its cache, with the tree list of
+/// [`pack_image`] placed at `jobs` and its pack in the node's upstream: the files of the tree are
+/// spans of the pack, which the cache fills when a file is first opened.
+pub(super) fn placed_pack(name: &str) -> Wire {
+    let (image, pack) = pack_image();
+    let mut rig = Rig::new(name, Built::of(Vec::new()));
+    let work = rig.work.handle();
+    work.block_on(rig.upstream.put(PACK_KEY, Bytes::from(pack)))
+        .unwrap();
+    let _entered = work.enter();
+    let trees = TreeStore::open(rig.node.clone(), TreesConfig::default()).unwrap();
+    let bytes = Bytes::from(image);
+    let request = ImageRequest {
+        digest: TreeDigest::of(&bytes),
+        image: open_image(bytes),
+        at: vec![fs_at("jobs")],
+        ttl: None,
+        ready: false,
+        staged: None,
+    };
+    let _ = trees.create_image(request).unwrap();
+    let asks = Arc::new(InProcess::new(
+        (rig.node.clone(), Some(trees)),
+        rig.work.handle(),
+        Duration::from_secs(30),
+        Arc::new(|_| {}),
+    ));
+    let table = TreeTable::open(&rig.runtime).unwrap();
+    let settings = rig.core.settings().clone();
+    rig.core = Arc::new(Core::new(settings, asks, table, &rig.runtime));
+    Wire::on(rig, name, false)
+}
+
 /// Asserts that the files of a placed tree that are spans of one pack, at different offsets of it,
 /// share one descriptor of the pack, and that sixteen handles, four of each of four files, read
 /// from one thread each at different offsets at the same time, each give the bytes of their own
 /// file and no other.
 #[test]
 fn files_that_are_spans_of_one_pack_read_their_own_bytes_at_once_on_the_shared_descriptor() {
-    let wire = Wire::over("nodefs-shared-pack", Built::of(Vec::new()), false);
-    let (image, pack) = pack_image();
-    let tree = TreeDigest::of(&image);
-    let path = image_path(&wire.rig.cache, &tree);
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(&path, &image).unwrap();
-    let pack_path = wire.rig.dir.path().join("pack");
-    std::fs::write(&pack_path, &pack).unwrap();
-    {
-        let mut answers = crate::server::treefs::locked(&wire.rig.upstream.answers);
-        let place = "tree 0123456789abcdef0123456789abcdef".to_owned();
-        let _ = answers.insert("place".to_owned(), place);
-        let _ = answers.insert("image".to_owned(), format!(r#"image {tree} ["jobs"]"#));
-    }
-    *crate::server::treefs::locked(&wire.rig.upstream.pack) = Some(pack_path);
+    let wire = placed_pack("nodefs-shared-pack");
     let root = entry_out(&wire.ask(op::LOOKUP, ino::ROOT, &cstr(b"jobs"))).nodeid;
     let files: Vec<(u64, Vec<u8>)> = PACKED
         .iter()

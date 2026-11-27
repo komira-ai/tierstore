@@ -64,6 +64,7 @@ pub(super) mod cold;
 #[path = "config_fs.rs"]
 pub(super) mod fs;
 use super::config_entry::entry_tuning;
+use super::config_fill::warn_ignored_fill_socket;
 use super::config_handoff::handoff_of;
 use super::config_hot_only::{refuse_hot_keys, warn_retired_keys};
 pub(super) use super::config_interface::OciFlags;
@@ -690,6 +691,9 @@ pub(super) fn settings(
     let trees = check_trees(trees.as_ref(), hot_store.is_none() && local_cache.is_some())?;
     if let Some(hot) = &hot_store {
         warn_retired_keys(hot);
+    }
+    if let Some(cache) = &local_cache {
+        warn_ignored_fill_socket(cache);
     }
     let listed = with_legacy(interface, server.listen.take(), oci)?;
     let fronts = interfaces(&listed)?;

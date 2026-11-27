@@ -2,7 +2,7 @@
 //!
 //! A blob that is queued has its place in the table of the fills (`flights`) like a fill that
 //! runs, so that it is one entry of one table: a read of the same name (the mount's open through
-//! the fill socket, or a `GET` of the S3 front) finds it there. What differs is that the fill has
+//! the core, or a `GET` of the S3 front) finds it there. What differs is that the fill has
 //! not started, and that a read that finds it **promotes** it: the read starts it at once, on a
 //! permit of its own pool, and the queue forgets it; the blob is fetched once, and the readers
 //! that came later join it as they join any fill that runs.

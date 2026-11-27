@@ -1,8 +1,8 @@
-//! What a `tierstore fs` process does between its start and its end: whether to take the mount
-//! over or to make it, what to tell the service manager, and what ends it
-//! (`docs/design/virtual-build-fs.md` sections 7.2 and 7.3). The choice of the start ([`start`]),
-//! and what ends a process ([`ended`]), are also those of the `fs` interface of the one process
-//! (`interface.rs`), whose core calls the node's cache instead of asking the fill socket.
+//! What the mount of the `fs` interface does between its start and its end: whether to take the
+//! mount over or to make it, what to tell the service manager, and what ends it
+//! (`docs/design/virtual-build-fs.md` sections 7.2 and 7.3): the choice of the start ([`start`]),
+//! and what ends a process ([`ended`]), which the `fs` interface of the one process runs
+//! (`interface.rs`). Its core calls the node's cache in the process.
 //!
 //! At a start, in order:
 //!
@@ -21,11 +21,11 @@
 //!    serving it by then: it is aborted and detached first, and the mount point is not looked at
 //!    (`run.rs`).
 //!
-//! None of these waits for the announcement of the mount's pins and placements to the node's fill
-//! socket: after a boot the node's tierstore reads its whole cache before it binds the socket, and
-//! a thread of the core tells it the pins once it answers (`core/live.rs`). What a start still
-//! asks of the socket before it is ready is the trees of the attachments file, which it makes
-//! again (`start.rs`): none after a boot, when the runtime directory is new. Each step's time is
+//! None of these waits for the announcement of the mount's pins and placements to the node's
+//! cache: a thread of the core tells it the pins once the cache takes the write role
+//! (`core/live.rs`). What a start still asks of the cache before it is ready is the trees of the
+//! attachments file, which it makes again (`start.rs`): none after a boot, when the runtime
+//! directory is new. Each step's time is
 //! said as it ends (`steps.rs`), on the clock of the platform.
 //!
 //! The manager is then told the unit is ready, and the process serves until SIGTERM or SIGINT
@@ -39,12 +39,16 @@ use std::sync::Arc;
 use tsfuse::abi::InitFlags;
 
 use super::config::FsSettings;
-use super::fills::Reach;
-use super::handover::{self, Offer, Paths};
+use super::fills::Calls;
+#[cfg(test)]
+use super::handover::Offer;
+use super::handover::{self, Paths};
 use super::recover;
 use super::run::{Kernel, Prepared, Running};
 use super::sd::{self, FUSE_NAME, Manager, Stored};
-use super::start::{Signals, StartError, io};
+#[cfg(test)]
+use super::start::Signals;
+use super::start::{StartError, io};
 use super::steps::Steps;
 use crate::{Clock, MonotonicClock};
 
@@ -75,7 +79,7 @@ pub(super) struct Started {
 /// restart where the kernel cannot send requests again. An error means the connection cannot be
 /// served: the start goes on to make a mount.
 fn adopt_stored(
-    (settings, reach): (&FsSettings, &Reach),
+    (settings, reach): (&FsSettings, &Calls),
     (stored, kernel): (&Stored, &Kernel),
 ) -> Result<(Arc<Running>, Option<tokio::sync::oneshot::Receiver<()>>), StartError> {
     let device = sd::take(stored.fd).map_err(|source| StartError::Io {
@@ -138,7 +142,7 @@ pub(super) fn prepare(
 /// descriptor the service manager kept, else mount afresh. The core asks the node's cache and
 /// tree store by `reach`.
 pub(super) async fn start(
-    (settings, reach): (&FsSettings, &Reach),
+    (settings, reach): (&FsSettings, &Calls),
     platform: &Platform,
     steps: &mut Steps,
 ) -> Result<Started, StartError> {
@@ -231,11 +235,17 @@ pub(super) async fn hang(hung: Option<tokio::sync::oneshot::Receiver<()>>) {
     std::future::pending().await
 }
 
-/// Starts, tells the service manager, and serves until the process ends.
+/// Starts, tells the service manager, and serves until the process ends: the loop of the process
+/// that served the mount alone, which the tests run to drive the start, the hand-over and the end
+/// that the `fs` interface of the one process (`interface.rs`) is made of.
 ///
 /// # Errors
 /// [`StartError`]: why the mount is not served, or why it could not be left.
-async fn run(settings: &FsSettings, platform: Platform) -> Result<(), StartError> {
+#[cfg(test)]
+async fn run(
+    (settings, reach): (&FsSettings, &Calls),
+    platform: Platform,
+) -> Result<(), StartError> {
     // The handlers are in place before the mount is: a signal after it is never lost.
     let mut signals = Signals::install()?;
     let mut steps = Steps::new(Arc::clone(&platform.clock));
@@ -243,7 +253,7 @@ async fn run(settings: &FsSettings, platform: Platform) -> Result<(), StartError
         running,
         notice,
         hung,
-    } = start((settings, &Reach::Socket), &platform, &mut steps).await?;
+    } = start((settings, reach), &platform, &mut steps).await?;
     let manager = &platform.manager;
     let bind = || {
         Offer::bind(
@@ -328,16 +338,21 @@ pub(super) fn leave_to_kernel(running: Arc<Running>) {
     std::mem::forget(running);
 }
 
-/// Serves with `platform`.
+/// Serves with `platform`, the core calling the cache and the tree store of `reach`, on a runtime
+/// of its own, which the work of the cache of `reach` does not run on.
 ///
 /// # Errors
 /// As [`run`].
-pub(super) fn serve_with(settings: &FsSettings, platform: Platform) -> Result<(), StartError> {
+#[cfg(test)]
+pub(super) fn serve_with(
+    (settings, reach): (&FsSettings, &Calls),
+    platform: Platform,
+) -> Result<(), StartError> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(io("starting the runtime"))?;
-    runtime.block_on(run(settings, platform))
+    runtime.block_on(run((settings, reach), platform))
 }
 
 impl Platform {
@@ -352,14 +367,6 @@ impl Platform {
             clock: Arc::new(MonotonicClock::new()),
         }
     }
-}
-
-/// Serves with the service manager this process was started by, if any.
-///
-/// # Errors
-/// As [`run`].
-pub(in crate::server) fn serve(settings: &FsSettings) -> Result<(), StartError> {
-    serve_with(settings, Platform::of_process())
 }
 
 #[cfg(test)]

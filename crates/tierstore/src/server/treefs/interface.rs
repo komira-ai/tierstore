@@ -1,7 +1,7 @@
 //! The `fs` interface of the one process (`docs/design/one-service.md`, sections 2.3 and 3.5):
 //! the mount a build node's `tierstore` serves itself when its file has an `[[interface]]` of type
 //! `fs`, with a core that calls the node's cache and tree store (`in_process.rs`) instead of
-//! asking a fill socket. Linux only: the mount is a FUSE mount; macOS serves the same interface by
+//! asking another process. Linux only: the mount is a FUSE mount; macOS serves the same interface by
 //! its NFS front (`nfs/interface.rs`).
 //!
 //! The start (`cache_cli.rs`, `cache_cli_mount.rs`) opens the cache and the tree store and then gets
@@ -64,7 +64,7 @@ use crate::server::local_cache::LocalCache;
 use crate::server::local_cache::trees::TreeStore;
 
 use super::config::FsSettings;
-use super::fills::{Calls, Reach};
+use super::fills::Calls;
 use super::handover::{self, HandoverError, Offer};
 use super::launch::{self, End, Platform, Started, ended, hang, leave_to_kernel};
 use super::run::{Prepared, Running};
@@ -136,17 +136,22 @@ impl Service {
             });
         };
         let runtime = Handle::current();
-        let reach = Reach::Calls(Calls {
+        let reach = Calls {
             cache,
             trees,
             runtime: runtime.clone(),
-        });
+        };
         let mine = settings.clone();
         // The start waits for the cache's answers (the attachments are made again through it),
         // which are worked out on the runtime: it runs on a thread of its own.
         let started = tokio::task::spawn_blocking(move || {
             let mut steps = Steps::new(Arc::clone(&platform.clock));
-            runtime.block_on(launch::start((&mine, &reach), &platform, &mut steps))
+            let started = runtime.block_on(launch::start((&mine, &reach), &platform, &mut steps));
+            tracing::info!(
+                "tierstore fs: the start of the mount took {} ms",
+                steps.total()
+            );
+            started
         })
         .await
         .unwrap_or_else(|panicked| std::panic::resume_unwind(panicked.into_panic()))?;
@@ -207,11 +212,11 @@ impl Mounted {
         let Self { settings, platform } = self;
         let manager = platform.manager.clone();
         let runtime = Handle::current();
-        let reach = Reach::Calls(Calls {
+        let reach = Calls {
             cache,
             trees,
             runtime: runtime.clone(),
-        });
+        };
         let mine = settings.clone();
         let TakenMount { device, control } = mount;
         // The take-over waits for the cache's answers (the attachments are made again through it),

@@ -1,7 +1,7 @@
 //! The copy of a pack that the cache holds whole, which a fill of a blob inside it reads from in
 //! place of the upstream.
 //!
-//! A write-through put of a pack (the fill socket's `put`, the put ingest) keeps the pack whole in
+//! A write-through put of a pack (the core's `put`, the put ingest) keeps the pack whole in
 //! `obj/`, under the name of its key (see `keep`). The files of a tree of manifests name each blob
 //! by its digest and the span of the pack it lies in, and the fill of one (`source`, `prefetch`)
 //! is kept under the digest's name: another name. So the fill looks here first. If the cache's

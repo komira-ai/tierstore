@@ -121,22 +121,84 @@ fn the_requests_of_the_put_directory_are_not_counted() {
     assert_eq!(counts(&wire), of(&[RequestKind::Lookup]));
 }
 
-/// Asserts that the stop of the readers tells the node of the requests answered, as the core
-/// counts them, and that a second stop with no request between tells it nothing more.
+/// The `_count` of each kind in the node cache's rendered `tierstore_fs_request_seconds`, in the
+/// order of [`KINDS`].
+fn told(wire: &Wire) -> [u64; KINDS.len()] {
+    let text = wire.rig.node.metrics();
+    KINDS.map(|kind| {
+        let series = format!(
+            "tierstore_fs_request_seconds_count{{kind=\"{}\"}} ",
+            kind.word()
+        );
+        let count = text
+            .lines()
+            .find_map(|line| line.strip_prefix(series.as_str()));
+        count
+            .and_then(|count| count.parse().ok())
+            .unwrap_or(u64::MAX)
+    })
+}
+
+/// Every `_bucket` number of every kind in the node cache's rendered family, kind after kind, each
+/// kind's from its first bucket to `+Inf`.
+fn bucketed(wire: &Wire) -> Vec<u64> {
+    let text = wire.rig.node.metrics();
+    let mut all = Vec::new();
+    for kind in KINDS {
+        let series = format!(
+            "tierstore_fs_request_seconds_bucket{{kind=\"{}\",",
+            kind.word()
+        );
+        for line in text.lines().filter(|line| line.starts_with(&series)) {
+            all.extend(line.rsplit(' ').next().and_then(|n| n.parse::<u64>().ok()));
+        }
+    }
+    all
+}
+
+/// The numbers of [`bucketed`] that the totals `spans` of one process make: each kind's buckets
+/// cumulated: the last is the one above the bounds, and so the count at `+Inf`.
+fn cumulated(spans: &[Spans; KINDS.len()]) -> Vec<u64> {
+    let mut all = Vec::new();
+    for spans in spans {
+        let mut below = 0;
+        for bucket in spans.buckets {
+            below += bucket;
+            all.push(below);
+        }
+    }
+    all
+}
+
+/// Asserts that the stop of the readers tells the node cache of the requests answered, as the
+/// core counts them (the node's `tierstore_fs_request_seconds` is the core's report), that it
+/// tells it the tree lists the mount holds, and that a second stop with no request between tells
+/// it no request more: the node's own record of this process's totals is set back to nothing
+/// between the two, so that a report sent again would add the request a second time.
 #[test]
 fn the_stop_of_the_readers_tells_the_node_of_the_requests() {
     let wire = Wire::new("nodefs-requests-drain");
     assert_eq!(wire.ask(op::GETATTR, node(TOOL), &[0; 16]).error, 0);
-    let told = || wire.rig.upstream.asked("requests");
-    let lists = || wire.rig.upstream.asked("treelists");
+    let report = wire.rig.core.requests_report();
+    let mapped = format!(
+        "tierstore_fs_tree_lists_mapped{{mount=\"{}\"}}",
+        report.mount
+    );
+    assert_eq!(told(&wire), [0; KINDS.len()]);
+    assert!(!wire.rig.node.metrics().contains(&mapped));
     wire.fs.drain();
-    until(|| told().len() == 1 && lists().len() == 1);
-    let sent = Requests::parse(told()[0].strip_prefix("requests ").unwrap()).unwrap();
-    assert_eq!(sent, wire.rig.core.requests_report());
+    assert_eq!(told(&wire), of(&[RequestKind::Getattr]));
     assert_eq!(counts(&wire), of(&[RequestKind::Getattr]));
+    let report = wire.rig.core.requests_report();
+    assert_eq!(bucketed(&wire), cumulated(&report.spans));
+    assert!(wire.rig.node.metrics().contains(&mapped));
+    // The node takes the process's totals as gone back to nothing: it adds nothing, and what the
+    // next report carries is all new to it.
+    wire.rig.node.requests_reported(Requests {
+        spans: [Spans::default(); KINDS.len()],
+        ..report
+    });
+    assert_eq!(told(&wire), of(&[RequestKind::Getattr]));
     wire.fs.drain();
-    // The reports go in order, `treelists` after `requests`: once the second `treelists` is
-    // there, a second `requests` would be too.
-    until(|| lists().len() == 2);
-    assert_eq!(told().len(), 1);
+    assert_eq!(told(&wire), of(&[RequestKind::Getattr]));
 }
