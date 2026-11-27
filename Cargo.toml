@@ -143,9 +143,6 @@ tierstore = { path = "crates/tierstore" }
 tierstore-trees-api = { path = "crates/tierstore-trees-api" }
 # Scratch directories, loopback ports and child processes for tests.
 tierstore-testkit = { path = "crates/tierstore-testkit" }
-# The CI and release steps (`cargo xtask`): the tests of the update hook lay out the macOS
-# installer package with the code `release macos-pkg` builds it with.
-xtask = { path = "crates/xtask" }
 # The storage tier's on-disk and on-wire formats (pure: bytes in, bytes out).
 tierstore-format = { path = "crates/tierstore-format" }
 # The frozen interfaces of the read path on a build node, and their fakes.

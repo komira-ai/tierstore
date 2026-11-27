@@ -8,8 +8,6 @@ use std::fs;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 
-use xtask::release::macos_pkg;
-
 use super::super::super::ports::{Host, PortError, PortKind};
 use super::super::super::{
     CHECK_BINARY, MACOS_PACKAGE_RELEASE_BINARY, PACKAGE_RELEASE_BINARY, SERVICE_BINARY,
@@ -141,15 +139,21 @@ impl<F: Fn(&Call)> Runner for Watching<F> {
     }
 }
 
-/// Asserts that a release of the installer package is found where the release puts its binary:
-/// `tree/` and the path `release macos-pkg` installs it at, and that the copy a check runs is
-/// beside the copy of the archive package's units.
+/// The plist the macOS installer package installs, whose program is the package's binary.
+const PACKAGE_PLIST: &str = include_str!("../../../../../../packaging/macos-pkg/tierstore.plist");
+
+/// Asserts that a release of the installer package is found where the package puts its binary:
+/// `tree` and the program of the package's plist (xtask's tests hold the payload to the same
+/// path), and that the copy a check runs is beside the copy of the archive package's units.
 #[test]
 fn the_macos_package_binary_is_the_path_the_installer_package_installs() {
-    assert_eq!(
-        MACOS_PACKAGE_RELEASE_BINARY,
-        format!("tree{}", macos_pkg::BINARY_PATH)
-    );
+    let program = PACKAGE_PLIST
+        .split("<key>ProgramArguments</key>")
+        .nth(1)
+        .and_then(|rest| rest.split("<string>").nth(1))
+        .and_then(|rest| rest.split("</string>").next())
+        .expect("the plist names its program");
+    assert_eq!(MACOS_PACKAGE_RELEASE_BINARY, format!("tree{program}"));
     assert_eq!(
         Path::new(CHECK_BINARY).parent(),
         Path::new(SERVICE_BINARY).parent()

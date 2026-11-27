@@ -1,12 +1,13 @@
 //! A Mac that runs the macOS installer package, updated through the layout the release ships and
-//! hostkeeper stages: the payload is what `release macos-pkg` lays out (xtask's
-//! `macos_pkg::build`, with `pkgbuild` and `productbuild` stood in for, as they exist on macOS
-//! alone; `pkgbuild --root` packs that tree as it is), staged as hostkeeper's `macos-pkg`
+//! hostkeeper stages: the payload is the one `release macos-pkg` lays out (its binary at the
+//! program of the package's plist, `packaging/macos-pkg/tierstore.plist`, mode 0755, and that plist
+//! at `/Library/LaunchDaemons/tierstore.plist`, mode 0644, in directories of mode 0755; xtask's
+//! tests hold its payload to the path the hook looks at), staged as hostkeeper's `macos-pkg`
 //! installer stages a version (the expanded payload in the version directory's `tree/`, every
 //! entry its owner's and writable by neither group nor others, the version directory 0700, root's
 //! alone: hostkeeper's `VERSION_MODE`), and installed as its `activate` installs it (each file of
 //! the payload put at its path under the root, a new file in place of the old). The params are
-//! those of the manifest the release sends for a Mac (`macos_pkg::manifest_json`) and the node's
+//! those of the manifest the release sends for a Mac (xtask's `macos_pkg::manifest_json`) and the node's
 //! file is the Mac's own (`packaging/macos/tierstore.toml`, one process with an `fs` interface).
 //!
 //! What is real: the hook's steps, its host (`SystemHost` as `host_for` builds it for launchd,
@@ -30,7 +31,6 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use tierstore_testkit::dir::TestDir;
-use xtask::release::macos_pkg::{self, BuildPkg, Request};
 
 use super::fake::{assert_failed, assert_ok};
 use crate::server::build_info::gauge;
@@ -68,6 +68,18 @@ const MOUNT_PROGRAM: &str = "/sbin/mount";
 const NODE_FILE: &str = include_str!("../../../../../../packaging/macos/tierstore.toml");
 /// The mount point of that file's `fs` interface.
 const MOUNT: &str = "/private/var/tierstore/fs";
+/// The plist the macOS installer package installs.
+const PACKAGE_PLIST: &str = include_str!("../../../../../../packaging/macos-pkg/tierstore.plist");
+/// The label of the package's job and the manifest's `launchd_label`.
+const LABEL: &str = "tierstore";
+/// The node's file the manifest's `config_file` names on a Mac.
+const CONFIG_FILE: &str = "/usr/local/tierstore/etc/tierstore.toml";
+
+/// Where the package installs its binary: the program of its plist.
+fn package_binary() -> String {
+    plist_program(PACKAGE_PLIST).expect("the package's plist names its program")
+}
+
 /// The directory of the copy the archive package's plist runs, which a Mac of the installer
 /// package never runs.
 const ARCHIVE_COPY_DIR: &str = "/usr/local/libexec/tierstore";
@@ -115,42 +127,6 @@ fn plist_program(text: &str) -> Option<String> {
     let rest = text.split("<key>ProgramArguments</key>").nth(1)?;
     let rest = rest.split("<string>").nth(1)?;
     Some(rest.split("</string>").next()?.to_owned())
-}
-
-/// `pkgbuild` and `productbuild` stood in for: the payload's root `pkgbuild` was given is kept
-/// (`pkgutil --expand-full` gives that tree back as the payload), and the product is a file.
-#[derive(Default)]
-struct PkgTools {
-    root: RefCell<Option<PathBuf>>,
-}
-
-impl BuildPkg for PkgTools {
-    fn build_pkg(
-        &self,
-        root: &Path,
-        _scripts: &Path,
-        _identifier: &str,
-        _version: &str,
-        _pkg: &Path,
-    ) -> Result<(), xtask::Error> {
-        *self.root.borrow_mut() = Some(root.to_path_buf());
-        Ok(())
-    }
-
-    fn build_product(
-        &self,
-        _component: &Path,
-        _identifier: &str,
-        _version: &str,
-        product: &Path,
-    ) -> Result<(), xtask::Error> {
-        fs::write(product, b"product").expect("the product");
-        Ok(())
-    }
-
-    fn check_signature(&self, _pkg: &Path) -> Result<String, xtask::Error> {
-        unreachable!("the build checks no signature")
-    }
 }
 
 fn mode_of(path: &Path) -> u32 {
@@ -249,7 +225,7 @@ impl Mac {
         fs::create_dir_all(&service).expect("packages");
         set_mode(&service, 0o711);
         set_mode(service.parent().expect("packages"), 0o711);
-        let config = mac.at(macos_pkg::CONFIG_FILE);
+        let config = mac.at(CONFIG_FILE);
         fs::create_dir_all(config.parent().expect("etc")).expect("etc");
         fs::write(&config, NODE_FILE).expect("node file");
         // Searchable by others whatever the umask, as on a Mac.
@@ -265,24 +241,31 @@ impl Mac {
         self.root.join(path.trim_start_matches('/'))
     }
 
-    /// The package of `version` built by `release macos-pkg`'s code and staged as hostkeeper's
-    /// `macos-pkg` installer stages it.
+    /// The payload of the package of `version`, laid out as `release macos-pkg` lays it out, and
+    /// staged as hostkeeper's `macos-pkg` installer stages it.
     fn stage(&self, version: &str) {
-        let binary = self.work.join(format!("{version}.binary"));
-        fs::write(&binary, program_text(version)).expect("binary");
-        let tools = PkgTools::default();
-        let request = Request {
-            version,
-            binary: &binary,
-            stage: &self.work.join(format!("{version}.stage")),
-            out: &self.work.join(format!("{version}.out")),
-        };
-        macos_pkg::build(&tools, &request).expect("the pkg builds");
-        let payload = tools
-            .root
-            .borrow()
-            .clone()
-            .expect("pkgbuild was given the payload");
+        let payload = self.work.join(format!("{version}.payload"));
+        let files = [
+            (package_binary(), 0o755, program_text(version)),
+            (LAUNCHD_PLIST.to_owned(), 0o644, PACKAGE_PLIST.to_owned()),
+        ];
+        for (path, mode, text) in files {
+            let at = payload.join(path.trim_start_matches('/'));
+            let mut dir = payload.clone();
+            for part in Path::new(&path)
+                .parent()
+                .expect("a directory")
+                .components()
+                .skip(1)
+            {
+                dir.push(part);
+                fs::create_dir_all(&dir).expect("payload directory");
+                set_mode(&dir, 0o755);
+            }
+            fs::write(&at, text).expect("payload file");
+            set_mode(&at, mode);
+        }
+        set_mode(&payload, 0o755);
         let dir = self.at(&release(version));
         fs::create_dir(&dir).expect("version directory");
         stage_copy(&payload, &dir.join("tree"));
@@ -369,7 +352,7 @@ impl Mac {
             clock: self,
             state: &state,
         };
-        let label = macos_pkg::LABEL;
+        let label = LABEL;
         run_step_with(step, params, label, &ports, true)
     }
 
@@ -400,7 +383,7 @@ impl Mac {
     }
 
     fn launchctl(&self, args: &[&str]) -> Answer {
-        let target = format!("system/{}", macos_pkg::LABEL);
+        let target = format!("system/{}", LABEL);
         let loaded = self.job.borrow().is_some();
         match args {
             ["print", label] => {
@@ -551,12 +534,9 @@ impl Clock for Mac {
 /// The params hostkeeper writes for the update to `version`, from `previous` when there is one:
 /// the keys of the manifest the release sends for a Mac, and the updater's.
 fn params(version: &str, previous: Option<&str>) -> Params {
-    let manifest = macos_pkg::manifest_json("0.1.0");
-    let mut text = String::new();
-    for (key, value) in manifest["params"].as_object().expect("params") {
-        let value = value["text"].as_str().expect("a text param");
-        text.push_str(&format!("{key} = \"{value}\"\n"));
-    }
+    let mut text = format!(
+        "config_file = \"{CONFIG_FILE}\"\nservice_manager = \"launchd\"\nlaunchd_label = \"{LABEL}\"\n"
+    );
     text.push_str(&format!(
         "\"updater.staged_release\" = \"{}\"\n\"updater.target_version\" = \"{version}\"\n",
         release(version)
@@ -733,7 +713,7 @@ fn a_staged_package_without_its_binary_is_refused_by_name_with_nothing_stopped()
     set_mode(&dir, 0o755);
     let binary = dir
         .join("tree")
-        .join(macos_pkg::BINARY_PATH.trim_start_matches('/'));
+        .join(package_binary().trim_start_matches('/'));
     fs::remove_file(&binary).expect("remove the binary");
     set_mode(&dir, 0o700);
     let done = mac.step(Step::Prepare, &params(NEXT, Some(CURRENT)));
@@ -763,7 +743,7 @@ fn uninstall_boots_the_job_out_and_leaves_the_package_to_hostkeeper() {
     assert_ok(&mac.step(Step::Uninstall, &params(CURRENT, None)));
     assert_eq!(mac.serving(), None);
     assert!(mac.job.borrow().is_none());
-    assert!(mac.at(macos_pkg::BINARY_PATH).is_file());
+    assert!(mac.at(&package_binary()).is_file());
     assert!(mac.at(LAUNCHD_PLIST).is_file());
     assert_eq!(mac.archive_copies(), Vec::<PathBuf>::new());
     assert_eq!(mac.record(), Record::idle(None));
@@ -779,15 +759,12 @@ fn the_account_reaches_the_installed_binary_and_not_the_one_in_a_staged_version(
     let staged = mac
         .at(&release(CURRENT))
         .join("tree")
-        .join(macos_pkg::BINARY_PATH.trim_start_matches('/'));
+        .join(package_binary().trim_start_matches('/'));
     assert!(staged.is_file());
     assert!(!mac.account_reaches(&staged));
-    assert!(mac.account_reaches(&mac.at(macos_pkg::BINARY_PATH)));
+    assert!(mac.account_reaches(&mac.at(&package_binary())));
     let program = staged.to_string_lossy().into_owned();
-    let config = mac
-        .at(macos_pkg::CONFIG_FILE)
-        .to_string_lossy()
-        .into_owned();
+    let config = mac.at(CONFIG_FILE).to_string_lossy().into_owned();
     let args = [
         "-n",
         "-u",

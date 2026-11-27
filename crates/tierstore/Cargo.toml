@@ -223,9 +223,6 @@ tokio = { workspace = true, features = ["io-util", "macros", "test-util"] }
 # Reads the config files and the manifest the tests of the binary and of the packaging check, as
 # tables, beside the binary's own parser.
 toml.workspace = true
-# The macOS installer package as the release builds it (`release macos-pkg`'s payload and the
-# manifest of its entry), which the tests of the update hook stage as hostkeeper does and update.
-xtask.workspace = true
 
 [lints]
 workspace = true
