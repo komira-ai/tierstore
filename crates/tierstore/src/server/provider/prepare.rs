@@ -243,7 +243,7 @@ async fn place(shared: &Shared, job: &Job, reads: UnboundedSender<Queued>) -> Re
         }
         Owner::Newer => Err(Stage::Released),
         Owner::Gone => {
-            let _ = shared.store.release(&created.placement);
+            let _ = shared.store.release_now(&created.placement);
             Err(Stage::Released)
         }
     }

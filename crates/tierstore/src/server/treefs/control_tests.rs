@@ -483,6 +483,22 @@ fn a_closed_gate_waits_for_the_requests_that_passed_it() {
     assert!(gate.enter().is_some());
 }
 
+/// Asserts that the gate counts each request that passed it: with two passed, the end of one
+/// leaves the other counted, and only the end of the last leaves none, so that a close then
+/// returns at once.
+#[test]
+fn a_gate_counts_each_request_until_the_last_ends() {
+    let gate = super::Gate::default();
+    let first = gate.enter().unwrap();
+    let second = gate.enter().unwrap();
+    drop(second);
+    assert_eq!(*gate.state.lock().unwrap(), (false, 1));
+    drop(first);
+    assert_eq!(*gate.state.lock().unwrap(), (false, 0));
+    gate.close_and_drain();
+    assert!(gate.enter().is_none());
+}
+
 /// The inode of `bin/cc` of the sample tree, the first tree a rig numbers.
 fn cc_ino() -> u64 {
     crate::server::treefs::ino::of(1, 3)

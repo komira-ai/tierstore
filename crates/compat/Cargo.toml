@@ -7,11 +7,12 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
-# Test support only, and the one place that builds two releases side by side: the tests in
+# Test support only, and the one place that builds other releases beside this branch: the tests in
 # `tests/` run the previous release's `tierstore` library (the dev-dependency `tierstore_prev`,
 # pinned to the commit of its tag) and this branch's against the same directory and the same S3
-# service, to show that each reads what the other wrote. `src/lib.rs` holds the fixtures the
-# tests share. It is a dev-dependency of nothing and no release builds it.
+# service, to show that each reads what the other wrote; `tests/trees.rs` does the same for the
+# tree store's directories with `tierstore_trees_prev`, a later release that has a tree store.
+# `src/lib.rs` holds the fixtures the tests share. It is a dev-dependency of nothing and no release builds it.
 
 [dev-dependencies]
 bytes.workspace = true
@@ -27,6 +28,9 @@ rustls.workspace = true
 tierstore = { workspace = true, features = ["s3", "server"] }
 # The previous release, pinned in the root `[workspace.dependencies]`.
 tierstore_prev = { workspace = true, features = ["s3", "server"] }
+# The previous release of the tree store's directories, pinned in the root `[workspace.dependencies]`
+# (`tests/trees.rs`).
+tierstore_trees_prev = { workspace = true, features = ["server"] }
 tierstore-testkit.workspace = true
 # This branch's new cache (`[cache]`): its entry store, the types of its entries and the boot id
 # of its journal, which `tests/cache_root.rs` writes `packs-v2/` with.
