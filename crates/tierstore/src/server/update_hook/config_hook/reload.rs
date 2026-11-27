@@ -6,9 +6,8 @@
 //! `treefs/control.rs`); a byte-identical file is the case with nothing to set.
 //!
 //! - `prepare` records the update with `reload` and no `next` or `mode`, when the params declare no
-//!   restart, exactly one instance runs (and at most one of the fs process of the old layout,
-//!   which it names), and the config hook's record has no other update in flight; otherwise the
-//!   steps are the arm's, as for any config update.
+//!   restart, exactly one instance runs, and the config hook's record has no other update in
+//!   flight; otherwise the steps are the arm's, as for any config update.
 //! - `cutover` reloads the guard when the package changes its file, has the control socket set the
 //!   staged value, and records `swapped` with the mount the socket named.
 //! - `verify` observes the build of the instance that serves, as the arm does (and, before the
@@ -129,9 +128,8 @@ fn read(state: &dyn StateDir) -> Result<Option<Record>, Done> {
 
 /// `prepare` of a reload over the params `params` of the config package, whose staged file the
 /// instance that serves `build` applies as `reload` says. `Ok(None)` leaves the step to the arm:
-/// no instance runs, or both do (one of them drains), both instances of the fs process of the old
-/// layout run, or the config hook's record has an update of the arm in flight (the arm finishes a
-/// committed one, and refuses one past its cutover). A `prepare` run again over the reload it
+/// no instance runs, or both do (one of them drains), or the config hook's record has an update of
+/// the arm in flight (the arm finishes a committed one, and refuses one past its cutover). A `prepare` run again over the reload it
 /// recorded keeps it: hostkeeper may have installed the staged file since, which the change would
 /// then be read from as none.
 pub(super) fn prepare(

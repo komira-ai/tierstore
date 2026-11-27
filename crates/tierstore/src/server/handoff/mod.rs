@@ -106,8 +106,6 @@ pub(crate) use take::take_service;
 #[cfg(test)]
 pub(crate) use take::take_with_ready;
 pub(crate) use take::{Ask, Inherited, Offered, Ready, Want, offered_with, take};
-#[cfg(test)]
-pub(crate) use written::Wrote;
 pub(crate) use written::{Predecessor, follow};
 
 /// What an instance is told to do about a hand-off: where the control socket is, and how long a

@@ -1,5 +1,5 @@
-//! The `[fs.nfs]` table: the settings of the NFS frontend (macOS), which a file without the table
-//! gets the defaults of, so that a file written before this table existed loads unchanged.
+//! The `nfs` params of an `fs` interface (keys named `fs.nfs.<key>` below): the settings of the NFS
+//! frontend (macOS), which params without the table get the defaults of.
 //!
 //! | key | meaning | default |
 //! |---|---|---|
@@ -67,7 +67,7 @@ pub(super) const MOST_UNMOUNT_WAIT: Duration = Duration::from_secs(25);
 /// The longest a name of a user may be.
 const MOST_USER_NAME: usize = 64;
 
-/// `[fs.nfs]`, and `params.nfs` of an `fs` interface.
+/// `params.nfs` of an `fs` interface.
 #[derive(Clone, Debug, Deserialize)]
 pub(in crate::server) struct NfsTable {
     listen: Option<String>,

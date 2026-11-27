@@ -52,7 +52,8 @@ fn a_systemd_config_update_that_would_switch_is_refused() {
             assert_eq!(
                 lin::detail(&done),
                 format!(
-                    "this node still runs the two-process layout (tierstore-fs@{letter}.service                      is active): switch this node to the fs interface with release M first"
+                    "this node still runs the two-process layout (tierstore-fs@{letter}.service is \
+                     active): switch this node to the fs interface with release M first"
                 )
             );
             assert_eq!(node.fake.record(), before);

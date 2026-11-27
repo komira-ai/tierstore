@@ -32,7 +32,8 @@
 //! - `mode` (systemd only, while an update is in flight): `handover` (the new instance takes the
 //!   listening sockets of the old) or `restart` (the old one is stopped first: a gap).
 //!
-//! - `fs_live`, `fs_next` and `fs_switch` are read and never written by this hook: they are the
+//! - `fs_live`, `fs_next` and `fs_switch` are read and never written by the systemd arm (the
+//!   config hook's switch of a Mac sets `fs_switch`, `config_hook/switch.rs`): they are the
 //!   keys of the earlier two-process layout, which an earlier release wrote and this one still
 //!   decodes (and holds to their rules), so that the record of a node that has not left that
 //!   layout is understood. `fs_live` (systemd only) is the instance of `tierstore-fs@.service`
