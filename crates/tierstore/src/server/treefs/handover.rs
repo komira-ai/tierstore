@@ -52,7 +52,7 @@ use std::time::Duration;
 use tokio::net::{UnixListener, UnixStream};
 
 use crate::server::handoff::wire::{self, Frame};
-use crate::server::handoff::{Mount, check_control};
+use crate::server::handoff::{Claim, Holding, Mount, check_control};
 use crate::server::{ACCEPT_PAUSE, pause_after};
 
 use super::run::Running;
@@ -66,6 +66,10 @@ const READY: &str = "ready";
 const BYE: &str = "bye";
 /// Why a request is refused when it is not one the running instance understands.
 const NOT_UNDERSTOOD: &str = "the request is not understood";
+/// Why a request is refused while a taker of the one hand-over is at the mount.
+const BUSY: &str = "another taker is taking the mount";
+/// Why a request is refused once the mount was given up on the one hand-over.
+const GONE: &str = "this instance holds no mount";
 
 /// Why a hand-over did not happen.
 #[derive(Debug, thiserror::Error)]
@@ -161,48 +165,58 @@ pub(super) fn offer_lines(mountpoint: &Path, control: &Path) -> Vec<String> {
     ]
 }
 
+/// What a resume that cannot serve the mount again is told: the error.
+pub(super) type Stuck = Arc<dyn Fn(&std::io::Error) + Send + Sync>;
+
 /// The mount of `running`, served with `settings`, as the one hand-over offers it
 /// (`server/handoff/`: `take 1`, `ready`, `mount`): shared, quiesced and resumed as `take-fs 1`
-/// does it, and at `ready` given up for good, with the descriptor's entry of `manager`'s store
-/// removed. A resume that cannot serve the mount again calls `stuck` with the error: the start
-/// passes what ends the process, so that its unit is started again and adopts the descriptor
-/// from its store.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the start of the fs interface offers its mount (one-service.md section 6, P3)"
-    )
-)]
+/// does it, within `settings.handoff_wait`, and at `ready` given up for good, with the
+/// descriptor's entry of `manager`'s store removed. `claim` is the one the instance's `take-fs 1`
+/// offer has too ([`Offer::with_claim`]). A resume that cannot serve the mount again calls `stuck`
+/// with the error: the start stops the process there, so that its unit is started again and adopts
+/// the descriptor from its store.
 pub(in crate::server) fn offered(
     running: &Arc<Running>,
     settings: &super::config::FsSettings,
     manager: Manager,
-    stuck: fn(&std::io::Error),
+    (stuck, claim): (Stuck, Arc<Claim>),
 ) -> Mount {
-    let (sharing, quiescing, resuming, leaving) = (
-        Arc::clone(running),
-        Arc::clone(running),
-        Arc::clone(running),
-        Arc::clone(running),
-    );
+    // Weak: the offer that holds these does not keep the mount's state alive, so a process that
+    // ends its service of the mount (a hang, a stop) takes it whole whatever the offer is doing.
+    let weak = Arc::downgrade(running);
+    let (sharing, quiescing, resuming, leaving) = (weak.clone(), weak.clone(), weak.clone(), weak);
     Mount {
         mountpoint: settings.mountpoint.clone(),
         control: settings.control_socket.clone(),
-        share: Arc::new(move || sharing.share()),
-        quiesce: Arc::new(move || quiescing.quiesce()),
-        resume: Arc::new(move || stuck_on(resuming.resume(), stuck)),
+        share: Arc::new(move || alive(&sharing)?.share()),
+        quiesce: Arc::new(move || drop(alive(&quiescing).map(|running| running.quiesce()))),
+        resume: Arc::new(move || {
+            let resumed = alive(&resuming).map(|running| running.resume());
+            stuck_on(resumed.unwrap_or(Ok(())), &*stuck);
+        }),
         give_up: Arc::new(move || {
-            leaving.give_up();
+            drop(alive(&leaving).map(|running| running.give_up()));
             if let Err(why) = manager.unstore(FUSE_NAME) {
                 tracing::warn!("tierstore: the descriptor's store entry was not removed: {why}");
             }
         }),
+        wait: settings.handoff_wait,
+        claim,
     }
 }
 
+/// The mount's state, while the process still serves it.
+///
+/// # Errors
+/// `NotFound`: the process has ended its service of the mount.
+fn alive(running: &std::sync::Weak<Running>) -> std::io::Result<Arc<Running>> {
+    running.upgrade().ok_or_else(|| {
+        std::io::Error::new(ErrorKind::NotFound, "the mount is no longer served here")
+    })
+}
+
 /// Calls `stuck` with the error of a resume that failed: the mount cannot be served again.
-pub(super) fn stuck_on(resumed: std::io::Result<()>, stuck: fn(&std::io::Error)) {
+pub(super) fn stuck_on(resumed: std::io::Result<()>, stuck: &dyn Fn(&std::io::Error)) {
     if let Err(why) = resumed {
         tracing::error!("tierstore: the mount cannot be served again: {why}");
         stuck(&why);
@@ -408,6 +422,8 @@ pub(super) struct Offer {
     uid: u32,
     /// The service manager whose store holds the descriptor: its entry is removed at `ready`.
     manager: Manager,
+    /// Which conversation has the mount: this one, or the one hand-over of the same process.
+    claim: Arc<Claim>,
 }
 
 impl Offer {
@@ -429,7 +445,17 @@ impl Offer {
             wait,
             uid: rustix::process::geteuid().as_raw(),
             manager: Manager::default(),
+            claim: Arc::default(),
         })
+    }
+
+    /// The same, sharing `claim` with the one hand-over of the same process
+    /// (`server/handoff/offer.rs`: `Offer::with_mount`): one taker at a time is at the mount, on
+    /// either conversation; once it is given up on that one, a request here is refused, and the
+    /// socket's path, which the successor binds after its `bye`, is not removed by this offer.
+    pub(super) fn with_claim(mut self, claim: Arc<Claim>) -> Self {
+        self.claim = claim;
+        self
     }
 
     /// The same, removing the descriptor's entry of `manager`'s store at `ready`: from then on the
@@ -480,16 +506,26 @@ impl Offer {
         stream: &UnixStream,
         running: &Arc<Running>,
     ) -> Result<bool, HandoverError> {
-        let negotiated = tokio::time::timeout(self.wait, self.negotiate(stream, running)).await;
+        let mut claimed = false;
+        let negotiating = self.negotiate(stream, running, &mut claimed);
+        let negotiated = tokio::time::timeout(self.wait, negotiating).await;
         let bye = match negotiated {
             Ok(Ok(Some(bye))) => bye,
-            Ok(Ok(None)) => return Ok(false),
-            Ok(Err(why)) => {
-                tracing::warn!("tierstore fs: a hand-over request failed: {why}");
-                return Ok(false);
-            }
-            Err(_) => {
-                tracing::warn!("tierstore fs: a hand-over request was not completed in time");
+            other => {
+                match other {
+                    Ok(Err(why)) => {
+                        tracing::warn!("tierstore fs: a hand-over request failed: {why}")
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            "tierstore fs: a hand-over request was not completed in time"
+                        );
+                    }
+                    Ok(_) => {}
+                }
+                if claimed {
+                    self.claim.release();
+                }
                 return Ok(false);
             }
         };
@@ -514,6 +550,7 @@ impl Offer {
             if let Err(why) = self.manager.unstore(FUSE_NAME) {
                 tracing::warn!("tierstore fs: the descriptor's store entry was not removed: {why}");
             }
+            self.claim.give_up();
             if bye && let Err(why) = wire::send(stream, &[BYE.to_owned()], &[]).await {
                 tracing::warn!("tierstore fs: bye was not sent: {why}");
             }
@@ -521,6 +558,7 @@ impl Offer {
         }
         tracing::warn!("tierstore fs: the taker did not say it serves the mount; serving again");
         self.resume(running).await?;
+        self.claim.release();
         Ok(false)
     }
 
@@ -542,11 +580,13 @@ impl Offer {
         Ok(())
     }
 
-    /// Reads the request, offers the mount, and returns whether the taker answered `ack`.
+    /// Reads the request, offers the mount, and returns whether the taker answered `ack`; notes in
+    /// `claimed` that the mount was claimed for this taker.
     async fn negotiate(
         &self,
         stream: &UnixStream,
         running: &Arc<Running>,
+        claimed: &mut bool,
     ) -> std::io::Result<Option<bool>> {
         let request = wire::recv(stream).await?;
         let bye = match request.lines.as_slice() {
@@ -556,6 +596,11 @@ impl Offer {
         };
         if stream.peer_cred()?.uid() != self.uid {
             return refuse(stream, "the taker is not the user of this instance").await;
+        }
+        match self.claim.claim() {
+            Holding::Here => *claimed = true,
+            Holding::Taking => return refuse(stream, BUSY).await,
+            Holding::Gone => return refuse(stream, GONE).await,
         }
         let (device, control) = running.share()?;
         let lines = offer_lines(&self.paths.0, &self.paths.1);
@@ -587,9 +632,10 @@ fn socket(path: &Path) -> Result<UnixListener, HandoverError> {
 
 impl Drop for Offer {
     /// An instance that ends without handing over removes its socket file, so that the next start
-    /// finds none; one that handed over has removed it already.
+    /// finds none; one that handed over has removed it already, and one whose mount was given up on
+    /// the one hand-over leaves the path to the successor, which binds it after its `bye`.
     fn drop(&mut self) {
-        if self.listener.is_some() {
+        if self.listener.is_some() && self.claim.holding() != Holding::Gone {
             let _ = std::fs::remove_file(&self.path);
         }
     }

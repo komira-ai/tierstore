@@ -56,7 +56,12 @@ fn one(name: &str) -> One {
     );
     let manager = FakeManager::start(&rig.dir.path().join("old-manager.sock"));
     let store = Manager::new(Some(manager.socket().as_os_str()));
-    let mount = offered(&running, &settings, store, |_| {});
+    let mount = offered(
+        &running,
+        &settings,
+        store,
+        (Arc::new(|_| {}), Arc::default()),
+    );
     let offer = Offer::bind(&settings.handoff_socket, Vec::new())
         .unwrap()
         .with_ready_wait(WAIT)
@@ -555,9 +560,9 @@ async fn a_failed_resume_is_told_and_an_unreachable_store_does_not_stop_the_give
     let note: fn(&std::io::Error) = |_| {
         let _ = STUCK.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     };
-    handover::stuck_on(Ok(()), note);
+    handover::stuck_on(Ok(()), &note);
     assert_eq!(STUCK.load(std::sync::atomic::Ordering::SeqCst), 0);
-    handover::stuck_on(Err(std::io::Error::other("no readers")), note);
+    handover::stuck_on(Err(std::io::Error::other("no readers")), &note);
     assert_eq!(STUCK.load(std::sync::atomic::Ordering::SeqCst), 1);
 
     let rig = Rig::new("tfs-svc-unreachable", sample());
@@ -573,7 +578,12 @@ async fn a_failed_resume_is_told_and_an_unreachable_store_does_not_stop_the_give
         Running::adopt((&settings, &Reach::Socket), prepared, device, (None, false)).unwrap(),
     );
     let nobody = Manager::new(Some(rig.dir.path().join("nobody-home").as_os_str()));
-    let mount = offered(&running, &settings, nobody, note);
+    let mount = offered(
+        &running,
+        &settings,
+        nobody,
+        (Arc::new(note), Arc::default()),
+    );
     (mount.quiesce)();
     (mount.give_up)();
     assert!(!running.reading());
@@ -598,4 +608,97 @@ async fn a_take_fs_request_with_a_line_this_release_does_not_know_is_refused() {
     }
     old.assert_serving(1);
     old.serving.abort();
+}
+
+/// Asserts that the `take-fs 1` offer of a process of the one-process layout shares its claim of
+/// the mount with the one hand-over: while a taker of the one hand-over is at the mount, a request
+/// is refused as busy; once that taker is gone, a request is offered the mount, and a taker that
+/// goes away before `ack` leaves the claim free again; once the mount was given up on the one
+/// hand-over, a request is refused as by an instance that holds none, and the socket's file, which
+/// the successor binds after its `bye`, is left in place when the offer goes. It would catch a
+/// mount offered on both conversations at once, or after it was given up.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn take_fs_shares_the_claim_of_the_mount_with_the_one_hand_over() {
+    use crate::server::handoff::{Claim, Holding};
+    let rig = Rig::new("tfs-svc-claim", sample());
+    let settings = rig.settings();
+    let record = Record::first(outcome(false), "mount-1".to_owned());
+    init_record::write(&rig.runtime, &record).unwrap();
+    let (device, _kernel) = pair();
+    let prepared = Prepared::load(&settings).unwrap();
+    let running = Arc::new(
+        Running::adopt((&settings, &Reach::Socket), prepared, device, (None, false)).unwrap(),
+    );
+    let claim = Arc::new(Claim::default());
+    let offer = handover::Offer::bind(
+        &settings.handoff_socket,
+        &settings.mountpoint,
+        &settings.control_socket,
+        WAIT,
+    )
+    .unwrap()
+    .with_claim(Arc::clone(&claim));
+    let serving = tokio::spawn(offer.serve(Arc::clone(&running)));
+    let request = ["take-fs 1", "ready"];
+
+    assert_eq!(claim.claim(), Holding::Here);
+    let busy = ask(&connect(&settings.handoff_socket).await, &request).await;
+    assert_eq!(busy.lines, ["refused", "another taker is taking the mount"]);
+    claim.release();
+    let taker = connect(&settings.handoff_socket).await;
+    let offered = ask(&taker, &request).await;
+    assert_eq!(offered.lines[0], "offer-fs");
+    assert_eq!(claim.holding(), Holding::Taking);
+    drop((taker, offered));
+    crate::server::local_cache::testing::until("the claim is free again", || {
+        claim.holding() == Holding::Here
+    })
+    .await;
+
+    assert_eq!(claim.claim(), Holding::Here);
+    claim.give_up();
+    let gone = ask(&connect(&settings.handoff_socket).await, &request).await;
+    assert_eq!(gone.lines, ["refused", "this instance holds no mount"]);
+    serving.abort();
+    assert!(serving.await.is_err(), "the offer was ended");
+    assert!(settings.handoff_socket.exists());
+}
+
+/// Asserts that the mount the one hand-over offers keeps no part of the process's state of it
+/// alive: once the process has ended its service of the mount (a hang or a stop takes that state
+/// whole), the offer shares nothing and its other steps do nothing, and a resume is not told as
+/// stuck. It would catch an offer that keeps the state alive, which makes the end of a hung mount
+/// fail to take it out of the store.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_mount_offered_after_its_service_ended_shares_nothing() {
+    static STUCK: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let rig = Rig::new("tfs-svc-ended", sample());
+    let settings = rig.settings();
+    let record = Record::first(outcome(false), "mount-1".to_owned());
+    init_record::write(&rig.runtime, &record).unwrap();
+    let (device, _kernel) = pair();
+    let prepared = Prepared::load(&settings).unwrap();
+    let running = Arc::new(
+        Running::adopt((&settings, &Reach::Socket), prepared, device, (None, false)).unwrap(),
+    );
+    let nobody = Manager::new(Some(rig.dir.path().join("nobody-home").as_os_str()));
+    let note: fn(&std::io::Error) = |_| {
+        let _ = STUCK.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    };
+    let mount = offered(
+        &running,
+        &settings,
+        nobody,
+        (Arc::new(note), Arc::default()),
+    );
+    let alone = Arc::try_unwrap(running)
+        .ok()
+        .expect("the offer holds no part of it");
+    alone.leave();
+    let shared = (mount.share)().expect_err("nothing is shared");
+    assert_eq!(shared.kind(), std::io::ErrorKind::NotFound);
+    (mount.quiesce)();
+    (mount.resume)();
+    (mount.give_up)();
+    assert_eq!(STUCK.load(std::sync::atomic::Ordering::SeqCst), 0);
 }

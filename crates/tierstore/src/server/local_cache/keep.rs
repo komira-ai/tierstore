@@ -97,7 +97,9 @@ use tokio::sync::{OwnedSemaphorePermit, mpsc};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
-use crate::{Error, Meta, PartBody, PutAnswer, PutClaim, PutOutcome, TreeDigest};
+use crate::{
+    BodyDigests, Error, Meta, PartBody, PutAnswer, PutClaim, PutKind, PutOutcome, TreeDigest,
+};
 
 use super::calls::counting;
 use super::fill::{Flight, Pending, Published, Reserved, Staged};
@@ -130,6 +132,17 @@ pub(super) enum Sent<'a> {
     /// Create-only, of a body of this length that is to hash to this digest (see
     /// [`put_stream_sha256`](crate::Backend::put_stream_sha256)).
     Checked(u64, TreeDigest),
+}
+
+impl<'a> Sent<'a> {
+    /// How a put of `kind` is sent.
+    pub(super) fn of(kind: PutKind<'a>) -> Self {
+        match kind {
+            PutKind::Creates => Self::Creates,
+            PutKind::CreatesHotOnly => Self::CreatesHotOnly,
+            PutKind::Replaces(claim) => Self::Replaces(claim),
+        }
+    }
 }
 
 /// The task that writes the chunks of a body to the stage file, and the way to it.
@@ -368,26 +381,21 @@ impl Inner {
         key: &str,
         len: Option<u64>,
         body: PartBody<'_>,
-        sent: Sent<'_>,
+        (sent, digests): (Sent<'_>, BodyDigests),
     ) -> Result<(PutOutcome, Option<(PutAnswer, u64)>), Error> {
-        let answer = match sent {
+        let kind = match sent {
             Sent::Checked(len, sha256) => {
                 let put = self.upstream.put_stream_sha256(key, len, body, sha256);
                 return Ok((put.await?, None));
             }
-            Sent::Creates => {
-                let put = self.upstream.put_stream_answered(key, len, body, false);
-                put.await?
-            }
-            Sent::CreatesHotOnly => {
-                let put = self.upstream.put_stream_answered(key, len, body, true);
-                put.await?
-            }
-            Sent::Replaces(claim) => {
-                let put = self.upstream.put_stream_replacing(key, len, body, claim);
-                put.await?
-            }
+            Sent::Creates => PutKind::Creates,
+            Sent::CreatesHotOnly => PutKind::CreatesHotOnly,
+            Sent::Replaces(claim) => PutKind::Replaces(claim),
         };
+        let put = self
+            .upstream
+            .put_stream_digested(key, len, body, kind, digests);
+        let answer = put.await?;
         let answered = answer.map(|answer| (answer, self.clock.now()));
         Ok((PutOutcome::Created, answered))
     }
@@ -409,6 +417,21 @@ impl Inner {
         len: Option<u64>,
         body: PartBody<'_>,
         sent: Sent<'_>,
+    ) -> Result<PutOutcome, Error> {
+        let none = BodyDigests::default();
+        self.put_through_digested(key, len, body, (sent, none))
+            .await
+    }
+
+    /// [`put_through`](Self::put_through) of a body whose request named `digests` of it, which go
+    /// to the upstream's [`Backend::put_stream_digested`](crate::Backend::put_stream_digested)
+    /// with the put (a put that names its SHA-256 sends that digest its own way).
+    pub(super) async fn put_through_digested(
+        self: &Arc<Self>,
+        key: &str,
+        len: Option<u64>,
+        body: PartBody<'_>,
+        (sent, digests): (Sent<'_>, BodyDigests),
     ) -> Result<PutOutcome, Error> {
         self.writable(key)?;
         let replaces = matches!(sent, Sent::Replaces(_));
@@ -454,9 +477,12 @@ impl Inner {
         let sent = match &mut keeping {
             Some(keeping) => {
                 let teed = counting(tee(key, body, keeping), &passed);
-                self.send_put(key, len, teed, sent).await
+                self.send_put(key, len, teed, (sent, digests)).await
             }
-            None => self.send_put(key, len, counting(body, &passed), sent).await,
+            None => {
+                let counted = counting(body, &passed);
+                self.send_put(key, len, counted, (sent, digests)).await
+            }
         };
         if replaces {
             self.forget(key);
