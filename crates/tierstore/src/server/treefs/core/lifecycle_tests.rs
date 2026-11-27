@@ -400,7 +400,14 @@ fn a_pin_in_flight_when_a_detach_starts_is_unpinned_after_it() {
         core.release(open.join().unwrap().unwrap());
         assert!(detach.join().unwrap().is_some());
     });
-    assert_eq!(t.pinned(), 0, "the pin followed the unpin");
+    // Only the busy tree's blob is unpinned: the other tree, which no run of this test detaches,
+    // keeps its pin (its file, "the other tree", is 14 bytes), and a pin that followed the unpin
+    // would leave the 300000 bytes of `big.bin` pinned beside it.
+    assert_eq!(
+        t.pinned(),
+        b"the other tree".len() as u64,
+        "the pin followed the unpin"
+    );
 }
 
 /// Asserts that a tree attached again between the decision of a detach and its unpin is not

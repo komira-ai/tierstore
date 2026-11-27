@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use bytes::Bytes;
 use sha2::{Digest as _, Sha256};
 use tierstore_testkit::dir::TestDir;
 use tokio::runtime::{Handle as RuntimeHandle, Runtime};
@@ -333,9 +334,26 @@ impl Puts {
         until(|| self.node.tamper.at_puts() >= count);
     }
 
-    /// Fails the next put that reaches the upstream with `error`, after those failed before.
+    /// Fails the next put that reaches the upstream with `error`, after those failed before. Not
+    /// for `AlreadyExists`: the put of a staged file answers that by reading the object that is
+    /// there (see [`Puts::plant`]), and finds none.
     pub(in crate::server::treefs) fn fail_next(&self, error: Error) {
         self.node.upstream.fail_next_with(Op::Put, error);
+    }
+
+    /// Puts the object `key` in the upstream with `bytes`, as another writer did: a put of the key
+    /// is then refused by the upstream, and answered `AlreadyExists` when the bytes differ. The put
+    /// is not counted.
+    pub(in crate::server::treefs) fn plant(&self, key: &str, bytes: &[u8]) {
+        let body = Bytes::copy_from_slice(bytes);
+        let put = self.node.tamper.put(key, body);
+        self.work.handle().block_on(put).unwrap();
+    }
+
+    /// Deletes the object `key` from the upstream.
+    pub(in crate::server::treefs) fn remove(&self, key: &str) {
+        let delete = self.node.tamper.delete(key);
+        self.work.handle().block_on(delete).unwrap();
     }
 
     /// Fails the next `count` puts that reach the upstream with the error of an upstream that

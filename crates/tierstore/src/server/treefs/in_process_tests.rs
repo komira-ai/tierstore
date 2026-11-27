@@ -759,12 +759,33 @@ fn the_core_fills_through_the_cache_with_no_socket_in_the_process() {
     assert_eq!(rig.node.pinned_bytes(), 10);
 
     // A put of a staged file.
+    // The rig's cache is read-only to puts (`write_through` is off), so the put goes through a
+    // cache of the node's kind that takes writes, over the same upstream.
     let staged = rig.dir.path().join("pack.part");
     std::fs::write(&staged, b"pack bytes").unwrap();
     let digest = TreeDigest::of(b"pack bytes").to_string();
-    let put = rig
-        .asks()
-        .put(("cas/b/1/n/pack", digest.as_str(), 10), &staged, LONG);
+    let writing = {
+        use crate::TestClock;
+        use crate::server::local_cache::CacheConfig;
+        use crate::server::local_cache::testing::{FakeDisk, never_expires};
+        let path = rig.dir.path().join("cache-writing");
+        std::fs::create_dir_all(&path).unwrap();
+        let mut config = CacheConfig::new(path, 1 << 30, vec![("cas/".to_owned(), true)]);
+        never_expires(&mut config);
+        config.write_through = true;
+        let handle = rig.work.handle();
+        let _entered = handle.enter();
+        let upstream: Arc<dyn crate::Backend> = rig.upstream.clone();
+        let cache = LocalCache::open(
+            config,
+            upstream,
+            Arc::new(FakeDisk::new()),
+            Arc::new(TestClock::new()),
+        )
+        .unwrap();
+        InProcess::new((cache, None), handle.clone(), LONG, Arc::new(|_| {}))
+    };
+    let put = writing.put(("cas/b/1/n/pack", digest.as_str(), 10), &staged, LONG);
     assert_eq!(put, Ok(r#"{"ok":true,"created":true}"#.to_owned()));
     let objects = rig.work.handle().block_on(rig.upstream.put_objects());
     let stored = objects.iter().find(|(key, _)| key == "cas/b/1/n/pack");
@@ -840,6 +861,9 @@ async fn a_node_file_with_fill_socket_concurrency_still_bounds_the_fills() {
     );
     assert_eq!(sample(&rig.cache, BUSY), 1);
     gate.add_permits(1_000);
+    // Waited for by turns of the scheduler, not by an await: the fill's disk work runs on threads
+    // while the paused clock would move to the request's end as soon as every task waits.
+    until("the first fill ends", || first.is_finished()).await;
     assert_eq!(first.await.unwrap(), Ok(()));
     until("the permit is given back", || {
         sample(&rig.cache, RUNNING) == 0
@@ -861,6 +885,7 @@ async fn a_node_file_with_fill_socket_concurrency_still_bounds_the_fills() {
     .await;
     gate.add_permits(1_000);
     for fill in both {
+        until("the fill ends", || fill.is_finished()).await;
         assert_eq!(fill.await.unwrap(), Ok(()));
     }
     assert_eq!(sample(&rig.cache, BUSY), 0);

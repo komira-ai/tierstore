@@ -103,6 +103,10 @@ fn the_pins_of_two_opens_are_asked_at_once_and_an_open_of_a_pinned_blob_waits_fo
     let pinned = open_cached(&core, ino::of(1, 3), false).unwrap();
     assert_eq!(cache.pinned_bytes(), 3000);
     assert_eq!(core.pins.pins_asked(), 1);
+    // The cache writes its pins file at a tick (at most once a second): a cache that takes the
+    // role back restores its pins from that file, so the first pin is written before the role is lost.
+    assert_eq!(cache.tick().unwrap(), Tick::Held);
+    assert!(rig.cache.join("pins").exists());
     lose_the_write_role(&rig, &cache);
     let watching = cache.mode_watchers();
     let (again, handles) = std::thread::scope(|scope| {

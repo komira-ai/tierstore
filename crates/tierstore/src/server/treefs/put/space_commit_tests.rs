@@ -72,8 +72,16 @@ fn each_answer_of_the_upload_has_its_errno_and_leaves_the_file_staged() {
     let dir = nonce(space);
     let _ = staged(space, dir, "pack.part", b"bytes");
     let key = format!("{DIR}/pack");
+    // The upstream holds other bytes under the key: its create-only put refuses, and the read of
+    // the object that follows finds them not to be the staged bytes.
+    rig.puts.plant(&key, b"other");
+    let renamed = space.rename((dir, "pack.part"), (dir, "pack"), false);
+    assert_eq!(renamed, Err(Errno::EXIST));
+    assert_eq!(rig.puts.count(), 1);
+    assert_eq!(space.lookup(dir, "pack.part").unwrap().unwrap().size, 5);
+    assert_eq!(space.lookup(dir, "pack").unwrap(), None);
+    rig.puts.remove(&key);
     let refusals = [
-        (Error::AlreadyExists(key.clone()), Errno::EXIST),
         (Error::BadDigest(key.clone()), Errno::BADMSG),
         (Error::TooLarge(key), Errno::FBIG),
     ];
@@ -81,7 +89,7 @@ fn each_answer_of_the_upload_has_its_errno_and_leaves_the_file_staged() {
         rig.puts.fail_next(refusal);
         let renamed = space.rename((dir, "pack.part"), (dir, "pack"), false);
         assert_eq!(renamed, Err(errno), "{errno:?}");
-        assert_eq!(rig.puts.count(), count + 1);
+        assert_eq!(rig.puts.count(), count + 2);
         assert_eq!(space.lookup(dir, "pack.part").unwrap().unwrap().size, 5);
         assert_eq!(space.lookup(dir, "pack").unwrap(), None);
     }
