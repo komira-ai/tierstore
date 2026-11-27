@@ -271,7 +271,7 @@ fn the_tailnet_is_joined_after_the_build_of_xtask_and_before_the_farm() {
     // Catches: the join moved before the build of xtask (a build script would see the farm's
     // network), or after the command that needs it; and a second join.
     let text = text_of(FILE);
-    let join = "      - name: Join the farm's Tailscale network\n        uses: tailscale/github-action@d1b6cd204f8dceda5b3eaad7f1f767be390056cd # v4.2.0\n        with:\n          oauth-client-id: ${{ vars.TS_CLIENT_ID }}\n          audience: ${{ vars.TS_AUDIENCE }}\n          tags: tag:ci\n";
+    let join = "      - name: Join the farm's Tailscale network\n        uses: tailscale/github-action@d1b6cd204f8dceda5b3eaad7f1f767be390056cd # v4.2.0\n        timeout-minutes: 10\n        with:\n          oauth-client-id: ${{ vars.TS_CLIENT_ID }}\n          audience: ${{ vars.TS_AUDIENCE }}\n          tags: tag:ci\n";
     assert!(text.contains(join));
     let without = text.replacen(join, "", 1);
     let early = without.replacen(

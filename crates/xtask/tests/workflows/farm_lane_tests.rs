@@ -105,6 +105,11 @@ fn the_token_in_another_job_or_another_workflow_is_refused() {
                 "line {line}: `uses: {}` has no version comment (`# v1.2.3`) on its line",
                 pinned()
             ),
+            format!(
+                "line {}: `uses: {}` has no version comment (`# v1.2.3`) on its line",
+                line_of(BUCK2_FARM),
+                build_pin()
+            ),
             "job build: `id-token: write` is not allowed in ci.yml".to_owned(),
         ]
     );
@@ -115,7 +120,7 @@ fn a_second_job_is_refused() {
     // Catches: a job added beside `build`, which the lint's other rules would let through.
     let second = with(
         "\njobs:\n",
-        "\njobs:\n  other:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: true\n",
+        "\njobs:\n  other:\n    runs-on: ubuntu-24.04\n    timeout-minutes: 30\n    steps:\n      - run: true\n        timeout-minutes: 10\n",
     );
     assert_eq!(lint(FILE, &second), ["job other is not a job of farm.yml"]);
 }
