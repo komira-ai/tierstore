@@ -859,7 +859,7 @@ undo the others. A build node (a read cache) refuses it, as it refuses every wri
 The front serves one bucket, path-style or (with `server.domains`) virtual-hosted-style, over plain HTTP (over HTTPS when the file has `server.tls_cert_file` and `server.tls_key_file`), and checks SigV4 in the `Authorization`
 header only. An SDK with its defaults sends some things the front refuses, so a client needs these
 settings. `crates/tierstore/tests/s3_front/sdk.rs` drives the front with aws-sdk-rust (the
-`aws-sdk-s3` crate, version 1.96.0, in this repository's tests only) set this way, and that test is
+`aws-sdk-s3` crate, version 1.162.0, in this repository's tests only) set this way, and that test is
 what "tested" means below.
 
 | setting | value | why |

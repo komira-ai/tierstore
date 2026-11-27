@@ -170,3 +170,42 @@ impl LocalCache {
         self.inner.flush_touches();
     }
 }
+
+impl Inner {
+    /// Removes the object from the index and, if this cache may write to its directory, from the
+    /// disk. A read-only cache forgets the object and leaves its files: they are the holder's.
+    /// It notes the name, and removes the files when it takes the lock (see `hold`), so that the
+    /// object is not served from them then: it was deleted or replaced at the upstream.
+    pub(super) fn drop_entry(&self, hex: &str) {
+        let _ = self.remove_entry(hex, false);
+    }
+
+    /// [`drop_entry`](Self::drop_entry) for the eviction: an object that is pinned stays. Says
+    /// whether the object was removed.
+    pub(super) fn evict_entry(&self, hex: &str) -> bool {
+        self.remove_entry(hex, true)
+    }
+
+    /// The work of both; `keep_pinned` leaves a pinned object where it is, looking at the pins
+    /// under the lock of the index, so that a pin made since the eviction chose the object holds.
+    fn remove_entry(&self, hex: &str, keep_pinned: bool) -> bool {
+        // Asked first: a take that is running holds the answer until it has looked at the notes,
+        // and an entry removed before that would be put back by the index it makes.
+        let may_delete = self.may_delete(hex);
+        #[cfg(test)]
+        self.trace_between_delete_steps();
+        {
+            let mut index = locked(&self.index);
+            if keep_pinned && index.pins.is_pinned(hex) {
+                return false;
+            }
+            drop(index.remove(hex));
+        }
+        if may_delete {
+            let root = &self.config.path;
+            let _ = std::fs::remove_file(data_path(root, hex));
+            let _ = std::fs::remove_file(super::layout::meta_path(root, hex));
+        }
+        true
+    }
+}

@@ -383,6 +383,38 @@ What they do not count:
 - A put that failed at the upstream, or at the HEAD before it, counts no bytes, whatever part of its body was sent. The one put the client is told failed that counts bytes is a `bad_digest` put the upstream had already taken (above).
 - `writes_through_total` counts whole-body puts only, `upstream_puts_total` counts those and completions, and `write_exists_total` counts the HEAD's answer and the upstream's together.
 
+### Failed puts and the short objects they leave
+
+Two families count the puts of an object that fail, and what is done about an object of the wrong
+length a failed put can leave in the upstream S3 store (some stores keep a PUT whose body was cut
+short as an object of the bytes that came, 0 of them for a body that failed before its first byte).
+
+| name | type | labels | increments when |
+|---|---|---|---|
+| `tierstore_s3_put_failures_total` | counter | `reason`: `timeout`, `incomplete`, `bad_digest`, `too_large`, `busy`, `exists`, `upstream`, `other` | a `PUT` of an object on the S3 listener whose body the front streams (no `If-Match`, no `If-None-Match` but `*`) was answered with an error, by the code of the answer |
+| `tierstore_cache_upstream_short_objects_total` | counter | `result`: `removed`, `left`, `failed` | a single PUT the cache sent its S3 upstream got no answer (its body or its connection failed) and the one HEAD of the key after it found an object of another length than the put declared, or could not be made |
+
+The reasons of a failed put on the front:
+
+- `timeout`: no byte of the body came within `server.body_idle_timeout`, or the body came slower than `server.put_min_bytes_per_sec` (`RequestTimeout`).
+- `incomplete`: the body ended before its length or could not be read, as when the client goes away (`IncompleteBody`).
+- `bad_digest`: the body is not the digest its request named (`BadDigest`, `XAmzContentSHA256Mismatch`, `InvalidDigest`).
+- `too_large`: the body is over the limit (`EntityTooLarge`).
+- `busy`: the server was taking as many bodies as it may, or the store had no room (`SlowDown`).
+- `exists`: a create-only put of a key that exists (`PreconditionFailed`).
+- `upstream`: the store did not answer, or failed (`ServiceUnavailable`, `InternalError`).
+- `other`: any other refusal.
+
+The results of the look after a single PUT that got no answer:
+
+- `removed`: the object carried the token that PUT sent as its metadata `x-amz-meta-write-token`, so the PUT made it; it was deleted on its entity tag.
+- `left`: the object did not carry that token: it was there before the put began (the store refused a create-only PUT on it), or another writer made it. It is left as it is.
+- `failed`: the HEAD or the DELETE failed, or the object had no entity tag; an object of the wrong length may have stayed.
+
+An object of the length the put declared, or no object, counts nothing. A put the store answered
+(even with an error) is not looked after, and a body sent as a multipart upload never leaves an
+object of a failed put. The series stay 0 for an upstream that is not an S3 store.
+
 ### Build node: request to start
 
 A build node whose cache has a tree store and serves jobscheduler's mount provider (the

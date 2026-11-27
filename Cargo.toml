@@ -24,7 +24,7 @@ async-trait = "0.1.92"
 # Pinned exactly, so that the test is of one SDK version. No default features: the default
 # HTTP client brings a TLS provider (aws-lc), which the front, plain HTTP, does not need; the
 # HTTP client below has no TLS either. Apache-2.0.
-aws-sdk-s3 = { version = "=1.96.0", default-features = false, features = ["behavior-version-latest", "rt-tokio"] }
+aws-sdk-s3 = { version = "=1.162.0", default-features = false, features = ["behavior-version-latest", "rt-tokio"] }
 # The SDK's own hyper-based HTTP client, built without TLS (`build_http`) for a plain-HTTP
 # endpoint. Apache-2.0.
 aws-smithy-http-client = { version = "1.1.4", default-features = false, features = ["default-client"] }

@@ -182,6 +182,8 @@ pub(super) fn s3_client(server: &ServerTable) -> Result<S3Client, ConfigError> {
             endpoint_attempts,
             single_put_max,
             part_bytes,
+            // Not a setting: the wait before the look after a PUT that got no answer.
+            cut_put_look_after: old.tuning.cut_put_look_after,
         },
         ..old
     })

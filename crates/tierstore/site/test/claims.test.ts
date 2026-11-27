@@ -57,7 +57,7 @@ export function code(text: string): string {
 }
 
 /** The files that export metrics: the OCI front's, the cache's (and its entries by extents', its runs' request to start, its mounts' tree attaches, its mounts' descriptors, its mounts' opens, its mounts' tree lists, its mounts' requests and its mounts' attaches and detaches of runs) and the tiers'. */
-const EXPORTERS = new Set(['server/oci/metrics.rs', 'server/local_cache/metrics.rs', 'server/local_cache/extents/counts.rs', 'server/local_cache/starts.rs', 'server/local_cache/attaches.rs', 'server/local_cache/descriptors.rs', 'server/local_cache/opens.rs', 'server/local_cache/tree_lists.rs', 'server/local_cache/requests.rs', 'server/local_cache/runs.rs', 'metrics.rs', 'server/build_info.rs', 'server/mod.rs']);
+const EXPORTERS = new Set(['server/oci/metrics.rs', 'server/local_cache/metrics.rs', 'server/local_cache/extents/counts.rs', 'server/local_cache/starts.rs', 'server/local_cache/attaches.rs', 'server/local_cache/descriptors.rs', 'server/local_cache/opens.rs', 'server/local_cache/tree_lists.rs', 'server/local_cache/requests.rs', 'server/local_cache/runs.rs', 'metrics.rs', 'server/build_info.rs', 'server/mod.rs', 'server/front_counts.rs']);
 
 /** What in the source no longer matches the pages. Each problem names the pages to change. */
 export function staleClaims(src: ReadonlyMap<string, string>): string[] {
