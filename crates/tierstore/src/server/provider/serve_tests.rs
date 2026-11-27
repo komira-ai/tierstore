@@ -13,8 +13,8 @@ use super::super::Drained;
 use super::super::cache_cli_tests::{Node, serving};
 use super::super::local_cache::pack_testing::Pack;
 use super::super::local_cache::{Disk, SystemDisk};
-use super::testing::{Client, READ_ONLY, Rig, list_of, source};
-use crate::{Backend, FaultyBackend, MemoryBackend, tree_list_key};
+use super::testing::{Client, READ_ONLY, Rig, source, tree_objects};
+use crate::{Backend, FaultyBackend, MemoryBackend};
 
 /// Asserts that a build node whose file has a `mount-provider` interface serves the provider on
 /// its socket while it serves: a prepare of a tree list in the node's upstream, a mount that
@@ -35,9 +35,9 @@ async fn a_build_node_serves_its_mount_provider_beside_the_s3_front() {
         .put(&pack.key, Bytes::copy_from_slice(pack.bytes()))
         .await
         .unwrap();
-    let list = list_of(&pack).encode();
-    let key = tree_list_key(&list);
+    let [(key, list), (sidecar, l2)] = tree_objects(&pack);
     memory.put(&key, Bytes::from(list)).await.unwrap();
+    memory.put(&sidecar, Bytes::from(l2)).await.unwrap();
     let upstream: Arc<dyn Backend> = Arc::new(FaultyBackend::new(memory));
     let disk: Arc<dyn Disk> = Arc::new(SystemDisk);
     let path = socket.clone();
