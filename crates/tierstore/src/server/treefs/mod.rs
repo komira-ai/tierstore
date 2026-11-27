@@ -134,7 +134,7 @@ pub(super) use config::{
 pub(super) use config::{builders, from_text};
 pub(super) use groups::{Database, Found, system as system_names};
 #[cfg(target_os = "linux")]
-pub(super) use interface::{Served, Service};
+pub(super) use interface::{Mounted, Served, Service};
 pub(super) use nfs::config::NfsTable;
 #[cfg(any(target_os = "macos", test))]
 pub(super) use nfs::{NfsServed, NfsService};

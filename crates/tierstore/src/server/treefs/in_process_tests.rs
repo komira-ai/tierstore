@@ -833,12 +833,12 @@ fn the_core_fills_through_the_cache_with_no_socket_in_the_process() {
     assert!(!rig.runtime.join("fill.sock").exists());
 }
 
-/// A cache of `concurrency` permits for the source fills, which waits for one for 5 s, and a pack
+/// A cache of `concurrency` permits for the source fills, which waits for one for 50 ms, and a pack
 /// of two blobs in its upstream.
 async fn bounded(name: &str, concurrency: usize) -> (Rig, Pack) {
     let rig = Rig::with(name, |config| {
         config.fill_socket_concurrency = concurrency;
-        config.fill_socket_wait = Duration::from_secs(5);
+        config.fill_socket_wait = Duration::from_millis(50);
     });
     let pack = Pack::put(&rig, "packs/bounded", &[400, 500]).await;
     (rig, pack)
@@ -866,8 +866,9 @@ async fn fill_blob_of(
 /// which the gauge of the fills running shows), a fill of another blob finds no permit within
 /// `fill_socket_wait` and is answered `busy`, which `tierstore_cache_fill_socket_busy_total`
 /// counts once; the first fill then ends `ok`. With `fill_socket_concurrency = 2` the two fills
-/// run together and none is busy. The clock is paused and moves when every task waits.
-#[tokio::test(start_paused = true)]
+/// run together and none is busy. The first fill is held at the upstream until the test lets it
+/// go, so the second's wait for a permit ends `busy` whatever its length: no answer races it.
+#[tokio::test(flavor = "multi_thread")]
 async fn a_node_file_with_fill_socket_concurrency_still_bounds_the_fills() {
     let (rig, pack) = bounded("tfs-in-bound-one", 1).await;
     let over = shared(&rig.cache, None);
@@ -886,9 +887,6 @@ async fn a_node_file_with_fill_socket_concurrency_still_bounds_the_fills() {
     );
     assert_eq!(sample(&rig.cache, BUSY), 1);
     gate.add_permits(1_000);
-    // Waited for by turns of the scheduler, not by an await: the fill's disk work runs on threads
-    // while the paused clock would move to the request's end as soon as every task waits.
-    until("the first fill ends", || first.is_finished()).await;
     assert_eq!(first.await.unwrap(), Ok(()));
     until("the permit is given back", || {
         sample(&rig.cache, RUNNING) == 0
@@ -910,7 +908,6 @@ async fn a_node_file_with_fill_socket_concurrency_still_bounds_the_fills() {
     .await;
     gate.add_permits(1_000);
     for fill in both {
-        until("the fill ends", || fill.is_finished()).await;
         assert_eq!(fill.await.unwrap(), Ok(()));
     }
     assert_eq!(sample(&rig.cache, BUSY), 0);

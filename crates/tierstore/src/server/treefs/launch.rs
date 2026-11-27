@@ -119,6 +119,25 @@ fn unstore(manager: &Manager) {
     }
 }
 
+/// What a taker of the mount does with the device of an offer before it says `ack`, on either
+/// conversation (`take-fs 1`, and the one hand-over, `interface.rs`): it checks that the runtime
+/// state of `settings` loads and puts the device in `manager`'s store, so that from `ack` on
+/// someone always holds the connection. What it says when it cannot is the reason of the `nak`.
+///
+/// # Errors
+/// The state does not load, or the descriptor cannot be stored.
+pub(super) fn prepare(
+    settings: &FsSettings,
+    manager: &Manager,
+    device: &std::os::fd::OwnedFd,
+) -> Result<(), String> {
+    Prepared::load(settings).map_err(|why| why.to_string())?;
+    manager
+        .store(FUSE_NAME, device.as_fd())
+        .and_then(|()| manager.barrier())
+        .map_err(|why| format!("the descriptor cannot be stored: {why}"))
+}
+
 /// Makes the start's choice, in this order: take the mount from a running instance, else adopt the
 /// descriptor the service manager kept, else mount afresh. The core asks the node's cache and
 /// tree store by `reach`.
@@ -139,13 +158,7 @@ pub(super) async fn start(
     // read again once it has: it changes until then (a client attaches a tree).
     let taken = handover::take(
         &paths,
-        Box::new(|device| {
-            Prepared::load(settings).map_err(|why| why.to_string())?;
-            manager
-                .store(FUSE_NAME, device.as_fd())
-                .and_then(|()| manager.barrier())
-                .map_err(|why| format!("the descriptor cannot be stored: {why}"))
-        }),
+        Box::new(|device| prepare(settings, manager, device)),
     )
     .await?;
     let _ = steps.done("asking a running instance for the mount");
