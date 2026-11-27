@@ -89,3 +89,24 @@ jobs:
       # from its cache), and stops buck2's daemon however the build ended.
       - name: buck2 build //:ci on the farm, local 0
         run: cargo xtask farm-build --buck2 "$RUNNER_TEMP/bin/buck2" --target //:ci
+      # When the build failed, buildrules' `:sync_patch` runs `buildrules sync` on the farm (no
+      # network: the sources Cargo.lock pins, fetched by hash) and says what it changed instead of
+      # changing it: the files it would write go up as the artifact `sync-patch` (`sync.patch`, which
+      # `git apply` takes, and the files themselves), and the job's summary gives the verdict and the
+      # two commands that take the patch. Nothing is pushed and the job stays red. These are the
+      # three steps of buildrules' docs/how.md ("A stale table in a pull request"); docs/farm.md says
+      # how to use them.
+      - name: Regenerate the generated files on the farm (when the build failed)
+        id: sync_patch
+        if: failure()
+        run: '"$RUNNER_TEMP/bin/buck2" build //:sync_patch --out "$RUNNER_TEMP/sync-patch"'
+      - name: Offer the patch (it is never pushed)
+        if: failure() && steps.sync_patch.outcome == 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sync-patch
+          path: ${{ runner.temp }}/sync-patch/offer/
+          if-no-files-found: ignore
+      - name: Say what the patch is and how to apply it
+        if: failure() && steps.sync_patch.outcome != 'skipped'
+        run: '"$RUNNER_TEMP/bin/buck2" run buildrules//rules/rust:sync_patch -- summary --dir "$RUNNER_TEMP/sync-patch" --run "$GITHUB_RUN_ID" --repository "$GITHUB_REPOSITORY" --artifact sync-patch --to "$GITHUB_STEP_SUMMARY"'

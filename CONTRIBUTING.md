@@ -26,9 +26,13 @@ cargo-deny, as CI runs it: `cargo deny --all-features check bans licenses source
 check: they are reported separately and never block a pull request. See [docs/ci-and-release.md](docs/ci-and-release.md).
 
 The same workspace also builds with Buck2 through buildrules on the build farm (`farm.yml`, advisory; [docs/farm.md](docs/farm.md)).
-Cargo stays the build of record and ignores what buildrules adds. After a change to a `Cargo.toml` or `Cargo.lock`, run
-`buildrules sync` and commit what it writes (`buildrules.lock.bzl`, `buildrules.bzl`, `third_party/buildrules/`): the farm
-lane's `//:check` fails while those files no longer match the manifests.
+Cargo stays the build of record and ignores what buildrules adds. After a change to a `Cargo.toml` or `Cargo.lock`, the
+generated files (`buildrules.lock.bzl`, `buildrules.bzl`, `third_party/buildrules/`) must be regenerated: the farm lane's
+`//:check` fails while they no longer match the manifests. You need not run `buildrules sync` yourself: push the change
+with the `Cargo.lock` cargo writes for it, and when the farm lane fails it regenerates the files on the farm and offers
+them as the artifact `sync-patch`. Its summary prints the two commands that take it, run at the root of a checkout of
+the pull request's head; commit what they change and push. Running `buildrules sync` and committing what it writes
+does the same. What the farm cannot sync, and why: [docs/farm.md](docs/farm.md), "A stale table in a pull request".
 
 ## Coverage
 

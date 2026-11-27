@@ -31,8 +31,45 @@ The files of the build, all generated or written once by `buildrules`:
 | `buildrules.lock.bzl`, `buildrules.bzl`, `third_party/buildrules/` | Cargo's unit graph of every member, every crates.io crate as a unit pinned by SHA-256 and size, and every git dependency (hostkeeper's crates, the nfsserve fork, the previous tierstore) as GitHub's archive of its pinned commit, by SHA-256 and size (`git_archives.tsv`) | `buildrules sync`; never edited by hand |
 
 `Cargo.toml`, `Cargo.lock` and `rust-toolchain.toml` stay the source: `//:check` fails every
-target when the generated table no longer matches them, and prints `buildrules sync` as the fix.
-After a change to a manifest or the lock, run `buildrules sync` and commit what it wrote.
+target when the generated table no longer matches them, and prints `buildrules sync` as the fix
+(with `STALE TABLE ONLY: ...` when the table alone is stale). After a change to a manifest or the
+lock, either run `buildrules sync` and commit what it wrote, or take the patch the farm lane
+offers (below).
+
+### A stale table in a pull request
+
+When the build of `farm.yml` fails, three more steps of the same job run buildrules'
+`//:sync_patch`: `buildrules sync` as a farm action, with no network (the sources `Cargo.lock`
+pins, fetched by hash), whose output is what the sync would change rather than the change. They
+upload `offer/` as the run's artifact `sync-patch` (`sync.patch`, one patch `git apply` takes, and
+`files/`, the regenerated files themselves) and write the verdict to the job's summary: `none`
+(the generated files are current, and the failure is elsewhere), `tables` (only the generated
+files are stale) or `lock` (cargo changed `Cargo.lock` too, and the patch holds that
+`Cargo.lock`: read that part before you commit it). Nothing is pushed, and the job stays red.
+
+For a stale table, the summary gives two commands. Run them at the root of a checkout of the pull
+request's head, then commit what changed and push:
+
+```sh
+gh run download <run> -R komira-ai/tierstore -n sync-patch -D ../sync-patch-<run>
+git apply ../sync-patch-<run>/sync.patch
+```
+
+So a pull request that adds or bumps a dependency needs no `buildrules sync` on a workstation: push
+the `Cargo.toml` change with the `Cargo.lock` that cargo writes for it (any `cargo` command of the
+workspace does), wait for the farm lane, and take its patch. The patch is made for the commit the
+run built; after a merge of `main` or another push that touches a manifest, take the patch of the
+newer run.
+
+What the farm sync cannot do, the first step says in its log, and the summary says there is no
+patch; these need `buildrules sync` where there is a network:
+
+- a crate or a git commit that `Cargo.lock` does not name yet (a `Cargo.toml` changed without the
+  `Cargo.lock` cargo writes for it);
+- a member the table does not list yet: its package cannot load until the table lists it;
+- a change of `rust-toolchain.toml`: the sync runs the Rust of the table.
+
+A fork's pull request and Dependabot's get no farm-lane run (below), so no patch either.
 
 A file a crate reads beyond its unit's own sources is declared in its BUCK file (`extra_srcs`): a
 library sees `src/` and `build.rs`, a test target `tests/`, a build script its whole package. So
