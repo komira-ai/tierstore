@@ -43,9 +43,8 @@
 //!   quiesces it at `ack`, resumes it when the taker is gone before `ready`, and gives it up at
 //!   `ready`, before its `bye`. It refuses a taker that does not ask for the mount, so that the
 //!   mount is never left with an instance about to end: at the request of a taker that asks
-//!   `take 1` alone, and at the `ready` of one that asked for that step, unless the mount was
-//!   taken meanwhile on the instance's `take-fs 1` (as a taker of the previous release takes it,
-//!   `mount.rs`: `Claim`). An instance that holds none refuses the line ("this instance holds no
+//!   `take 1` alone, and at the `ready` of one that asked for that step (`mount.rs`: `Claim` says
+//!   which taker has it). An instance that holds none refuses the line ("this instance holds no
 //!   mount"), and the taker asks again without it.
 //! - **The cache lock** (`written.rs`, `local_cache/handing.rs`). An instance given its cache
 //!   (`Offer::with_lock`) offers a taker that asked for the `ready` step a descriptor of its
@@ -87,22 +86,24 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
-pub(crate) use offer::{Hold, Offer, Socket, check_control_path};
+#[cfg(test)]
+pub(crate) use offer::Hold;
+pub(crate) use offer::{Offer, Socket, check_control_path};
 
 /// The most listening sockets one instance can hand over: what one message carries.
 pub(crate) const MAX_SOCKETS: usize = wire::MAX_FDS;
 pub(crate) use exec::read as read_handed;
 pub(crate) use exec::{Handed, Handing, Image, Own, handed_input};
 #[cfg(test)]
+pub(crate) use mount::Holding;
+#[cfg(test)]
 pub(crate) use mount::Prepare;
-pub(crate) use mount::{Claim, Holding, Mount, MountWant, TakenMount, check_control};
+pub(crate) use mount::{Claim, Mount, MountWant, TakenMount};
 #[cfg(test)]
 pub(crate) use take::offered;
 #[cfg(test)]
 pub(crate) use take::take_service;
-pub(crate) use take::{Ask, Inherited, Offered, Ready, Want, offered_with, take, take_with_ready};
-#[cfg(test)]
-pub(crate) use written::Wrote;
+pub(crate) use take::{Ask, Inherited, Offered, Ready, Want, offered_with, take};
 pub(crate) use written::{Predecessor, follow};
 
 /// What an instance is told to do about a hand-off: where the control socket is, and how long a

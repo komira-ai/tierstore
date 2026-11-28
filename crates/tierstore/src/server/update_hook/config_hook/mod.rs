@@ -15,7 +15,7 @@
 //!   restart otherwise. It refuses with `mode_unsupported`, unless the params say
 //!   `mode = "restart"`, a staged file whose `fs` interface moves the mount point, the control
 //!   socket or the runtime directory of the one that serves, and a change that must restart a
-//!   node that holds a mount. It notes the switch of the node to one process (below).
+//!   node that holds a mount. On Linux it refuses the switch of a node to one process (below).
 //! - `cutover` reloads the network guard (Linux, when the node has `guard.nft`) and starts the
 //!   other instance on the new file, by the hand-over (or the restart) of an update; on a Mac it
 //!   restarts the one job.
@@ -23,8 +23,8 @@
 //!   and the build of the instance that serves; for the switch of a Mac it also requires the
 //!   mount listed at the mount point of the installed file.
 //! - `rollback`, after hostkeeper has put the previous package's files back, reloads the guard
-//!   and hands back to the instance that served; for the switch the mount goes back first. A node's first config package has no files to
-//!   go back to: its rollback reloads nothing, leaves the instance that runs serving and fails
+//!   and hands back to the instance that served; for the switch of a Mac the mount goes back
+//!   first. A node's first config package has no files to go back to: its rollback reloads nothing, leaves the instance that runs serving and fails
 //!   `no_previous_release`.
 //! - `cleanup` retires the old instance, as for an update.
 //! - `uninstall` changes nothing: the service keeps what it read.
@@ -36,14 +36,14 @@
 //! back from the gauge of the mount, `rollback` sets the value of the file that served again, and
 //! `cleanup` commits with the same instance serving (`reload.rs`).
 //!
-//! A node's fs process of the old layout is left alone by every config update but one: the
-//! **switch** of a node to one process, a package whose staged file has an `fs` interface where
-//! the file that serves has none and the old fs process runs (on a Mac: the `tierstore-fs` job is
-//! loaded). On Linux the new instance of the store takes the mount from the fs process as it
-//! takes the sockets, and the hook removes both fs markers once it serves, starting and stopping
-//! no fs unit; its rollback starts the fs instance again before the store's. On a Mac the switch
-//! is a restart, with the fs job booted out and disabled first (`switch.rs`). Where no old fs
-//! process runs, the package is a plain config update.
+//! A node's fs process of the old layout is left alone by every config update. The **switch** of
+//! a node to one process, a package whose staged file has an `fs` interface where the file that
+//! serves has none and the old fs process runs (on a Mac: the `tierstore-fs` job is loaded), is
+//! a Mac's alone: it is a restart, with the fs job booted out and disabled first (`switch.rs`).
+//! On Linux this release has no step for the fs unit, so `prepare` refuses it with
+//! `mode_unsupported` (`old_layout.rs`), and the node is switched to the `fs` interface by the
+//! release that does that first. Where no old fs process runs, the package is a plain config
+//! update.
 //!
 //! Its record is its own, beside the update hook's and under the same lock
 //! (`config-state.json`), so that the release's record (`to`, `version`, the promotion) is never touched; `cleanup`

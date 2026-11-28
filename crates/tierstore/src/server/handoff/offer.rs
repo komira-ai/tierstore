@@ -41,8 +41,7 @@ pub(super) const NO_MOUNT: &str = "this instance holds no mount";
 /// Why an instance that holds the mount refuses a taker that does not ask for it: the mount must
 /// not be left with an instance about to end.
 pub(super) const HOLDS_MOUNT: &str = "this instance holds the mount, and a taker must ask for it";
-/// Why a request for the mount is refused while a taker of the other conversation that offers it
-/// (`take-fs 1`) is at it.
+/// Why a request for the mount is refused while another taker is at it.
 pub(super) const MOUNT_BUSY: &str = "another taker is taking the mount";
 
 /// A listening socket the instance offers: a copy of the descriptor the front serves from, so
@@ -74,7 +73,8 @@ impl Socket {
 /// What an instance does about its own writes while a taker takes its sockets: called with `true`
 /// once a taker has answered `ack`, before `done` is sent (the taker starts on the state the
 /// instance keeps only after `done`), and with `false` if the hand-off then does not complete and
-/// the instance goes on. It may block.
+/// the instance goes on. It may block. Only tests set one (`with_hold`): the node sets none, so in
+/// production the hold is never told anything.
 pub(crate) type Hold = Arc<dyn Fn(bool) + Send + Sync>;
 
 /// The control socket of a running instance, and the sockets it offers.
@@ -92,7 +92,8 @@ pub(crate) struct Offer {
     linked: AtomicBool,
     /// How long the loop waits after an accept that failed.
     accept_pause: Duration,
-    /// Told when a taker has answered `ack`, and when that taker did not complete.
+    /// Told when a taker has answered `ack`, and when that taker did not complete; set by tests
+    /// alone.
     hold: Option<Hold>,
     /// How long after `done` a taker that asked for the `ready` step has to say it; none: this
     /// instance does not take part in the step and refuses a request that names it.
@@ -160,6 +161,7 @@ impl Offer {
     }
 
     /// The same, telling `hold` when a taker has answered `ack` and when it did not complete.
+    #[cfg(test)]
     pub(crate) fn with_hold(mut self, hold: Hold) -> Self {
         self.hold = Some(hold);
         self
@@ -170,10 +172,8 @@ impl Offer {
     /// `mount.wait` for the quiesce and for its `ready`. At `ack` the mount is quiesced, at `ready`
     /// given up; a taker gone between the two leaves it resumed. While this instance holds the
     /// mount, a taker that does not ask for it is refused: at its request when it asks `take 1`
-    /// alone, and at its `ready` when it asked for that step and the mount was not taken meanwhile
-    /// on the instance's other conversation (`take-fs 1`, which a taker of the previous release
-    /// asks between its request here and its `ready`, `mount.claim`). Once the mount is given up
-    /// on either, a request for it is refused as by an instance that holds none.
+    /// alone, and at its `ready` when it asked for that step. Once the mount is given up, a request
+    /// for it is refused as by an instance that holds none.
     pub(crate) fn with_mount(mut self, mount: Mount) -> Self {
         self.mount = Some(mount);
         self
@@ -394,9 +394,7 @@ impl Offer {
         match (asked.mount, self.mount.as_ref()) {
             (true, None) => return refuse(stream, NO_MOUNT).await,
             // A taker with no `ready` step is handed the sockets at `done`: the mount would be left.
-            (false, Some(held))
-                if asked.ready.is_none() && held.claim.holding() != Holding::Gone =>
-            {
+            (false, Some(_)) if asked.ready.is_none() => {
                 return refuse(stream, HOLDS_MOUNT).await;
             }
             _ => {}
@@ -408,7 +406,7 @@ impl Offer {
             match held.claim.claim() {
                 Holding::Here => state.claimed = true,
                 Holding::Taking => return refuse(stream, MOUNT_BUSY).await,
-                // Taken on `take-fs 1`: this instance holds no mount any more.
+                // Given up meanwhile, by a session that handed it over: this instance holds none.
                 Holding::Gone => return refuse(stream, NO_MOUNT).await,
             }
         }
@@ -456,9 +454,9 @@ impl Offer {
                 .filter(|_| offered.mount)
                 .map_or(wait, |held| wait.max(held.wait));
             awaits_ready(stream, wait).await?;
-            if !offered.mount && mount.is_some_and(|held| held.claim.holding() != Holding::Gone) {
-                // The mount was not taken on `take-fs 1` meanwhile: this instance must not end
-                // with it. The taker is told so in place of `bye`, and this instance goes on.
+            if !offered.mount && mount.is_some() {
+                // This instance must not end with its mount. The taker is told so in place of
+                // `bye`, and this instance goes on.
                 refuse::<()>(stream, HOLDS_MOUNT).await?;
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,

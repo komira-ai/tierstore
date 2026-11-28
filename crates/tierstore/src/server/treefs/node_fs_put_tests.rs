@@ -149,7 +149,7 @@ impl Served {
         got.ok().map(|bytes| bytes.to_vec())
     }
 
-    /// The hand-over of a running instance to a successor, as `handoff-fs-v1` does it: the copies
+    /// The hand-over of a running instance to a successor, as the one hand-over does it: the copies
     /// of the descriptors offered, the running one quiesced, the successor adopting the connection
     /// and the control socket, the running one giving up and ending.
     fn hand_over(&mut self) {

@@ -4,7 +4,7 @@ use std::os::fd::AsFd as _;
 
 use tierstore_testkit::dir::TestDir;
 
-use super::{check_control, check_listening};
+use super::{Claim, Holding, check_control, check_listening};
 
 /// Asserts that a listening TCP socket and a listening Unix socket pass, and that a connected TCP
 /// socket, a Unix stream socket whose peer is gone, a datagram socket and a regular file are
@@ -65,4 +65,23 @@ fn only_a_listening_unix_socket_is_a_control_socket() {
             "the descriptor of the control socket is not a listening Unix socket"
         );
     }
+}
+
+/// Asserts that the release of a claim puts a taken mount back to [`Holding::Here`], and leaves a
+/// mount that is not taken as it is: one that no taker claimed stays here, and one that was given up
+/// while the conversation ended stays gone, so that it is never offered again.
+#[test]
+fn release_returns_only_a_taken_mount() {
+    let claim = Claim::default();
+    claim.release();
+    assert_eq!(claim.holding(), Holding::Here);
+    assert_eq!(claim.claim(), Holding::Here);
+    assert_eq!(claim.holding(), Holding::Taking);
+    claim.release();
+    assert_eq!(claim.holding(), Holding::Here);
+    assert_eq!(claim.claim(), Holding::Here);
+    claim.give_up();
+    claim.release();
+    assert_eq!(claim.holding(), Holding::Gone);
+    assert_eq!(claim.claim(), Holding::Gone);
 }

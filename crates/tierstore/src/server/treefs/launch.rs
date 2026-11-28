@@ -1,22 +1,20 @@
-//! What the mount of the `fs` interface does between its start and its end: whether to take the
-//! mount over or to make it, what to tell the service manager, and what ends it
+//! What the mount of the `fs` interface does between its start and its end: whether to adopt the
+//! mount or to make it, what to tell the service manager, and what ends it
 //! (`docs/design/virtual-build-fs.md` sections 7.2 and 7.3): the choice of the start ([`start`]),
 //! and what ends a process ([`ended`]), which the `fs` interface of the one process runs
 //! (`interface.rs`). Its core calls the node's cache in the process.
 //!
-//! At a start, in order:
+//! The mount of a running instance is not taken here: it is taken, with the sockets and the lock,
+//! in the one hand-over (`server/handoff/`, `cache_cli_mount.rs`), which does not come through
+//! [`start`]. At a start, in order:
 //!
-//! 1. A running instance answering on `fs.handoff_socket` is asked for the mount
-//!    (`handoff-fs-v1`, `handover.rs`). The descriptor goes into the service manager's store and
-//!    the state is read before the running instance is told to stop; the mount is served from the
-//!    recorded `INIT` outcome.
-//! 2. Otherwise a descriptor the service manager passed under the name `fuse` is the connection of
+//! 1. A descriptor the service manager passed under the name `fuse` is the connection of
 //!    a process that died or was stopped: it is served from the recorded outcome, and where the
 //!    kernel can send requests again (`FUSE_HAS_RESEND`) it is asked to send those the process
 //!    before read and did not answer; where it cannot, `fs.recover_wait` bounds the wait for them
 //!    (`recover.rs`). A descriptor whose state cannot be read is taken out of the store and the
 //!    mount is made afresh, which aborts its connection, so that no job hangs on it.
-//! 3. Otherwise the mount is made, and the descriptor is put in the manager's store. A mount of
+//! 2. Otherwise the mount is made, and the descriptor is put in the manager's store. A mount of
 //!    this file system that the kernel's table of mounts shows at the mount point has no process
 //!    serving it by then: it is aborted and detached first, and the mount point is not looked at
 //!    (`run.rs`).
@@ -40,9 +38,6 @@ use tsfuse::abi::InitFlags;
 
 use super::config::FsSettings;
 use super::fills::Calls;
-#[cfg(test)]
-use super::handover::Offer;
-use super::handover::{self, Paths};
 use super::recover;
 use super::run::{Kernel, Prepared, Running};
 use super::sd::{self, FUSE_NAME, Manager, Stored};
@@ -69,8 +64,6 @@ pub(super) struct Platform {
 /// What the start made.
 pub(super) struct Started {
     pub running: Arc<Running>,
-    /// The connection to the instance this one took the mount from.
-    pub notice: Option<handover::Notice>,
     /// Receives when the watch of a restart has aborted the connection.
     pub hung: Option<tokio::sync::oneshot::Receiver<()>>,
 }
@@ -119,9 +112,8 @@ fn unstore(manager: &Manager) {
     }
 }
 
-/// What a taker of the mount does with the device of an offer before it says `ack`, on either
-/// conversation (`take-fs 1`, and the one hand-over, `interface.rs`): it checks that the runtime
-/// state of `settings` loads and puts the device in `manager`'s store, so that from `ack` on
+/// What a taker of the mount does with the device of an offer before it says `ack` in the one
+/// hand-over (`interface.rs`): it checks that the runtime state of `settings` loads and puts the device in `manager`'s store, so that from `ack` on
 /// someone always holds the connection. What it says when it cannot is the reason of the `nak`.
 ///
 /// # Errors
@@ -138,46 +130,14 @@ pub(super) fn prepare(
         .map_err(|why| format!("the descriptor cannot be stored: {why}"))
 }
 
-/// Makes the start's choice, in this order: take the mount from a running instance, else adopt the
-/// descriptor the service manager kept, else mount afresh. The core asks the node's cache and
-/// tree store by `reach`.
+/// Makes the start's choice, in this order: adopt the descriptor the service manager kept, else
+/// mount afresh. The core asks the node's cache and tree store by `reach`.
 pub(super) async fn start(
     (settings, reach): (&FsSettings, &Calls),
     platform: &Platform,
     steps: &mut Steps,
 ) -> Result<Started, StartError> {
     let manager = &platform.manager;
-    let paths = Paths {
-        socket: &settings.handoff_socket,
-        mountpoint: &settings.mountpoint,
-        control: &settings.control_socket,
-        wait: settings.handoff_wait,
-        device: platform.kernel.device,
-    };
-    // The state is read to see that it can be, before the running instance is told to stop, and
-    // read again once it has: it changes until then (a client attaches a tree).
-    let taken = handover::take(
-        &paths,
-        Box::new(|device| prepare(settings, manager, device)),
-    )
-    .await?;
-    let _ = steps.done("asking a running instance for the mount");
-    if let Some(taken) = taken {
-        let handover::Taken {
-            device,
-            control,
-            notice,
-        } = taken;
-        let prepared = Prepared::load(settings)?;
-        // Nothing reads the device until the running instance's `bye` (`run`).
-        let running = Running::take_over((settings, reach), prepared, device, control)?;
-        let _ = steps.done("taking the mount over");
-        return Ok(Started {
-            running: Arc::new(running),
-            notice: Some(notice),
-            hung: None,
-        });
-    }
     if let Some(stored) = platform
         .stored
         .iter()
@@ -186,11 +146,7 @@ pub(super) async fn start(
         match adopt_stored((settings, reach), (stored, &platform.kernel)) {
             Ok((running, hung)) => {
                 let _ = steps.done("serving the descriptor the service manager kept");
-                return Ok(Started {
-                    running,
-                    notice: None,
-                    hung,
-                });
+                return Ok(Started { running, hung });
             }
             Err(why) => {
                 // The fresh start below aborts and detaches the mount of the descriptor.
@@ -210,7 +166,6 @@ pub(super) async fn start(
     let _ = steps.done("making the mount");
     Ok(Started {
         running: Arc::new(running),
-        notice: None,
         hung: None,
     })
 }
@@ -236,8 +191,8 @@ pub(super) async fn hang(hung: Option<tokio::sync::oneshot::Receiver<()>>) {
 }
 
 /// Starts, tells the service manager, and serves until the process ends: the loop of the process
-/// that served the mount alone, which the tests run to drive the start, the hand-over and the end
-/// that the `fs` interface of the one process (`interface.rs`) is made of.
+/// that served the mount alone, which the tests run to drive the start and the end that the `fs`
+/// interface of the one process (`interface.rs`) is made of.
 ///
 /// # Errors
 /// [`StartError`]: why the mount is not served, or why it could not be left.
@@ -249,51 +204,14 @@ async fn run(
     // The handlers are in place before the mount is: a signal after it is never lost.
     let mut signals = Signals::install()?;
     let mut steps = Steps::new(Arc::clone(&platform.clock));
-    let Started {
-        running,
-        notice,
-        hung,
-    } = start((settings, reach), &platform, &mut steps).await?;
+    let Started { running, hung } = start((settings, reach), &platform, &mut steps).await?;
     let manager = &platform.manager;
-    let bind = || {
-        Offer::bind(
-            &settings.handoff_socket,
-            &settings.mountpoint,
-            &settings.control_socket,
-            settings.handoff_wait,
-        )
-        .map(|offer| offer.with_manager(manager.clone()))
-    };
-    // The socket is there before the manager hears the unit is ready, so that the instance that
-    // is started next (the other letter) finds it. A successor binds after it has told the
-    // instance it took the mount from that it serves: that one still holds the path until then.
-    let early = if notice.is_none() {
-        Some(bind()?)
-    } else {
-        None
-    };
     tracing::info!("tierstore fs: ready after {} ms", steps.total());
     if let Err(why) = manager.ready() {
         tracing::warn!("tierstore fs: cannot tell the service manager it is ready: {why}");
     }
-    if let Some(notice) = notice {
-        notice.ready().await?;
-        // The running instance said `bye`, or ended (a release before the step): it reads the
-        // device no more.
-        running
-            .start_reading()
-            .map_err(io("reading the connection taken over"))?;
-    }
-    let offer = match early {
-        Some(offer) => offer,
-        None => bind()?,
-    };
     let end = tokio::select! {
         () = signals.wait() => End::Signal,
-        handed = offer.serve(Arc::clone(&running)) => {
-            handed?;
-            End::Handed
-        }
         () = hang(hung) => End::Hung,
     };
     ended(end, running, manager)

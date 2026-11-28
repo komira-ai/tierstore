@@ -1,50 +1,46 @@
-//! The `[fs.put]` table: not served unless enabled, its defaults, every key taken, and each refusal
-//! by the key it names.
+//! The `put` params of an `fs` interface: not served unless enabled, its defaults, every key taken,
+//! and each refusal by the key it names.
 
 #[cfg(target_os = "linux")]
 use std::path::PathBuf;
 #[cfg(target_os = "linux")]
 use std::time::Duration;
 
-use tracing::Level;
-use tracing::subscriber::with_default;
-
 #[cfg(target_os = "linux")]
 use super::super::store::PutSettings;
-use super::super::testing::Warnings;
 use super::PutConfig;
-use crate::server::build_info::stderr_log::LineLog;
-use crate::server::treefs::config::{builders, from_text};
+use crate::server::treefs::config::{TEST_PLACE, builders, from_params};
 
-/// A file with the needed keys of `[fs]` and the table `[fs.put]` of `put`.
+/// The params with the needed keys of an `fs` interface and the table `put` of `put`.
 fn file(put: &str) -> String {
-    format!(
-        "[fs]\nclient_group = \"7\"\nowner = \"1000:1001\"\n\
-         cache_path = \"/var/cache/tierstore\"\n\
-         [fs.put]\n{put}"
-    )
+    format!("client_group = \"7\"\nowner = \"1000:1001\"\n[put]\n{put}")
+}
+
+/// The name of the key `name` of `put`, as a refusal says it.
+fn at(name: &str) -> String {
+    format!("{TEST_PLACE}.put.{name}")
 }
 
 /// The put directory of the file with the table `put`.
 fn put_of(put: &str) -> Option<PutConfig> {
-    from_text(&file(put), &builders).unwrap().put
+    from_params(&file(put), &builders).unwrap().put
 }
 
 /// The words of the refusal of the file with the table `put`.
 fn refused(put: &str) -> String {
-    from_text(&file(put), &builders).unwrap_err().to_string()
+    from_params(&file(put), &builders).unwrap_err().to_string()
 }
 
 /// What an enabled table needs.
 const ENABLED: &str =
     "enabled = true\nprefixes = [\"cas/b/\"]\nstage_dir = \"/var/cache/tierstore/stage\"\n";
 
-/// Asserts that a file with no `[fs.put]`, an empty one, or one that is not enabled has no put
+/// Asserts that params with no `put`, an empty one, or one that is not enabled have no put
 /// directory, whatever else the table holds.
 #[test]
 fn the_put_directory_is_not_served_unless_enabled() {
-    let none = "[fs]\nclient_group = \"7\"\nowner = \"1:2\"\ncache_path = \"/c\"\n";
-    assert_eq!(from_text(none, &builders).unwrap().put, None);
+    let none = "client_group = \"7\"\nowner = \"1:2\"\n";
+    assert_eq!(from_params(none, &builders).unwrap().put, None);
     assert_eq!(put_of(""), None);
     assert_eq!(put_of("enabled = false\nprefixes = [\"cas/b/\"]\n"), None);
 }
@@ -120,40 +116,41 @@ fn every_key_is_taken_when_it_is_set() {
 fn each_refusal_of_an_enabled_table_names_its_key() {
     let stage = "stage_dir = \"/s\"\n";
     for (put, said) in [
-        (
-            format!("enabled = true\n{stage}"),
-            "fs.put.prefixes: it is needed",
-        ),
+        (format!("enabled = true\n{stage}"), "prefixes: it is needed"),
         (
             "enabled = true\nprefixes = [\"cas/b/\"]\n".to_owned(),
-            "fs.put.stage_dir: it is needed",
+            "stage_dir: it is needed",
         ),
         (
             format!("enabled = true\nprefixes = []\n{stage}"),
-            "fs.put.prefixes: is empty: no key could be written",
+            "prefixes: is empty: no key could be written",
         ),
         (
             format!("enabled = true\nprefixes = [\"cas/b\"]\n{stage}"),
-            "fs.put.prefixes: \"cas/b\" is not a key prefix of names joined by `/` and ending in `/`",
+            "prefixes: \"cas/b\" is not a key prefix of names joined by `/` and ending in `/`",
         ),
         (
             format!("enabled = true\nprefixes = [\"cas//\"]\n{stage}"),
-            "fs.put.prefixes: \"cas//\" is not a key prefix of names joined by `/` and ending in `/`",
+            "prefixes: \"cas//\" is not a key prefix of names joined by `/` and ending in `/`",
         ),
         (
             format!("enabled = true\nprefixes = [\"cas b/\"]\n{stage}"),
-            "fs.put.prefixes: \"cas b/\" is not a key prefix of names joined by `/` and ending in `/`",
+            "prefixes: \"cas b/\" is not a key prefix of names joined by `/` and ending in `/`",
         ),
         (
             format!("enabled = true\nprefixes = [\"cas/b/\", \"_tiering/x/\"]\n{stage}"),
-            "fs.put.prefixes: \"_tiering/x/\" is under a prefix the proxy keeps for itself",
+            "prefixes: \"_tiering/x/\" is under a prefix the proxy keeps for itself",
         ),
         (
             "enabled = true\nprefixes = [\"cas/b/\"]\nstage_dir = \"stage\"\n".to_owned(),
-            "fs.put.stage_dir: must be an absolute path",
+            "stage_dir: must be an absolute path",
         ),
     ] {
-        assert!(refused(&put).contains(said), "{put}: {}", refused(&put));
+        assert!(
+            refused(&put).contains(&at(said)),
+            "{put}: {}",
+            refused(&put)
+        );
     }
 }
 
@@ -164,45 +161,21 @@ fn each_number_out_of_its_range_is_refused_by_its_key() {
     for (put, said) in [
         (
             "max_object_bytes = 0\n",
-            "fs.put.max_object_bytes: must be at least 1",
+            "max_object_bytes: must be at least 1",
         ),
-        (
-            "max_dir_bytes = 0\n",
-            "fs.put.max_dir_bytes: must be at least 1",
-        ),
-        (
-            "max_dir_files = 0\n",
-            "fs.put.max_dir_files: must be at least 1",
-        ),
-        ("commit_deadline_secs = 0\n", "fs.put.commit_deadline_secs"),
-        (
-            "commit_deadline_secs = 3601\n",
-            "fs.put.commit_deadline_secs",
-        ),
-        ("stage_ttl_secs = 900\n", "fs.put.stage_ttl_secs"),
-        ("stage_ttl_secs = 604801\n", "fs.put.stage_ttl_secs"),
-        ("committed_ttl_secs = 0\n", "fs.put.committed_ttl_secs"),
-        ("committed_ttl_secs = 604801\n", "fs.put.committed_ttl_secs"),
+        ("max_dir_bytes = 0\n", "max_dir_bytes: must be at least 1"),
+        ("max_dir_files = 0\n", "max_dir_files: must be at least 1"),
+        ("commit_deadline_secs = 0\n", "commit_deadline_secs"),
+        ("commit_deadline_secs = 3601\n", "commit_deadline_secs"),
+        ("stage_ttl_secs = 900\n", "stage_ttl_secs"),
+        ("stage_ttl_secs = 604801\n", "stage_ttl_secs"),
+        ("committed_ttl_secs = 0\n", "committed_ttl_secs"),
+        ("committed_ttl_secs = 604801\n", "committed_ttl_secs"),
     ] {
-        assert!(refused(put).contains(said), "{put}: {}", refused(put));
+        assert!(refused(put).contains(&at(said)), "{put}: {}", refused(put));
         let enabled = format!("{ENABLED}{put}");
-        assert!(refused(&enabled).contains(said), "{enabled}");
+        assert!(refused(&enabled).contains(&at(said)), "{enabled}");
     }
-}
-
-/// Asserts that a key of `[fs.put]` this release does not know is ignored with one warning that
-/// names it, and the file loads (a release does not refuse the file of the next).
-#[test]
-fn an_unknown_put_key_is_ignored_and_the_file_loads() {
-    let warnings = Warnings::default();
-    let put = with_default(LineLog::new(warnings.clone(), Level::WARN), || {
-        from_text(&file("futuristic = 3\n"), &builders).unwrap().put
-    });
-    assert_eq!(put, None);
-    assert_eq!(
-        warnings.text(),
-        "tierstore fs: fs.put.futuristic is not a key of this release; ignored\n"
-    );
 }
 
 /// Asserts that off Linux an enabled table is refused: only the FUSE frontend serves `put/` in
@@ -210,5 +183,5 @@ fn an_unknown_put_key_is_ignored_and_the_file_loads() {
 #[cfg(not(target_os = "linux"))]
 #[test]
 fn an_enabled_table_is_refused_off_linux() {
-    assert!(refused(ENABLED).contains("fs.put.enabled"));
+    assert!(refused(ENABLED).contains(&at("enabled")));
 }

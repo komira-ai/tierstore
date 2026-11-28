@@ -215,9 +215,10 @@ impl Work {
 
 impl Drop for Work {
     fn drop(&mut self) {
-        if let Some(runtime) = self.0.take() {
-            runtime.shutdown_background();
-        }
+        self.0
+            .take()
+            .into_iter()
+            .for_each(tokio::runtime::Runtime::shutdown_background);
     }
 }
 
@@ -270,7 +271,6 @@ impl Rig {
             cache_path: self.cache.clone(),
             fetch_timeout: Duration::from_secs(5),
             threads: 4,
-            handoff_socket: self.dir.path().join("handoff.sock"),
             handoff_wait: Duration::from_secs(30),
             recover_wait: Duration::from_secs(30),
             reattach_concurrency: 4,

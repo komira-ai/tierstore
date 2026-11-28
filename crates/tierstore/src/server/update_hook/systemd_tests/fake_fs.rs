@@ -1,103 +1,22 @@
-//! The second unit of the fake machine, `tierstore-fs@a` and `tierstore-fs@b`: its instances, its
-//! start markers and the hand-over of the mount between them, in the world of the parent module.
-//!
-//! `start(x)` models systemd and `tierstore fs`: without the marker the unit file's
-//! `ConditionPathExists=` names the unit stays inactive; otherwise it runs the release whose binary
-//! the hook put at [`SERVICE_BINARY`]. When the other instance holds the mount the new one takes
-//! it and is active (a notify unit is active once it said `READY=1`, which it says after the
-//! take), and the old one is deactivating for a chosen number of `state` looks and then inactive,
-//! by itself; with no holder it makes the mount afresh and is active. [`FsTake`] makes the take
-//! fail. Every call is counted and logged with the prefix `fs_units.`, `fs_markers.` or
-//! `fs_proc.`, so the exact lists of `actions()` of the first unit are not changed by it;
-//! `fs_actions()` lists the changes.
-//!
-//! The process of a running instance has the pid [`fs_pid`]. The file at [`SERVICE_BINARY`] is
-//! the binary of the release installed there, a file of its own per release ([`file_of`]); a
-//! process runs the file of its release, and its `/proc/<pid>/exe` reads [`SERVICE_BINARY`] while
-//! that release is the one installed, and `<SERVICE_BINARY> (deleted)` once another one replaced
-//! it. Its `--version` is the version of its release.
+//! The second unit of the earlier layout in the fake machine, `tierstore-fs@a` and
+//! `tierstore-fs@b`: the state of its units and the presence of its start markers, which the hook
+//! only looks at. A call that would change either (start, stop, set a marker, clear one) is
+//! logged with the prefix `fs_units.` or `fs_markers.` and changes nothing; `fs_actions()` lists
+//! those calls, which a step of this release never makes. A look at a unit is counted and logged
+//! as `fs_units.state`.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use crate::server::update_hook::{
-    Exe, Family, FileId, HANDOFF_FS_CAPABILITY, Instance, MARKER_DIR, Markers, PortError, PortKind,
-    Processes, Record, SERVICE_BINARY, UnitState, Units,
-};
+use crate::server::update_hook::{Instance, Markers, PortError, PortKind, UnitState, Units};
 
-use super::{NEW, NEWER, OLD, SystemdFake, Unit, World, count_in, version_of};
-
-/// The unit file the package ships for `tierstore fs`.
-const TEMPLATE: &str =
-    include_str!("../../../../../../packaging/hostkeeper/units/tierstore-fs@.service");
-
-/// The start marker of the fs instance `instance`: the path `tierstore-fs@.service`'s
-/// `ConditionPathExists=` names with `%i`.
-pub fn fs_marker_path(instance: Instance) -> PathBuf {
-    PathBuf::from(MARKER_DIR).join(Family::Fs.marker_file(instance))
-}
-
-/// The path the fs unit file's `ConditionPathExists=` names, with `%i` as the file spells it.
-pub fn fs_unit_condition() -> &'static str {
-    TEMPLATE
-        .lines()
-        .find_map(|line| line.strip_prefix("ConditionPathExists="))
-        .expect("the fs unit file has a ConditionPathExists")
-}
-
-/// The program of the fs unit file's `ExecStart=`.
-pub fn fs_unit_program() -> &'static str {
-    TEMPLATE
-        .lines()
-        .find_map(|line| line.strip_prefix("ExecStart="))
-        .and_then(|command| command.split_whitespace().next())
-        .expect("the fs unit file has an ExecStart")
-}
-
-/// The pid of the process of the fs instance `instance`, while it runs.
-pub fn fs_pid(instance: Instance) -> u32 {
-    match instance {
-        Instance::A => 4101,
-        Instance::B => 4102,
-    }
-}
-
-/// The file of the binary of `release`, as a copy of it at [`SERVICE_BINARY`] is: one per release.
-pub fn file_of(release: &Path) -> FileId {
-    let ino = [OLD, NEW, NEWER]
-        .iter()
-        .position(|known| Path::new(known) == release)
-        .map_or(99, |at| at as u64 + 10);
-    FileId { dev: 2049, ino }
-}
-
-/// What a new fs instance does when it asks the running one for the mount.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FsTake {
-    /// It takes the mount and says `READY=1`.
-    Works,
-    /// It cannot take it: the start fails, the old instance resumes, and the unit waits to be
-    /// started again (`Restart=on-failure`): `activating`.
-    Refused,
-    /// The start returns, but the unit is `failed`: the old instance resumed.
-    Dud,
-}
+use super::{SystemdFake, World, count_in};
 
 /// The state of the second unit.
 pub struct FsWorld {
-    units: BTreeMap<Instance, Unit>,
-    markers: BTreeSet<PathBuf>,
-    /// The `state` looks that still see the old instance running after it gave the mount away.
-    drain_looks: u32,
-    take: FsTake,
-    /// Whether an fs instance was ever started while the store said `ready read-only`.
-    started_over_read_only: bool,
-    /// systemd names no main process of a running fs instance.
-    no_pid: bool,
-    /// The path every `/proc/<pid>/exe` reads, instead of the one its release gives.
-    exe_shown: Option<PathBuf>,
+    units: BTreeMap<Instance, UnitState>,
+    markers: BTreeSet<Instance>,
 }
 
 impl FsWorld {
@@ -105,120 +24,24 @@ impl FsWorld {
         FsWorld {
             units: Instance::ALL
                 .into_iter()
-                .map(|i| (i, Unit::off()))
+                .map(|i| (i, UnitState::Inactive))
                 .collect(),
             markers: BTreeSet::new(),
-            drain_looks: 0,
-            take: FsTake::Works,
-            started_over_read_only: false,
-            no_pid: false,
-            exe_shown: None,
         }
     }
 }
 
 impl World {
-    fn fs_condition_path(instance: Instance) -> PathBuf {
-        PathBuf::from(fs_unit_condition().replace("%i", instance.letter()))
-    }
-
-    /// systemd starting the fs instance `instance`.
-    pub(super) fn start_fs(&mut self, instance: Instance) -> Result<(), PortError> {
-        if !self
-            .fs
-            .markers
-            .contains(&World::fs_condition_path(instance))
-        {
-            self.log.push(format!("skipped fs {instance}: no marker"));
-            return Ok(());
-        }
-        if self.fs.units[&instance].state == UnitState::Active {
-            return Ok(());
-        }
-        self.fs.started_over_read_only |= self.store_read_only();
-        let release = self.installed.clone();
-        let holder = Instance::ALL
-            .into_iter()
-            .find(|other| *other != instance && self.fs.units[other].state == UnitState::Active);
-        let started = Unit {
-            state: UnitState::Active,
-            release,
-            serving: true,
-            left: 0,
-        };
-        let Some(old) = holder else {
-            self.fs.units.insert(instance, started);
-            return Ok(());
-        };
-        match self.fs.take {
-            FsTake::Works => {
-                let old_release = self.fs.units[&old].release.clone();
-                self.fs.units.insert(instance, started);
-                self.fs.units.insert(
-                    old,
-                    Unit {
-                        state: UnitState::Deactivating,
-                        release: old_release,
-                        serving: false,
-                        left: self.fs.drain_looks,
-                    },
-                );
-                Ok(())
-            }
-            FsTake::Refused => {
-                self.fs.units.insert(
-                    instance,
-                    Unit {
-                        state: UnitState::Activating,
-                        ..Unit::off()
-                    },
-                );
-                Err(PortError::failed(
-                    PortKind::Units,
-                    "the unit did not become active",
-                ))
-            }
-            FsTake::Dud => {
-                self.fs.units.insert(
-                    instance,
-                    Unit {
-                        state: UnitState::Failed,
-                        ..Unit::off()
-                    },
-                );
-                Ok(())
-            }
-        }
-    }
-
-    pub(super) fn reboot_fs(&mut self) {
-        for instance in Instance::ALL {
-            self.fs.units.insert(instance, Unit::off());
-        }
-        for instance in Instance::ALL {
-            // A start that fails at boot leaves the unit as the failure did.
-            let _ = self.start_fs(instance);
-        }
-    }
-
-    pub(super) fn fs_snapshot(&self) -> Vec<(Instance, UnitState, Option<PathBuf>)> {
-        Instance::ALL
-            .into_iter()
-            .map(|i| {
-                (
-                    i,
-                    self.fs.units[&i].state,
-                    self.fs.units[&i].release.clone(),
-                )
-            })
+    pub(super) fn fs_snapshot(&self) -> Vec<(Instance, UnitState)> {
+        self.fs
+            .units
+            .iter()
+            .map(|(i, state)| (*i, *state))
             .collect()
     }
 
     pub(super) fn fs_marker_set(&self) -> Vec<Instance> {
-        Instance::ALL
-            .into_iter()
-            .filter(|i| self.fs.markers.contains(&fs_marker_path(*i)))
-            .collect()
+        self.fs.markers.iter().copied().collect()
     }
 }
 
@@ -231,27 +54,20 @@ impl FsPorts {
     pub(super) fn new(w: Rc<RefCell<World>>) -> FsPorts {
         FsPorts { w }
     }
+
+    /// A call that would change something: logged, and nothing changes.
+    fn act(&self, what: String) -> Result<(), PortError> {
+        count_in(&self.w, what, PortKind::Units).map(|_| ())
+    }
 }
 
 impl Units for FsPorts {
     fn start(&self, instance: Instance) -> Result<(), PortError> {
-        let late = count_in(
-            &self.w,
-            format!("fs_units.start {instance}"),
-            PortKind::Units,
-        )?;
-        self.w.borrow_mut().start_fs(instance)?;
-        SystemdFake::after(late, PortKind::Units)
+        self.act(format!("fs_units.start {instance}"))
     }
 
     fn stop(&self, instance: Instance) -> Result<(), PortError> {
-        let late = count_in(
-            &self.w,
-            format!("fs_units.stop {instance}"),
-            PortKind::Units,
-        )?;
-        self.w.borrow_mut().fs.units.insert(instance, Unit::off());
-        SystemdFake::after(late, PortKind::Units)
+        self.act(format!("fs_units.stop {instance}"))
     }
 
     fn state(&self, instance: Instance) -> Result<UnitState, PortError> {
@@ -260,112 +76,21 @@ impl Units for FsPorts {
             format!("fs_units.state {instance}"),
             PortKind::Units,
         )?;
-        let mut w = self.w.borrow_mut();
-        let unit = w.fs.units.get_mut(&instance).expect("both instances");
-        if unit.state == UnitState::Deactivating {
-            if unit.left == 0 {
-                *unit = Unit::off();
-            } else {
-                unit.left -= 1;
-            }
-        }
-        Ok(unit.state)
-    }
-}
-
-impl FsPorts {
-    /// The release the process `pid` runs: that of the running instance whose pid it is.
-    /// The steps ask only for a pid that `main_pid` gave.
-    fn release_of(&self, pid: u32) -> PathBuf {
-        let w = self.w.borrow();
-        Instance::ALL
-            .into_iter()
-            .filter(|instance| fs_pid(*instance) == pid)
-            .map(|instance| &w.fs.units[&instance])
-            .find(|unit| unit.state.running())
-            .and_then(|unit| unit.release.clone())
-            .expect("the pid of a running fs instance with a release")
-    }
-}
-
-impl Processes for FsPorts {
-    fn main_pid(&self, instance: Instance) -> Result<Option<u32>, PortError> {
-        count_in(
-            &self.w,
-            format!("fs_proc.main_pid {instance}"),
-            PortKind::Units,
-        )?;
-        // The steps ask only for the pid of an instance they saw active.
-        Ok((!self.w.borrow().fs.no_pid).then(|| fs_pid(instance)))
-    }
-
-    fn exe(&self, pid: u32) -> Result<Exe, PortError> {
-        count_in(&self.w, format!("fs_proc.exe {pid}"), PortKind::Host)?;
-        let release = self.release_of(pid);
-        let w = self.w.borrow();
-        let path = match (&w.fs.exe_shown, &w.installed) {
-            (Some(shown), _) => shown.clone(),
-            (None, Some(installed)) if *installed == release => PathBuf::from(SERVICE_BINARY),
-            (None, _) => PathBuf::from(format!("{SERVICE_BINARY} (deleted)")),
-        };
-        Ok(Exe {
-            path,
-            file: file_of(&release),
-        })
-    }
-
-    fn installed(&self) -> Result<FileId, PortError> {
-        count_in(&self.w, "fs_proc.installed".to_owned(), PortKind::Host)?;
-        let w = self.w.borrow();
-        let installed = w.installed.as_deref().ok_or_else(|| {
-            PortError::failed(PortKind::Host, format!("{SERVICE_BINARY}: not there"))
-        })?;
-        Ok(file_of(installed))
-    }
-
-    fn version(&self, pid: u32) -> Result<String, PortError> {
-        count_in(&self.w, format!("fs_proc.version {pid}"), PortKind::Host)?;
-        let release = self.release_of(pid);
-        Ok(version_of(&release.to_string_lossy()))
+        Ok(self.w.borrow().fs.units[&instance])
     }
 }
 
 impl Markers for FsPorts {
     fn present(&self, instance: Instance) -> Result<bool, PortError> {
-        Ok(self
-            .w
-            .borrow()
-            .fs
-            .markers
-            .contains(&fs_marker_path(instance)))
+        Ok(self.w.borrow().fs.markers.contains(&instance))
     }
 
     fn set(&self, instance: Instance) -> Result<(), PortError> {
-        let late = count_in(
-            &self.w,
-            format!("fs_markers.set {instance}"),
-            PortKind::Markers,
-        )?;
-        self.w
-            .borrow_mut()
-            .fs
-            .markers
-            .insert(fs_marker_path(instance));
-        SystemdFake::after(late, PortKind::Markers)
+        self.act(format!("fs_markers.set {instance}"))
     }
 
     fn clear(&self, instance: Instance) -> Result<(), PortError> {
-        let late = count_in(
-            &self.w,
-            format!("fs_markers.clear {instance}"),
-            PortKind::Markers,
-        )?;
-        self.w
-            .borrow_mut()
-            .fs
-            .markers
-            .remove(&fs_marker_path(instance));
-        SystemdFake::after(late, PortKind::Markers)
+        self.act(format!("fs_markers.clear {instance}"))
     }
 }
 
@@ -375,118 +100,31 @@ impl SystemdFake {
         &self.fs
     }
 
-    /// A host that runs `OLD` on instance a with `tierstore fs` running too, on instance a with
-    /// its marker and the record saying so. Every release lists `handoff-fs-v1`.
+    /// A host that runs `OLD` on instance a, with the second unit of the earlier layout running
+    /// too, on instance a, with its marker and the record saying so.
     pub fn fs_installed() -> SystemdFake {
         let fake = SystemdFake::installed();
-        for release in [OLD, NEW, NEWER] {
-            fake.list_fs_hand_over(release, true);
-        }
-        {
-            let mut w = fake.w.borrow_mut();
-            w.fs.markers.insert(World::fs_condition_path(Instance::A));
-            w.start_fs(Instance::A).expect("a fresh start");
-            let mut record =
-                Record::decode(w.record.as_deref().expect("a record")).expect("a record");
-            record.fs_live = Some(Instance::A);
-            w.record = Some(record.encode());
-            w.log.clear();
-        }
+        fake.set_fs_unit(Instance::A, UnitState::Active);
+        fake.set_fs_marker(Instance::A);
+        fake.set_fs_live(Some(Instance::A));
         fake
     }
 
-    /// Whether systemd names no main process of a running fs instance.
-    pub fn set_fs_no_pid(&self, gone: bool) {
-        self.w.borrow_mut().fs.no_pid = gone;
+    /// Puts the fs instance `instance` in a state.
+    pub fn set_fs_unit(&self, instance: Instance, state: UnitState) {
+        self.w.borrow_mut().fs.units.insert(instance, state);
     }
 
-    /// The path every `/proc/<pid>/exe` of an fs process reads, instead of the one its release
-    /// gives.
-    pub fn set_fs_exe_shown(&self, shown: Option<&str>) {
-        self.w.borrow_mut().fs.exe_shown = shown.map(PathBuf::from);
+    /// Lays down the start marker of the fs instance `instance`.
+    pub fn set_fs_marker(&self, instance: Instance) {
+        self.w.borrow_mut().fs.markers.insert(instance);
     }
 
-    /// Whether `release` lists `handoff-fs-v1`.
-    pub fn list_fs_hand_over(&self, release: &str, listed: bool) {
-        let mut w = self.w.borrow_mut();
-        let list = w
-            .capabilities
-            .get_mut(&PathBuf::from(release))
-            .expect("a release of this host");
-        list.retain(|word| word != HANDOFF_FS_CAPABILITY);
-        if listed {
-            list.push(HANDOFF_FS_CAPABILITY.to_owned());
-        }
-    }
-
-    /// What a new fs instance does when it asks for the mount.
-    pub fn set_fs_take(&self, take: FsTake) {
-        self.w.borrow_mut().fs.take = take;
-    }
-
-    /// How many `state` looks a fs instance that gave the mount away is still seen running.
-    pub fn set_fs_drain_looks(&self, looks: u32) {
-        self.w.borrow_mut().fs.drain_looks = looks;
-    }
-
-    /// Puts the fs instance `instance` in a state, running `release`.
-    pub fn set_fs_unit(&self, instance: Instance, state: UnitState, release: Option<&str>) {
-        self.w.borrow_mut().fs.units.insert(
-            instance,
-            Unit {
-                state,
-                release: release.map(PathBuf::from),
-                serving: state == UnitState::Active,
-                left: 0,
-            },
-        );
-    }
-
-    /// Puts the fs instance `instance` in `deactivating`, running `release`, for `looks` looks of
-    /// `state` that still see it so.
-    pub fn set_fs_deactivating(&self, instance: Instance, release: &str, looks: u32) {
-        self.w.borrow_mut().fs.units.insert(
-            instance,
-            Unit {
-                state: UnitState::Deactivating,
-                release: Some(PathBuf::from(release)),
-                serving: false,
-                left: looks,
-            },
-        );
-    }
-
-    /// Whether an fs instance was ever started while the store said `ready read-only`: its fill
-    /// socket was not up.
-    pub fn fs_started_over_read_only(&self) -> bool {
-        self.w.borrow().fs.started_over_read_only
-    }
-
-    /// The state of the fs instance `instance`, without a look that counts.
-    pub fn peek_fs(&self, instance: Instance) -> UnitState {
-        self.w.borrow().fs.units[&instance].state
-    }
-
-    /// The release the fs instance `instance` runs.
-    pub fn fs_release(&self, instance: Instance) -> Option<PathBuf> {
-        self.w.borrow().fs.units[&instance].release.clone()
-    }
-
-    /// The fs instances whose process may run.
-    pub fn fs_running(&self) -> Vec<Instance> {
-        let w = self.w.borrow();
-        Instance::ALL
-            .into_iter()
-            .filter(|i| w.fs.units[i].state.running())
-            .collect()
-    }
-
-    /// The fs instances that have their marker.
-    pub fn fs_markers(&self) -> Vec<Instance> {
-        Instance::ALL
-            .into_iter()
-            .filter(|i| Markers::present(&self.fs, *i).expect("a look at a marker"))
-            .collect()
+    /// Sets `fs_live` of the record on disk.
+    pub fn set_fs_live(&self, live: Option<Instance>) {
+        let mut record = self.record();
+        record.fs_live = live;
+        self.set_record(&record);
     }
 
     /// The calls that change an fs unit or marker, in order.
@@ -504,13 +142,5 @@ impl SystemdFake {
                 .any(|prefix| line.starts_with(prefix))
             })
             .collect()
-    }
-
-    /// Every call that looks at an fs unit.
-    pub fn fs_looks(&self) -> usize {
-        self.log()
-            .iter()
-            .filter(|line| line.starts_with("fs_units.state"))
-            .count()
     }
 }

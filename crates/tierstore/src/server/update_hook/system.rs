@@ -11,8 +11,8 @@ use super::config_hook::{Common, GUARD_FILE, GUARD_UNIT, Running, launchd_step, 
 use super::look::POLL_INTERVAL;
 use super::machine::{
     CONFIG_STATE_FILE, ControlSocket, GuardUnit, LaunchctlJobs, LaunchdTimes, LoopbackInstances,
-    MarkerFiles, MonotonicClock, ProcFiles, ProviderSocket, ProviderTimes, Runner, StateFiles,
-    SystemHost, SystemRunner, SystemdUnits,
+    MarkerFiles, MonotonicClock, ProviderSocket, ProviderTimes, Runner, StateFiles, SystemHost,
+    SystemRunner, SystemdUnits,
 };
 use super::params::{Params, ServiceManager};
 use super::ports::{Family, LaunchdPorts, SystemdPorts};
@@ -27,11 +27,6 @@ pub(super) const LAUNCHCTL_PROGRAM: &str = super::machine::LAUNCHCTL_PROGRAM;
 /// The longest `systemctl start` may run.
 pub(super) const START_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// How long the hook waits for `systemctl start` of an fs unit: above the `TimeoutStartSec=300` of
-/// `tierstore-fs@.service` (a start that takes the mount over lasts up to `fs.handoff_wait`, 120 s
-/// by default, plus its attachments), so that the hook sees systemd's verdict and does not kill
-/// `systemctl` first.
-pub(super) const FS_START_TIMEOUT: Duration = Duration::from_secs(330);
 /// The longest `systemctl stop` may run: it returns when the drain is over.
 pub(super) const STOP_TIMEOUT: Duration = Duration::from_secs(1000);
 /// The longest `systemctl show` may run.
@@ -112,18 +107,16 @@ pub(super) fn run_on(config: &SystemConfig<'_>, invocation: &Invocation, params:
             let units = SystemdUnits::new(runner, START_TIMEOUT, STOP_TIMEOUT, SHOW_TIMEOUT)
                 .with_program(config.systemctl);
             let markers = MarkerFiles::new(under(&config.root, MARKER_DIR));
-            let fs_units = SystemdUnits::new(runner, FS_START_TIMEOUT, STOP_TIMEOUT, SHOW_TIMEOUT)
+            // The second unit of the earlier layout is only looked at.
+            let fs_units = SystemdUnits::new(runner, START_TIMEOUT, STOP_TIMEOUT, SHOW_TIMEOUT)
                 .with_program(config.systemctl)
                 .of(Family::Fs);
             let fs_markers = MarkerFiles::new(under(&config.root, MARKER_DIR)).of(Family::Fs);
-            let fs_processes =
-                ProcFiles::new(&fs_units, config.root.clone(), runner, CAPABILITIES_TIMEOUT);
             let ports = SystemdPorts {
                 units: &units,
                 markers: &markers,
                 fs_units: &fs_units,
                 fs_markers: &fs_markers,
-                fs_processes: &fs_processes,
                 instances: &instances,
                 host: &host,
                 provider: &provider,
@@ -195,18 +188,16 @@ pub(super) fn config_run_on(
             let markers = MarkerFiles::new(under(&config.root, MARKER_DIR));
             let guard = GuardUnit::new(&units, GUARD_UNIT, under(&config.root, GUARD_FILE));
             let control = ControlSocket::new(config.root.clone(), CONTROL_TIMEOUT);
-            let fs_units = SystemdUnits::new(runner, FS_START_TIMEOUT, STOP_TIMEOUT, SHOW_TIMEOUT)
+            // The second unit of the earlier layout is only looked at.
+            let fs_units = SystemdUnits::new(runner, START_TIMEOUT, STOP_TIMEOUT, SHOW_TIMEOUT)
                 .with_program(config.systemctl)
                 .of(Family::Fs);
             let fs_markers = MarkerFiles::new(under(&config.root, MARKER_DIR)).of(Family::Fs);
-            let fs_processes =
-                ProcFiles::new(&fs_units, config.root.clone(), runner, CAPABILITIES_TIMEOUT);
             let ports = SystemdPorts {
                 units: &units,
                 markers: &markers,
                 fs_units: &fs_units,
                 fs_markers: &fs_markers,
-                fs_processes: &fs_processes,
                 instances: &instances,
                 host: &running,
                 provider: &provider,

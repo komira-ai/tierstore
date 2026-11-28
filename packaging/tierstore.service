@@ -70,7 +70,7 @@ TimeoutStopSec=960
 Restart=on-failure
 RestartSec=30
 RestartPreventExitStatus=2 3
-# The same value as tierstore-fs@.service: this process serves the node's cache and the fill socket for the mount, whose jobs keep files of it open as long as they run.
+# This process serves the node's cache and the mount, whose jobs keep files of it open as long as they run.
 LimitNOFILE=1048576
 UMask=0077
 NoNewPrivileges=yes

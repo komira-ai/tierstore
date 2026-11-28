@@ -4,7 +4,7 @@ use super::super::params::Params;
 use super::super::ports::{Instance, UnitState};
 use super::super::record::{Marker, Record};
 use super::super::report::{Done, Reason};
-use super::{Ctx, fs, next_of, unit_name};
+use super::{Ctx, next_of, unit_name};
 
 pub(super) fn cleanup(c: &Ctx<'_, '_>, params: &Params, record: &Record) -> Result<Done, Done> {
     if !record.updating {
@@ -29,7 +29,7 @@ pub(super) fn cleanup(c: &Ctx<'_, '_>, params: &Params, record: &Record) -> Resu
     let committed = if record.committed() {
         record.clone()
     } else {
-        confirm(c, record, next, &params.target_version)?;
+        confirm(c, next, &params.target_version)?;
         // `stopping` precedes its act: from here on nothing is reversible.
         let committed = record.with(Marker::Stopping);
         c.commit_written.set(true);
@@ -45,20 +45,18 @@ pub(super) fn cleanup(c: &Ctx<'_, '_>, params: &Params, record: &Record) -> Resu
 }
 
 /// The end of a committed update, whatever its old instances are doing: the markers of the old
-/// instances go and the record is saved at rest, `next` as `live` and `fs_next` as `fs_live`.
+/// instances go and the record is saved at rest, `next` as `live`, naming no fs instance.
 /// Returns the record at rest, and the names of the old units that still run.
 ///
 /// An old instance of a hand-over is never stopped here: it ends by itself, in a time the hook
-/// does not know (the store's within its drain deadline; an fs process of a release that frees
-/// its whole state before it ends can take minutes). Nothing waits for it, since nothing of the update is
-/// left to do once the new instances serve and the commit is written. Its marker goes while it
-/// runs: systemd reads `ConditionPathExists=` only when it starts a unit from inactive or failed,
-/// so a process that runs is not touched, and without the marker the unit is not started again
-/// by a boot. `Restart=on-failure` does not start again one that ended with status 0, as an old
-/// instance that drained or handed the mount over does, and the fs template's `ExecCondition=`
-/// tests for the marker at an automatic restart too. Every later step looks at the units themselves: a `prepare` that finds both
-/// instances of a template running waits for the drain, and the boot step leaves the old instance
-/// to end. A crash in here leaves the record committed and in flight, which the next `cleanup`,
+/// does not know (the store's within its drain deadline). Nothing waits for it, since nothing of
+/// the update is left to do once the new instance serves and the commit is written. Its marker
+/// goes while it runs: systemd reads `ConditionPathExists=` only when it starts a unit from
+/// inactive or failed, so a process that runs is not touched, and without the marker the unit is
+/// not started again by a boot. `Restart=on-failure` does not start again one that ended with
+/// status 0, as an old instance that drained does. Every later step looks at the units
+/// themselves: a `prepare` that finds both instances of a template running waits for the drain,
+/// and the boot step leaves the old instance to end. A crash in here leaves the record committed and in flight, which the next `cleanup`,
 /// `prepare` or boot step finishes the same way.
 pub(super) fn finish(c: &Ctx<'_, '_>, committed: &Record) -> Result<(Record, Vec<String>), Done> {
     let next = next_of(committed)?;
@@ -69,22 +67,14 @@ pub(super) fn finish(c: &Ctx<'_, '_>, committed: &Record) -> Result<(Record, Vec
         }
         c.ports.markers.clear(live)?;
     }
-    // The old fs instance of a hand-over ends by itself, and is never stopped here.
-    if let Some(old) = fs::retire(c, committed)? {
-        drains.push(fs::fs_name(old));
-    }
     let mut finished = committed.clone();
     finished.updating = false;
     finished.from = None;
     finished.live = Some(next);
     finished.next = None;
     finished.mode = None;
-    // The switch ends with no fs instance: the one process holds the mount.
-    finished.fs_live = if committed.fs_switch {
-        None
-    } else {
-        finished.fs_next.or(finished.fs_live)
-    };
+    // The hook acts on no fs instance: a record it writes names none.
+    finished.fs_live = None;
     finished.fs_next = None;
     c.save(&finished)?;
     Ok((finished, drains))
@@ -103,7 +93,7 @@ pub(super) fn drain_note(drains: &[String]) -> String {
 /// hand-over the old instance still drains on the same listening sockets and answers `/readyz`
 /// with 503 until it exits, so a look that reaches it is no verdict: `confirm` waits for
 /// `/readyz` as `cutover` does, then probes for the build.
-fn confirm(c: &Ctx<'_, '_>, record: &Record, next: Instance, target: &str) -> Result<(), Done> {
+fn confirm(c: &Ctx<'_, '_>, next: Instance, target: &str) -> Result<(), Done> {
     let not_confirmed = |why: String| Done::fail(Reason::NotConfirmed, why);
     let state = c.ports.units.state(next)?;
     if state != UnitState::Active {
@@ -111,16 +101,6 @@ fn confirm(c: &Ctx<'_, '_>, record: &Record, next: Instance, target: &str) -> Re
             "{} is {state:?}, not active",
             unit_name(next)
         )));
-    }
-    // The fs instance the update started, too: active is a mount it has taken.
-    if let Some(fs_next) = record.fs_next {
-        let state = c.ports.fs_units.state(fs_next)?;
-        if state != UnitState::Active {
-            return Err(not_confirmed(format!(
-                "{} is {state:?}, not active",
-                fs::fs_name(fs_next)
-            )));
-        }
     }
     c.look().serves(target).map(|_| ()).map_err(|failed| {
         not_confirmed(format!(

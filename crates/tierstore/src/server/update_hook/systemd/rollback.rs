@@ -2,11 +2,12 @@
 //! back to it already; the hook puts its binary back where the units run it, so an instance that
 //! starts runs it.
 
+use super::super::old_layout;
 use super::super::params::Params;
 use super::super::ports::Instance;
 use super::super::record::{Mode, Record};
 use super::super::report::{Done, Reason};
-use super::{Ctx, DRAIN_RETRY_SECS, fs, next_of, unit_name};
+use super::{Ctx, DRAIN_RETRY_SECS, next_of, unit_name};
 
 pub(super) fn rollback(c: &Ctx<'_, '_>, params: &Params, record: &Record) -> Result<Done, Done> {
     if record.committed() {
@@ -18,6 +19,9 @@ pub(super) fn rollback(c: &Ctx<'_, '_>, params: &Params, record: &Record) -> Res
     if !record.updating {
         return Ok(Done::ok("nothing to roll back: no update is in flight"));
     }
+    // The way back of an update that moved the fs process is not this release's: it has no step
+    // for that process.
+    old_layout::refuse_record(record)?;
     let next = next_of(record)?;
     if record.from.is_none() {
         return first_install(c, record, next);
@@ -33,16 +37,6 @@ pub(super) fn rollback(c: &Ctx<'_, '_>, params: &Params, record: &Record) -> Res
     // Before any start: the instance that comes back runs the previous release's binary. The new
     // instance, if it runs, keeps the copy it started from.
     c.ports.host.install_binary(&previous.release)?;
-    // The fs process first, the reverse of `cutover`: the store then starts beside the old fs
-    // instance, which is the pair the previous release is tested as.
-    if let Some(fs_next) = record.fs_next {
-        fs::give_back(c, fs_next)?;
-    }
-    // The switch's way back is the same: the mount goes to the fs instance first, then the
-    // sockets go to the store's old instance.
-    if record.fs_switch {
-        fs::take_back(c, record)?;
-    }
     if record.mode == Some(Mode::Handover) {
         hand_back(c, back, next, version)?;
     } else {
@@ -54,6 +48,8 @@ pub(super) fn rollback(c: &Ctx<'_, '_>, params: &Params, record: &Record) -> Res
     }
     c.ports.markers.clear(next)?;
     let mut idle = Record::idle(Some(back));
+    // Read, never set: a record that names an fs instance keeps naming it, so that `prepare` still
+    // refuses the node.
     idle.fs_live = record.fs_live;
     c.save(&idle)?;
     Ok(Done::ok(format!(

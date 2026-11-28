@@ -1,7 +1,8 @@
 //! The update hook's `state.json`: one record for both service managers. The launchd arm writes
 //! the keys of the single-instance record of the release before; the systemd arm adds `live`,
-//! `next` and `mode`, and, on a node with an fs process, `fs_live` and `fs_next`; the config hook's
-//! record of a change applied in place adds `reload`.
+//! `next` and `mode`, and a node of the earlier two-process layout had `fs_live` and `fs_next`,
+//! which later releases read and never write; the config hook's record of a change applied in
+//! place adds `reload`.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -104,6 +105,26 @@ fn the_fs_record_fixture_reads_and_is_written_as_the_fixture() {
     assert_eq!(systemd_fs().check(), Ok(()));
     let without = Record::decode(SYSTEMD).unwrap();
     assert_eq!((without.fs_live, without.fs_next), (None, None));
+}
+
+/// Asserts that a record that names `fs_live` and `fs_next`, as an earlier release wrote it for a
+/// node of the two-process layout, still decodes, field for field, and holds to its rules: this
+/// release only reads those keys. Catches a decoder that drops or refuses a key it no longer
+/// writes, which a node that has not left the earlier layout would meet as an unreadable record.
+#[test]
+fn a_record_with_fs_live_still_decodes() {
+    let record = Record::decode(SYSTEMD_FS).unwrap();
+    assert_eq!(record.fs_live, Some(Instance::A));
+    assert_eq!(record.fs_next, Some(Instance::B));
+    assert!(!record.fs_switch);
+    assert_eq!(
+        (record.live, record.next, record.mode),
+        (Some(Instance::A), Some(Instance::B), Some(Mode::Handover))
+    );
+    assert!(record.updating);
+    assert_eq!(record.markers, BTreeSet::from([Marker::Swapped]));
+    assert_eq!(record.version.as_deref(), Some("0.5.0+0123456789ab"));
+    assert_eq!(record.check(), Ok(()));
 }
 
 /// The record of the switch of a node to one process, in flight: the fs instance `a` that ran is

@@ -26,15 +26,14 @@ use crate::server::handoff::testing::within;
 use crate::server::local_cache::{Disk, SystemDisk};
 use crate::server::treefs::config::FsSettings;
 use crate::server::treefs::fakedev::{self, FakeDevice};
-use crate::server::treefs::handover::{HandoverError, Offer};
 use crate::server::treefs::init_record::{self, Record};
 use crate::server::treefs::ino;
 use crate::server::treefs::launch::Platform;
-use crate::server::treefs::run::{Kernel, Prepared, Running};
+use crate::server::treefs::run::Kernel;
 use crate::server::treefs::sd::{FUSE_NAME, Manager, Stored};
 use crate::server::treefs::start::StartError;
 use crate::server::treefs::table::TreeTable;
-use crate::server::treefs::testing::{FakeManager, Rig, sample, until, with_fuse};
+use crate::server::treefs::testing::{FakeManager, until, with_fuse};
 use crate::{Backend, ByteRange, Error as StoreError, Listed, MemoryBackend, Meta, Mono};
 
 /// The connection number the tests' tables of mounts give the mount.
@@ -205,40 +204,6 @@ fn left_state(settings: &FsSettings) {
     init_record::write(&settings.runtime_dir, &record).unwrap();
 }
 
-/// A running `tierstore fs` process of the two-process layout over a stand-in for the kernel, on
-/// the paths of `settings`, answering `take-fs 1` on its hand-over socket. Its core calls the cache
-/// of a rig, which stands for the cache of the old `tierstore`.
-struct OldFs {
-    running: Arc<Running>,
-    kernel: FakeDevice,
-    serving: JoinHandle<Result<(), HandoverError>>,
-    _fill: Rig,
-}
-
-fn old_fs(settings: &FsSettings) -> OldFs {
-    left_state(settings);
-    let fill = Rig::new("tsfs-one-oldfill", sample());
-    let (device, kernel) = fakedev::pair();
-    let prepared = Prepared::load(settings).unwrap();
-    let running =
-        Running::adopt((settings, &fill.calls()), prepared, device, (None, false)).unwrap();
-    let running = Arc::new(running);
-    let offer = Offer::bind(
-        &settings.handoff_socket,
-        &settings.mountpoint,
-        &settings.control_socket,
-        settings.handoff_wait,
-    )
-    .unwrap();
-    let serving = tokio::spawn(offer.serve(Arc::clone(&running)));
-    OldFs {
-        running,
-        kernel,
-        serving,
-        _fill: fill,
-    }
-}
-
 /// Asks `kernel` for the attributes of the root as request `unique`, and asserts that it is
 /// answered; a notification sent meanwhile (a kernel asked to send requests again) is passed over.
 fn assert_answers(kernel: &FakeDevice, unique: u64) {
@@ -275,14 +240,13 @@ async fn stop(started: Started) -> Result<Drained, Error> {
     within("the node ends", started.ended).await.unwrap()
 }
 
-/// Asserts the order of a start: a running instance that answers on the hand-over socket gives the
-/// mount, and the descriptor the service manager kept is not served and the mount the table shows
-/// is not touched; with no running instance the kept descriptor is served, and the mount the table
-/// shows is still not touched; with neither, the mount the table shows (which no process serves)
-/// is aborted, and the mount is made afresh. Catches a start that adopts or mounts while an
-/// instance holds the mount, or mounts while the store holds it.
+/// Asserts the order of a start: with a kept descriptor the service manager's store holds, the
+/// descriptor is served, the request it holds is answered, and the mount the table shows is not
+/// touched; with none, the mount the table shows (which no process serves) is aborted, and the
+/// mount is made afresh. Catches a start that mounts while the store holds the connection, or one
+/// that leaves a mount no process serves.
 #[test]
-fn a_start_takes_before_it_adopts_and_adopts_before_it_mounts() {
+fn a_start_adopts_before_it_mounts() {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
@@ -291,29 +255,12 @@ fn a_start_takes_before_it_adopts_and_adopts_before_it_mounts() {
     let node = FsNode::new("tsfs-one-order");
     let settings = || node.settings("", "", "127.0.0.1:0");
     let fs = settings().fs.unwrap();
+    left_state(&fs);
     let (stored, kept) = fakedev::pair();
     runtime.block_on(async {
-        // A running instance, a kept descriptor and a mount in the table: the mount is taken.
-        let old = old_fs(&fs);
-        let manager = FakeManager::start(&node.dir.path().join("taker.sock"));
-        let on_platform = platform(&manager, Some(stored.as_raw_fd()), node.kernel(true));
-        let mut taker = start_on(settings(), memory(), on_platform);
-        let _addresses = within("the taker serves", &mut taker.bound).await.unwrap();
-        within("the old instance gives the mount", old.serving)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_answers(&old.kernel, 1);
-        assert_unanswered(&kept, 2);
-        assert!(!node.aborted());
-        told(
-            &manager,
-            &["FDSTORE=1\nFDNAME=fuse", "BARRIER=1", "READY=1"],
-        );
-        stop(taker).await.unwrap();
-        drop(old.running);
-
-        // No running instance: the kept descriptor is served; the request it holds is answered.
+        // A kept descriptor and a mount in the table: the descriptor is served; the request it
+        // holds is answered.
+        kept.getattr(2, ino::ROOT);
         let manager = FakeManager::start(&node.dir.path().join("adopter.sock"));
         let on_platform = platform(&manager, Some(stored.as_raw_fd()), node.kernel(true));
         let mut adopter = start_on(settings(), memory(), on_platform);
@@ -367,131 +314,65 @@ impl Drop for Detached {
     }
 }
 
-/// Asserts the start of release M on a node where a `tierstore fs` process of the two-process
-/// layout serves the mount: it takes the mount from that process, which ends, and serves it; it
-/// never aborts or detaches the mount, which the kernel's table shows all along; and a request the
-/// kernel holds meanwhile is answered by the new process.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_start_in_m_with_a_live_old_fs_process_takes_from_it_and_never_detaches() {
-    let node = FsNode::new("tsfs-one-old");
-    let settings = node.settings("", "", "127.0.0.1:0");
-    let fs = settings.fs.clone().unwrap();
-    let old = old_fs(&fs);
-    assert_answers(&old.kernel, 1);
-    let manager = FakeManager::start(&node.dir.path().join("notify.sock"));
-    let on_platform = platform(&manager, None, node.kernel(true));
-    let mut new = start_on(settings, memory(), on_platform);
-    within("the old process gives the mount", old.serving)
-        .await
-        .unwrap()
-        .unwrap();
-    let addresses = within("the new process serves", &mut new.bound)
-        .await
-        .unwrap();
-    assert_answers(&old.kernel, 2);
-    assert!(!node.aborted());
-    told(
-        &manager,
-        &["FDSTORE=1\nFDNAME=fuse", "BARRIER=1", "READY=1"],
-    );
-    // The new process answers on the hand-over socket in its turn, and serves S3.
-    assert!(fs.handoff_socket.exists());
-    let (status, _) = probe(addresses.s3, "/healthz").await;
-    assert_eq!(status, 200);
-    stop(new).await.unwrap();
-    assert!(!fs.handoff_socket.exists());
-    drop(old.running);
-}
-
-/// Asserts the start that switches a node from two processes to one: the old `tierstore` (S3, no
-/// mount) and the old `tierstore fs` both run, and the new process, on a file with an `fs`
-/// interface and the same `server.handoff_socket`, takes the mount from the fs process and the S3
-/// sockets from the other. Both old processes end; the new one serves the kernel's requests at the
-/// old addresses.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_switch_start_connects_to_both_old_processes_and_takes_the_mount_from_the_fs_one() {
-    let node = FsNode::new("tsfs-one-switch");
-    let control = node.dir.path().join("control.sock");
-    let server = format!(
-        "handoff_socket = {:?}\nhandoff_wait = \"30s\"",
-        control.display().to_string()
-    );
-    // The old S3 process: the node's file of today, with no fs interface.
-    let old_settings = settings_from_text(&node.node.text(&server, ""), QUICK)
-        .unwrap()
-        .into_cache()
-        .unwrap();
-    let mut old_s3 = start(old_settings, memory(), OnSystem::default());
-    let old_bound = within("the old S3 process serves", &mut old_s3.bound)
-        .await
-        .unwrap();
-    let new_settings = node.settings(&server, "", &old_bound.s3.to_string());
-    let fs = new_settings.fs.clone().unwrap();
-    let old = old_fs(&fs);
-    let manager = FakeManager::start(&node.dir.path().join("notify.sock"));
-    let on_platform = platform(&manager, None, node.kernel(true));
-    let mut new = start_on(new_settings, memory(), on_platform);
-    within("the old fs process gives the mount", old.serving)
-        .await
-        .unwrap()
-        .unwrap();
-    let new_bound = within("the new process serves", &mut new.bound)
-        .await
-        .unwrap();
-    assert_eq!(new_bound.s3, old_bound.s3);
-    let drained = within("the old S3 process ends", old_s3.ended)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(drained, Drained { abandoned: 0 });
-    assert_answers(&old.kernel, 1);
-    assert!(!node.aborted());
-    told(
-        &manager,
-        &["FDSTORE=1\nFDNAME=fuse", "BARRIER=1", "READY=1"],
-    );
-    stop(new).await.unwrap();
-    drop(old.running);
-}
-
-/// Asserts that a running instance that accepts on the hand-over socket and never answers fails
-/// the start, after `params.handoff_wait`, by name, and that nothing was taken, adopted, aborted,
-/// detached or bound: the kept descriptor's request is not answered, the mount the table shows is
-/// not aborted, the service manager is told nothing, and no address is said.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_running_instance_that_never_answers_fails_the_start_and_detaches_nothing() {
-    let node = FsNode::new("tsfs-one-mute");
-    let settings = node.settings("", "handoff_wait = \"1s\"", "127.0.0.1:0");
-    let fs = settings.fs.clone().unwrap();
-    left_state(&fs);
-    let mute = tokio::net::UnixListener::bind(&fs.handoff_socket).unwrap();
-    let held = tokio::spawn(async move {
-        let (stream, _) = mute.accept().await.unwrap();
-        // Holds the connection and says nothing.
-        std::future::pending::<()>().await;
-        drop(stream);
+/// Asserts the start of a node whose file gains an `fs` interface beside a running instance that
+/// holds no mount (the S3 process of the file it had): the new process takes that instance's S3
+/// sockets and makes the mount afresh, asking nothing else of it. The old instance drains and ends,
+/// the new one serves the same S3 address, the descriptor is put in the service manager's store
+/// before it is told ready, and no socket of the two-process layout (`handoff.sock` in the runtime
+/// directory) is bound or asked. Catches a start that mounts nothing because no instance gave a
+/// mount, or one that waits on a conversation no release answers.
+#[test]
+fn a_start_facing_an_instance_without_a_mount_takes_its_sockets_and_makes_the_mount() {
+    with_fuse(|| {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let node = FsNode::new("tsfs-one-nomount");
+            let control = node.dir.path().join("control.sock");
+            let server = format!(
+                "handoff_socket = {:?}\nhandoff_wait = \"30s\"",
+                control.display().to_string()
+            );
+            // The old process: the node's file as it was, with no fs interface.
+            let old_settings = settings_from_text(&node.node.text(&server, ""), QUICK)
+                .unwrap()
+                .into_cache()
+                .unwrap();
+            let mut old = start(old_settings, memory(), OnSystem::default());
+            let old_bound = within("the old process serves", &mut old.bound)
+                .await
+                .unwrap();
+            let settings = node.settings(&server, "", &old_bound.s3.to_string());
+            let fs = settings.fs.clone().unwrap();
+            let manager = FakeManager::start(&node.dir.path().join("notify.sock"));
+            let on_platform = platform(&manager, None, node.kernel(false));
+            let _detached = Detached(node.mountpoint());
+            let mut new = start_on(settings, memory(), on_platform);
+            let new_bound = within("the new process serves", &mut new.bound)
+                .await
+                .unwrap();
+            assert_eq!(new_bound.s3, old_bound.s3);
+            let drained = within("the old process ends", old.ended)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(drained, Drained { abandoned: 0 });
+            assert!(mounted(&node.mountpoint()));
+            assert!(!node.aborted());
+            told(
+                &manager,
+                &["FDSTORE=1\nFDNAME=fuse", "BARRIER=1", "READY=1"],
+            );
+            assert!(!fs.runtime_dir.join("handoff.sock").exists());
+            let (status, _) = probe(new_bound.s3, "/healthz").await;
+            assert_eq!(status, 200);
+            stop(new).await.unwrap();
+            assert!(mounted(&node.mountpoint()), "the store keeps the mount");
+        });
     });
-    let (stored, kept) = fakedev::pair();
-    let manager = FakeManager::start(&node.dir.path().join("notify.sock"));
-    let on_platform = platform(&manager, Some(stored.as_raw_fd()), node.kernel(true));
-    let started = start_on(settings, memory(), on_platform);
-    let error = within("the start fails", started.ended)
-        .await
-        .unwrap()
-        .unwrap_err();
-    assert_eq!(
-        error.to_string(),
-        format!(
-            "hand-over: no end of the hand-over at {} in time",
-            fs.handoff_socket.display()
-        )
-    );
-    assert_eq!(exit_status(&error), 1);
-    assert!(started.bound.await.is_err(), "no address was said");
-    assert_unanswered(&kept, 1);
-    assert!(!node.aborted());
-    assert!(manager.texts().is_empty(), "{:?}", manager.texts());
-    held.abort();
 }
 
 /// A store whose reads wait for the test once it is armed: the request of an S3 client that reaches
@@ -607,10 +488,10 @@ async fn the_fronts_drain_before_the_mount_is_left() {
 }
 
 /// Asserts the update of a node of the one-process layout: a second process on the same file
-/// takes the mount from the first (on the runtime directory's hand-over socket) and then its S3
-/// sockets (on `server.handoff_socket`); the first serves S3 until then, drains and ends with
-/// success, and never serves the mount again: it takes the descriptor out of its service manager's
-/// store when it gives the mount up.
+/// takes the mount and the S3 sockets of the first in one conversation (on
+/// `server.handoff_socket`); the first serves S3 until then, drains and ends with success, and
+/// never serves the mount again: it takes the descriptor out of its service manager's store when it
+/// gives the mount up.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_second_process_takes_the_mount_then_the_sockets_of_the_first() {
     let node = FsNode::new("tsfs-one-update");
@@ -684,38 +565,6 @@ async fn a_mount_whose_requests_stay_unanswered_stops_the_node_in_failure() {
     assert_eq!(exit_status(&error), 1);
     assert!(node.aborted());
     told(&manager, &["READY=1", "FDSTOREREMOVE=1\nFDNAME=fuse"]);
-}
-
-/// Asserts that a start that serves the mount and cannot then answer on the hand-over socket leaves
-/// the mount as a stop does (to the store) and fails by name before any front is bound, and the
-/// manager is never told the unit is ready.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_start_that_cannot_bind_the_hand_over_socket_leaves_the_mount_and_fails() {
-    let node = FsNode::new("tsfs-one-nobind");
-    let settings = node.settings("", "", "127.0.0.1:0");
-    let fs = settings.fs.clone().unwrap();
-    left_state(&fs);
-    // A directory where the socket would be: no instance answers there, and none can be bound.
-    std::fs::create_dir_all(fs.handoff_socket.join("in-the-way")).unwrap();
-    let (stored, kept) = fakedev::pair();
-    let manager = FakeManager::start(&node.dir.path().join("notify.sock"));
-    let on_platform = platform(&manager, Some(stored.as_raw_fd()), node.kernel(false));
-    let started = start_on(settings, memory(), on_platform);
-    let error = within("the start fails", started.ended)
-        .await
-        .unwrap()
-        .unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .starts_with("hand-over: removing the old hand-over socket: "),
-        "{error}"
-    );
-    assert!(started.bound.await.is_err(), "no address was said");
-    // The connection was served (the kernel was asked to send its requests again) and then left.
-    assert_eq!(kept.reply().unique, 0);
-    assert_unanswered(&kept, 1);
-    assert!(manager.texts().is_empty(), "{:?}", manager.texts());
 }
 
 /// Asserts that a build node whose file has no `fs` interface mounts nothing and tells the service
@@ -813,7 +662,6 @@ async fn a_start_whose_s3_address_is_taken_leaves_the_mount_it_served() {
     // The connection was served (the kernel was asked to send its requests again) and then left.
     assert_eq!(kept.reply().unique, 0);
     assert_unanswered(&kept, 1);
-    assert!(!fs.handoff_socket.exists());
     assert!(manager.texts().is_empty(), "{:?}", manager.texts());
     drop(taken);
 }

@@ -4,7 +4,7 @@
 //! a `.part` name to a final name, hands over the staged file, its key and its SHA-256, which are put
 //! upstream through the cache's put of a staged file ([`upload`]); the answer is then recorded.
 //! [`space`] is the namespace of inode numbers over the store that a frontend answers from, and
-//! [`carry`] what it hands a successor; [`config`] is the `[fs.put]` table.
+//! [`carry`] what it hands a successor; [`config`] is the `put` params of the `fs` interface.
 //!
 //! The rules, from the design of the put directory (its interfaces, its failure and GC rules and its
 //! security); the store knows nothing of what the objects hold:

@@ -2,10 +2,39 @@ use super::super::{check, code, parse, read_docs, said, with_appended};
 use super::{LINUX_ONLY, OFF_LINUX_REFUSAL, judged};
 use crate::server::config_testing::{DEFAULTS, loads};
 
-/// A whole file that turns the put directory on, as the page's example does.
-const PUT_FILE: &str = "[fs]\nclient_group = \"builders\"\nowner = \"1000:1000\"\n\
-                        cache_path = \"/var/cache/tierstore\"\n\n[fs.put]\nenabled = true\n\
-                        prefixes = [\"cas/b/\"]\nstage_dir = \"/var/cache/tierstore/put-stage\"\n";
+/// A whole file that turns the put directory on, as the page's example does: the `fs` interface is
+/// the second entry, which the refusal off Linux names (`interface[1]`).
+const PUT_FILE: &str = r#"[[interface]]
+type   = "s3"
+params = { port = 9300 }
+
+[[interface]]
+type = "fs"
+[interface.params]
+client_group = "1000"
+owner = "1000:1000"
+
+[interface.params.put]
+enabled   = true
+prefixes  = ["cas/b/"]
+stage_dir = "/var/lib/tierstore-cache/cas/put-stage"
+
+[server]
+proxy_id        = "c1"
+bucket          = "cas"
+access_key_file = "/etc/tierstore/access.key"
+
+[local_cache]
+path   = "/var/lib/tierstore-cache/cas"
+budget = "185GiB"
+
+[cold_store]
+kind = "memory"
+
+[[policy]]
+prefix = "cas/"
+cache  = true
+"#;
 
 fn refused(why: &str) -> Result<(), String> {
     Err(why.to_owned())
@@ -49,7 +78,7 @@ fn a_linux_file_must_be_refused_off_linux_for_the_put_directory_alone() {
     let other = "the loader refuses the file marked `toml linux` off Linux, and not for the put \
                  directory: ";
     for why in [
-        "fs.cache_path: must be an absolute path".to_owned(),
+        "interface[1].params.put.stage_dir: must be an absolute path".to_owned(),
         format!("{OFF_LINUX_REFUSAL} "),
         format!("x{OFF_LINUX_REFUSAL}"),
         String::new(),
@@ -63,8 +92,8 @@ fn a_linux_file_must_be_refused_off_linux_for_the_put_directory_alone() {
         judged(Ok(()), true, false).as_deref(),
         Some(
             "the loader takes the file marked `toml linux` off Linux, where it must refuse it \
-             with: fs.put.enabled: the put directory is served by the FUSE frontend (Linux) \
-             alone in this release"
+             with: interface[1].params.put.enabled: the put directory is served by the FUSE \
+             frontend (Linux) alone in this release"
         )
     );
 }
@@ -103,11 +132,15 @@ fn the_put_example_of_the_page_is_marked_linux() {
         .filter(|b| b.info == LINUX_ONLY)
         .collect();
     assert_eq!(marked.len(), 1, "the blocks marked {LINUX_ONLY}");
-    assert!(marked[0].body.contains("[fs.put]\nenabled = true\n"));
+    assert!(
+        marked[0]
+            .body
+            .contains("[interface.params.put]\nenabled = true\n")
+    );
 }
 
 /// Asserts that the checker of the pages judges a block marked `toml linux`: the put file is no
-/// problem on this system, a file the loader refuses for a fault of its `[fs.put]` (a relative
+/// problem on this system, a file the loader refuses for a fault of its `put` params (a relative
 /// `stage_dir`, refused before the system is looked at) is found on every system, and the keys of
 /// a marked block are checked as those of any TOML block are.
 #[test]
@@ -118,7 +151,10 @@ fn the_checker_judges_a_block_marked_linux() {
         &code(),
     );
     assert!(!said(&problems, "the loader"), "{problems:?}");
-    let broken = PUT_FILE.replace("\"/var/cache/tierstore/put-stage\"", "\"put-stage\"");
+    let broken = PUT_FILE.replace(
+        "\"/var/lib/tierstore-cache/cas/put-stage\"",
+        "\"put-stage\"",
+    );
     let problems = check(
         &with_appended("configuration.md", &fenced(&broken)),
         &code(),
@@ -132,5 +168,8 @@ fn the_checker_judges_a_block_marked_linux() {
         &with_appended("configuration.md", &fenced(&misspelt)),
         &code(),
     );
-    assert!(said(&problems, "fs.ownerr is not a key"), "{problems:?}");
+    assert!(
+        said(&problems, "params.ownerr is not a key"),
+        "{problems:?}"
+    );
 }

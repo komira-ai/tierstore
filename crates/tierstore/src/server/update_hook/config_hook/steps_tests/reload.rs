@@ -63,11 +63,15 @@ pub(super) fn changed(from: u64, to: u64) -> Reload {
 
 /// The same, once `cutover` set it.
 fn set_on_mount(from: u64, to: u64) -> Reload {
-    let mut reload = changed(from, to);
-    if let Some(cap) = &mut reload.tree_list_ram_bytes {
-        cap.mount = Some(MOUNT.to_owned());
+    Reload {
+        guard: false,
+        tree_list_ram_bytes: Some(ListCap {
+            from,
+            to,
+            control_socket: PathBuf::from(DEFAULT_SOCKET),
+            mount: Some(MOUNT.to_owned()),
+        }),
     }
-    reload
 }
 
 /// The config hook's record of a reload `reload` committed and at rest, `A` serving.
@@ -583,46 +587,26 @@ fn a_hand_over_after_a_reload_at_rest_is_the_arms() {
     assert_eq!(node.fake.record().reload, None);
 }
 
-/// Asserts that a reload records the fs instance of the old layout that runs, not the one an
-/// older config record names (a release update hands that process over without touching the
-/// config record), and writes it into the release's record; and that with both fs instances
-/// running (one of them still drains) the change is left to the arm. Catches a stale `fs_live`
-/// that the boot step would start.
+/// Asserts that a reload on a node that still runs the fs unit of the earlier layout is applied
+/// in place as on any node, and writes no fs key: the config hook's record names no fs instance
+/// and the release's record keeps what it held. Catches a reload that carries an fs instance
+/// forward, which the boot step of an older release would start.
 #[test]
-fn a_reload_names_the_fs_instance_that_runs() {
+fn a_reload_writes_no_fs_instance() {
     let node = Linux::on(
         lin::SystemdFake::fs_installed(),
         &[],
         Some(lin::WITH_SOCKET),
         lin::WITH_SOCKET,
     );
-    node.fake
-        .set_fs_unit(Instance::A, UnitState::Inactive, Some(lin::OLD));
-    node.fake
-        .set_fs_unit(Instance::B, UnitState::Active, Some(lin::OLD));
-    node.fake.set_record(&Record {
-        fs_live: Some(Instance::A),
-        ..Record::idle(Some(Instance::A))
-    });
     let p = update();
     node.go(&p, &[Prepare]);
-    assert_eq!(node.fake.record().fs_live, Some(Instance::B));
+    let prepared = node.fake.record();
+    assert!(prepared.reload.is_some());
+    assert_eq!((prepared.fs_live, prepared.fs_next), (None, None));
     node.go(&p, &[Cutover, Verify, Cleanup]);
-    assert_eq!(
-        node.service.get().and_then(|record| record.fs_live),
-        Some(Instance::B)
-    );
-
-    let node = Linux::on(
-        lin::SystemdFake::fs_installed(),
-        &[],
-        Some(lin::WITH_SOCKET),
-        lin::WITH_SOCKET,
-    );
-    node.fake
-        .set_fs_unit(Instance::B, UnitState::Active, Some(lin::OLD));
-    let _ = node.step(Prepare, &p);
-    assert_eq!(node.fake.record().reload, None);
+    assert_eq!(node.service.get().and_then(|record| record.fs_live), None);
+    assert!(node.fake.fs_actions().is_empty());
 }
 
 /// Asserts that a change applied in place is not refused for what would need a new process: a

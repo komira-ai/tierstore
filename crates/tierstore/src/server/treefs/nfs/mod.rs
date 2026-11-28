@@ -2,7 +2,7 @@
 //! the NFS and MOUNT protocols on a loopback socket, mounted at `fs.mountpoint` by `mount_nfs`
 //! (`docs/design/virtual-build-fs.md` section 8; decision C9). FSKit may replace it later.
 //!
-//! - [`config`]: the `[fs.nfs]` table.
+//! - [`config`]: the `nfs` params of the `fs` interface.
 //! - `boot`: the epoch of the boot, which the table of tree numbers and the handles carry, so that
 //!   a restart of the server keeps them and a reboot does not.
 //! - `handle`: the file handle, the core's inode number and the epoch.

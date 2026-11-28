@@ -5,17 +5,11 @@
 
 use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixDatagram;
-use std::sync::Arc;
 use std::time::Duration;
 
 use tsfuse::abi::InitFlags;
 
-use super::config::FsSettings;
-use super::handover::{HandoverError, Offer, Paths};
-use super::init_record::{self, Outcome, Record};
-use super::ino;
-use super::run::{Prepared, Running};
-use super::testing::{Rig, sample};
+use super::init_record::Outcome;
 
 const LOOKUP: u32 = 1;
 const GETATTR: u32 = 3;
@@ -188,69 +182,5 @@ impl FakeDevice {
             std::io::ErrorKind::WouldBlock,
             "a reply is waiting"
         );
-    }
-}
-
-/// A rig, and a running instance over a stand-in for the kernel, that serves the offer.
-pub(in crate::server::treefs) struct Instance {
-    pub rig: Rig,
-    pub settings: FsSettings,
-    pub running: Arc<Running>,
-    pub kernel: FakeDevice,
-    pub serving: tokio::task::JoinHandle<Result<(), HandoverError>>,
-}
-
-pub(in crate::server::treefs) fn instance(
-    name: &str,
-    wait: Duration,
-    uid: Option<u32>,
-) -> Instance {
-    let rig = Rig::new(name, sample());
-    let mut settings = rig.settings();
-    settings.handoff_wait = wait;
-    let record = Record::first(outcome(false), "mount-1".to_owned());
-    init_record::write(&rig.runtime, &record).unwrap();
-    let (device, kernel) = pair();
-    let prepared = Prepared::load(&settings).unwrap();
-    let running = Arc::new(
-        Running::adopt((&settings, &rig.calls()), prepared, device, (None, false)).unwrap(),
-    );
-    let mut offer = Offer::bind(
-        &settings.handoff_socket,
-        &settings.mountpoint,
-        &settings.control_socket,
-        wait,
-    )
-    .unwrap();
-    if let Some(uid) = uid {
-        offer = offer.of_user(uid);
-    }
-    let serving = tokio::spawn(offer.serve(Arc::clone(&running)));
-    Instance {
-        rig,
-        settings,
-        running,
-        kernel,
-        serving,
-    }
-}
-
-impl Instance {
-    pub(in crate::server::treefs) fn paths(&self) -> Paths<'_> {
-        Paths {
-            socket: &self.settings.handoff_socket,
-            mountpoint: &self.settings.mountpoint,
-            control: &self.settings.control_socket,
-            wait: Duration::from_secs(3600),
-            // The fake device is a socket, not the FUSE device.
-            device: |_| Ok(()),
-        }
-    }
-
-    /// Asserts that the running instance still answers the kernel.
-    pub(in crate::server::treefs) fn assert_serving(&self, unique: u64) {
-        self.kernel.getattr(unique, ino::ROOT);
-        let reply = self.kernel.reply();
-        assert_eq!((reply.unique, reply.error), (unique, 0));
     }
 }

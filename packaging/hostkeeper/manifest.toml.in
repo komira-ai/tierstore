@@ -22,14 +22,14 @@
 # The bounds are the same on both systems. `cutover` (4000 s) covers, on Linux, the start of the
 # idle instance and the hook's wait for the release to serve (up to 1000 looks a second apart: a
 # new instance answers only once it has opened its local cache, which took minutes on a slow
-# disk) and its probe of the build gauge (60 looks), then, on a node whose fs process is handed
-# over, the wait for a store that serves read-only to take the cache lock (up to 2400 looks: the
-# old instance's drain, up to 910 s, and a scan of the cache) and the start of the fs instance
-# (TimeoutStartSec, 300 s): 3760 s at the longest, below the bound; and, on macOS, the hand-over
-# of the one job (the copy of the binary and a signal, then the same wait) or a restart (a release
-# without handoff-exec-v1, or a params file with mode = "restart"): the bootout of the job (ExitTimeOut, 210 s: the 1 s settle and the 60 s drain deadline, the 120 s at
-# most of an unmount after them, and a margin, see packaging/hostkeeper/units/tierstore.plist), its
-# bootstrap and the same wait: 210 s and 1060 looks a second apart are 1270 s, below the bound;
+# disk) and its probe of the build gauge (60 looks): 1060 looks a second apart at the longest,
+# below the bound (the one process makes the file system's mount itself, so there is no second
+# instance to start or wait for); and, on macOS, the hand-over of the one job (the copy of the
+# binary and a signal, then the same wait) or a restart (a release without handoff-exec-v1, or a
+# params file with mode = "restart"): the bootout of the job (ExitTimeOut, 210 s: the 1 s settle
+# and the 60 s drain deadline, the 120 s at most of an unmount after them, and a margin, see
+# packaging/hostkeeper/units/tierstore.plist), its bootstrap and the same wait: 210 s and 1060
+# looks a second apart are 1270 s, below the bound;
 # `rollback` (1500 s) covers the same moves back, with no wait for the cache lock.
 # `cleanup` (1300 s) is above the stop timeout of a Linux instance (TimeoutStopSec, 960 s: the
 # 10 s settle, the 15 min drain deadline and a margin). `prepare = 0` is unbounded.

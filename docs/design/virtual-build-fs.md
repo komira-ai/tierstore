@@ -1,6 +1,6 @@
 # Build inputs as a filesystem: lazy, writable, digest-addressed trees served by tierstore
 
-Status: **Built on Linux and on macOS; the views of section 6.6 (dropped by C9) and the NFSv4.0 state recovery of section 7.5 (the frontend is NFSv3, which has none) are not built.** On Linux the file system is served through `tsfuse` with cached opens (no passthrough); on macOS by a read-only NFSv3 loopback server (decision C9). Both sit on one core with the control socket, pins and tree manifests. The one tierstore process serves the file system as its `fs` interface on both systems (P3 and P5 of [one-service.md](one-service.md); komira-ai/tierstore#454, komira-ai/tierstore#463), and the two-process path (`tierstore fs`, its unit, `fs.toml`, the fill socket) still ships beside it until P9 deletes it (komira-ai/tierstore#524). Open slices: `stall_ms` in the answer of `detach` (komira-ai/tierstore#555) and per-request-kind latency and per-attach timing metrics (komira-ai/tierstore#556). The status of each part is in [status.md](status.md). The owner's decisions of 2026-11-09 and 2026-11-10 are recorded in section 13.
+Status: **Built on Linux and on macOS; the views of section 6.6 (dropped by C9) and the NFSv4.0 state recovery of section 7.5 (the frontend is NFSv3, which has none) are not built.** On Linux the file system is served through `tsfuse` with cached opens (no passthrough); on macOS by a read-only NFSv3 loopback server (decision C9). Both sit on one core with the control socket, pins and tree manifests. The one tierstore process serves the file system as its `fs` interface on both systems (P3 and P5 of [one-service.md](one-service.md); komira-ai/tierstore#454, komira-ai/tierstore#463), and the two-process path (`tierstore fs` as a process, its Linux unit, the `[fs]` file, the fill socket, `take-fs 1`) is deleted (komira-ai/tierstore#523, komira-ai/tierstore#524); what is left of it is the macOS update path of the `tierstore-fs` job, komira-ai/tierstore#624. Open slices: `stall_ms` in the answer of `detach` (komira-ai/tierstore#555) and per-request-kind latency and per-attach timing metrics (komira-ai/tierstore#556). The status of each part is in [status.md](status.md). The owner's decisions of 2026-11-09 and 2026-11-10 are recorded in section 13.
 
 The experiments of section 11 and phase 0 have run (Linux on node-05 and in a KVM guest, macOS on the farm Mac, executor logs and a fanotify watch for the inputs). The farm's build executor (the service that runs build actions, called "the executor" below) keeps
 copying (or linking) each action's inputs into a scratch directory and removing it afterwards. This document designs, in
@@ -13,7 +13,7 @@ the owner's decisions and sets out the macOS frontend (C9, decided 2026-11-10: N
 
 **The `fuser` crate was replaced by `tsfuse`** (row T-R of `docs/design/fetch-cache-serve.md`): the Linux frontend speaks the FUSE protocol through `tsfuse`, the FUSE library of this repository, which serves an initialised connection without a handshake and sends `FUSE_NOTIFY_RESEND` itself, and the `fuser` fork is retired. Where this document speaks of the `fuser` crate or its patch (sections 3, 6.2, 7.1 and the plan of section 12), it records the design as built before that change.
 
-**One process, one unit, one configuration file** (the owner's decision of 2026-11-23, design in [one-service.md](one-service.md)): the file system becomes the `[[interface]]` of type `fs` of the build node's `tierstore`, and `tierstore fs` as a process of its own, its unit or launchd job, `fs.toml`, the fill socket between the two (removed by komira-ai/tierstore#523: the core calls the node's cache in the process, and `tierstore fs` serving exits 2) and the second hand-over go. Section 6.2 is rewritten for it, and decision C5 is reversed. Where this document speaks of `tierstore fs` as a process, of the fill socket (which no release serves after komira-ai/tierstore#523), of `fs.toml` or of the hand-over of `tierstore fs` (sections 5, 6.3, 6.5, 6.8, 7, 8 and 12), it describes the two-process path, which ships beside the one process's `fs` interface (P3 and P5 have landed) until P9 removes it (komira-ai/tierstore#524).
+**One process, one unit, one configuration file** (the owner's decision of 2026-11-23, design in [one-service.md](one-service.md)): the file system becomes the `[[interface]]` of type `fs` of the build node's `tierstore`, and `tierstore fs` as a process of its own, its unit or launchd job, `fs.toml`, the fill socket between the two (removed by komira-ai/tierstore#523: the core calls the node's cache in the process, and `tierstore fs` serving exits 2) and the second hand-over go. Section 6.2 is rewritten for it, and decision C5 is reversed. Where this document speaks of `tierstore fs` as a process, of the fill socket (which no release serves after komira-ai/tierstore#523), of `fs.toml` or of the hand-over of `tierstore fs` (sections 5, 6.3, 6.5, 6.8, 7, 8 and 12), it describes the two-process path, which release M+1 deleted on Linux (komira-ai/tierstore#524; the macOS update path of its job is komira-ai/tierstore#624) and which stays here as the record of the design.
 
 **What this document starts from.** An earlier proposal, built on researched findings, preceded it and recommended: one tierstore
 filesystem core in Rust with thin frontends (FUSE with passthrough on Linux, an NFSv4.0 loopback server on macOS, FSKit
@@ -422,7 +422,7 @@ reason for the split was to keep `CAP_SYS_ADMIN` out of the process that parses 
 not worth the second process, so the one process holds the capability, which it needs to mount (one-service.md section 2). This replaces "Why two processes" and decision C5 of the earlier
 text, and the `fs` front of `docs/design/pluggable-interfaces.md` section 4 is again the design.
 
-**What main holds** is the one process's `fs` interface (P3 and P5 of one-service.md section 6, in process) beside the two-process design, which stays until P9 (komira-ai/tierstore#524) deletes it. The two-process design is:
+**What main holds** is the one process's `fs` interface (P3 and P5 of one-service.md section 6, in process) The two-process design, which release M+1 deleted on Linux (komira-ai/tierstore#524), was:
 `tierstore fs`, a subcommand of the same binary with its own unit (`tierstore-fs@.service`, instances `a` and `b`) or
 launchd job (`tierstore-fs`), its own file (`fs.toml`, the `[fs]` table), holding `CAP_SYS_ADMIN` as its only capability
 with `RestrictAddressFamilies=AF_UNIX`, and, in the earlier releases, talking to the node's `tierstore` over a fill socket (`local_cache.fill_socket`,
@@ -993,6 +993,8 @@ which looks like a build failure; 7.4 says how the runtime tells it apart.
 
 ### 7.3 A live update of `tierstore fs` (Linux)
 
+**Built differently (komira-ai/tierstore#524).** The conversation of this section, `take-fs 1` between two `tierstore fs` processes, is deleted. The mount moves in the one hand-over of [one-service.md](one-service.md) section 3.1, on `server.handoff_socket`, with the same steps (the device in the store before `ack`, the readers stopped at `ack`, `done`, `ready`, `bye`, the device read only after `bye`). The rest of this section is the design of those steps.
+
 The hand-over of tierstore-handover.md section 0 is the model; `tierstore fs` has its own control socket for it (not the
 S3 instance's `handoff.sock`) and its own offer, built on the frame code of `server/handoff/wire.rs`. The offer today
 carries `<front> <address>` lines with one descriptor each, and a taker refuses any other line
@@ -1297,8 +1299,8 @@ New formats, each versioned and additive from its first release:
   its index at start and evicts them like any other, and ignores the pins file (the cache's scan reads `obj/` and `.stage/` only, `local_cache/layout.rs`;
   to be pinned by a test in the pull request that adds pins).
 - **The fill socket, the control socket and the hand-off conversation of `tierstore fs`** are local interfaces between
-  processes of one node, not public ones; each is versioned by its first line (`take-fs 1`), and a release offers the
-  session only to a taker that lists `handoff-fs-v1`.
+  processes of one node, not public ones; each is versioned by its first line (`take-fs 1`, no longer offered or asked, komira-ai/tierstore#524; the one hand-over is `take 1`), and a release offers the
+  session only to a taker that lists `handoff-service-v1`.
 - **The state in the runtime directory** (7.1) is local to one node and one mount; a new mount starts it afresh.
 - **jobscheduler**: the new input kind is sent only to hosts that list the capability (6.7).
 - **The S3 front** does not change.

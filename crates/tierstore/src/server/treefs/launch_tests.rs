@@ -1,11 +1,10 @@
-//! The process: whether it takes the mount over or makes it, what it tells the service manager,
+//! The process: whether it adopts the mount or makes it, what it tells the service manager,
 //! and what ends it. Over a real mount where one can be made; otherwise over a stand-in for the
 //! kernel's end of `/dev/fuse` (`fakedev.rs`).
 
 use std::os::fd::AsRawFd as _;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::{End, Platform, ended, hang, serve_with};
 use crate::Mono;
@@ -16,7 +15,7 @@ use crate::server::treefs::config::FsSettings;
 use crate::server::treefs::fakedev;
 use crate::server::treefs::fills::Calls;
 use crate::server::treefs::init_record::{self, Record};
-use crate::server::treefs::run::Kernel;
+use crate::server::treefs::run::{Kernel, Prepared, Running};
 use crate::server::treefs::sd::{FUSE_NAME, Manager, Stored};
 use crate::server::treefs::start::StartError;
 use crate::server::treefs::testing::{
@@ -86,7 +85,7 @@ fn leave_record(rig: &Rig, resend: bool) {
 }
 
 /// Asserts a start that makes the mount: the descriptor is put in the service manager's store and
-/// the manager has it before it is told ready; the hand-over socket is bound; and a SIGTERM stops the
+/// the manager has it before it is told ready; and a SIGTERM stops the
 /// readers and leaves the mount, for the store to keep, without unmounting it.
 #[test]
 fn a_fresh_start_stores_the_descriptor_says_ready_and_a_signal_leaves_the_mount() {
@@ -111,7 +110,6 @@ fn fresh_start() {
     );
     assert_eq!(manager.take_fds("FDSTORE=1\nFDNAME=fuse").len(), 1);
     assert!(mounted(&rig.mountpoint));
-    assert!(settings.handoff_socket.exists());
     assert_eq!(
         init_record::read(&rig.runtime).unwrap().generation,
         1,
@@ -120,7 +118,6 @@ fn fresh_start() {
     sigterm();
     thread.join().unwrap().unwrap();
     assert!(mounted(&rig.mountpoint), "the store keeps the mount");
-    assert!(!settings.handoff_socket.exists());
     detach(&rig.mountpoint);
 }
 
@@ -146,8 +143,7 @@ fn no_manager() {
     let mine = settings.clone();
     let calls = rig.calls();
     let thread = std::thread::spawn(move || serve_with((&mine, &calls), platform));
-    until(|| settings.handoff_socket.exists());
-    assert!(mounted(&rig.mountpoint));
+    until(|| mounted(&rig.mountpoint));
     sigterm();
     thread.join().unwrap().unwrap();
     assert!(!mounted(&rig.mountpoint));
@@ -244,7 +240,6 @@ fn a_start_says_ready_before_the_cache_takes_the_pins() {
     assert_eq!(
         timed,
         [
-            "tierstore fs: asking a running instance for the mount",
             "tierstore fs: making the directories",
             "tierstore fs: making the 0 attachments of the file again",
             "tierstore fs: setting up the core",
@@ -254,12 +249,8 @@ fn a_start_says_ready_before_the_cache_takes_the_pins() {
             "tierstore fs: ready after 0 ms",
         ]
     );
-    for line in [
-        "tierstore fs: asking a running instance for the mount took 0 ms\n",
-        "tierstore fs: serving the descriptor the service manager kept took 0 ms\n",
-    ] {
-        assert!(text.contains(line), "{line:?} in {text}");
-    }
+    let line = "tierstore fs: serving the descriptor the service manager kept took 0 ms\n";
+    assert!(text.contains(line), "{line:?} in {text}");
 }
 
 /// Asserts the bound of a restart on a kernel that cannot send requests again: the connection is
@@ -284,8 +275,8 @@ fn a_restart_without_resend_aborts_a_connection_that_stays_hung() {
     std::fs::write(kernel.connections.join("77/waiting"), "2\n").unwrap();
     let manager = FakeManager::start(&rig.dir.path().join("notify.sock"));
     let (device, _kernel) = fakedev::pair();
-    let platform = platform(&manager, Some(device.as_raw_fd()), kernel.clone());
-    let error = serve_with((&settings, &rig.calls()), platform).unwrap_err();
+    let aborting = platform(&manager, Some(device.as_raw_fd()), kernel.clone());
+    let error = serve_with((&settings, &rig.calls()), aborting).unwrap_err();
     assert!(matches!(error, StartError::Aborted));
     assert_eq!(error.status(), 1);
     assert_eq!(
@@ -301,19 +292,12 @@ fn a_restart_without_resend_aborts_a_connection_that_stays_hung() {
     // Nothing waits: the watch ends and the process serves until the signal.
     std::fs::write(kernel.connections.join("77/waiting"), "0\n").unwrap();
     std::fs::remove_file(kernel.connections.join("77/abort")).unwrap();
-    let platform = super::Platform {
-        manager: Manager::new(None),
-        stored: vec![Stored {
-            name: FUSE_NAME.to_owned(),
-            fd: device.as_raw_fd(),
-        }],
-        kernel,
-        clock: Arc::new(Mono::new()),
-    };
+    let watching = FakeManager::start(&rig.dir.path().join("watching.sock"));
+    let platform = platform(&watching, Some(device.as_raw_fd()), kernel);
     let mine = settings.clone();
     let calls = rig.calls();
     let thread = std::thread::spawn(move || serve_with((&mine, &calls), platform));
-    until(|| mine_exists(&settings));
+    until_ready(&watching);
     sigterm();
     thread.join().unwrap().unwrap();
     assert!(!rig.dir.path().join("connections/77/abort").exists());
@@ -358,30 +342,6 @@ fn a_restart_whose_resend_is_refused_is_watched_and_aborted_when_the_requests_st
     );
 }
 
-/// Asserts that the hand-over socket exists before the service manager is told the unit is ready,
-/// so that the instance started next finds it: a start that cannot bind it ends in an error
-/// without having said ready.
-#[test]
-fn the_manager_is_not_told_ready_before_the_hand_over_socket_is_bound() {
-    let _one_at_a_time = SIGNALS
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let rig = Rig::new("tfs-launch-unbound", sample());
-    leave_record(&rig, false);
-    let mut settings = rig.settings();
-    settings.handoff_socket = rig.dir.path().join("no/dir/handoff.sock");
-    let manager = FakeManager::start(&rig.dir.path().join("notify.sock"));
-    let (device, _kernel) = fakedev::pair();
-    let platform = platform(&manager, Some(device.as_raw_fd()), kernel_of(&rig, ""));
-    let error = serve_with((&settings, &rig.calls()), platform).unwrap_err();
-    assert!(error.to_string().contains("hand-over socket"), "{error}");
-    assert!(!manager.texts().iter().any(|text| text == "READY=1"));
-}
-
-fn mine_exists(settings: &FsSettings) -> bool {
-    settings.handoff_socket.exists()
-}
-
 /// Asserts that a connection the kernel does not show is served without a watch.
 #[test]
 fn a_restart_on_a_connection_the_kernel_does_not_show_is_served_unwatched() {
@@ -397,19 +357,12 @@ fn a_restart_on_a_connection_the_kernel_does_not_show_is_served_unwatched() {
     );
     let kernel = kernel_of(&rig, &info);
     let (device, _kernel) = fakedev::pair();
-    let platform = Platform {
-        manager: Manager::new(None),
-        stored: vec![Stored {
-            name: FUSE_NAME.to_owned(),
-            fd: device.as_raw_fd(),
-        }],
-        kernel,
-        clock: Arc::new(Mono::new()),
-    };
+    let manager = FakeManager::start(&rig.dir.path().join("notify.sock"));
+    let platform = platform(&manager, Some(device.as_raw_fd()), kernel);
     let mine = settings.clone();
     let calls = rig.calls();
     let thread = std::thread::spawn(move || serve_with((&mine, &calls), platform));
-    until(|| settings.handoff_socket.exists());
+    until_ready(&manager);
     sigterm();
     thread.join().unwrap().unwrap();
 }
@@ -467,56 +420,6 @@ fn dropped_and_remade(bogus: bool) {
     detach(&rig.mountpoint);
 }
 
-/// Asserts a start that takes the mount from a running instance: the descriptor goes into the
-/// manager's store before the running instance is told to stop, the mount is served from the
-/// recorded outcome, the manager is told ready, and the running instance ends.
-#[tokio::test]
-async fn a_start_takes_the_mount_from_the_running_instance() {
-    let old = fakedev::instance(
-        "tfs-launch-take",
-        std::time::Duration::from_secs(3600),
-        None,
-    );
-    old.assert_serving(1);
-    let manager = FakeManager::start(&old.rig.dir.path().join("notify.sock"));
-    // The stand-in for the device is a socket, not the FUSE device.
-    let kernel = Kernel {
-        device: |_| Ok(()),
-        ..Kernel::real()
-    };
-    let platform = platform(&manager, None, kernel);
-    let settings = old.settings.clone();
-    let calls = old.rig.calls();
-    let ended = Arc::new(AtomicBool::new(false));
-    let done = Arc::clone(&ended);
-    let thread = std::thread::spawn(move || {
-        let _one_at_a_time = SIGNALS
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let served = serve_with((&settings, &calls), platform);
-        done.store(true, Ordering::Release);
-        served
-    });
-    within("the running instance ends", old.serving)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(
-        manager.texts()[..2],
-        ["FDSTORE=1\nFDNAME=fuse", "BARRIER=1"]
-    );
-    until_ready(&manager);
-    // The successor answers the kernel.
-    old.kernel.getattr(9, 1);
-    let reply = old.kernel.reply();
-    assert_eq!((reply.unique, reply.error), (9, 0));
-    assert_eq!(init_record::read(&old.rig.runtime).unwrap().generation, 3);
-    sigterm();
-    thread.join().unwrap().unwrap();
-    assert!(ended.load(Ordering::Acquire));
-    drop(old.running);
-}
-
 /// Asserts that a process whose mount a successor took ends with success and leaves its state
 /// whole, for the end of the process to release: the core is not taken apart (a weak reference to
 /// it still reaches it after the end), and a part of it still held elsewhere (by the session of a
@@ -526,19 +429,14 @@ async fn a_start_takes_the_mount_from_the_running_instance() {
 /// ends with an error because a client was connected.
 #[tokio::test]
 async fn after_a_hand_over_the_state_is_left_whole_to_the_end_of_the_process() {
-    let fakedev::Instance {
-        rig: _rig,
-        running,
-        serving,
-        kernel: _kernel,
-        ..
-    } = fakedev::instance(
-        "tfs-launch-left",
-        std::time::Duration::from_secs(3600),
-        None,
+    let rig = Rig::new("tfs-launch-left", sample());
+    leave_record(&rig, false);
+    let settings = rig.settings();
+    let (device, _kernel) = fakedev::pair();
+    let prepared = Prepared::load(&settings).unwrap();
+    let running = Arc::new(
+        Running::adopt((&settings, &rig.calls()), prepared, device, (None, false)).unwrap(),
     );
-    serving.abort();
-    let _ = serving.await;
     let state = Arc::downgrade(&running);
     let manager = Manager::new(None);
 
@@ -600,52 +498,6 @@ fn a_start_that_cannot_be_made_is_the_error_of_serve() {
     assert!(error.to_string().contains("fs.cache_path"), "{error}");
 }
 
-/// Asserts the hand-over between two processes of this release over one connection: the second
-/// takes the mount from the first, which ends with success once the second serves; the second puts
-/// the descriptor in its own manager's store and says ready to it; and the kernel's requests are
-/// answered by the second.
-#[test]
-fn a_hand_over_between_two_processes_ends_the_first_with_success() {
-    let _one_at_a_time = SIGNALS
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let rig = Rig::new("tfs-launch-two", sample());
-    leave_record(&rig, false);
-    let settings = rig.settings();
-    let (device, kernel) = fakedev::pair();
-    let first_manager = FakeManager::start(&rig.dir.path().join("first.sock"));
-    let first = platform(
-        &first_manager,
-        Some(device.as_raw_fd()),
-        kernel_of(&rig, ""),
-    );
-    let mine = settings.clone();
-    let calls = rig.calls();
-    let first_thread = std::thread::spawn(move || serve_with((&mine, &calls), first));
-    until_ready(&first_manager);
-    kernel.getattr(1, 1);
-    assert_eq!(kernel.reply().unique, 1);
-
-    let second_manager = FakeManager::start(&rig.dir.path().join("second.sock"));
-    // The stand-in for the device is a socket, not the FUSE device.
-    let second = platform(&second_manager, None, kernel_of(&rig, ""));
-    let mine = settings.clone();
-    let calls = rig.calls();
-    let second_thread = std::thread::spawn(move || serve_with((&mine, &calls), second));
-    until_ready(&second_manager);
-    first_thread.join().unwrap().unwrap();
-    assert_eq!(
-        second_manager.texts(),
-        ["FDSTORE=1\nFDNAME=fuse", "BARRIER=1", "READY=1"]
-    );
-    kernel.getattr(2, 1);
-    assert_eq!(kernel.reply().unique, 2);
-    assert_eq!(init_record::read(&rig.runtime).unwrap().generation, 3);
-    sigterm();
-    second_thread.join().unwrap().unwrap();
-    drop(device);
-}
-
 /// Asserts that a service manager that cannot be reached is said and does not stop the process: the
 /// mount is made, the descriptor is not stored, the unit is not said ready, and a signal leaves the
 /// mount.
@@ -672,40 +524,8 @@ fn unreachable_manager() {
     let mine = settings.clone();
     let calls = rig.calls();
     let thread = std::thread::spawn(move || serve_with((&mine, &calls), platform));
-    until(|| settings.handoff_socket.exists());
-    assert!(mounted(&rig.mountpoint));
+    until(|| mounted(&rig.mountpoint));
     sigterm();
     thread.join().unwrap().unwrap();
     detach(&rig.mountpoint);
-}
-
-/// Asserts that a start that is offered the mount and cannot store the descriptor takes nothing:
-/// it fails by name, and the running instance goes on serving.
-#[tokio::test]
-async fn a_start_that_cannot_store_the_descriptor_leaves_the_running_instance_serving() {
-    let old = fakedev::instance(
-        "tfs-launch-nostore",
-        std::time::Duration::from_secs(3600),
-        None,
-    );
-    let platform = Platform {
-        manager: Manager::new(Some(old.rig.dir.path().join("nobody-home").as_os_str())),
-        stored: Vec::new(),
-        // The stand-in for the device is a socket, not the FUSE device.
-        kernel: kernel_of(&old.rig, ""),
-        clock: Arc::new(Mono::new()),
-    };
-    let settings = old.settings.clone();
-    let calls = old.rig.calls();
-    let refused = tokio::task::spawn_blocking(move || serve_with((&settings, &calls), platform))
-        .await
-        .unwrap();
-    match refused {
-        Err(StartError::Handover(why)) => {
-            assert!(why.to_string().contains("cannot be stored"), "{why}");
-        }
-        other => panic!("{:?}", other.err()),
-    }
-    old.assert_serving(1);
-    assert!(old.settings.handoff_socket.exists());
 }

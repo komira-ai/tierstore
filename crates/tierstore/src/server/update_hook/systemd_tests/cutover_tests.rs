@@ -2,6 +2,7 @@
 
 use std::ffi::OsString;
 use std::process::ExitCode;
+use std::time::Duration;
 
 use tierstore_testkit::dir::TestDir;
 
@@ -70,6 +71,24 @@ fn a_hand_over_that_cannot_bind_leaves_the_old_instance_serving() {
     assert_eq!(fake.actions()[before..], ["markers.clear b"]);
     assert_eq!(fake.record(), Record::idle(Some(Instance::A)));
     assert_eq!(fake.running(), [Instance::A]);
+}
+
+/// Asserts that a hand-over to a release that does not list the hand-over word (the new one
+/// cannot take the sockets of the old instance) fails the `cutover` with `probe_failed` while
+/// the old instance still serves, still reversible, and the new instance is left failed with no
+/// `swapped` recorded. Catches a cutover that reports a start that took no sockets as served.
+#[test]
+fn a_hand_over_to_a_release_without_the_hand_over_word_leaves_the_old_instance_serving() {
+    let fake = SystemdFake::installed();
+    let p = params(NEW, Some(OLD));
+    fake.drive(&p, &[Prepare]);
+    fake.set_capabilities(NEW, &[]);
+    let done = fake.run(Cutover, &p);
+    assert_failed(&done, Reason::ProbeFailed);
+    assert!(done.report.reversible);
+    assert_eq!(fake.peek(Instance::A), UnitState::Active);
+    assert_eq!(fake.peek(Instance::B), UnitState::Failed);
+    assert!(!fake.record().has(Marker::Swapped));
 }
 
 /// Asserts that a new release that never answers `/readyz` fails the `cutover` with `not_ready`
@@ -595,17 +614,17 @@ fn update_hook_cleanup_on_the_command_line_commits_past_the_draining_503() {
     assert!(!fake.record().committed());
 }
 
-/// Asserts the fs hand-over of `cutover` through the verb hostkeeper runs, `update-hook cutover
-/// --params`, over the cache lock as the server holds it: with the old store draining 13 s and the
-/// new one taking the lock 28 s after it exits (node 02's times), the one run exits 0 with a
-/// reversible report and no reason, `tierstore-fs@b` is started only once the store is read-write,
-/// and the record says `swapped`; with a store that stays read-only through the wait it exits 75
-/// with `draining`, retry after 10 seconds, no fs unit touched and no `swapped`. Catches a cutover
-/// that exits 75 on the first read-only answer, which hostkeeper rolls back and never runs again.
+/// Asserts that `cutover` through the verb hostkeeper runs, `update-hook cutover --params`, over
+/// the cache lock as the server holds it (the old store draining 13 s and the new one taking the
+/// lock 28 s after it exits: node 02's times) exits 0 with a reversible report and no reason as
+/// soon as the new store serves the release, read-only as it then is, and records `swapped`: it
+/// waits for the build and not for the lock, which `verify` defers on. Catches a cutover that waits
+/// for the cache lock, which a node whose old store drains for minutes would run into the step's
+/// bound with.
 #[test]
-fn update_hook_cutover_on_the_command_line_waits_for_the_cache_lock_before_the_fs_take() {
+fn update_hook_cutover_on_the_command_line_does_not_wait_for_the_cache_lock() {
     let p = params(NEW, Some(OLD));
-    let fake = SystemdFake::fs_installed();
+    let fake = SystemdFake::installed();
     fake.drive(&p, &[Prepare]);
     fake.set_drain_looks(13);
     fake.hold_cache_lock(28);
@@ -615,29 +634,40 @@ fn update_hook_cutover_on_the_command_line_waits_for_the_cache_lock_before_the_f
     assert_eq!(line["reversible"], true);
     assert_eq!(
         line["detail"],
-        format!(
-            "tierstore@b serves {} (hand-over); tierstore-fs@b holds the mount; the store took \
-             the cache lock after 39 s",
-            version_of(NEW)
-        )
+        format!("tierstore@b serves {} (hand-over)", version_of(NEW))
     );
-    assert!(!fake.fs_started_over_read_only());
-    assert_eq!(
-        fake.fs_actions(),
-        ["fs_markers.set b", "fs_units.start b", "fs_markers.clear a"]
-    );
-    assert!(fake.record().has(Marker::Swapped));
-
-    let fake = SystemdFake::fs_installed();
-    fake.drive(&p, &[Prepare]);
-    fake.set_read_only(true);
-    let (code, line) = on_the_command_line(&fake, "cutover", "tierstore-hook-cutover-read-only");
-    assert_eq!(format!("{code:?}"), format!("{:?}", ExitCode::from(75)));
-    assert_eq!(line["reason"], "draining");
-    assert_eq!(line["retry_after_secs"], 10);
-    assert_eq!(line["reversible"], true);
     assert!(fake.fs_actions().is_empty(), "{:?}", fake.fs_actions());
-    assert!(!fake.record().has(Marker::Swapped));
+    assert!(fake.record().has(Marker::Swapped));
+}
+
+/// What `/readyz` of the instance that serves says, as one line.
+fn readyz(fake: &SystemdFake) -> String {
+    fake.ports()
+        .instances
+        .get(9300, "/readyz")
+        .expect("an instance serves")
+        .body
+}
+
+/// Asserts the cache lock as the clock moves it: with the holder's unit gone and no instance
+/// serving yet, the lock is not taken by anyone; once the new instance serves, `/readyz` says
+/// `ready read-only` through the 3 seconds of its scan of the cache, a second at a time, and
+/// `ready read-write` as the scan ends and it holds the lock. Catches a store that says
+/// read-write while no instance holds the lock, or one that never takes a free lock.
+#[test]
+fn the_new_instance_serves_read_only_until_it_takes_the_released_cache_lock() {
+    let fake = SystemdFake::installed();
+    fake.hold_cache_lock(3);
+    fake.set_unit(Instance::A, UnitState::Deactivating, Some(OLD), false);
+    fake.set_unit(Instance::B, UnitState::Inactive, None, false);
+    fake.pause(Duration::from_secs(1));
+    assert_eq!(fake.peek(Instance::A), UnitState::Inactive);
+    fake.set_unit(Instance::B, UnitState::Active, Some(NEW), true);
+    assert_eq!(readyz(&fake), "ready read-only");
+    fake.pause(Duration::from_secs(2));
+    assert_eq!(readyz(&fake), "ready read-only");
+    fake.pause(Duration::from_secs(1));
+    assert_eq!(readyz(&fake), "ready read-write");
 }
 
 /// Asserts that a hand-over whose new instance opens its cache for 65 looks (as a build node's

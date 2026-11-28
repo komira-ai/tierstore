@@ -13,7 +13,7 @@ use super::super::fs::TreeNfs;
 use super::super::mount::{Ran, Runner};
 use super::super::wire_client::{Client, Cred, Dec, Enc, GETATTR, NFS};
 use super::{Leaving, Running, Serve, serve_with, timer};
-use crate::server::treefs::config::{FsSettings, builders, from_text};
+use crate::server::treefs::config::{FsSettings, builders, from_params};
 use crate::server::treefs::ino;
 use crate::server::treefs::locked;
 use crate::server::treefs::testing::SIGNALS;
@@ -444,29 +444,24 @@ async fn a_stop_after_the_mount_is_gone_succeeds_without_an_unmount() {
     );
 }
 
-/// The `[fs.nfs]` table of a file written for tierstore 0.3.166, which read `fs.nfs.allowed_uids`
-/// and served only the users it listed; serving only (`mount = false`) on any free loopback port.
-const NFS_TABLE_OF_0_3_166: &str = "[fs.nfs]\nlisten = \"127.0.0.1:0\"\nmount = false\n\
-    allowed_uids = [9999]\n";
+/// The `nfs` params of an `fs` interface that serves only (`mount = false`) on any free loopback
+/// port.
+const NFS_TABLE: &str = "[nfs]\nlisten = \"127.0.0.1:0\"\nmount = false\n";
 
-/// Asserts that this release starts on a file written for tierstore 0.3.166 that sets
-/// `fs.nfs.allowed_uids`, read by the loader of the process, and serves every user over the wire:
-/// the one the file listed, the user of the process (the mount user, which that release served by
-/// default), and one that neither names; and that `fs.nfs.mount = false` serves without running
-/// any command, then stops without one. Catches a release that stops on such a file, or that
-/// still refuses a user the file leaves out.
+/// Asserts that this release starts on the `nfs` params of an `fs` interface, read by the loader
+/// of the interface's params, and serves every user over the wire: a user the params do not name
+/// (the one a release up to 0.3.166 listed in `allowed_uids`), the user of the process (the mount
+/// user, which that release served by default), and another; and that `nfs.mount = false` serves
+/// without running any command, then stops without one. Catches a release that refuses a user it
+/// was not told of.
 #[tokio::test]
-async fn a_start_on_a_file_that_still_lists_users_serves_every_user() {
+async fn a_start_on_params_that_list_no_users_serves_every_user() {
     let (rig, _) = attached("nfs-run-nomount");
     let (listed, other) = (9_999, 7_777);
     let default_user = euid();
     assert!(![listed, other].contains(&default_user));
-    let text = format!(
-        "[fs]\nclient_group = \"77\"\nowner = \"1000:1001\"\n\
-         cache_path = \"/var/cache/tierstore\"\n\
-         {NFS_TABLE_OF_0_3_166}"
-    );
-    let loaded = from_text(&text, &builders).unwrap();
+    let text = format!("client_group = \"77\"\nowner = \"1000:1001\"\n{NFS_TABLE}");
+    let loaded = from_params(&text, &builders).unwrap();
     let settings = settings(&rig, loaded.nfs);
     let runner = Recorder::new(true);
     let running = Running::start(
@@ -482,7 +477,7 @@ async fn a_start_on_a_file_that_still_lists_users_serves_every_user() {
 
     let mut client = Client::connect(running.address).await;
     let handle = client.mount("/").await;
-    // Each case is named by its place: the listed user, the user of the process, another.
+    // Each case is named by its place: a user of the old list, the user of the process, another.
     for (case, uid) in [listed, default_user, other].into_iter().enumerate() {
         let reply = client
             .call(

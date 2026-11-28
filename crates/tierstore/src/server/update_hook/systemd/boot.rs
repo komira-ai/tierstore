@@ -5,13 +5,12 @@ use super::super::ports::{Instance, UnitState};
 use super::super::record::{Marker, Record};
 use super::super::report::Done;
 use super::cleanup::finish;
-use super::{Ctx, fs, unit_name};
+use super::{Ctx, unit_name};
 
 /// Stops both instances, removes both markers and the copy of the binary the units run. The data
 /// directory, the configuration and the record directory stay; the record says nothing is in
 /// flight and nothing serves.
 pub(super) fn uninstall(c: &Ctx<'_, '_>) -> Result<Done, Done> {
-    fs::uninstall(c)?;
     for instance in Instance::ALL {
         c.ports.units.stop(instance)?;
     }
@@ -67,8 +66,7 @@ pub(super) fn restore(
     c.ports.markers.set(desired)?;
     c.ports.host.install_binary(&params.staged_release)?;
     c.ports.units.start(desired)?;
-    let fs = fs::restore(c, record)?;
-    let mut said = format!("{} started{fs}", unit_name(desired));
+    let mut said = format!("{} started", unit_name(desired));
     if let Some(committed) = record.filter(|r| r.updating && r.committed()) {
         finish(c, committed)?;
         said.push_str("; the committed update is finished");

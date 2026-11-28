@@ -6,7 +6,7 @@
 //! |---|---|---|
 //! | `fs.put.enabled` | serve `put/` | `false` |
 //! | `fs.put.prefixes` | the key prefixes a job may write under, each ending in `/` (needed when enabled) | none |
-//! | `fs.put.stage_dir` | where the bytes are staged; on the volume of `fs.cache_path` (needed when enabled) | none |
+//! | `fs.put.stage_dir` | where the bytes are staged; on the volume of `local_cache.path` (needed when enabled) | none |
 //! | `fs.put.max_object_bytes` | the most bytes of one object | no limit |
 //! | `fs.put.max_dir_bytes` | the most staged bytes of one directory | no limit |
 //! | `fs.put.max_dir_files` | the most names of one directory, staged or committed | no limit |

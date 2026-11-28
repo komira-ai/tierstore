@@ -460,27 +460,26 @@ fn verify_fails_when_the_installed_file_cannot_be_checked() {
     assert!(!node.fake.record().has(Marker::Verified));
 }
 
-/// Asserts that a config update on a node with an fs process leaves the fs process alone (the
-/// instance a keeps the mount, with no fs unit started or stopped and no fs hand-over planned),
-/// and that `cleanup` writes the store's new letter and the fs letter a into the release's
-/// record. Catches a hand-over of the fs process on an edit of the store's configuration.
+/// Asserts that a config update that restarts or hands over the store, on a node that still runs
+/// the fs unit of the earlier layout, is refused by the arm's `prepare` with `mode_unsupported`
+/// and the exact detail naming the unit, its marker and the record key, and that nothing is
+/// recorded, started or stopped. Catches a config update that replaces the store beside an fs
+/// process this release cannot hand over.
 #[test]
-fn a_config_update_leaves_the_fs_process_alone_and_writes_its_letter_back() {
+fn a_config_update_of_a_node_that_still_runs_the_fs_unit_is_refused() {
     let node = Linux::with_fs();
-    let p = update();
-    node.go(&p, &[Prepare]);
-    let prepared = node.fake.record();
+    let before = node.fake.record();
+    let done = node.step(Prepare, &update());
+    lin::assert_failed(&done, Reason::ModeUnsupported);
     assert_eq!(
-        (prepared.fs_live, prepared.fs_next),
-        (Some(Instance::A), None)
+        lin::detail(&done),
+        "this node still runs the two-process layout (tierstore-fs@a.service is active; the \
+         marker run-fs-a is present; the record names fs_live a): switch this node to the fs \
+         interface with release M first"
     );
-    node.go(&p, &[Cutover, Verify, Cleanup]);
-    assert_eq!(node.fake.fs_running(), [Instance::A]);
-    assert_eq!(node.fake.fs_markers(), [Instance::A]);
+    assert_eq!(node.fake.record(), before);
+    assert!(node.fake.actions().is_empty());
     assert!(node.fake.fs_actions().is_empty());
-    let mut want = release_record(Instance::B);
-    want.fs_live = Some(Instance::A);
-    assert_eq!(node.service.get(), Some(want));
 }
 
 /// Asserts that a config update of a node with no fs process leaves the `fs_live` the release's
@@ -494,24 +493,6 @@ fn a_config_update_without_an_fs_process_keeps_the_release_records_fs_letter() {
     };
     node.service.set(&held);
     node.go(&update(), &[Prepare, Cutover, Verify, Cleanup]);
-    let want = Record {
-        fs_live: Some(Instance::A),
-        ..release_record(Instance::B)
-    };
-    assert_eq!(node.service.get(), Some(want));
-}
-
-/// Asserts that `cleanup` writes the fs letter into a release record that already names the
-/// store's new instance but not the fs process's, with a write (the record is not left alone
-/// because the store's letter agrees). Catches a write-back that compares the store's letter
-/// alone.
-#[test]
-fn cleanup_writes_the_fs_letter_into_a_release_record_that_names_the_store_instance() {
-    let node = Linux::with_fs();
-    let p = update();
-    node.go(&p, &[Prepare, Cutover, Verify]);
-    node.service.set(&release_record(Instance::B));
-    node.go(&p, &[Cleanup]);
     let want = Record {
         fs_live: Some(Instance::A),
         ..release_record(Instance::B)

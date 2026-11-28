@@ -1,7 +1,8 @@
 //! The update of a farm node, on each platform arm, fed the farm's committed files as they are
 //! (`live_configs`): the update of a release by hand-over, and the config hook's switch of a node
 //! from two processes to one, over the fake systemd and the fake launchd. Each ends with the node
-//! serving its mount, or fails and rolls back to the node that served before.
+//! serving its mount, or fails and rolls back to the node that served before; on Linux the switch
+//! is refused before anything is recorded (this release has no step for the second unit).
 //!
 //! The hook reads paths, not files under them, so the files are read unmodified: the tests here
 //! put the committed text at the path the hook reads, and nothing is moved onto a scratch
@@ -15,7 +16,7 @@ use super::super::super::systemd_tests::fake::{NEW, OLD, SystemdFake, params, ve
 use super::super::super::{
     CACHE_HANDOFF_CAPABILITY, FS_CONFIG_FILE, FS_LAUNCHD_PLIST, HANDOFF_CAPABILITY,
     HANDOFF_EXEC_CAPABILITY, HANDOFF_SERVICE_CAPABILITY, HANDOFF_STATE_DIR_CAPABILITY, Instance,
-    Instances, LAUNCHD_PLIST, Marker, Mode, Reason, Record, Step, UnitState,
+    Instances, LAUNCHD_PLIST, Marker, Mode, Reason, Record, Step,
 };
 use super::macos::{Mac, mac_update};
 use super::{Linux, lin, staged, update};
@@ -208,7 +209,8 @@ fn a_release_update_of_the_farms_linux_node_needs_handoff_service_v1_in_both_rel
 }
 
 /// A Linux node of two processes: the farm's file without its `fs` interface serves, the
-/// `tierstore-fs` instance `a` holds the mount, and the config package stages the farm's file.
+/// `tierstore-fs` instance `a` holds the mount (its unit active, its marker and `fs_live` on
+/// record), and the config package stages the farm's file.
 fn linux_switching() -> Linux {
     let serving = linux_without_fs();
     let fake = SystemdFake::fs_installed();
@@ -216,119 +218,26 @@ fn linux_switching() -> Linux {
     Linux::on(fake, &[], Some(&serving), LINUX)
 }
 
-/// Asserts that the config hook's switch of a Linux node from two processes to the farm's file
-/// ends with the one process serving: `prepare` records the switch with the fs instance that
-/// holds the mount, `cutover` starts the other store instance (which takes the mount from the fs
-/// process) and only then clears both fs markers, and once the fs process has ended `verify` and
-/// `cleanup` commit with no fs instance on record, no fs marker and no fs unit running. Catches a
-/// hook that refuses or mis-reads the farm's file at the switch, one that leaves the old fs unit
-/// startable, and one that commits with the fs process still holding the mount.
+/// Asserts that the config hook refuses the switch of a Linux node from two processes to the
+/// farm's file: `prepare` fails with `mode_unsupported` and the exact detail that names the fs unit
+/// that runs, and nothing is recorded, started or stopped, the store's units and the fs unit and
+/// marker alike. This release has no step that moves the mount from `tierstore-fs@` into the one
+/// process; the node is switched by the release that does. Catches a config hook that starts the
+/// farm's file on a node whose mount another process still holds.
 #[test]
-fn the_switch_of_the_farms_linux_node_to_one_process_ends_with_no_fs_instance() {
+fn the_switch_of_the_farms_linux_node_to_one_process_is_refused() {
     let node = linux_switching();
-    let p = update();
-    let prepared = node.step(Prepare, &p);
-    lin::assert_ok(&prepared);
-    assert!(
-        lin::detail(&prepared)
-            .ends_with("; the mount moves from tierstore-fs@a to the one process of the new file")
-    );
-    let record = node.fake.record();
-    assert!(record.fs_switch);
+    let before = node.fake.record();
+    let done = node.step(Prepare, &update());
+    lin::assert_failed(&done, Reason::ModeUnsupported);
     assert_eq!(
-        (record.fs_live, record.fs_next, record.mode),
-        (Some(Instance::A), None, Some(Mode::Handover))
+        lin::detail(&done),
+        "this node still runs the two-process layout (tierstore-fs@a.service is active): switch \
+         this node to the fs interface with release M first"
     );
+    assert_eq!(node.fake.record(), before);
+    assert!(node.fake.actions().is_empty());
     assert!(node.fake.fs_actions().is_empty());
-
-    lin::assert_ok(&node.step(Cutover, &p));
-    assert_eq!(
-        node.fake.fs_actions(),
-        ["fs_markers.clear a", "fs_markers.clear b"]
-    );
-    assert!(node.fake.fs_markers().is_empty());
-    // The fs process ends by itself once the new instance has taken the mount.
-    node.fake
-        .set_fs_unit(Instance::A, UnitState::Inactive, None);
-    node.fake
-        .set_unit(Instance::A, UnitState::Inactive, None, false);
-    node.go(&p, &[Verify, Cleanup]);
-
-    let end = node.fake.record();
-    assert!(!end.updating);
-    assert!(end.committed());
-    assert_eq!((end.fs_live, end.fs_next), (None, None));
-    assert!(node.fake.fs_running().is_empty());
-    assert!(node.fake.fs_markers().is_empty());
-    assert_eq!(node.fake.running(), [Instance::B]);
-    assert_eq!(node.fake.markers(), [Instance::B]);
-    assert_eq!(
-        node.fake.fs_actions(),
-        ["fs_markers.clear a", "fs_markers.clear b"]
-    );
-}
-
-/// Asserts that the switch of the farm's Linux node whose new instance does not start fails
-/// `cutover` with unit_failed with the fs markers and the fs process untouched, and that the
-/// rollback then leaves the node as it was: the fs process holds the mount and the old store
-/// instance serves, with no fs unit started or stopped. Catches a cutover that gives the fs
-/// process up before the new instance serves.
-#[test]
-fn the_switch_of_the_farms_linux_node_whose_new_instance_does_not_start_keeps_the_mount() {
-    let node = linux_switching();
-    let p = update();
-    node.go(&p, &[Prepare]);
-    node.fake.fail_on(Some("units.start b"));
-    lin::assert_failed(&node.step(Cutover, &p), Reason::UnitFailed);
-    node.fake.fail_on(None);
-    assert_eq!(node.fake.fs_markers(), [Instance::A]);
-    assert_eq!(node.fake.fs_running(), [Instance::A]);
-
-    lin::assert_ok(&node.step(Rollback, &p));
-    assert!(node.fake.fs_actions().is_empty());
-    assert_eq!(node.fake.fs_markers(), [Instance::A]);
-    assert_eq!(node.fake.fs_running(), [Instance::A]);
-    assert_eq!(node.fake.running(), [Instance::A]);
-    let mut want = Record::idle(Some(Instance::A));
-    want.fs_live = Some(Instance::A);
-    assert_eq!(node.fake.record(), want);
-}
-
-/// Asserts that the switch of the farm's Linux node whose new process took the mount but answers as
-/// another build fails `verify` with wrong_build, and that the rollback brings the mount back first
-/// (the fs marker, then the fs unit) and the sockets after (the store's marker, then its unit),
-/// ending with both serving and the fs instance on record. Catches a rollback that hands the
-/// sockets back before the mount, to a process that still holds the mount.
-#[test]
-fn the_switch_of_the_farms_linux_node_that_serves_the_wrong_build_gives_the_mount_back_first() {
-    let node = linux_switching();
-    let p = update();
-    node.go(&p, &[Prepare, Cutover]);
-    node.fake.lie(lin::OLD, OTHER_BUILD);
-    lin::assert_failed(&node.step(Verify, &p), Reason::WrongBuild);
-    node.fake.lie(lin::OLD, &lin::version_of(lin::OLD));
-    // The old fs process and the old store ended after they gave the mount and the sockets away.
-    node.fake
-        .set_fs_unit(Instance::A, UnitState::Inactive, None);
-    node.fake
-        .set_unit(Instance::A, UnitState::Inactive, None, false);
-
-    lin::assert_ok(&node.step(Rollback, &p));
-    let log = node.fake.log();
-    let at = |prefix: &str| {
-        log.iter()
-            .position(|line| line.starts_with(prefix))
-            .unwrap_or_else(|| panic!("no call {prefix}: {log:?}"))
-    };
-    assert!(at("fs_markers.set a") < at("fs_units.start a"), "{log:?}");
-    assert!(at("fs_units.start a") < at("markers.set a"), "{log:?}");
-    assert!(at("markers.set a") < at("units.start a"), "{log:?}");
-    assert_eq!(node.fake.fs_running(), [Instance::A]);
-    assert_eq!(node.fake.fs_markers(), [Instance::A]);
-    assert_eq!(node.fake.running(), [Instance::A]);
-    let mut want = Record::idle(Some(Instance::A));
-    want.fs_live = Some(Instance::A);
-    assert_eq!(node.fake.record(), want);
 }
 
 /// A Mac whose both releases list `handoff-exec-v1` and whose file is the farm's.

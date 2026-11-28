@@ -1,9 +1,9 @@
 //! The mount of a build node's `fs` interface, made by the one process under systemd: `tierstore
 //! --config <file>` whose file has an `[[interface]]` of type `fs`, started as a transient unit with
-//! the service options of the unit that makes the mount today
-//! (`packaging/hostkeeper/units/tierstore-fs@.service`: `CAP_SYS_ADMIN` as its one capability, and
-//! none of the options that give a service a mount namespace of its own), with the address families
-//! of the S3 front added, since the one process serves it too. The unit is `Type=notify`, so the
+//! the service options of the unit that runs it
+//! (`packaging/hostkeeper/units/tierstore@.service`: `CAP_SYS_ADMIN` as its one capability, and
+//! none of the options that give a service a mount namespace of its own). The packaged unit is
+//! `Type=simple`; the transient unit is made `Type=notify`, so the
 //! start returns once the process said `READY=1`; the test, outside the unit, then finds the mount
 //! in its own `/proc/self/mountinfo`: the mount reached the host's mount namespace, where the job
 //! runtime sees it. A stop ends the unit with success.
@@ -29,15 +29,18 @@ use std::process::{Command, Output};
 use tierstore_testkit::dir::TestDir;
 
 /// The packaged unit whose service options the test runs the process with.
-const UNIT: &str = "tierstore-fs@.service";
+const UNIT: &str = "tierstore@.service";
 
-/// The options of [`UNIT`] the transient unit does not take: the command and its condition, the
+/// The options of [`UNIT`] the transient unit does not take: the command, the
 /// account (the test's own user runs it, so that it can read the scratch directory), the runtime
-/// directories under `/run` (the test's paths are in its scratch directory), and the restarts
-/// (one start is the test).
-const LEFT_OUT: [&str; 8] = [
+/// directories under `/run` and the state directory under `/var/lib` (the test's paths are in its
+/// scratch directory), the restarts (one start is the test), and the type, which the test sets
+/// itself.
+const LEFT_OUT: [&str; 10] = [
     "ExecStart",
-    "ExecCondition",
+    "Type",
+    "StateDirectory",
+    "StateDirectoryMode",
     "User",
     "RuntimeDirectory",
     "RuntimeDirectoryPreserve",
@@ -45,9 +48,6 @@ const LEFT_OUT: [&str; 8] = [
     "RestartSec",
     "RestartPreventExitStatus",
 ];
-
-/// The address families of the one process: the fs unit's `AF_UNIX`, and the S3 front's.
-const FAMILIES: &str = "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6";
 
 /// Runs `program` with `args` through `sudo -n`.
 fn sudo(program: &str, args: &[String]) -> Output {
@@ -71,7 +71,7 @@ fn missing() -> Option<&'static str> {
 }
 
 /// The `[Service]` options of the packaged [`UNIT`], one `key=value` each, continuation lines
-/// joined, but those of [`LEFT_OUT`], and with the address families of [`FAMILIES`].
+/// joined, but those of [`LEFT_OUT`].
 fn service_options() -> Vec<String> {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../packaging/hostkeeper/units")
@@ -83,18 +83,16 @@ fn service_options() -> Vec<String> {
         .nth(1)
         .and_then(|rest| rest.split("\n[").next())
         .expect("a [Service] section");
-    let mut options: Vec<String> = service
+    service
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty() && !line.starts_with('#'))
         .filter(|line| {
             let key = line.split('=').next().unwrap_or_default();
-            !LEFT_OUT.contains(&key) && key != "RestrictAddressFamilies"
+            !LEFT_OUT.contains(&key)
         })
         .map(str::to_owned)
-        .collect();
-    options.push(FAMILIES.to_owned());
-    options
+        .collect()
 }
 
 /// The transient unit and the scratch directory: the unit is stopped, and the mount it left to a
@@ -210,7 +208,11 @@ fn the_mount_reaches_the_host_namespace_from_the_unit() {
         "-p".to_owned(),
         format!("Group={}", rustix::process::getegid().as_raw()),
     ];
-    for option in service_options() {
+    for option in ["Type=notify", "NotifyAccess=main"]
+        .map(str::to_owned)
+        .into_iter()
+        .chain(service_options())
+    {
         args.push("-p".to_owned());
         args.push(option);
     }

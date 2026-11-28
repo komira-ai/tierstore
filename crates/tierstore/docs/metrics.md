@@ -608,7 +608,7 @@ sum by (instance) (increase(tierstore_provider_unavailable_total{reason="no_fs"}
 
 A lookup of `trees/<digest>` that no run has attached reads the tree's manifests (or the one tree
 list it is) and attaches it
-(see [the virtual build file system](operations.md#the-virtual-build-file-system)). `tierstore fs`
+(see [the virtual build file system](operations.md#the-virtual-build-file-system)). the file system of the node's `fs` interface
 reports to the node's cache how long each such attach took, where the manifests of
 each read of a tree came from and how many levels and rounds of fills each read took, and the node's
 cache counts the reports in its block; the node also times each fill of a manifest it makes itself.
@@ -680,7 +680,7 @@ sum(increase(tierstore_fs_manifest_fill_seconds_sum[1h])) / sum(increase(tiersto
 
 ### Build node: the mount's descriptors
 
-`tierstore fs` shares one descriptor per cache file (a blob or a pack) across all its open handles,
+The file system of the `fs` interface shares one descriptor per cache file (a blob or a pack) across all its open handles,
 and at each look for idle trees (every quarter of `fs.tree_idle_secs`, at most a minute apart: a
 minute by default) reports to the node's cache how many cache files it holds open and
 how many opens failed for lack of descriptors since its previous report (the cache file could not
@@ -713,7 +713,7 @@ increase(tierstore_fs_open_descriptor_failures_total[1h]) > 0
 
 ### Build node: the opens of files
 
-`tierstore fs` times every open of a file of a tree, from the arrival of its request to its answer
+The file system of the `fs` interface times every open of a file of a tree, from the arrival of its request to its answer
 on the mount's clock, to the millisecond, and counts the opens waiting for an answer. Over FUSE that
 is an `OPEN`, answered at once by the reader that read it or parked until the node answers a fill;
 over NFS, which has no open, it is the fill of the file's descriptor that the first read of the file
@@ -721,7 +721,7 @@ starts, from that read's arrival. The mount reports the counts to the node's cac
 each look for idle trees (every quarter of `fs.tree_idle_secs`, at most a minute apart: a minute by
 default) and when its readers stop for a hand-over or a restart, as running totals of the process;
 the node adds what each process's totals grew by since its previous report, so a report that was
-lost loses nothing the next one carries, and the two processes of a hand-over, reporting in turns,
+lost loses nothing the next one carries, and the two instances of a hand-over, reporting in turns,
 are each counted once. The families are on every process with a cache, with a `# TYPE` line, and
 stay at zero on a node whose mount reports nothing. The buckets are those of the attach histogram
 above. The node keeps at most 64 mounts, as for the descriptors.
@@ -753,9 +753,9 @@ histogram_quantile(0.99, sum by (source, le) (rate(tierstore_fs_open_seconds_buc
 
 ### Build node: the mapped tree lists
 
-`tierstore fs` reads the tree of a placement that is a version 2 tree list from a read-only mapping
+The file system of the `fs` interface reads the tree of a placement that is a version 2 tree list from a read-only mapping
 of its image file, one mapping per list however many of its trees show it, shared with the node's
-tree store where the mount runs in the node's process. It keeps the bytes of those mappings, in
+tree store, as the mount runs in the node's process. It keeps the bytes of those mappings, in
 whole pages and each list once, under `fs.tree_list_ram_bytes` (512 MiB by default): before a list
 is attached it releases, the least recently used first, the lists that no run attaches and no
 request is reading, and a list that still does not fit is mapped past the cap and counted (see
@@ -779,8 +779,8 @@ The node keeps at most 64 mounts, as for the descriptors.
 What they do not count: a report that was lost, so a gauge may be a minute old; the trees of
 manifests, whose memory is in the line of the trees in memory
 ([operations](operations.md#the-virtual-build-file-system)); the lists the tree store of the node
-maps where the mount runs in a process of its own (`tierstore fs`), which are mapped, and counted
-nowhere, in the node's process. A release of a list the tree store also holds (its placement still
+maps, which are mapped in the node's process, are counted
+nowhere. A release of a list the tree store also holds (its placement still
 has a lease or another holder) frees no bytes until the store lets it go too. A node of an earlier
 release answers the report `refused unknown request`, which the mount ignores.
 
@@ -792,7 +792,7 @@ increase(tierstore_fs_tree_list_over_cap_total[1h]) > 0
 
 ### Build node: the requests of the mount
 
-`tierstore fs` times every request its frontend answers, from the request's arrival to its answer
+The file system of the `fs` interface times every request its frontend answers, from the request's arrival to its answer
 on the mount's clock, to the millisecond, by its kind, for the requests by kind and their latency
 of the Q-B measurement (`docs/design/virtual-build-fs.md`, section 11). Over FUSE a request is
 one the session hands the frontend, by its opcode, answered at once by the reader that read it or
@@ -831,7 +831,7 @@ histogram_quantile(0.99, sum by (kind, le) (rate(tierstore_fs_request_seconds_bu
 
 ### Build node: the attaches and detaches of runs
 
-`tierstore fs` times each `attach <digest> for <run>` and each `detach <run>` of its control
+The file system of the `fs` interface times each `attach <digest> for <run>` and each `detach <run>` of its control
 socket, from the request to its answer on the mount's clock, to the millisecond, and splits each
 attach into three parts that add up to it, the `attach_ms` and `detach_ms` of the Q-B measurement
 (`docs/design/virtual-build-fs.md`, section 11): the **fetch**, to the end of the last manifest

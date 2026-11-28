@@ -4,7 +4,7 @@ The host updater this hook plugs into is hostkeeper, a separate program with a p
 arguments, a params file, an exit status and one JSON line), so a hook in any language can speak it; this one is written in Rust
 because tierstore is.
 
-Status: built, except the one-conversation start on Linux (below). The hook is `crates/tierstore/src/server/update_hook/`, and the operator's page is
+Status: built. The hook is `crates/tierstore/src/server/update_hook/`, and the operator's page is
 `crates/tierstore/docs/update-hook.md`. Section 0 is the design of record of the hook: the new instance takes the listening
 sockets of the old one, so no redirect, no second port and no privilege beyond root's are involved. Sections 1 to 4, 9 and 10 describe the
 port-forward design (nftables redirect, slot units on private ports, an updater declaration and a hook-only account) that the
@@ -13,10 +13,8 @@ entries and lease, the drain, the metrics) are about the server, which both desi
 redirect, read the two instances `tierstore@a` and `tierstore@b` and the hand-over.
 Built on Linux since komira-ai/tierstore#571: the new instance of a node with a cache takes the cache lock with the sockets (`take 1`
 and `ready` on `server.handoff_socket`) and its cache is the writer at the old instance's `written`, and `verify` defers until the new
-instance is read-write. Not built: the one conversation that takes sockets, mount, control socket and lock together on a Linux start
-(komira-ai/tierstore#522, which carries komira-ai/tierstore#479): the start of a node with an `fs` interface still takes the mount by
-`take-fs 1` and the sockets by `take 1`, and the new cache's scan at `written` and the mount-provider socket that follows it are as long as
-before. Nothing on this page is decided against.
+instance is read-write. Built since komira-ai/tierstore#604 (komira-ai/tierstore#522): the start of a node with an `fs` interface takes the sockets, the mount, the control socket and the lock in one conversation (`take 1`, `ready`, `mount`), and the `take-fs 1` of the two-process layout is deleted by komira-ai/tierstore#524, which is built on Linux. The new cache's scan at `written` and the mount-provider socket that follows it are as long as before.
+Nothing on this page is decided against.
 
 tierstore ships its update as a subcommand of its own binary, `tierstore update-hook <step>`, run by hostkeeper: steps `prepare`,
 `cutover`, `verify`, `rollback`, `cleanup`, `uninstall` and the boot step `restore`; exit `0`, `1`, `75` deferred; the last stdout line
@@ -25,7 +23,7 @@ is one JSON object; every step idempotent.
 ## 0. Live update by listening-socket hand-off (server side)
 
 This replaces the port-forward of sections 1 to 4 and the slot ports. The hook uses it (`server/handoff/`, entered through
-`run_handing`, with the control socket named by `server.handoff_socket`), on Linux; for `tierstore` on macOS the hook restarts it (`tierstore fs` has one for its NFS socket, below), and a build node of a Mac hands over to the next image of its own program on SIGUSR2 when both releases list `handoff-exec-v1` and its params name no fs job (below; the hook sends it with `launchctl kill SIGUSR2`).
+`run_handing`, with the control socket named by `server.handoff_socket`), on Linux; for `tierstore` on macOS the hook restarts it, and a build node of a Mac hands over to the next image of its own program on SIGUSR2 when both releases list `handoff-exec-v1` and its params name no fs job (below; the hook sends it with `launchctl kill SIGUSR2`).
 The binary calls it: `run_serving` passes the hand-off of the settings, `server.handoff_socket` and `server.handoff_wait`
 (default 10s, 1ms to 1h), to `run_handing`; without `server.handoff_socket` it binds as before and makes no control socket.
 A build node and a storage node with `[local_cache]` hand off through the same `run_handing` machinery: `bind_fronts`
@@ -72,27 +70,16 @@ Edge cases, each proved by a test in `server/handoff/` or `tests/s3_front/handof
   change them (`settings_that_name_other_addresses_take_nothing`).
 - A taker of another user is refused (`a_taker_of_another_user_is_refused`).
 
-The same code hands over the NFS socket of `tierstore fs` on a Mac (`fs.nfs.handoff_socket`, `server/treefs/nfs/run.rs`): a
-front kind `nfs` is a new line of the offer (`<front> <address>`; a taker that meets a front it does not know skips the line
-and closes the descriptor, `an_old_release_ignores_the_new_front_kind_line`, so a front can be added without breaking the
-update to or from a release that lacks it). What differs from the S3 front: the taker asks before it opens the table of tree
-numbers or binds the control socket of `fs`, since the running process holds both, and it makes no mount, since the mount is
-there. The old process stops accepting when `offer.serve` returns, answers the requests it has read, shuts down its side of
-each connection and waits for the clients to close theirs (up to `fs.nfs.drain_wait`) so that no reply it wrote is lost to a
-reset, and exits without unmounting (`the_old_instance_stops_accepting_at_ack_and_answers_every_owed_reply_before_it_exits`,
-`the_write_side_of_each_connection_is_shut_down_before_exit`). A request it had not read is not answered: the client sends it
-again on its new connection, and requests on trees are idempotent. The drain is `NFSTcp::handle_until` of the `komira-ai/nfsserve`
-fork; a client that never closes is let go when `fs.nfs.drain_wait` has passed
-(`a_client_that_never_closes_is_let_go_when_the_drain_wait_has_passed`).
+The NFS front of a Mac had a socket offer of its own, `fs.nfs.handoff_socket`, with the front kind `nfs` as a line of the offer (a taker that meets a front it does not know skips the line and closes the descriptor, `an_old_release_ignores_the_new_front_kind_line`). It is removed (komira-ai/tierstore#524): the keys `fs.nfs.handoff_*` are refused as unknown fields, and a Mac hands over to the next image of its own program (one-service.md section 3.4). What the offer kept from it is the step below.
 
-The NFS hand-over has one step more, `ready`, because a successor that dies after `done` and before it serves would
+The hand-over has one step more, `ready`, which the NFS front first needed, because a successor that dies after `done` and before it serves would
 otherwise leave nobody serving (the old process had ended, its listening socket closed with it, and a client's hard mount
 hung until a process was started by hand). The taker's request is `take 1` and a second line, `ready`; the old process, once
 it has said `done`, has handed nothing over until the taker sends the frame `ready` (the taker does so when its start is done
 and it is about to serve), and it goes on accepting and answering on its own copy of the socket meanwhile. A taker that ends the
-connection, sends another frame, or is silent for `fs.nfs.handoff_ready_wait` after `done` has not taken anything: the old process
+connection, sends another frame, or is silent for the wait of the instance that takes part after `done` has not taken anything: the old process
 lets its hold go, makes its hand-over socket again and, where the successor's start had replaced it, binds its control socket
-again, and serves on. The step is additive (the wait for `ready` is its own key, `fs.nfs.handoff_ready_wait`, 120s, so the taker's wait for `done`, `fs.nfs.handoff_wait`, stays 10s): an old
+again, and serves on. The step is additive: an old
 process that does not know it answers the request `refused` with "the request is not understood", and the taker asks again
 with `take 1` alone; a taker of a release before it asks a new process with `take 1` alone and is handed over as before, with
 no step. The sequence, from `done`:
@@ -109,12 +96,7 @@ new                                     old (running)
 
 `ready` is answered `bye` so that the two never serve together: an old process whose wait passed has closed the connection, the write of `ready` may still succeed into the buffer, and only the missing `bye` tells the taker the old one serves on (`a_ready_that_arrives_after_the_instance_gave_up_is_not_answered_bye`, `an_answer_other_than_bye_to_ready_is_an_error`).
 
-Each step at which the taker may die is a test (`a_successor_killed_at_each_step_leaves_the_old_instance_serving`,
-`a_successor_whose_start_fails_after_done_leaves_the_old_instance_serving`,
-`the_control_socket_is_bound_again_when_a_successor_that_replaced_it_is_gone`,
-`the_old_instance_ends_when_the_successor_says_ready_and_not_before`, and on the offer's side in `server/handoff/`
-`a_taker_gone_after_done_before_ready_leaves_the_instance_serving`, `a_taker_silent_for_the_wait_after_done_is_given_up`,
-`a_taker_asks_again_without_ready_of_an_instance_that_does_not_know_it`).
+Each step at which the taker may die is a test on the offer's side, in `server/handoff/` (`a_taker_gone_after_done_before_ready_leaves_the_instance_serving`, `a_taker_silent_for_the_wait_after_done_is_given_up`, `a_taker_asks_again_without_ready_of_an_instance_that_does_not_know_it`).
 
 The one hand-over of `docs/design/one-service.md` (section 3.1) adds to the same conversation, additively. The request may
 have a third line, `mount`: an instance that holds the mount offers it after the sockets (`fuse <mountpoint>` with the
@@ -122,8 +104,7 @@ have a third line, `mount`: an instance that holds the mount offers it after the
 taker goes before `ready`, and gives it up at `ready` (its store entry removed) before it says `bye`; an instance that holds
 none refuses the line (`this instance holds no mount`) and the taker asks again without it, and an instance that holds one
 refuses a taker that does not ask for it: at the request of one that asks `take 1` alone, and at the `ready` of one that
-asked for that step (`refused` in place of `bye`), unless the mount was taken meanwhile on the instance's `take-fs 1`, as the
-start of the previous release takes it (the two conversations share a claim of the mount, `handoff/mount.rs`). A cache instance offers its lock (`lock <path>`, a descriptor of `<cache>/.lock`) to a
+asked for that step (`refused` in place of `bye`). The claim of the mount (`handoff/mount.rs`) keeps two sessions from taking it together. A cache instance offers its lock (`lock <path>`, a descriptor of `<cache>/.lock`) to a
 taker that asked for `ready`, starts no cache write from `ready` on, and says `written` after `bye` once its writes in flight
 have ended; the taker takes the write role then, or when the connection ends (`handoff/written.rs`). Its cache tells
 the requests that wait for the write role that it is read-write only after its tree store has read the cache directory again
@@ -137,19 +118,10 @@ the running instance is its own user and the kind of each descriptor (the socket
 its path) before `ack`. A build node's instance takes part in all of it (`serve_front`), offering the mount where its file
 has an `fs` interface; the Linux start of a node with a cache asks for the lock with the sockets (komira-ai/tierstore#571,
 `handoff::follow`), and the start of the one process asks for the mount, the sockets and the lock in this one conversation
-(`cache_cli_mount.rs`, komira-ai/tierstore#522), falling back to `take-fs 1` for the mount only where the instance holds
-none. The frames are read one at a time
+(`cache_cli_mount.rs`, komira-ai/tierstore#522), and where the instance holds no mount it asks for the sockets and the lock alone and adopts or makes the mount. The frames are read one at a time
 (`frames_sent_together_are_read_one_at_a_time`), as `bye` and `written` may come back to back.
 
-Two processes must not write the table of tree numbers and the attachments file, which the taker reads after `done`. The offer
-therefore calls a hold when a taker answers `ack`, before `done` is sent (`the_hold_is_told_before_the_taker_has_its_done`), and
-releases it if that taker does not complete (`the_hold_is_released_when_the_taker_does_not_complete`); the hold waits for the attach
-or detach in progress, and every later one is refused (`a_held_core_changes_neither_the_table_nor_the_attachments`,
-`the_old_instance_writes_no_state_once_the_new_one_has_the_socket`). The old process gives numbers only at an attach, so it gives
-none after the ack. And the taker finds what can fail in its start (the directories, the table, the attachments file, the
-directory of its control socket) before it asks, since a start that fails after the ack leaves no one listening
-(`a_start_that_cannot_work_is_refused_before_the_running_instance_gives_up_its_socket`). What it cannot find before (the
-bind of the control socket itself, a full disk) is not checked.
+Two processes must not write the table of tree numbers and the attachments file, which the taker reads after `done`. The offer has a hold for it, which it calls when a taker answers `ack`, before `done` is sent, and releases if that taker does not complete; no front of this release gives the offer one (the NFS front that did is gone, komira-ai/tierstore#524), and the hold is exercised by the tests of the offer alone. The mount is quiesced at `ack` instead (`Mount::quiesce`), and the taker finds what can fail in its start (the directories, the table, the attachments file, the directory of its control socket) before it asks, since a start that fails after the ack leaves no one listening (`a_start_that_cannot_work_is_refused_before_it_binds_or_mounts`). What it cannot find before (the bind of the control socket itself, a full disk) is not checked.
 
 A build node of a Mac hands over to the next image of its own program instead of to a second instance
 (`docs/design/one-service.md` section 3.4; `server/handoff/exec.rs`, `server/next_image.rs`): on SIGUSR2 it drains as on a
@@ -168,8 +140,7 @@ The proxy id no longer derives from a port: `server.proxy_id_from_facts` makes i
 (`server/config_facts.rs`; the macOS package sets it). No package sets either hand-over key, and the macOS package is not to
 set `server.handoff_socket`: an update of a Mac is the hand-over to the next image when both releases list `handoff-exec-v1`
 and the params name no fs job, and a restart otherwise; a Mac whose file has an `fs` interface is refused that restart unless
-the params say `mode = "restart"` (`docs/design/one-service.md` section 3.6). `fs.nfs.handoff_socket` is for an operator or a
-hook that starts the two processes by hand.
+the params say `mode = "restart"` (`docs/design/one-service.md` section 3.6).
 
 ### The hook on top of it
 

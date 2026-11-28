@@ -9,7 +9,7 @@ use tierstore_testkit::dir::TestDir;
 use super::{Host, SUBUID, first_range, read_text};
 use crate::server::config::{PerRun, settings_from_text};
 use crate::server::config_testing::DEFAULTS;
-use crate::server::treefs::{self, Database, Found};
+use crate::server::treefs::{Database, Found};
 
 /// The users (and groups) of the fixture system: `builders` is also the client group.
 fn users(_database: Database, name: &str) -> Found {
@@ -282,7 +282,7 @@ fn a_wrong_owner_table_is_refused() {
 }
 
 /// Asserts that the table is the `fs` interface's alone: another type refuses `owner` in either
-/// form, and the `[fs]` table of `tierstore fs` keeps taking `user:group` only.
+/// form.
 #[test]
 fn the_table_is_the_fs_interfaces_alone() {
     let text = file("\"1:2\"").replace(
@@ -304,15 +304,6 @@ fn the_table_is_the_fs_interfaces_alone() {
         .expect_err("refused")
         .to_string();
     assert_eq!(why, "interface[0].params.owner: not for type \"s3\"");
-    let fs_toml = "[fs]\nclient_group = \"builders\"\nowner = { subids_of = \"builders\", id = 1 }\n\
-                   cache_path = \"/c\"\n";
-    let why = treefs::from_text(fs_toml, &treefs::builders)
-        .expect_err("refused")
-        .to_string();
-    assert_eq!(
-        why,
-        "line 3, column 9: a value: not a value this key takes (it is not shown); expected a string"
-    );
 }
 
 /// Asserts that the system's host reads a file's text as it is, and says why one cannot be read.

@@ -367,12 +367,12 @@ impl Linux {
         }
     }
 
-    /// A node like [`Linux::alike`] that also has an fs process, instance `A`, and whose running
-    /// release lists `handoff-fs-v1`.
+    /// A node like [`Linux::alike`] that also still runs the fs unit of the earlier layout,
+    /// instance `A`.
     fn with_fs() -> Linux {
         Linux::on(
             lin::SystemdFake::fs_installed(),
-            &[crate::server::update_hook::HANDOFF_FS_CAPABILITY],
+            &[],
             Some(lin::WITH_SOCKET),
             &format!("{}proxy_id = \"p2\"\n", lin::WITH_SOCKET),
         )
@@ -397,7 +397,6 @@ impl Linux {
             markers: &self.fake,
             fs_units: self.fake.fs_ports(),
             fs_markers: self.fake.fs_ports(),
-            fs_processes: self.fake.fs_ports(),
             instances: &Gauged {
                 fake: &self.fake,
                 control: &self.control,

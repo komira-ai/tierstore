@@ -286,3 +286,88 @@ fn the_one_process_mounts_keeps_the_mount_across_sigusr2_and_unmounts_at_sigterm
     running.stop();
     assert!(!node.mounted(), "the stop unmounts");
 }
+
+/// What `/usr/bin/id` says with `flag` of the user of this test, without the newline.
+fn id(flag: &str) -> String {
+    let out = Command::new("/usr/bin/id").arg(flag).output().unwrap();
+    assert!(out.status.success(), "id {flag}");
+    String::from_utf8(out.stdout).unwrap().trim().to_owned()
+}
+
+/// Runs `tierstore --check-config` over a node's file whose `fs` interface has `client_group` as
+/// `group` and `owner` as `owner` and whose other keys are valid, and gives the process's output.
+fn check(name: &str, group: &str, owner: &str) -> (std::process::Output, TestDir) {
+    let dir = TestDir::under(std::env::temp_dir(), name);
+    let (cache, runtime, mountpoint) = (
+        dir.path().join("cache"),
+        dir.path().join("run"),
+        dir.path().join("mnt"),
+    );
+    let key = dir.path().join("key");
+    std::fs::write(&key, KEY).unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let text = format!(
+        "[[interface]]\ntype = \"s3\"\nparams = {{ port = 9300 }}\n\n\
+         [[interface]]\ntype = \"fs\"\n[interface.params]\nmountpoint = {mountpoint:?}\n\
+         runtime_dir = {runtime:?}\nclient_group = \"{group}\"\nowner = \"{owner}\"\n\n\
+         [server]\nproxy_id = \"fs-interface\"\nbucket = \"b\"\naccess_key_file = {key:?}\n\n\
+         [local_cache]\npath = {cache:?}\nbudget = \"64MiB\"\n\n\
+         [cold_store]\nkind = \"memory\"\n\n[[policy]]\nprefix = \"cas/\"\ncache = true\n",
+    );
+    let file = dir.path().join("node.toml");
+    std::fs::write(&file, text).unwrap();
+    let output = Command::new(BIN)
+        .arg("--config")
+        .arg(&file)
+        .arg("--check-config")
+        .output()
+        .expect("the binary runs");
+    (output, dir)
+}
+
+/// Asserts that `client_group` of the `fs` interface given by name is looked up through the system
+/// (Open Directory, by `dscacheutil`), not read from `/etc/group`: `--check-config` of a file that
+/// names the primary group of the user of the test exits 0 and says nothing.
+#[test]
+fn the_fs_interface_takes_its_client_group_by_name_from_the_system() {
+    let name = id("-gn");
+    let gid = std::fs::metadata(std::env::temp_dir()).unwrap().gid();
+    let owner = format!("{}:{gid}", id("-u"));
+    let (output, _dir) = check("fs-interface-group", &name, &owner);
+    assert_eq!(output.status.code(), Some(0), "{name}: {output:?}");
+    assert!(
+        output.stdout.is_empty() && output.stderr.is_empty(),
+        "{output:?}"
+    );
+}
+
+/// Asserts that `owner` of the `fs` interface given as `<user>:<group>` by the names of the user
+/// of this test (their accounts of Open Directory, looked up by `dscacheutil`) is taken:
+/// `--check-config` exits 0 and says nothing.
+#[test]
+fn the_fs_interface_takes_its_owner_by_names_from_the_system() {
+    let owner = format!("{}:{}", id("-un"), id("-gn"));
+    let (output, _dir) = check("fs-interface-owner", &id("-g"), &owner);
+    assert_eq!(output.status.code(), Some(0), "{owner}: {output:?}");
+    assert!(
+        output.stdout.is_empty() && output.stderr.is_empty(),
+        "{output:?}"
+    );
+}
+
+/// Asserts that an `owner` whose user is a name the system does not have is refused: status 2 and
+/// a line that names the `owner` param and the name.
+#[test]
+fn the_fs_interface_refuses_an_owner_whose_user_the_system_does_not_have() {
+    let owner = format!("no-such-user-tierstore:{}", id("-gn"));
+    let (output, _dir) = check("fs-interface-owner-absent", &id("-g"), &owner);
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let said = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        said.contains("params.owner: \"no-such-user-tierstore\" is neither a user id"),
+        "{said}"
+    );
+}

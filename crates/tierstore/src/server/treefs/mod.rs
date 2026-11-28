@@ -4,9 +4,9 @@
 //! and any tree whose digest a lookup names (`core/implicit.rs`, until it is idle for
 //! `fs.tree_idle_secs`), lazily: a file's bytes are filled into the node's cache on the file's
 //! first open, by calls of the cache of this process (`in_process`, with the values of `fills`).
-//! The verb `tierstore fs` serves nothing: it lists the attachments and checks an `[fs]` file.
+//! The verb `tierstore fs` serves nothing: it says so and exits 2.
 //!
-//! - [`config`]: the `[fs]` table of the file.
+//! - [`config`]: the params of the `fs` interface.
 //! - [`ino`], [`table`], [`tree`]: the inode numbers (invariant I1), the table of tree numbers in
 //!   the runtime directory, and a flattened tree.
 //! - [`attach`], [`control`]: the attachments (of runs, and of lookups) and the control socket
@@ -36,8 +36,9 @@
 //!   connection over serves it from the record of the kernel's handshake (`init_record`) without a
 //!   handshake (`serving`); the file handles of the process before are told by their numbers
 //!   (`handle`); a kernel that cannot send the unanswered requests again is waited on for a bounded
-//!   time (`recover`); and a running instance hands the connection to a new one with no moment in
-//!   which no one holds it (`handover`). `launch` decides at a start which of these applies.
+//!   time (`recover`); and a running instance offers the connection to a new one in the one
+//!   hand-over (`server/handoff/`), with no moment in which no one holds it (`handover` makes the
+//!   offer of the mount). `launch` decides at a start which of these applies.
 //!
 //! The core serves a frontend in either of two ways: with opens and handles, and a count of the
 //! lookups the kernel holds until it forgets them (FUSE); or by inode alone, with the reads of
@@ -128,10 +129,10 @@ mod nfs;
 
 pub(super) use config::{
     DEFAULT_CONTROL_SOCKET, DEFAULT_MOUNTPOINT, DEFAULT_RUNTIME_DIR, DEFAULT_TREE_LIST_RAM_BYTES,
-    FsSettings, FsTable, Lookup, id_of, load,
+    FsSettings, FsTable, Lookup, id_of,
 };
 #[cfg(test)]
-pub(super) use config::{builders, from_text};
+pub(super) use config::{builders, from_params};
 pub(super) use groups::{Database, Found, system as system_names};
 #[cfg(target_os = "linux")]
 pub(super) use interface::{Mounted, Served, Service};
@@ -160,9 +161,6 @@ fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 #[cfg(test)]
 #[cfg(target_os = "linux")]
 mod fakedev;
-#[cfg(test)]
-#[cfg(target_os = "linux")]
-mod handover_kernel_tests;
 #[cfg(test)]
 #[cfg(target_os = "linux")]
 mod handover_service_tests;

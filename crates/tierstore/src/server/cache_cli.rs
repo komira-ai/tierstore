@@ -48,8 +48,8 @@
 //! running instance, or serves the descriptor the service manager kept, or mounts afresh, and only
 //! then takes or binds the S3 and OCI sockets; a start that fails after that leaves the mount as a stop does. A running
 //! instance of the one process is asked for its mount, its S3 and OCI sockets and its cache lock in
-//! one conversation (`take 1`, `ready`, `mount`); one that holds no mount (the S3 process of the
-//! two-process layout) for its sockets and lock alone, and the mount is then taken on `take-fs 1`.
+//! one conversation (`take 1`, `ready`, `mount`); one that holds no mount for its sockets and lock
+//! alone, and the mount is then adopted or made.
 //! The running instance serves until this start says `ready`, then starts no cache write and says
 //! `written` once its writes in flight have ended, and this start's cache takes the write role with
 //! the lock it handed over then, rather than after that instance's drain, so that the mount's fills

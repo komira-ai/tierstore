@@ -17,7 +17,6 @@ mod instances;
 mod launchd;
 mod markers;
 mod nfs_read;
-mod processes;
 mod provider;
 mod runner;
 mod service_binary;
@@ -40,7 +39,6 @@ pub use launchd::{
     kill_args, print_args,
 };
 pub use markers::MarkerFiles;
-pub use processes::ProcFiles;
 pub use provider::{ProviderSocket, ProviderTimes};
 pub use runner::{Call, Output, RunError, Runner, SystemRunner};
 pub use state::{CONFIG_STATE_FILE, LOCK_FILE, STATE_FILE, StateFiles};
@@ -90,8 +88,6 @@ mod launchd_tests;
 mod markers_tests;
 #[cfg(test)]
 mod nfs_read_tests;
-#[cfg(test)]
-mod processes_tests;
 #[cfg(test)]
 mod provider_tests;
 #[cfg(test)]

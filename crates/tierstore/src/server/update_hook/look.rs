@@ -20,15 +20,6 @@ pub const POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// and `cleanup` bounds are above this and [`PROBE_ATTEMPTS`] together
 /// (`crates/tierstore/tests/packaging_hostkeeper.rs`).
 pub const READY_ATTEMPTS: u32 = 1000;
-/// How many looks `cutover` gives a new store that serves read-only to take the cache lock,
-/// before it starts the fs instance on it ([`Look::read_write`]). In a hand-over the new store
-/// takes the lock only once the old one has drained and exited, which is at most its settle and
-/// its drain deadline (10 s and 15 min by default: `server.drain_lb_wait`,
-/// `server.drain_deadline`), and has then scanned its cache again, which takes about as long as a
-/// read-only open (up to 664 s, see [`READY_ATTEMPTS`]): 1574 s at the longest. 2400 looks a
-/// second apart leave a margin of half again. The manifest's `cutover` bound is above this,
-/// [`READY_ATTEMPTS`] and [`PROBE_ATTEMPTS`] together (`look_tests.rs`).
-pub(super) const READ_WRITE_ATTEMPTS: u32 = 2400;
 /// How many looks a probe of the build makes.
 pub const PROBE_ATTEMPTS: u32 = 60;
 /// How many answers in a row by the expected version a probe needs.
@@ -106,25 +97,6 @@ impl Look<'_> {
                 format!("port {PUBLIC_PORT} does not answer /readyz"),
             )
         })
-    }
-
-    /// Looks at `/readyz` until it says a mode other than read-only, up to
-    /// [`READ_WRITE_ATTEMPTS`] looks a [`POLL_INTERVAL`] apart, the first at once: what `cutover`
-    /// does before it starts the fs instance on a store that serves read-only. A look that is
-    /// answered read-only, or not ready (no answer, or 503 from the old instance that still drains
-    /// on the same sockets), is waited out. The mode `/readyz` then said, or `None` when no look
-    /// said another.
-    pub fn read_write(&self) -> Option<CacheMode> {
-        for attempt in 0..READ_WRITE_ATTEMPTS {
-            if attempt > 0 {
-                self.clock.pause(POLL_INTERVAL);
-            }
-            match self.ready() {
-                None | Some(CacheMode::ReadOnly) => {}
-                mode => return mode,
-            }
-        }
-        None
     }
 
     /// The failure of a start whose release was not seen to serve.

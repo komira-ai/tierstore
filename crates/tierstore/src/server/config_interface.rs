@@ -15,8 +15,8 @@
 //! gRPC API of node-local trees, see [`trees`](super::trees)), `mount-provider` (jobscheduler's
 //! mount provider on a Unix socket, see [`provider::config`](super::provider::config), which listens
 //! on no address and takes params of its own) and `fs` (the trees as a file system, see
-//! [`config::fs`](super::config::fs), which listens on no address either and takes the params of the
-//! `[fs]` table of `tierstore fs`). Every other entry says where it listens with one of two params:
+//! [`config::fs`](super::config::fs), which listens on no address either and takes params of its
+//! own). Every other entry says where it listens with one of two params:
 //! `port`, the wildcard of IPv4 (`0.0.0.0:<port>`), or `addresses`, a socket address or a list
 //! of them. Both are refused, and so is neither, but for a `trees` interface, which listens on
 //! port 9600 of the wildcard when it says neither. An address that two interfaces (or one
@@ -126,7 +126,7 @@ pub(super) struct Params {
     pub tree_list_ram_bytes: Option<u64>,
     pub nfs: Option<Strict<NfsTable>>,
     pub put: Option<Strict<PutTable>>,
-    // Keys of `[fs]` that are not params, each refused by name with why, whatever its value.
+    // Keys of the two-process layout's `[fs]` table that are not params, each refused by name with why, whatever its value.
     pub fill_socket: Option<IgnoredAny>,
     pub cache_path: Option<IgnoredAny>,
     pub handoff_socket: Option<IgnoredAny>,

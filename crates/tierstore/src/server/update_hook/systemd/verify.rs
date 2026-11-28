@@ -1,10 +1,8 @@
 //! `verify`: observes that the staged release serves, and records it; before the commit, a new
-//! instance whose cache is still read-only defers it ([`writable`]). On a node whose fs process
-//! the update handed over, it also checks that the new fs instance runs the binary the update
-//! installed ([`fs_exe`]); on one whose fs process it left alone, the detail says first which
-//! release that process still runs. On a node with a mount provider, the new instance, once it is
-//! the cache's writer, must also pass the mount check ([`mount_check`]): its provider prepares,
-//! mounts and releases the two trees of the check, and every file of them reads back right.
+//! instance whose cache is still read-only defers it ([`writable`]). On a node with a mount
+//! provider, the new instance, once it is the cache's writer, must also pass the mount check
+//! ([`mount_check`]): its provider prepares, mounts and releases the two trees of the check, and
+//! every file of them reads back right.
 
 use super::super::PUBLIC_PORT;
 use super::super::look::{verified, writable};
@@ -13,7 +11,7 @@ use super::super::params::Params;
 use super::super::ports::UnitState;
 use super::super::record::{Marker, Record};
 use super::super::report::{Done, Reason};
-use super::{Ctx, fs, fs_exe, next_of, unit_name};
+use super::{Ctx, next_of, unit_name};
 
 pub(super) fn verify(c: &Ctx<'_, '_>, params: &Params, record: &Record) -> Result<Done, Done> {
     let target = &params.target_version;
@@ -53,8 +51,6 @@ pub(super) fn verify(c: &Ctx<'_, '_>, params: &Params, record: &Record) -> Resul
             ));
         }
     }
-    fs::check_active(c, record, params.verify_retry_secs)?;
-    let fs_said = fs_exe::check(c, record, target)?;
     let observed = c
         .look()
         .observed(target)
@@ -68,7 +64,7 @@ pub(super) fn verify(c: &Ctx<'_, '_>, params: &Params, record: &Record) -> Resul
     if !record.has(Marker::Verified) {
         c.save(&record.with(Marker::Verified))?;
     }
-    Ok(verified(mode, target).led_by(mounted).led_by(fs_said))
+    Ok(verified(mode, target).led_by(mounted))
 }
 
 /// `done` deferred when it is a look at `/readyz` that was not answered ready, so that hostkeeper

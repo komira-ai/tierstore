@@ -2,14 +2,16 @@
 //! config package's own (the check of the staged and the installed file, the guard, the
 //! instance written back into the release's record) and hands the rest to the update hook's arm
 //! with params that name this binary's build as the version on both sides of the update, so that
-//! the arm starts, observes, retires and hands back instances exactly as for a release. The fs
-//! process of the old layout is left alone but for the switch of a node to one process, which the
-//! arm's `prepare` records (systemd) or `switch.rs` does (a Mac). On systemd a change that the
-//! instance that serves applies in place is not handed to the arm at all (`reload.rs`).
+//! the arm starts, observes, retires and hands back instances exactly as for a release. On
+//! systemd the fs process of the old layout is not touched: a change that would be the switch of
+//! a node to one process is refused ([`Reason::ModeUnsupported`], `old_layout.rs`), and a Mac's
+//! switch is `switch.rs`'s. On systemd a change that the instance that serves applies in place is
+//! not handed to the arm at all (`reload.rs`).
 
 use std::path::{Path, PathBuf};
 
 use super::super::args::Step;
+use super::super::old_layout;
 use super::super::params::{Params, Previous};
 use super::super::ports::{
     Control, Guard, Host, Instance, LaunchdPorts, PortError, StateDir, SystemdPorts,
@@ -17,7 +19,6 @@ use super::super::ports::{
 use super::super::record::{Marker, Record, Reload};
 use super::super::report::{Done, Reason};
 use super::super::shape::{FS_INTERFACE, fs_interface};
-use super::super::systemd::FsPolicy;
 use super::super::{DIR_TIER_KIND, FS_LAUNCHD_LABEL, HANDOFF_SOCKET_KEY, HOT_STORE_TABLE};
 use super::{reload, staged_copy, switch};
 
@@ -320,16 +321,6 @@ fn prepare_params(
     })
 }
 
-/// Whether a `tierstore-fs` instance runs.
-fn fs_runs(ports: &SystemdPorts<'_>) -> Result<bool, Done> {
-    for instance in Instance::ALL {
-        if ports.fs_units.state(instance)?.running() {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
 /// A config package that is the node's first has no files to go back to: hostkeeper takes the
 /// package, and with it the files, off the node. The instances stay as they are; the record
 /// says nothing is in flight, with the instance that runs as the one that serves.
@@ -370,12 +361,7 @@ fn systemd_attempt(
     common: &Common<'_>,
 ) -> Result<Done, Done> {
     let config = config_file(params)?.to_path_buf();
-    // A configuration update leaves the fs process alone, as its own file is not in that package,
-    // except the switch to one process, which `prepare` notes in the record.
-    let arm = |step: Step, params: &Params, policy: FsPolicy| {
-        super::super::systemd::run_step_with(step, params, ports, policy)
-    };
-    let left = FsPolicy::LeftAlone;
+    let arm = |step: Step, params: &Params| super::super::systemd::run_step(step, params, ports);
     let plain = arm_params(params, common.build, &config, false);
     // A step after `prepare` of an update applied in place is the reload's own, not the arm's.
     let act = reload::Act {
@@ -411,22 +397,22 @@ fn systemd_attempt(
                 return Ok(done);
             }
             guard.reload()?;
-            Ok(arm(step, &plain, left))
+            Ok(arm(step, &plain))
         }
         Step::Verify => {
             checked(ports.host, common.release, "installed", &config)?;
-            Ok(in_place()?.unwrap_or_else(|| arm(step, &plain, left)))
+            Ok(in_place()?.unwrap_or_else(|| arm(step, &plain)))
         }
         Step::Rollback => match in_place()? {
             Some(done) => Ok(done),
             None if params.previous.is_none() => systemd_first_back(ports, &plain),
             None => {
                 guard.reload()?;
-                Ok(arm(step, &plain, left))
+                Ok(arm(step, &plain))
             }
         },
         Step::Cleanup => {
-            let done = in_place()?.unwrap_or_else(|| arm(step, &plain, left));
+            let done = in_place()?.unwrap_or_else(|| arm(step, &plain));
             if done.outcome == super::super::report::Outcome::Success {
                 write_back(ports.state, common.service)?;
             }
@@ -441,9 +427,9 @@ fn systemd_prepare(
     params: &Params,
     ports: &SystemdPorts<'_>,
     common: &Common<'_>,
-    arm: &dyn Fn(Step, &Params, FsPolicy) -> Done,
+    arm: &dyn Fn(Step, &Params) -> Done,
 ) -> Result<Done, Done> {
-    let holds_fs = || fs_runs(ports);
+    let holds_fs = || old_layout::running_units(ports).map(|running| !running.is_empty());
     let mut prepared = prepare_params(params, ports.host, common, &holds_fs, (false, true))?;
     if let Some(reload) = prepared.reload.take() {
         if let Some(done) = reload::prepare(params, ports, common.build, reload)? {
@@ -452,12 +438,12 @@ fn systemd_prepare(
         // The node is not one instance serving: the change is the arm's, refusals and all.
         prepared = prepare_params(params, ports.host, common, &holds_fs, (false, false))?;
     }
-    let policy = if prepared.switch {
-        FsPolicy::Switch
-    } else {
-        FsPolicy::LeftAlone
-    };
-    Ok(arm(Step::Prepare, &prepared.params, policy))
+    // The switch of a node to one process moved the mount from the fs unit; this release has no
+    // step for that unit, so a node that still runs it is refused.
+    if prepared.switch {
+        return Err(old_layout::refusal(&old_layout::running_units(ports)?));
+    }
+    Ok(arm(Step::Prepare, &prepared.params))
 }
 
 /// The rollback of a node's first config package on systemd: the instance that runs serves,
@@ -513,22 +499,18 @@ fn systemd_first_back(ports: &SystemdPorts<'_>, plain: &Params) -> Result<Done, 
     Err(no_previous(serving))
 }
 
-/// Writes the instances the config hook's record says serve (the S3 process, and the fs process
-/// when the record names one) into the release's record, which the boot step reads; a release's
+/// Writes the instance the config hook's record says serves (the S3 process) into the release's
+/// record, which the boot step reads; a release's
 /// record that is absent, or in an update, is left as it is. The config hook's own record was
 /// written by the arm's `cleanup` just before; one that cannot be decoded names no instance, and
 /// nothing is written back (the boot step then starts the instance the release's record names,
 /// which serves the same files).
 pub(super) fn write_back(config: &dyn StateDir, service: &dyn StateDir) -> Result<(), Done> {
     let _lock = config.lock()?;
-    let Some((live, fs_live, switched)) = config
+    let Some(live) = config
         .load()?
         .and_then(|bytes| Record::decode(&bytes).ok())
-        .and_then(|record| {
-            record
-                .live
-                .map(|live| (live, record.fs_live, record.fs_switch))
-        })
+        .and_then(|record| record.live)
     else {
         return Ok(());
     };
@@ -536,18 +518,10 @@ pub(super) fn write_back(config: &dyn StateDir, service: &dyn StateDir) -> Resul
         return Ok(());
     };
     let mut release = Record::decode(&bytes)?;
-    // A node with no fs process leaves the release's `fs_live` as it is; the switch to one
-    // process leaves none.
-    let fs_live = if switched {
-        None
-    } else {
-        fs_live.or(release.fs_live)
-    };
-    if release.updating || (release.live == Some(live) && release.fs_live == fs_live) {
+    if release.updating || release.live == Some(live) {
         return Ok(());
     }
     release.live = Some(live);
-    release.fs_live = fs_live;
     release.check()?;
     service.save(&release.encode())?;
     Ok(())

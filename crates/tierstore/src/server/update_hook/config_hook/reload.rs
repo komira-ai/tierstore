@@ -6,9 +6,8 @@
 //! `treefs/control.rs`); a byte-identical file is the case with nothing to set.
 //!
 //! - `prepare` records the update with `reload` and no `next` or `mode`, when the params declare no
-//!   restart, exactly one instance runs (and at most one of the fs process of the old layout,
-//!   which it names), and the config hook's record has no other update in flight; otherwise the
-//!   steps are the arm's, as for any config update.
+//!   restart, exactly one instance runs, and the config hook's record has no other update in
+//!   flight; otherwise the steps are the arm's, as for any config update.
 //! - `cutover` reloads the guard when the package changes its file, has the control socket set the
 //!   staged value, and records `swapped` with the mount the socket named.
 //! - `verify` observes the build of the instance that serves, as the arm does (and, before the
@@ -129,9 +128,8 @@ fn read(state: &dyn StateDir) -> Result<Option<Record>, Done> {
 
 /// `prepare` of a reload over the params `params` of the config package, whose staged file the
 /// instance that serves `build` applies as `reload` says. `Ok(None)` leaves the step to the arm:
-/// no instance runs, or both do (one of them drains), both instances of the fs process of the old
-/// layout run, or the config hook's record has an update of the arm in flight (the arm finishes a
-/// committed one, and refuses one past its cutover). A `prepare` run again over the reload it
+/// no instance runs, or both do (one of them drains), or the config hook's record has an update of
+/// the arm in flight (the arm finishes a committed one, and refuses one past its cutover). A `prepare` run again over the reload it
 /// recorded keeps it: hostkeeper may have installed the staged file since, which the change would
 /// then be read from as none.
 pub(super) fn prepare(
@@ -174,19 +172,6 @@ pub(super) fn prepare(
     let [live] = running.as_slice() else {
         return Ok(None);
     };
-    // The fs process of the old layout is left alone; the record names the instance that runs,
-    // as the arm's does (a release update may have handed it over since the record was written).
-    let mut fs_running = Vec::new();
-    for instance in Instance::ALL {
-        if ports.fs_units.state(instance)?.running() {
-            fs_running.push(instance);
-        }
-    }
-    let fs_live = match fs_running.as_slice() {
-        [one] => Some(*one),
-        [] => record.as_ref().and_then(|record| record.fs_live),
-        _ => return Ok(None),
-    };
     let detail = format!(
         "prepared in place: {} applies {}; no other instance starts",
         unit_name(*live),
@@ -196,7 +181,6 @@ pub(super) fn prepare(
         updating: true,
         to: Some(params.staged_release.clone()),
         version: Some(build.to_owned()),
-        fs_live,
         reload: Some(reload),
         ..Record::idle(Some(*live))
     };
@@ -542,9 +526,7 @@ fn rollback(opened: &Opened, act: &Act<'_>) -> Result<Done, Done> {
         }
         back = format!(" on fs.tree_list_ram_bytes {}", cap.from);
     }
-    let mut idle = Record::idle(Some(live));
-    idle.fs_live = record.fs_live;
-    act.ports.state.save(&idle.encode())?;
+    act.ports.state.save(&Record::idle(Some(live)).encode())?;
     if act.first {
         return Err(super::steps::no_previous(Some(live)));
     }

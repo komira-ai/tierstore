@@ -1,5 +1,6 @@
 //! The pages that describe the hook: the operator's page and the design of record.
 
+use super::old_layout;
 use super::{
     CACHE_HANDOFF_CAPABILITY, CHECK_BINARY, CONFIG_FILE_KEY, FS_CONFIG_FILE, FS_LAUNCHD_LABEL_KEY,
     FS_LAUNCHD_PLIST, HANDOFF_CAPABILITY, HANDOFF_EXEC_CAPABILITY, HANDOFF_SERVICE_CAPABILITY,
@@ -125,7 +126,6 @@ fn the_page_says_the_build_lists_the_hand_off() {
         HANDOFF_CAPABILITY,
         CACHE_HANDOFF_CAPABILITY,
         HANDOFF_STATE_DIR_CAPABILITY,
-        crate::server::build_info::HANDOFF_FS_CAPABILITY,
     ];
     if cfg!(target_os = "linux") {
         words.push(HANDOFF_SERVICE_CAPABILITY);
@@ -138,7 +138,6 @@ fn the_page_says_the_build_lists_the_hand_off() {
         "`handoff-socket-v1`",
         "`handoff-cache-v1`",
         "`handoff-state-dir-v1`",
-        "`handoff-fs-v1`",
         "`handoff-service-v1`",
         "`handoff-exec-v1`",
         "`[local_cache]`",
@@ -184,32 +183,34 @@ fn the_page_states_the_order_of_releases_and_the_configuration_check() {
     assert!(!PAGE.contains("A Mac never hands over"));
 }
 
-/// The operator's page of the file system process and the unit file of its template.
+/// The operator's page of the file system.
 const OPERATIONS: &str = include_str!("../../../docs/operations.md");
-const FS_UNIT: &str =
-    include_str!("../../../../../packaging/hostkeeper/units/tierstore-fs@.service");
 
-/// Asserts that the page, the operations page and the header of the fs unit file describe the
-/// second unit as the hook acts on it: the page names the record keys, the marker, the rule that
-/// the instance that holds the mount is never stopped and the capability both releases need, how
-/// `verify` checks the binary of the fs process and the sentence it says of one left alone, and
-/// none of the three says any longer that the hook does not act on the unit or that nothing writes
-/// its marker. Catches a page left behind when the code learned the unit.
+/// Asserts that the page describes the second unit of the earlier layout as the hook meets it: a
+/// node that still runs it is refused, with the closing words the code says (the page quotes them
+/// word for word), and the page names the record keys `fs_live`, `fs_next` and `fs_switch` and
+/// the `run-fs-` marker it looks at, says the keys are read and never written, and says no more
+/// that the hook hands the fs process over, with its capability. Catches a page that describes a
+/// step the hook no longer has.
 #[test]
-fn the_pages_describe_the_second_unit_as_the_hook_acts_on_it() {
+fn the_page_describes_the_second_unit_as_the_refusal() {
+    let said = old_layout::refusal(&["found".to_owned()])
+        .report
+        .detail
+        .unwrap();
+    let (_, closing) = said.rsplit_once("): ").unwrap();
+    assert_eq!(
+        closing,
+        "switch this node to the fs interface with release M first"
+    );
     for needle in [
+        closing,
         "`fs_live`",
         "`fs_next`",
+        "`fs_switch`",
         "run-fs-<instance>`",
-        "never stopped",
-        "`handoff-fs-v1`",
-        "left on its release",
-        "`tierstore-fs@<fs_next>`",
-        "`/proc/<pid>/exe`",
-        "still runs release 0.4.0+0123456789ab, and the update installed 0.5.0+0123456789ab: it \
-         was left on its release",
-        "/usr/local/libexec/tierstore/tierstore (deleted)",
-        "`/proc/<pid>/exe --version`",
+        "read and never written",
+        "still runs the two-process layout",
     ] {
         assert!(
             PAGE.contains(needle),
@@ -217,20 +218,21 @@ fn the_pages_describe_the_second_unit_as_the_hook_acts_on_it() {
         );
     }
     for stale in [
+        "handoff-fs-v1",
+        "left on its release",
+        "`/proc/<pid>/exe`",
         "does not act on the unit yet",
         "does not act on this unit yet",
         "which nothing writes yet",
         "Nothing writes it yet",
         "until the update hook learns the unit",
-        "chooses a restart, which the store carries across, when either release",
     ] {
-        for (name, text) in [
-            ("update-hook.md", PAGE),
-            ("operations.md", OPERATIONS),
-            ("tierstore-fs@.service", FS_UNIT),
-        ] {
-            assert!(!text.contains(stale), "{name} still says {stale:?}");
-        }
+        assert!(!PAGE.contains(stale), "update-hook.md still says {stale:?}");
     }
-    assert!(FS_UNIT.contains("hook writes and removes it"));
+    for stale in ["does not act on the unit yet", "which nothing writes yet"] {
+        assert!(
+            !OPERATIONS.contains(stale),
+            "operations.md still says {stale:?}"
+        );
+    }
 }

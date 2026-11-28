@@ -10,7 +10,8 @@
 //! `restore`; [`Host::install_binary`](super::Host::install_binary)), so an instance that starts
 //! runs whichever release `current` names at that moment.
 //!
-//! - `prepare` checks that the node can take the update (a configuration that names
+//! - `prepare` checks that the node does not still run the two-process layout (below), and
+//!   that it can take the update (a configuration that names
 //!   `server.handoff_socket`, unless the params force a restart), asks the staged and the
 //!   previous binary what they can do (`handoff-socket-v1`, and `handoff-cache-v1` for a
 //!   configuration with a `[local_cache]` table), picks the mode (hand-over when both can, restart
@@ -19,9 +20,8 @@
 //!   drains and exits on its own; in a restart `live` is stopped first; on a first install
 //!   there is no `live`. It then waits for the staged release to serve, and records `swapped`.
 //!   A failure is reported and nothing is undone here: hostkeeper runs `rollback`.
-//! - `verify` observes the staged release on the public port and records `verified`; after a
-//!   hand-over of the fs process it also needs the new fs process to run the installed binary,
-//!   and on a node with a mount provider the mount check to pass (`mount_check`).
+//! - `verify` observes the staged release on the public port and records `verified`; on a node
+//!   with a mount provider the mount check must pass too (`mount_check`).
 //! - `rollback` brings the previous release back on the instance that served it (or stops the
 //!   only instance of a first install) and records nothing in flight. Before the commit only.
 //! - `cleanup` confirms afresh (it waits for `/readyz`, which the old instance, still draining
@@ -40,19 +40,15 @@
 //! is gone: a `prepare` that finds it past its cutover, and a `rollback`, roll it back first with
 //! the params it was written under, then do their own step (`Record::stale`).
 //!
-//! The second unit, `tierstore-fs@a` and `tierstore-fs@b` ([`fs`]), is handed over in the same
-//! steps on a node where an instance of it runs, between releases that both list
-//! `handoff-fs-v1`: `cutover` starts it after the store (the new instance takes the mount from the
-//! old one), `verify` and `cleanup` need it active, `verify` needs its process to run the binary
-//! the update installed ([`fs_exe`]) and names the release of an fs process it left alone,
-//! `cleanup` removes the old instance's marker and neither waits for it nor stops it, `rollback`
-//! puts it back before the store, `restore` starts the recorded instance after the store and
-//! `uninstall` stops the instances that run.
-//! The config hook runs the steps with [`FsPolicy::LeftAlone`], or, for the switch of a node to one
-//! process, [`FsPolicy::Switch`]: `prepare` records the switch (`fs_switch`, with `fs_live` naming
-//! the instance that runs), `cutover` removes both fs markers once the new instance serves and
-//! starts and stops no fs unit, `cleanup` records no fs instance, and `rollback` starts the fs
-//! instance and has it take the mount before the store's way back.
+//! The earlier layout had a second unit, `tierstore-fs@a` and `tierstore-fs@b`, for the file system.
+//! This arm has no step for it: it only looks at it, and `prepare` refuses, before it saves
+//! anything or asks a release, a node that still runs it (a unit of it running, one of the markers
+//! `run-fs-a` and `run-fs-b`, or a record that names `fs_live`) with
+//! [`Reason::ModeUnsupported`] and the way out: switch the node to the `fs` interface with the
+//! release that does that first ([`old_layout`](super::old_layout)). A record of an update in
+//! flight that names `fs_next` or says `fs_switch`, which only an earlier release wrote, is
+//! refused the same way by `prepare` and `rollback` instead of rolled back. The record keys
+//! `fs_live`, `fs_next` and `fs_switch` are read, never written (`cleanup` writes none).
 //!
 //! Every step holds the lock of the state directory, holds the record to its rules before it
 //! acts, and sets state rather than doing things once, so a step run again after a crash
@@ -61,8 +57,6 @@
 mod boot;
 mod cleanup;
 mod cutover;
-mod fs;
-mod fs_exe;
 mod prepare;
 mod rollback;
 mod verify;
@@ -72,33 +66,15 @@ use std::convert::identity;
 
 use super::args::Step;
 use super::look::Look;
+use super::old_layout;
 use super::params::Params;
 use super::ports::{Instance, Lock, SystemdPorts};
 use super::record::{Record, Stale};
 use super::report::{Done, Reason};
 
-/// Whether the steps hand the fs process over to the other instance with the store.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum FsPolicy {
-    /// The fs process is handed over when both releases list `handoff-fs-v1`.
-    Managed,
-    /// The fs process is left alone, running the release it runs: the update is of the store's
-    /// configuration, and the fs process's own file is not in that package.
-    LeftAlone,
-    /// The update is the switch of a node to one process: the staged file has an `fs`
-    /// interface, the file that serves had none, and the fs process that runs is not handed
-    /// over but given up. The new instance of the store takes the mount from it; once that
-    /// instance serves, both markers of the fs unit are removed, so that it never starts again,
-    /// and no fs unit is started or stopped. A rollback starts the fs instance again, and the
-    /// mount goes back to it before the store's sockets do.
-    Switch,
-}
-
 /// What a step works with.
 struct Ctx<'a, 'b> {
     ports: &'b SystemdPorts<'a>,
-    /// What the steps do to the fs process.
-    fs: FsPolicy,
     /// Whether the record as it is on disk, as far as this step knows, says `stopping`.
     committed: Cell<bool>,
     /// Whether this step began to write `stopping`: from then on, a failure leaves the commit
@@ -199,28 +175,12 @@ fn open(step: Step, ports: &SystemdPorts<'_>) -> Result<(Lock, Option<Record>), 
 
 /// Runs `step`. `params` is the parsed params file.
 pub(super) fn run_step(step: Step, params: &Params, ports: &SystemdPorts<'_>) -> Done {
-    run_step_with(step, params, ports, FsPolicy::Managed)
-}
-
-/// Runs `step` with `fs` saying what it does to the fs process.
-pub(super) fn run_step_with(
-    step: Step,
-    params: &Params,
-    ports: &SystemdPorts<'_>,
-    fs: FsPolicy,
-) -> Done {
     let (_lock, record) = match open(step, ports) {
         Ok(opened) => opened,
         Err(done) => return done,
     };
-    // A step after `prepare` goes by what the record says: the switch it noted.
-    let fs = match &record {
-        Some(record) if step != Step::Prepare && record.fs_switch => FsPolicy::Switch,
-        _ => fs,
-    };
     let c = Ctx {
         ports,
-        fs,
         // The record as it stands says whether the update is committed, at rest included
         // ([`Record::commits`]).
         committed: Cell::new(record.as_ref().is_some_and(|r| commits(r, step, params))),
@@ -321,7 +281,10 @@ fn past_a_stale(
             done.report.detail = Some(format!("{said}: {why}"));
             Err::<Done, Done>(done)
         }),
-        Stale::Own(own) => Some(roll_back_first(c, step, params, record, &own.params)),
+        Stale::Own(own) => Some(
+            old_layout::refuse_record(record)
+                .and_then(|()| roll_back_first(c, step, params, record, &own.params)),
+        ),
     }
 }
 

@@ -114,6 +114,12 @@ pub enum Reason {
     /// drained the node's jobs. On a Mac, also an update of the release on a node whose file has a
     /// `mount-provider` interface and no `fs` interface: nothing would serve the provider's mount,
     /// and the node is switched to one process first; no mode overrides that.
+    ///
+    /// Also `prepare` of a node that still runs the two-process layout (a `tierstore-fs@` unit
+    /// running, a `run-fs-*` marker, or a record that names an fs instance), and of a config
+    /// update that would be the switch to one process: this release has no step for the second
+    /// unit, and the node is first switched to the `fs` interface by the release that does that.
+    /// Nothing is recorded, started or stopped.
     ModeUnsupported,
     /// `verify`: the node's mount provider refused a call of the mount check, for a tree of a
     /// form the build service writes (with its L2 sidecar or without one): the node's jobs would

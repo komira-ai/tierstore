@@ -2,8 +2,7 @@
 //! Linux, NFS on loopback on macOS) in the node's own file, as `docs/design/one-service.md` lays
 //! out. They are read and checked here; the start of the build node serves the mount from them (on
 //! Linux by FUSE, `treefs/interface.rs`; on macOS by NFS, `treefs/nfs/interface.rs`), and on a
-//! system that is neither this release serves nothing from them and says so (`not_served`). `tierstore fs`
-//! no longer serves: it only checks an `[fs]` table (`--check-config`) and lists attachments.
+//! system that is neither this release serves nothing from them and says so (`not_served`).
 //!
 //! ```toml
 //! [[interface]]
@@ -18,16 +17,16 @@
 //! stage_dir = "/var/lib/tierstore-cache/cas/put-stage"
 //! ```
 //!
-//! The params are the keys of the `[fs]` table of `tierstore fs` (`treefs/config.rs`), with the same
-//! names, defaults and ranges, and its sub-tables `[fs.nfs]` and `[fs.put]` are the params `nfs` and
-//! `put`. Three keys of `[fs]` are not params, and each is refused by name: `fill_socket` (the file
-//! system is served by the process that holds the cache), `cache_path` (it is `local_cache.path` of
-//! the same file) and `handoff_socket` (the process's hand-over is on `server.handoff_socket`); nor
-//! are the hand-off keys of `[fs.nfs]` (`handoff_socket`, `handoff_wait`, `handoff_ready_wait`).
-//! Unlike `[fs]`, which warns of a key it does not know, the params refuse one, as every
-//! interface's do, in `nfs` and `put` too: a new table has no older file to keep loading.
+//! The params are the keys of [`FsTable`] (`treefs/config.rs`), with their names, defaults and
+//! ranges, and its sub-tables `nfs` and `put` (`treefs/nfs/config.rs`, `treefs/put/config.rs`).
+//! Three keys of the two-process layout's `[fs]` table are not params, and each is refused by name:
+//! `fill_socket` (the file system is served by the process that holds the cache), `cache_path` (it
+//! is `local_cache.path` of the same file) and `handoff_socket` (the process's hand-over is on
+//! `server.handoff_socket`); nor are the hand-off keys of its `[fs.nfs]` (`handoff_socket`,
+//! `handoff_wait`, `handoff_ready_wait`), which `nfs` refuses as unknown keys. The params refuse a
+//! key they do not know, as every interface's do, in `nfs` and `put` too.
 //!
-//! What the one file adds to the rules of `[fs]`, each a refusal by name at load:
+//! What the one file adds to the rules of the params, each a refusal by name at load:
 //!
 //! - the interface is a build node's alone (a file with `[local_cache]` and `[cold_store]` and no
 //!   `[hot_store]`), as the `trees` and `mount-provider` interfaces are (`no_trees`), and a file has
@@ -42,8 +41,8 @@
 //! first subordinate uid and gid plus `id`, read from `/etc/subuid` and `/etc/subgid` at load
 //! ([`owner`]), so that one file serves every node of a group.
 //!
-//! Names of users and groups (`client_group`, `owner`) are looked up through the system at load, as
-//! `tierstore fs --check-config` does, the file system of a path is the device of the nearest
+//! Names of users and groups (`client_group`, `owner`) are looked up through the system at load,
+//! the file system of a path is the device of the nearest
 //! directory of it that is there ([`volume_of`]), and the subordinate id files are read: all
 //! through [`Host`], which a test replaces.
 
@@ -114,8 +113,8 @@ pub(in crate::server) fn volume_of(path: &Path) -> io::Result<u64> {
 pub(in crate::server) struct FsInterface {
     /// The entry's place in the list (`interface[2]`).
     at: String,
-    /// The params, as the `[fs]` table of `tierstore fs` would hold them, but for an owner given as
-    /// the job user's subordinate ids, which is `subids` until it is resolved.
+    /// The params as [`FsTable`] holds them, but for an owner given as the job user's subordinate
+    /// ids, which is `subids` until it is resolved.
     table: FsTable,
     /// `params.owner` given as `{ subids_of, id }`.
     subids: Option<Subids>,
@@ -155,8 +154,8 @@ fn others(params: &Params) -> [(&'static str, bool); 14] {
 /// The `fs` interface at `at` as its params say it.
 ///
 /// # Errors
-/// A param of another type, a key of `[fs]` that is not a param (`fill_socket`, `cache_path`,
-/// `handoff_socket`) and a hand-off key of `params.nfs`, each naming the param and why.
+/// A param of another type, and a key of the two-process layout's `[fs]` table that is not a param
+/// (`fill_socket`, `cache_path`, `handoff_socket`), each naming the param and why.
 pub(in crate::server) fn fs_of(at: &str, params: &Params) -> Result<FsInterface, ConfigError> {
     let place = format!("{at}.params");
     let why = "not for type \"fs\": the file system is served on its mount point alone";
@@ -182,10 +181,6 @@ pub(in crate::server) fn fs_of(at: &str, params: &Params) -> Result<FsInterface,
         refuse(&place, why, &[(key, given)])?;
     }
     let nfs = params.nfs.clone().map(|strict| strict.0);
-    if let Some(table) = &nfs {
-        let why = "not a param of an fs interface: the NFS front of the process has no hand-off of its own";
-        refuse(&format!("{place}.nfs"), why, &table.handoff_keys())?;
-    }
     let (owner, subids) = match params.owner.clone() {
         Some(Owner::Pair(text)) => (Some(text), None),
         Some(Owner::Subids(subids)) => (None, Some(subids)),
@@ -206,7 +201,6 @@ pub(in crate::server) fn fs_of(at: &str, params: &Params) -> Result<FsInterface,
         tree_idle_secs: params.tree_idle_secs,
         tree_list_ram_bytes: params.tree_list_ram_bytes,
         put: params.put.clone().map(|strict| strict.0),
-        ..FsTable::default()
     };
     Ok(FsInterface {
         at: at.to_owned(),
