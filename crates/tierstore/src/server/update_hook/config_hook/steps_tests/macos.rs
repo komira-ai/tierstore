@@ -40,6 +40,7 @@ impl Mac {
             launchd: &self.fake,
             instances: &self.fake,
             host: &running,
+            provider: &self.fake.provider,
             clock: &self.fake,
             state: &self.fake,
         };

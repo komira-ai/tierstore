@@ -2,8 +2,8 @@
 //!
 //! Each port of [`super::ports`] has one implementation here, over the real thing: programs
 //! run through a [`Runner`] (an argument vector, never a shell), files under a root that tests
-//! point at a scratch directory, a loopback socket, and the Unix control socket of the instance
-//! that serves. Nothing here reads an environment
+//! point at a scratch directory, a loopback socket, the Unix control socket of the instance
+//! that serves, and the Unix socket of the node's mount provider. Nothing here reads an environment
 //! variable. [`super::Machine::system`] builds the ports of an arm from these.
 //!
 //! Programs are called by absolute path (`/usr/bin/systemctl`, the Debian and Ubuntu location;
@@ -17,6 +17,7 @@ mod instances;
 mod launchd;
 mod markers;
 mod processes;
+mod provider;
 mod runner;
 mod service_binary;
 mod state;
@@ -39,6 +40,7 @@ pub use launchd::{
 };
 pub use markers::MarkerFiles;
 pub use processes::ProcFiles;
+pub use provider::{ProviderSocket, ProviderTimes};
 pub use runner::{Call, Output, RunError, Runner, SystemRunner};
 pub use state::{CONFIG_STATE_FILE, LOCK_FILE, STATE_FILE, StateFiles};
 pub use units::{GuardUnit, SystemdUnits};
@@ -87,6 +89,8 @@ mod launchd_tests;
 mod markers_tests;
 #[cfg(test)]
 mod processes_tests;
+#[cfg(test)]
+mod provider_tests;
 #[cfg(test)]
 mod runner_tests;
 #[cfg(test)]

@@ -403,6 +403,7 @@ impl Linux {
                 control: &self.control,
             },
             host: &running,
+            provider: &self.fake.provider,
             clock: &self.fake,
             state: &self.fake,
         };

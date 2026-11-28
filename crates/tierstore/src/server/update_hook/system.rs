@@ -11,8 +11,8 @@ use super::config_hook::{Common, GUARD_FILE, GUARD_UNIT, Running, launchd_step, 
 use super::look::POLL_INTERVAL;
 use super::machine::{
     CONFIG_STATE_FILE, ControlSocket, GuardUnit, LaunchctlJobs, LaunchdTimes, LoopbackInstances,
-    MarkerFiles, MonotonicClock, ProcFiles, Runner, StateFiles, SystemHost, SystemRunner,
-    SystemdUnits,
+    MarkerFiles, MonotonicClock, ProcFiles, ProviderSocket, ProviderTimes, Runner, StateFiles,
+    SystemHost, SystemRunner, SystemdUnits,
 };
 use super::params::{Params, ServiceManager};
 use super::ports::{Family, LaunchdPorts, SystemdPorts};
@@ -100,6 +100,7 @@ pub(super) fn run_on(config: &SystemConfig<'_>, invocation: &Invocation, params:
     let runner = config.runner;
     let host = host_for(config, &params.service_manager);
     let instances = LoopbackInstances::new(CONNECT_TIMEOUT, READ_TIMEOUT);
+    let provider = ProviderSocket::new(config.root.clone(), ProviderTimes::default());
     let clock = MonotonicClock::new().with_pause(config.poll);
     let state = StateFiles::new(under(&config.root, STATE_DIR), config.owner);
     match &params.service_manager {
@@ -125,6 +126,7 @@ pub(super) fn run_on(config: &SystemConfig<'_>, invocation: &Invocation, params:
                 fs_processes: &fs_processes,
                 instances: &instances,
                 host: &host,
+                provider: &provider,
                 clock: &clock,
                 state: &state,
             };
@@ -142,6 +144,7 @@ pub(super) fn run_on(config: &SystemConfig<'_>, invocation: &Invocation, params:
                 launchd: &launchd,
                 instances: &instances,
                 host: &host,
+                provider: &provider,
                 clock: &clock,
                 state: &state,
             };
@@ -171,6 +174,7 @@ pub(super) fn config_run_on(
         release,
     };
     let instances = LoopbackInstances::new(CONNECT_TIMEOUT, READ_TIMEOUT);
+    let provider = ProviderSocket::new(config.root.clone(), ProviderTimes::default());
     let clock = MonotonicClock::new().with_pause(config.poll);
     let state = StateFiles::new(under(&config.root, STATE_DIR), config.owner)
         .with_record(CONFIG_STATE_FILE);
@@ -205,6 +209,7 @@ pub(super) fn config_run_on(
                 fs_processes: &fs_processes,
                 instances: &instances,
                 host: &running,
+                provider: &provider,
                 clock: &clock,
                 state: &state,
             };
@@ -222,6 +227,7 @@ pub(super) fn config_run_on(
                 launchd: &launchd,
                 instances: &instances,
                 host: &running,
+                provider: &provider,
                 clock: &clock,
                 state: &state,
             };

@@ -66,6 +66,9 @@ fn the_tokens_are_the_ones_the_contract_documents() {
             "state_io",
             "host_failed",
             "mode_unsupported",
+            "provider_refused",
+            "mounted_tree_wrong",
+            "provider_busy",
         ]
     );
 }
@@ -90,6 +93,7 @@ fn the_class_follows_the_reason() {
         StateIo,
         HostFailed,
         ModeUnsupported,
+        ProviderBusy,
     ];
     let release = [
         OutOfOrder,
@@ -101,6 +105,8 @@ fn the_class_follows_the_reason() {
         WrongBuild,
         ServiceManagerUnknown,
         NoPreviousRelease,
+        ProviderRefused,
+        MountedTreeWrong,
     ];
     for reason in environment {
         assert_eq!(reason.class(), Class::Environment, "{reason:?}");

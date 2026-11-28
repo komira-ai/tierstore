@@ -10,7 +10,9 @@
 //! those of the manifest the release sends for a Mac (xtask's `macos_pkg::manifest_json`) and the node's
 //! file is the Mac's own (`packaging/macos/tierstore.toml`, one process with an `fs` interface).
 //!
-//! What is real: the hook's steps, its host (`SystemHost` as `host_for` builds it for launchd,
+//! What is real: the node's mount provider and the hook's client of it, on the socket of the
+//! Mac's file, with the volume the provider's trees appear in stood in for
+//! (`package_provider.rs`); the hook's steps, its host (`SystemHost` as `host_for` builds it for launchd,
 //! with the ownership, mode and not-a-link checks of every file it runs), its launchd port
 //! (`LaunchctlJobs`) and its record (`StateFiles`), all under a scratch root. What stands in: the
 //! programs the hook runs, answered by [`Mac`] (`launchctl`, `dscl`, `sudo`, `mount` and a
@@ -35,7 +37,9 @@ use std::time::Duration;
 use tierstore_testkit::dir::TestDir;
 
 use super::fake::{assert_failed, assert_ok};
+use super::package_provider::{PackageProvider, SOCKET};
 use crate::server::build_info::gauge;
+use crate::server::provider::check::WITHOUT_SIDECAR;
 use crate::server::update_hook::launchd::run_step_with;
 use crate::server::update_hook::machine::testing::{exit, me};
 use crate::server::update_hook::machine::{
@@ -47,7 +51,7 @@ use crate::server::update_hook::system::{
 };
 use crate::server::update_hook::{
     Clock, Done, HANDOFF_EXEC_CAPABILITY, Instances, Invocation, LAUNCHD_PLIST, LaunchdPorts,
-    Machine, Params, PortError, PortKind, Reason, Record, Reply, STATE_DIR, StateDir, Step,
+    Machine, Marker, Params, PortError, PortKind, Reason, Record, Reply, STATE_DIR, StateDir, Step,
 };
 
 /// Where hostkeeper keeps the versions of the service.
@@ -202,18 +206,26 @@ struct Mac {
     next_pid: Cell<u32>,
     calls: RefCell<Vec<Call>>,
     now: Cell<u64>,
+    /// The node's mount provider, on the socket its file names.
+    provider: PackageProvider,
 }
 
 impl Mac {
     /// A Mac with hostkeeper's packages directory (0711) and service directory (0711), the node's
     /// file, and the namespace `trees` that tierstore's file system has at the mount point.
     fn new(name: &str) -> Mac {
+        Mac::with_provider(name, false)
+    }
+
+    /// [`Mac::new`], whose provider refuses the tree without a sidecar when `refuse_plain`.
+    fn with_provider(name: &str, refuse_plain: bool) -> Mac {
         let dir = TestDir::under(std::env::temp_dir(), name);
         let root = dir.path().join("host");
         let work = dir.path().join("work");
         fs::create_dir_all(&work).expect("work");
         fs::create_dir_all(&root).expect("root");
         set_mode(&root, 0o755);
+        let provider = PackageProvider::new(name, &root, MOUNT, refuse_plain);
         let mac = Mac {
             _dir: dir,
             root,
@@ -222,6 +234,7 @@ impl Mac {
             next_pid: Cell::new(400),
             calls: RefCell::new(Vec::new()),
             now: Cell::new(0),
+            provider,
         };
         let service = mac.at(PACKAGES);
         fs::create_dir_all(&service).expect("packages");
@@ -351,6 +364,7 @@ impl Mac {
             launchd: &launchd,
             instances: self,
             host: &host,
+            provider: &self.provider,
             clock: self,
             state: &state,
         };
@@ -571,7 +585,11 @@ fn stale_record() -> Record {
 /// A Mac as the farm Macs stand: 0.3.202 staged, installed and served by the job, and the
 /// hook's record of the update to 0.3.203 in flight.
 fn farm_mac(name: &str) -> Mac {
-    let mac = Mac::new(name);
+    farm_mac_with(Mac::new(name))
+}
+
+/// [`farm_mac`] of `mac`.
+fn farm_mac_with(mac: Mac) -> Mac {
     mac.stage(CURRENT);
     mac.activate(CURRENT);
     let booted = mac.launchctl(&["bootstrap", "system", LAUNCHD_PLIST]);
@@ -617,7 +635,19 @@ fn updates_by_hand_over(mac: &Mac) {
         Some((pid, NEXT.to_owned())),
         "the same process serves"
     );
-    assert_ok(&mac.step(Step::Verify, &params));
+    let verified = mac.step(Step::Verify, &params);
+    assert_ok(&verified);
+    // The node's provider, on the socket of the Mac's file, placed both trees of the check under
+    // the file's mount point, they read back through it, and it released them.
+    let said = verified.report.detail.clone().unwrap_or_default();
+    assert!(
+        said.starts_with(&format!(
+            "the mount provider at {SOCKET} placed, served and released a tree with its L2 \
+             sidecar and one without an L2 sidecar; "
+        )),
+        "{said}"
+    );
+    assert_eq!(mac.provider.placements(), 0);
     assert_ok(&mac.step(Step::Cleanup, &params));
     let record = mac.record();
     assert!(!record.updating, "{record:?}");
@@ -668,6 +698,41 @@ fn a_farm_mac_with_a_failed_attempt_staged_updates_the_same_way() {
         words.iter().all(|word| !word.starts_with(&failed)),
         "{words:?}"
     );
+}
+
+/// Asserts that a farm Mac whose next release's mount provider refuses the tree without an L2
+/// sidecar (its list is not in the store, as a release that refuses every such tree answers) fails
+/// `verify` with `provider_refused` after the volume was proved, records nothing verified and
+/// leaves no placement, and that the `rollback` hostkeeper runs next hands the same process back
+/// to 0.3.202. Catches a Mac update reported healthy while its provider refuses every job's tree
+/// of that form, on the package the release ships and the node file a Mac has.
+#[test]
+fn a_farm_mac_whose_provider_refuses_a_tree_fails_verify_and_rolls_back() {
+    let mac = farm_mac_with(Mac::with_provider("mac-package-refused", true));
+    let (pid, _) = mac.serving().expect("the job serves");
+    mac.stage(NEXT);
+    let params = params(NEXT, Some(CURRENT));
+    assert_ok(&mac.step(Step::Prepare, &params));
+    mac.activate(NEXT);
+    assert_ok(&mac.step(Step::Cutover, &params));
+    let done = mac.step(Step::Verify, &params);
+    assert_failed(&done, Reason::ProviderRefused);
+    let said = done.report.detail.clone().unwrap_or_default();
+    assert!(
+        said.starts_with(&format!(
+            "the mount provider at {SOCKET} refused Mount of the tree without an L2 sidecar"
+        )),
+        "{said}"
+    );
+    assert!(
+        said.ends_with(&format!("no tree list at {}", WITHOUT_SIDECAR.key())),
+        "{said}"
+    );
+    assert!(!mac.record().has(Marker::Verified));
+    assert_eq!(mac.provider.placements(), 0);
+    mac.activate(CURRENT);
+    assert_ok(&mac.step(Step::Rollback, &params));
+    assert_eq!(mac.serving(), Some((pid, CURRENT.to_owned())));
 }
 
 /// Asserts that a rollback after `cutover` (hostkeeper's `activate` of the kept 0.3.202 package
