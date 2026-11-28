@@ -611,3 +611,19 @@ impl Expanded {
         }
     }
 }
+
+/// Asserts that the update hook looks for the binary of a staged release of this package where
+/// the package puts it: hostkeeper's `macos-pkg` installer expands the payload (install location
+/// `/`) into the version directory's `tree/`, and the hook's `MACOS_PACKAGE_RELEASE_BINARY` must be
+/// `tree` and [`BINARY_PATH`]. It would catch a package that moves its binary while the hook still
+/// looks at the old path: every update of a Mac would then fail `prepare` with `host_failed`.
+#[test]
+fn the_update_hook_looks_for_a_staged_release_s_binary_where_the_payload_puts_it() {
+    let hook =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../tierstore/src/server/update_hook/mod.rs");
+    let text = std::fs::read_to_string(&hook).expect("the hook's module");
+    let want = format!("MACOS_PACKAGE_RELEASE_BINARY: &str =\n    \"tree{BINARY_PATH}\";");
+    assert!(text.contains(&want), "{} lacks {want:?}", hook.display());
+    let payload = payload(b"bytes".to_vec());
+    assert!(payload.contains_key(BINARY_PATH.trim_start_matches('/')));
+}

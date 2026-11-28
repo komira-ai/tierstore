@@ -162,6 +162,14 @@ impl Rig {
         .await
     }
 
+    /// The same, with the provider's mount at `mountpoint`.
+    pub(in crate::server) async fn mounted_under(name: &str, mountpoint: &Path) -> Self {
+        Self::with(name, TreesConfig::default(), |settings| {
+            settings.mountpoint = mountpoint.to_path_buf();
+        })
+        .await
+    }
+
     /// Puts the version 1 bytes of `list` in the upstream under its key, and no sidecar (none is
     /// made of a version 1 list); the key.
     pub(super) async fn put_list(&self, list: &TreeList) -> String {
