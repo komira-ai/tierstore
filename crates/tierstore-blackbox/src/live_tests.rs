@@ -6,7 +6,6 @@ use std::process::ExitStatus;
 
 use tierstore_testkit::dir::TestDir;
 
-
 use super::*;
 
 /// Asserts the control command of each way the upstream can serve.
