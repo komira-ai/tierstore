@@ -55,6 +55,22 @@ fn stand_in(dir: &Path, failing: &'static [usize]) -> NodeCommand {
     })
 }
 
+/// A PUT of `bytes` under `key` of the bucket `cas`, unsigned, to the S3 service at `address`:
+/// its status line.
+fn put_raw(address: &str, key: &str, bytes: &[u8]) -> String {
+    use std::io::{BufRead as _, BufReader, Write as _};
+    let mut sock = std::net::TcpStream::connect(address).unwrap();
+    let head = format!(
+        "PUT /cas/{key} HTTP/1.1\r\nhost: {address}\r\ncontent-length: {}\r\n\r\n",
+        bytes.len()
+    );
+    sock.write_all(head.as_bytes()).unwrap();
+    sock.write_all(bytes).unwrap();
+    let mut line = String::new();
+    BufReader::new(&mut sock).read_line(&mut line).unwrap();
+    line.trim_end().to_owned()
+}
+
 fn setup(dir: &Path, small_disk: Option<PathBuf>) -> Setup {
     Setup {
         dir: dir.to_owned(),
@@ -69,7 +85,8 @@ fn setup(dir: &Path, small_disk: Option<PathBuf>) -> Setup {
 
 /// Asserts what the rig does from outside: the node file it writes, the tree it puts into the
 /// upstream, the agent's calls on the node's socket, a read of an empty mount, the placements
-/// in the cache directory, the node's memory, `/metricz` of its front, the upstream's modes and
+/// in the cache directory, `/readyz` of the node and a read through its S3 front, each answer as
+/// the node gave it, the node's memory, `/metricz` of its front, the upstream's modes and
 /// counts, a restart, the clock, and a stop of both processes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_live_rig_drives_its_node_and_upstream_from_outside() {
@@ -104,13 +121,32 @@ async fn the_live_rig_drives_its_node_and_upstream_from_outside() {
     live.release(&one).await.unwrap();
     assert!(provider.prepared().is_empty());
 
-    // The stand-in is no node: whatever its /readyz answers and whether its front serves the
-    // upstream's pack, the rig asks both of the node's address and says what came.
-    live.ready().await.unwrap();
+    // The stand-in node is a fake S3 holding nothing: its /readyz is an empty listing, and its
+    // front has the pack only once the test puts it there.
+    assert_eq!(
+        live.ready().await.unwrap(),
+        (
+            200,
+            "<ListBucketResult><IsTruncated>false</IsTruncated></ListBucketResult>".to_owned()
+        )
+    );
     let (pack, bytes) = &tree.objects()[0];
-    if let Err(why) = live.front_read(pack, bytes.len() as u64).await {
-        assert!(!why.is_empty());
-    }
+    let missing = live.front_read(pack, bytes.len() as u64).await.unwrap_err();
+    assert_eq!(missing, format!("object {pack} not found"));
+    let started = std::fs::read_to_string(dir.path().join("logs/tierstore.out")).unwrap();
+    let node = started
+        .split_whitespace()
+        .find_map(|word| word.strip_prefix("listen="))
+        .unwrap();
+    assert_eq!(put_raw(node, pack, bytes), "HTTP/1.1 200 OK");
+    assert_eq!(
+        live.front_read(pack, bytes.len() as u64).await.unwrap(),
+        *bytes
+    );
+    assert_eq!(
+        live.front_read(pack, 16).await.unwrap(),
+        bytes[..16].to_vec()
+    );
     assert_eq!(live.placements().unwrap(), 0);
     assert!(live.resident().unwrap() > 0);
     match live.gauges().await {
