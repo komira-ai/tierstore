@@ -19,22 +19,24 @@
 //!
 //! What fails the check, and so `verify`, with the provider's reason: a refusal of any call
 //! (`FAILED_PRECONDITION`, `INVALID_ARGUMENT` or any status but `UNAVAILABLE`,
-//! [`Reason::ProviderRefused`]), and a tree read back wrong or no tree of the check, a path of it
-//! the system answers with an error (a stale handle, a permission), a directory outside the mount,
-//! or a placement that outlives its release ([`Reason::MountedTreeWrong`]). Both are the release's: the
-//! node's jobs would fail the same way. What defers it (hostkeeper asks again and ends the
-//! deferrals itself at `verify_deadline_secs`) is what load or a start explains:
-//! [`Reason::ProviderBusy`], of the environment, for a provider that answers `UNAVAILABLE` (it has
-//! no room or no turn now: `trees.max_sources`, `trees.max_placements` or
+//! [`Reason::ProviderRefused`]), and a tree read back wrong or no tree of the check, a read of it
+//! that the system or the NFS front answers with an error (a stale handle, a permission, a path
+//! that is not there), a directory outside the mount, or a placement that outlives its release
+//! ([`Reason::MountedTreeWrong`]). Both are the release's: the node's jobs would fail the same
+//! way, and the check's objects are read from memory, so an error is no slow fill. What defers it
+//! (hostkeeper asks again and ends the deferrals itself at `verify_deadline_secs`) is what load or
+//! a start explains: [`Reason::ProviderBusy`], of the environment, for a provider that answers
+//! `UNAVAILABLE` (it has no room or no turn now: `trees.max_sources`, `trees.max_placements` or
 //! `trees.prepare_concurrency` at its bound, or a tree not placed within the `Mount`'s wait), and
 //! [`Reason::NotReady`] for a provider that does not answer (its socket not bound yet: the new
-//! instance binds it once it holds the cache's lock) or a read through the mount that does not
-//! end within its bound (a slow fill).
-//! A check that fails or defers after
-//! its first `Prepare` asks for the release of both sources before it ends (each asked even when
-//! the other's is not answered), so that it leaves no placement the provider can release; a
-//! placement it cannot is released by the next check's first step, or at `trees.ttl_max`; the trees' objects are the release's own
-//! and nothing is written to the store.
+//! instance binds it once it holds the cache's lock) or a read that does not end within its bound
+//! (a slow fill), or that the NFS front answers `NFS3ERR_JUKEBOX`.
+//!
+//! A check that fails or defers after its first `Prepare` asks for the release of both sources
+//! before it ends (each asked even when the other's is not answered), so that it leaves no
+//! placement the provider can release; a placement it cannot is released by the next check's
+//! first step, or at `trees.ttl_max`; the trees' objects are the release's own and nothing is
+//! written to the store.
 //!
 //! The check's sources are its own agent's, which no job's are, and it never sweeps: it is safe
 //! while jobs run. A node without the interface has no provider, and nothing is checked.

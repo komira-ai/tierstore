@@ -404,10 +404,12 @@ fn a_path_that_is_not_utf8_is_refused() {
 
 /// Asserts that slowness is slowness: a front that answers `NFS3ERR_JUKEBOX` (a fill that has not
 /// ended) and a front that never answers within the bound end the read as unread, so that the
-/// check defers; and that a front nobody listens on is a failure. Catches a check that fails, and
+/// check defers (the second waits out a bound of 50 ms, and no outcome depends on how long that
+/// is: the front never answers); and that a front that closes the connection unanswered is a
+/// failure. Catches a check that fails, and
 /// so rolls back, an update of a node whose front is only slow to fill a file.
 #[test]
-fn a_slow_front_is_unread_and_a_front_not_there_is_a_failure() {
+fn a_slow_front_is_unread_and_a_front_that_hangs_up_is_a_failure() {
     let jukebox = front(vec![mounted(), status(10_008)]);
     assert_eq!(
         read(jukebox, "a"),
@@ -429,16 +431,21 @@ fn a_slow_front_is_unread_and_a_front_not_there_is_a_failure() {
         "{why}"
     );
 
-    let gone = {
+    // A front that takes the connection and closes it without an answer.
+    let closing = {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        listener.local_addr().unwrap()
+        let address = listener.local_addr().unwrap();
+        std::thread::spawn(move || drop(listener.accept()));
+        address
     };
-    let read_gone = read(gone, "a");
-    let Err(ReadFault::Failed(why)) = &read_gone else {
-        panic!("{read_gone:?}");
+    let read_closed = read(closing, "a");
+    let Err(ReadFault::Failed(why)) = &read_closed else {
+        panic!("{read_closed:?}");
     };
+    // The call is either refused as it is written or left unanswered, as the close meets it:
+    // a failure that names the front and the call either way.
     assert!(
-        why.starts_with(&format!("the NFS front at {gone} could not be reached: ")),
+        why.starts_with(&format!("the NFS front at {closing} ")) && why.contains("MNT of /: "),
         "{why}"
     );
 }

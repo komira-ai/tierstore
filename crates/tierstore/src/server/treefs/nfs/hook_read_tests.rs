@@ -32,8 +32,7 @@ async fn read(
 /// `trees/<digest>` (the MOUNT of the export's root, a LOOKUP of each name, a READDIRPLUS of each
 /// directory) and finds every path with what it is: each file's bytes whole (one of 300000 bytes,
 /// read in several READs, and an empty one), each directory, and the link's target, and nothing
-/// more. Catches a read that stops at the first READ of a file, takes `.` or `..` for entries, or
-/// follows the link.
+/// more. Catches a read that stops at the first READ of a file, or follows the link.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_hook_reads_a_tree_whole_from_the_front() {
     let (rig, digest) = attached("nfs-hook-read");

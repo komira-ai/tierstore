@@ -570,7 +570,7 @@ pub enum TreeAt<'a> {
     },
 }
 
-/// Why a read of a tree through the mount gave no tree.
+/// Why a read of a tree, through the mount or from the NFS front, gave no tree.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ReadFault {
     /// The read did not end within its bound: the mount may be slow to fill a file, as it is
