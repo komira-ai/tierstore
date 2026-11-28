@@ -164,13 +164,13 @@ fn the_namespace_can_be_passed_through_and_not_listed_and_a_tree_resolves_at_the
         assert!(one >= 1);
         assert_eq!(errno_of(&std::fs::metadata(&later).unwrap_err()), ENOENT);
         assert_eq!(m.served("namespace") - before, 2 * one);
-        let tree = Built::of(vec![("only", file(b"later"))]);
-        let digest = tree.root.clone();
-        {
-            let mut built = m.rig.upstream.built.lock().unwrap();
-            built.manifests.extend(tree.manifests);
-            built.blobs.extend(tree.blobs);
-        }
+        let digest = m
+            .rig
+            .upstream
+            .built
+            .lock()
+            .unwrap()
+            .add_tree(vec![("only", file(b"later"))]);
         let there = mount.join("trees").join(&digest);
         assert_eq!(std::fs::read(there.join("only")).unwrap(), b"later");
         assert_eq!(m.rig.core.implicit().len(), 1);
@@ -329,7 +329,7 @@ fn a_file_whose_fill_fails_is_an_io_error_until_the_blob_can_be_had() {
             errno_of(&directory),
             rustix::io::Errno::ISDIR.raw_os_error()
         );
-        let failures = m.rig.core.detach(RUN).unwrap();
+        let failures = m.rig.core.detach(RUN).unwrap().failures;
         assert_eq!(failures.len(), 1);
         assert_eq!(failures[0].path, "/include/a.h");
         assert_eq!(failures[0].reason, "upstream 503");

@@ -9,10 +9,9 @@
 //!   between the two nor an older copy is served after the overwrite, and then keeps the new
 //!   copy under the tag the upstream's answer gives (see `keep`). Two puts of one key that run at
 //!   once, one of them a plain put, keep no copy: the order in which the upstream took them is
-//!   not known here, and the next read fills the object (see [`Writing`]). A put that replaces
-//!   on a tag (`If-Match`) is still refused. Where the upstream creates only (a proxy whose
-//!   format is not `active-marks`) the plain put is the upstream's create-only one and its
-//!   `AlreadyExists` is passed on.
+//!   not known here, and the next read fills the object (see [`Writing`]). Where the upstream
+//!   creates only (a proxy whose format is not `active-marks`) the plain put is the upstream's
+//!   create-only one and its `AlreadyExists` is passed on.
 //! - **Create-only put** ([`put_through`](Inner::put_through), in `keep`): one HEAD of the key
 //!   goes to the upstream before the body is read (also when the upstream is a proxy of two
 //!   tiers, whose own put refuses a key that only its first tier holds only after the body has
@@ -37,11 +36,28 @@
 //! - **Delete** ([`delete_through`](Inner::delete_through)): the entry is dropped, then the
 //!   upstream deletes. A fill that is running for the key does not keep the object it read (see
 //!   [`forget`](Inner::forget)).
-//! - **A put that replaces on a tag** (`put_if_match`) is not done, as on every front.
+//! - **A copy the upstream makes** ([`copy_through`](Inner::copy_through)): passed to the
+//!   upstream's own copy ([`copy_in_store`](crate::Backend::copy_in_store)), so no byte of it
+//!   passes through the node. A copy of an object forgets the key it writes before the copy and
+//!   again when the upstream has answered, as a delete does, and keeps no copy of it: the node
+//!   never held the bytes, and the first read fills the object as any miss (under a
+//!   `cache = true` policy). A copy into a part is the upstream's alone, as a part is. A copy the
+//!   upstream does not make comes back to the front, which reads the source and puts the bytes
+//!   (a plain or a create-only put, above).
+//! - **A put or a completion that replaces on a tag** (`If-Match`,
+//!   [`swap_through`](Inner::swap_through) and [`complete_swap_through`](Inner::complete_swap_through)):
+//!   sent to the upstream's own call ([`put_stream_if_match`](crate::Backend::put_stream_if_match),
+//!   [`complete_upload_if_match`](crate::Backend::complete_upload_if_match)), with no HEAD before
+//!   it: the upstream compares the tag and replaces in one step (an S3 bucket does), and its 412
+//!   and 404 are passed on. The cache forgets the key before the call and when the upstream has
+//!   answered, also with an error, as for a plain put, and keeps no copy: the next read fills
+//!   the object. The call counts as a plain put among the puts of the object that run at once
+//!   (see [`Writing`]), so that a put of the object beside it keeps no copy either.
 //!
 //! The keys under `_journal/` and `_tiering/` belong to a storage node and are refused with
 //! [`Error::Reserved`], as a storage node does.
 
+use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
@@ -50,7 +66,7 @@ use futures::StreamExt as _;
 use futures::stream;
 
 use crate::journal::is_reserved;
-use crate::{Error, PartBody};
+use crate::{CopyTarget, Error, PartBody, PutAnswer, StoreCopy};
 
 use super::calls::counting;
 use super::keep::Sent;
@@ -96,6 +112,26 @@ impl Inner {
         deleted
     }
 
+    /// A copy the upstream makes of its own object (module docs). The source is refused as the
+    /// key is, when it is one a storage node keeps for itself.
+    pub(super) async fn copy_through(
+        &self,
+        copy: &StoreCopy<'_>,
+    ) -> Result<Option<PutAnswer>, Error> {
+        self.writable(copy.key)?;
+        if is_reserved(copy.source) {
+            return Err(Error::Reserved(copy.source.to_owned()));
+        }
+        if let CopyTarget::Part { .. } = copy.target {
+            return self.upstream.copy_in_store(copy).await;
+        }
+        self.forget(copy.key);
+        let copied = self.upstream.copy_in_store(copy).await;
+        // Also on an error: a timeout, or a 5xx after the commit, may have replaced the object.
+        self.forget(copy.key);
+        copied
+    }
+
     /// Starts a multipart upload of `key` at the upstream.
     pub(super) async fn create_through(&self, key: &str) -> Result<String, Error> {
         self.writable(key)?;
@@ -136,6 +172,62 @@ impl Inner {
         let tag = completed.inspect_err(|error| self.counters.put_failed(error))?;
         bump(&self.counters.upstream_puts);
         self.forget(key);
+        Ok(tag)
+    }
+
+    /// A put that replaces the object only if it has the tag `etag`, sent to the upstream as it
+    /// is; gives the tag of the new object. See the module docs.
+    pub(super) async fn swap_through(
+        self: &Arc<Self>,
+        key: &str,
+        len: Option<u64>,
+        body: PartBody<'_>,
+        etag: &str,
+    ) -> Result<String, Error> {
+        self.writable(key)?;
+        let passed = AtomicU64::new(0);
+        let counted = counting(body, &passed);
+        let sent = self.swapping(
+            key,
+            self.upstream.put_stream_if_match(key, len, counted, etag),
+        );
+        let tag = sent.await?;
+        add(&self.counters.upstream_put_bytes, passed.into_inner());
+        bump(&self.counters.writes_through);
+        Ok(tag)
+    }
+
+    /// The completion of an upload that replaces the object only if it has the tag `etag`; as
+    /// [`swap_through`](Self::swap_through).
+    pub(super) async fn complete_swap_through(
+        self: &Arc<Self>,
+        key: &str,
+        id: &str,
+        parts: &[(u32, String)],
+        etag: &str,
+    ) -> Result<String, Error> {
+        self.writable(key)?;
+        let sent = self.upstream.complete_upload_if_match(key, id, parts, etag);
+        self.swapping(key, sent).await
+    }
+
+    /// Runs `call`, a write of the upstream that replaces `key` on a tag: registered as a plain
+    /// put of the object for its length, with the key forgotten before and after it. Counts the
+    /// write, or its failure.
+    async fn swapping(
+        self: &Arc<Self>,
+        key: &str,
+        call: impl Future<Output = Result<String, Error>>,
+    ) -> Result<String, Error> {
+        let writing = self
+            .cacheable(key)
+            .map(|name| self.begin_write(&name.hex, true));
+        self.forget(key);
+        let sent = call.await;
+        self.forget(key);
+        drop(writing);
+        let tag = sent.inspect_err(|error| self.counters.put_failed(error))?;
+        bump(&self.counters.upstream_puts);
         Ok(tag)
     }
 

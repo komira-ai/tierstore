@@ -1,7 +1,19 @@
 # tierstore as one service: one process, one unit, one configuration file
 
 Status: **approved by the owner on 2026-11-24, with the privilege design simplified to what is here (the process holds
-`CAP_SYS_ADMIN` for its life). No code changes come with this document; the build plan of section 6 builds it.** It reverses decision C5 of
+`CAP_SYS_ADMIN` for its life). Release M (phase 1, P1 to P7 of section 6) is built on Linux and macOS: the `fs` interface
+(komira-ai/tierstore#448, komira-ai/tierstore#450), the core's calls into the cache (komira-ai/tierstore#445), the start of the one process (komira-ai/tierstore#454), the one hand-over's
+wire format (komira-ai/tierstore#452), the macOS hand-over to the next image (komira-ai/tierstore#456, komira-ai/tierstore#462, komira-ai/tierstore#463), the unit and plists (komira-ai/tierstore#446), and the update hook and
+the switch (komira-ai/tierstore#458). The Linux start now also takes the cache lock with the sockets, and its verify waits for read-write
+(komira-ai/tierstore#571). Not built: the Linux start does not yet take the mount, the control socket and the sockets in one
+conversation (`take_service`, `Offer::with_mount` and `treefs::handover::offered` have no caller outside tests; the start takes
+the mount by `take-fs 1`), and the successor still scans the cache at `written` before it binds the mount-provider socket
+(komira-ai/tierstore#479, komira-ai/tierstore#522). Phase 2 (P9, release M+1, section 5) is built in part: the fill socket and the `Fills` trait
+are gone (the core calls the node's cache in the process alone), `local_cache.fill_socket` is
+read and ignored with a line on stderr, and `tierstore fs` serving exits 2 (komira-ai/tierstore#523).
+Not built: `tierstore attachments`, and `fs.toml`, the `tierstore-fs` units and the hook's second
+arm still ship (komira-ai/tierstore#524).
+P8 is in the deployment's repository.** It reverses decision C5 of
 [virtual-build-fs.md](virtual-build-fs.md) (section 13.1, "a second process on Linux build nodes holding `CAP_SYS_ADMIN`,
 with no network") on the owner's instruction: tierstore is one service, one process and one configuration file, and the
 file system is an `[[interface]]` of type `fs` inside it, as section 4 of [pluggable-interfaces.md](pluggable-interfaces.md)
@@ -85,8 +97,9 @@ Rules the one file adds, each a refusal by name at load (and so by `--check-conf
 - A second `fs` interface is refused.
 - The `mount-provider` interface's `mountpoint` param may be left out; it is then the `fs` interface's `mountpoint`. When both
   are given they must be equal. (Today they are two files that agree by hand: `provider/config.rs`, "the mount of `tierstore
-  fs` on the node (its `fs.mountpoint`)".) A `mount-provider` interface in a file without an `fs` interface keeps today's
-  meaning and default, so a file of today still loads.
+  fs` on the node (its `fs.mountpoint`)".) A `mount-provider` interface in a file without an `fs` interface kept today's
+  meaning and default in release M, so a file of today still loaded; since `tierstore fs` no longer serves (0.3.196) nothing
+  serves that mount, and the load refuses such a file, naming the provider's entry.
 - `params.put.stage_dir` must be on the file system of `local_cache.path` (today: of `fs.cache_path`).
 - `params.runtime_dir` must not be inside `local_cache.path`, and the control socket must differ from `server.handoff_socket`
   and the mount-provider socket, as the sockets of one file are compared today (`check_provider_socket`).
@@ -329,7 +342,8 @@ that is all the capability is for. It is what `tierstore-fs@.service` grants tod
 
 **macOS:** none. The process runs as `_tierstore`; the NFS listener is on an unprivileged loopback port, and `mount_nfs`,
 `umount` and `diskutil unmount force` of a loopback export need no root when the mounting user owns the mount point (read in
-`packaging/macos-pkg/tierstore-fs.plist`; Measured: macos E14 in virtual-build-fs.md).
+the `tierstore-fs.plist` the installer package shipped until komira-ai/tierstore#624; Measured: macos E14 in
+virtual-build-fs.md).
 
 ### 2.2 Unit hardening: what the host's mount namespace rules out
 
@@ -437,8 +451,12 @@ Where each step comes from:
   skips a front line it does not know and closes its descriptor, which is how `nfs` was added. The `mount` line is a third
   request line, as `ready` was a second: an instance that does not know it, or holds no mount, answers `refused`, and the
   taker asks again without it, which takes the sockets alone (section 4.2 uses that). An instance that holds the mount
-  refuses a taker that does not ask for it, so the mount is never left with an instance that is about to exit. The B8 tests
-  of P4 replay a previous release's taker against this offer and this taker against a previous release's offer.
+  refuses a taker that does not ask for it, so the mount is never left with an instance that is about to exit: a taker that
+  asks `take 1` alone at its request, and one that asked for the `ready` step at that `ready` (`refused` in place of `bye`),
+  unless the mount was taken meanwhile on the instance's `take-fs 1` (the two conversations share a claim of the mount, so
+  one taker at a time is at it). That is how the start of the previous release, which asks `take 1` / `ready` and takes the
+  mount on `take-fs 1` before its `ready`, still takes over from this one, so that an update back to it is a hand-over. The
+  B8 tests of P4 replay a previous release's taker against this offer and this taker against a previous release's offer.
 - **The lock line** is offered, by an instance that has a cache, to a taker that asked for the `ready` step; a taker that
   asks `take 1` alone gets the sockets as today and stays read-only until the old one exits (today's behaviour, which 4.2's
   rollback uses). A previous release's taker skips the line and closes the descriptor, which does not unlock (3.2).
@@ -466,11 +484,21 @@ Where each step comes from:
   restarted by systemd.
 - **Capability.** A release that speaks this lists `handoff-service-v1` in `tierstore --capabilities`. The hook hands a node
   with an `fs` interface over only when both releases list it (section 3.6).
+- **Built** (P3's wiring of P4, read in code): the running instance offers its mount on `server.handoff_socket`
+  (`Offer::with_mount` with `treefs::handover::offered`, from `cache_cli.rs`) beside its `take-fs 1` on the runtime directory's
+  socket, and its start asks `take 1` / `ready` / `mount` there (`cache_cli_mount.rs`): with an offer of the mount it takes
+  everything in this one conversation (`Mounted::take_handed`: the device stored before `ack`, the runtime state read again
+  after `done`, `ready` said before the device is read) and sends no `take-fs 1`; with an offer without it (the old layout's
+  S3 process, or an instance whose mount a `take-fs 1` took), it takes the mount on `take-fs 1` in the order of 4.2. Tests:
+  `a_running_one_process_instance_offers_sockets_mount_control_and_lock_on_the_handoff_socket`,
+  `a_successor_of_one_process_is_writer_at_written_not_at_the_old_exit`,
+  `a_taker_with_a_mount_and_a_cache_is_read_write_at_bye_without_the_old_process_exiting`,
+  `a_previous_release_start_takes_the_mount_on_take_fs_and_the_sockets_with_the_lock` (`treefs/interface_service_tests.rs`).
 
 ### 3.2 The cache lock
 
-Today the cache lock is an `flock(2)` on `<cache>/.lock` (`server/lock.rs`). The successor of a hand-over does not get it:
-it serves read-only until the old process exits and the kernel frees the lock, and then takes it at the next tick of
+Today the cache lock is an `flock(2)` on `<cache>/.lock` (`server/lock.rs`). Before komira-ai/tierstore#571 the successor of a hand-over did not get it:
+it served read-only until the old process exited and the kernel freed the lock, and then took it at the next tick of
 `local_cache.lock_interval` (`local_cache/hold.rs`). Meanwhile the old process kept answering the fill socket, so the file
 system's fills went on through the old process's whole drain.
 
@@ -507,14 +535,16 @@ long. So the lock passes in the hand-over:
   bounded by its own deadline, or a put, bounded by the S3 request's), not its drain. Fills of the file system wait across
   it (1.5), up to `params.fetch_timeout`. The take of the write role does what a take does today (empty the stage, rescan,
   replace the index), at `written` instead of at the old process's exit; its cost is unchanged.
-- **Built so far** (read in code, `server/cache_cli.rs`, `server/cli_serve.rs`): the Linux start of a node whose file has an
-  `fs` interface takes the mount by `take-fs 1` on the runtime directory's socket, as in 4.2, and the sockets by `take 1` /
-  `ready` with the lock on `server.handoff_socket` (`handoff::offered_with_lock`). It says `ready` there after the mount's
-  `bye` and before it serves or binds its own control socket, and its cache becomes the writer at `written`
-  (`handoff::follow`). A lock the running instance offers of another file (a configuration that moves
+- **Built** (read in code, `server/cache_cli_mount.rs`, `server/cli_serve.rs`): the Linux start of a node whose file has an
+  `fs` interface takes the lock with the mount and the sockets in the one conversation of 3.1 on `server.handoff_socket`
+  (`handoff::offered_with`), holding the received descriptor in a type whose drop only closes it (`Received`); against an
+  instance that holds no mount it takes the sockets and the lock there and the mount by `take-fs 1`, as in 4.2, and says
+  `ready` on `server.handoff_socket` after the mount's `bye`. Either way it says `ready` before it serves or binds its own
+  control socket, and its cache becomes the writer at `written` or at the end of the connection (`handoff::follow`), and
+  binds the mount provider then. A lock the running instance offers of another file (a configuration that moves
   `local_cache.path`) is closed and left with it, not refused with `nak`: the two caches are two directories. One
   that does not answer `bye` serves on, with its lock: the start then fails before it serves anything, leaving the
-  mount it took to its descriptor store, and the restart adopts it and takes the sockets again. Still to build: the
+  mount it took to its descriptor store, and the restart adopts it and takes the sockets again. Left as it is: the
   successor's scan of the cache at `written` (`promote`) is as long as before, and the mount provider is bound only
   after it.
 
@@ -712,7 +742,7 @@ A Mac has no hand-over today, and its file service unmounts when it stops (`nfs/
 boots it out before the main job: `launchd/fs.rs`). So the switch on a Mac is a restart, and it unmounts, as every tierstore
 update on a Mac does today. A job that holds a tree on that Mac during the switch fails. The window therefore drains the
 Mac first: the job agent takes no new job and its jobs end, as for any Mac update today. After the switch, updates are the
-hand-over of 3.4 and no longer unmount.
+hand-over of 3.4 and no longer unmount (section 4.5).
 
 1. M is on the Mac (two jobs). The Mac is drained.
 2. The group's configuration package is updated: `tierstore.toml` with the `fs` interface (1.3), no `fs.toml`, and no
@@ -724,8 +754,9 @@ hand-over of 3.4 and no longer unmount.
 3. The Mac is let take jobs again.
 
 Rollback: the package's previous files, `launchctl enable system/tierstore-fs`, and the old restart (fs job out, main job out
-and in, fs job in), with the Mac still drained. M+1's installer package does not ship `tierstore-fs.plist` and its
-postinstall removes a `tierstore-fs.plist` left by an earlier package.
+and in, fs job in), with the Mac still drained. The installer package no longer ships `tierstore-fs.plist`
+(komira-ai/tierstore#624); hostkeeper's activate of it removes the one an earlier package installed, since it deletes the
+files the old version shipped and the new one does not. Its postinstall does nothing about it.
 
 ### 4.4 What changes where
 
@@ -738,6 +769,45 @@ postinstall removes a `tierstore-fs.plist` left by an earlier package.
 | hostkeeper manifest | Linux `run` unchanged (`tierstore@a.service`, `tierstore@b.service`); macOS installer package's params lose `fs_launchd_label` and its payload loses `tierstore-fs.plist` (M+1); the cutover bound (4000 s, which includes the wait for the new store to take the cache lock) and the rollback bound (1500 s) still cover a Linux take (300 s start) and a Mac hand-over (61 s drain, start) | M, M+1 |
 | job agent (jobscheduler) | nothing: the mount-provider socket paths (`/var/lib/tierstore/provider.sock`, `/usr/local/tierstore/run/provider.sock`) and the mount roots do not move. On Linux, the ordering drop-in names `tierstore@a.service tierstore@b.service` | 4.2 step 5 |
 
+### 4.5 Updates of a Mac's release after the switch
+
+komira-ai/tierstore#623, #624. Since 0.3.196 `tierstore fs --config` serves nothing and exits 2; the file system of a Mac is
+served only by the `fs` interface of the node's one process. The macOS package's manifest still named `fs_launchd_label`, so
+an update booted the `tierstore-fs` job out (which unmounts) and in again after the main job served onto a binary that exits
+2, reported success, and nothing was mounted. The decision:
+
+- **A Mac that was switched** (its file has an `fs` interface) is updated by the hand-over of 3.4: the manifest names no
+  fs job, so between releases that both list `handoff-exec-v1` the hook copies the staged binary and sends `SIGUSR2`. The
+  process keeps its pid and its mount, ends its NFS connections as a hand-over does, and executes the new image, which serves
+  the same NFS listening socket and control socket. The jobs on the Mac see their reads of the mount pause for the drain and
+  the exec (the mount is `hard`, so the clients retry) and go on; nothing is unmounted and their files stay open. Before,
+  every update was a restart: a boot-out of the job (the drain of 60 s, then the unmount, up to 120 s) under the running jobs.
+- **A Mac that was not switched** (its file has a `mount-provider` interface and no `fs` interface) is refused in `prepare`
+  with `mode_unsupported`, and the detail says to switch the node to one process first. The refusal is in `prepare` because it
+  runs before `activate` and before anything is recorded, started or stopped: hostkeeper runs `rollback`, which finds
+  nothing in flight, and re-activates the previous package, so the Mac stays on its release with its mount served. A refusal
+  after the cutover would have stopped the one process that serves the mount. The config hook is not refused: its switch (4.3)
+  is the way off the layout.
+- **`verify` proves the volume before the commit.** The hand-over's own check is the build gauge, which says the new image
+  runs, not that it serves the mount. For a release on launchd whose file has an `fs` interface, `verify` requires the mount
+  listed at the interface's mount point (which is the mount provider's root, the loader holds the two equal) and a look-up
+  of `<mount point>/trees` that finds a directory: every mount of the file system has that namespace at its root, a plain
+  directory that is not mounted lacks it, and the look-up needs the server to answer. A failure is `not_ready` and hostkeeper
+  rolls back, which for a hand-over is the hand-over to the previous release by `SIGUSR2`. After the commit `verify` only
+  observes the version.
+- **`fs_launchd_label` is still read**, because the switch's rollback of a config package names it to go back to the
+  two-process layout: a params file that names it is driven as before (the fs job out before the main job, in after),
+  except in an update of the release on a node whose file has an `fs` interface. There every step, the boot step and the
+  rollback included, leaves the fs job alone whatever the params say: on the four switched farm Macs the update to 0.3.203,
+  whose manifest still named the job, failed in `cutover` and again in `rollback` at `launchctl bootstrap` of the disabled
+  `tierstore-fs.plist` (`Bootstrap failed: 5`) after the main job served, and its boot step fails the same way. No
+  release manifest names it, and the package ships no `tierstore-fs.plist`; hostkeeper's activate removes the file from a Mac
+  that has it, and a rollback to the old release lays it down again, where the job stays disabled on a switched Mac.
+- **Failure modes.** A mount that is not listed, or has no `trees`, fails `verify` and rolls the update back. On a hard NFS
+  mount whose server is gone, the look-up waits until the kernel marks the mount dead (`fs.nfs.dead_timeout`) and then fails,
+  so a dead server fails `verify` after that time and not at once. A Mac whose file lacks the `fs` interface stays on its
+  release until its config package switches it.
+
 ## 5. What it deletes (release M+1)
 
 - **The verb `tierstore fs`** (`server/verbs/fs.rs`, `server/treefs/launch.rs`'s own start, the `[fs]` loader of
@@ -745,10 +815,12 @@ postinstall removes a `tierstore-fs.plist` left by an earlier package.
   system is the `[[interface]]` of type `fs` of the node's file", so a unit left behind fails loudly and its
   `RestartPreventExitStatus=2` stops it from looping. `tierstore fs attachments` becomes `tierstore attachments --config
   <file>`, which reads the control socket from the `fs` interface (decision 8).
-- **`fs.toml`**: the packaging example `packaging/macos/fs.toml`, the copies in each group's configuration package.
-- **The units and jobs**: `packaging/hostkeeper/units/tierstore-fs@.service`, `packaging/hostkeeper/units/tierstore-fs.plist`,
-  `packaging/macos-pkg/tierstore-fs.plist`, the installer package's `FS_*` entries (`crates/xtask/src/release/macos_pkg.rs`).
-- **The fill socket**: `server/fill_socket/mod.rs` and `request.rs` (listener, sessions, parser, refusals) and their tests,
+- **`fs.toml`**: the packaging example `packaging/macos/fs.toml` (deleted in komira-ai/tierstore#624), the copies in each
+  group's configuration package.
+- **The units and jobs**: `packaging/hostkeeper/units/tierstore-fs@.service`; `packaging/hostkeeper/units/tierstore-fs.plist`,
+  `packaging/macos-pkg/tierstore-fs.plist` and the installer package's `FS_*` entries
+  (`crates/xtask/src/release/macos_pkg.rs`), deleted in komira-ai/tierstore#624.
+- **The fill socket** (built by komira-ai/tierstore#523): `server/fill_socket/mod.rs` and `request.rs` (listener, sessions, parser, refusals) and their tests,
   `server/treefs/fill_client.rs` and its tests, the socket parts of `server/config_fill.rs`, `Fronts.fill_socket` and the
   task that serves it. Kept, moved beside the provider listener that uses them: `bind_socket`, `SocketFile`, `pause_if`;
   kept beside the put ingest: `put::chunks`. `local_cache.fill_socket` is read and ignored with a line on stderr (B8: a file
@@ -778,14 +850,14 @@ a phase can be written in parallel; "needs" says which must merge first.
 |---|---|---|---|---|
 | P1 | The `fs` interface type: params into `FsSettings`, the rules of 1.2, `--check-config`, docs `configuration.md` | `FsSettings` (exists, `treefs/config.rs`); `Interfaces` gains `fs: Option<FsSettings>` | none | `an_fs_interface_makes_the_settings_the_fs_table_made`, `an_fs_interface_outside_a_build_node_is_refused`, `a_second_fs_interface_is_refused`, `an_fs_param_this_release_lacks_is_refused`, `fill_socket_cache_path_and_handoff_socket_are_refused_as_fs_params`, `a_provider_mountpoint_left_out_is_the_fs_mountpoint`, `a_provider_mountpoint_other_than_the_fs_one_is_refused`, `a_put_stage_off_the_cache_volume_is_refused`, `a_runtime_dir_inside_the_local_cache_is_refused`, `a_control_socket_equal_to_the_handoff_socket_is_refused`, `a_file_of_today_without_an_fs_interface_loads_as_today` |
 | P1b | `owner = { subids_of, id }` | `params.owner` | P1 | `the_owner_is_the_first_range_of_at_least_65536_plus_the_id`, `a_user_without_such_a_range_is_refused_by_name`, `ids_past_4294967294_are_refused`, `a_range_named_by_uid_is_found` (all over a fixture file, no host file: T12) |
-| P2 | The core calls the cache and the tree store (1.5); in M the socket client stays for `tierstore fs`, so the core takes either through one internal trait with these two implementations | the calls of 1.5 (exist) | none | each core test run over both implementations; `a_fill_waits_for_the_write_role_then_fills`, `a_fill_still_read_only_after_fetch_timeout_fails_with_eio`, `a_put_reads_the_staged_file_once_and_stores_it`, `the_reports_reach_the_cache_without_a_queue` |
+| P2 | The core calls the cache and the tree store (1.5): the core holds `InProcess` and calls it, and no trait stands between them (built by komira-ai/tierstore#523, with the removal of the fill socket) | the calls of 1.5 (exist) | none | each core test run over a real cache; `a_fill_waits_for_the_write_role_then_fills`, `a_fill_still_read_only_after_fetch_timeout_fails_with_eio`, `a_put_reads_the_staged_file_once_and_stores_it`, `the_reports_reach_the_cache_without_a_queue` |
 | P3 | The one process starts and stops the `fs` interface: the order of 2.3, the stop order of 3.5 | `serve_front` (exists) | P1, P2 | `a_start_takes_before_it_adopts_and_adopts_before_it_mounts`, `a_fresh_start_finds_a_dead_mount_in_mountinfo_without_touching_it`, `a_start_in_m_with_a_live_old_fs_process_takes_from_it_and_never_detaches`, `a_switch_start_connects_to_both_old_processes_and_takes_the_mount_from_the_fs_one`, `a_running_instance_that_never_answers_fails_the_start_and_detaches_nothing`, `the_fronts_drain_before_the_mount_is_left`; farm integration target (`*_integration`, S-2): `the_mount_reaches_the_host_namespace_from_the_unit` |
 | P4 | The one hand-over (3.1, 3.2) and the old-layout sides of 4.2 (`take 1` without `mount`; `take-fs 1` taker and offerer); `handoff-service-v1` | `server/handoff/` frames and `Offer`/`take`; `Hold` (exists) | none for the wire; P3 to wire it into the start | `an_offer_with_the_mount_hands_sockets_mount_control_and_lock_together`, `a_lock_descriptor_of_another_file_is_refused_before_ack`, `a_descriptor_of_the_wrong_kind_is_refused_before_ack`, `a_taker_refuses_an_offer_from_another_user`, `the_old_reads_no_request_after_ack_and_answers_what_it_read`, `the_new_reads_the_device_only_after_bye`, `a_taker_gone_before_ready_leaves_the_old_resuming_and_one_gone_after_ready_does_not`, `a_successor_killed_before_ready_leaves_the_old_serving` (every frame), `a_successor_killed_after_ready_is_started_again_and_adopts_from_its_store`, `the_old_removes_its_store_entry_at_ready`, `the_old_starts_no_cache_write_after_ready`, `the_new_writes_the_cache_only_after_written_or_the_end_of_the_connection`, `a_taker_that_naks_or_goes_away_leaves_the_lock_held` (a third `try_take` gets none), `the_lock_outlives_the_old_process_exit`, `the_old_unlocks_when_its_successor_dies_after_ready`, `an_instance_without_a_mount_refuses_the_mount_line_and_is_asked_again_without_it`, `an_instance_with_the_mount_refuses_a_taker_that_does_not_ask_for_it`, `take_fs_says_bye_and_the_old_fs_process_never_resumes_after_it`; B8: `a_previous_release_taker_skips_the_lock_fuse_and_control_lines_and_gets_the_sockets`, `a_taker_against_a_previous_release_offer_is_refused_the_mount_and_asks_again_without_it` (each replays the previous release's frames, kept as fixtures) |
 | P5 | macOS: the hand-over to the next image (3.4); `handoff-exec-v1` | the offer frame of P4 on a `socketpair`; `nfs/run.rs` | P4's frame | `the_next_image_reads_the_offer_from_the_handed_descriptor`, `every_owed_nfs_reply_is_sent_before_the_exec`, `only_the_handed_descriptor_survives_the_exec`, `an_offer_the_new_image_refuses_starts_it_cold_on_the_same_addresses_and_mount`, `the_cache_writes_in_flight_end_before_the_exec`, `the_new_image_takes_the_write_role_before_its_first_cache_write`; macOS integration: `a_launchd_job_keeps_its_pid_and_is_not_restarted_across_the_exec` (a real launchd job sent `SIGUSR2`: same pid, no restart, the new image serves); macOS runs these in `beta.yml`, not in the pull request's checks (B9) |
 | P6 | Packaging: the unit of 1.4 (the template and its package copy), the plists, the postinstall, the manifest's comments and bounds | the files | none | `the_unit_sets_no_option_that_makes_a_mount_namespace` (every option of 2.3 and its path options, with a negative case: a copy with `ProtectSystem` added fails, T15), `the_unit_grants_cap_sys_admin_and_no_other` (these two replace `the_fs_template_differs_from_the_s3_template_as_the_design_lists`, whose fs template goes in P9), `the_package_template_is_the_archive_template_but_for_the_binary` (exists), `the_plist_waits_210_seconds_on_exit`, `the_binary_accepts_the_units_command_line_and_the_example_file` |
 | P7 | The hook: the gating of 3.6 for both systems, the macOS hand-over arm, the switch and its rollback of 4.2 and 4.3 in the config hook | `update_hook` ports (exist) | P4, P5 capability words | `an_update_without_handoff_service_v1_in_both_is_refused_for_a_node_with_a_mount`, `mode_restart_overrides_the_refusal`, `a_config_update_that_moves_the_mount_point_is_refused`, `the_switch_checks_both_offers_before_either_ack_and_clears_the_fs_markers`, `a_switch_whose_offers_do_not_both_match_naks_both_and_changes_nothing`, `a_switch_whose_new_process_dies_after_ack_is_started_again_and_takes_or_adopts`, `the_switch_rolls_back_mount_first_then_sockets`, `the_one_process_instance_binds_the_fill_socket_while_it_is_the_writer_in_m`, `a_mac_switch_boots_out_and_disables_the_fs_job_before_the_main_job_starts`, `a_mac_update_with_handoff_exec_v1_sends_sigusr2_and_waits_for_the_target`, `a_mac_update_without_it_is_refused` |
 | P8 | The deployment's files and steps (sections 1.3, 4.2 step 5, 4.3), in the deployment's own repository | the configuration packages | M released | the deployment's own checks of its files |
-| P9 | Phase 2, M+1: the deletions of section 5 | | both windows done | `the_fs_verb_exits_2_and_names_the_interface`, `a_file_with_local_cache_fill_socket_starts_and_says_it_is_ignored`, `a_record_with_fs_live_still_decodes` (the stored-format fixture), `prepare_refuses_a_node_that_still_runs_tierstore_fs`, `attachments_reads_the_control_socket_from_the_fs_interface`; P2's trait has one implementation left and is removed (R9) |
+| P9 | Phase 2, M+1: the deletions of section 5 | | both windows done | `the_fs_verb_exits_2_and_names_the_interface`, `a_file_with_local_cache_fill_socket_starts_and_says_it_is_ignored`, `a_record_with_fs_live_still_decodes` (the stored-format fixture), `prepare_refuses_a_node_that_still_runs_tierstore_fs`, `attachments_reads_the_control_socket_from_the_fs_interface`; P2's trait is removed (R9). The fill-socket part of this phase (the fill socket, `local_cache.fill_socket` read and ignored, `tierstore fs` serving exits 2) is built by komira-ai/tierstore#523; the rest is not built |
 
 The design documents follow the code: each pull request rewrites the sections of virtual-build-fs.md (5, 6.3, 6.5, 7, 8,
 12) and tierstore-handover.md (section 0) that describe what it changes.

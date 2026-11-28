@@ -21,9 +21,10 @@ pub(super) const READ_RETRY_WAIT: Duration = Duration::from_millis(50);
 
 /// How many times at most a request is sent to the endpoints of a store when the sends before it
 /// provably never reached a store: the connection to the endpoint could not be made (refused, no
-/// route, DNS, connect timeout). Each send goes to the next endpoint in turn. A request that may
-/// have reached a store is never sent again by this setting. This is the default of
-/// [`S3Tuning::endpoint_attempts`].
+/// route, DNS, connect timeout), or, for a GET or a HEAD, the endpoint stalled (no answer within
+/// `request_timeout`) and was set aside, so the next send goes to another endpoint. Each send goes
+/// to the next endpoint in turn. Any other request that may have reached a store is never sent
+/// again by this setting. This is the default of [`S3Tuning::endpoint_attempts`].
 pub const ENDPOINT_ATTEMPTS: u32 = 3;
 
 /// How long an unused pooled connection is kept before the client drops it. A request
@@ -36,6 +37,13 @@ pub const ENDPOINT_ATTEMPTS: u32 = 3;
 /// race. This is the default of [`S3Tuning::pool_idle_timeout`].
 pub(super) const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// How long after a single PUT that got no answer the key is looked at (`cut_put.rs`). The store
+/// takes a body cut short when it sees the connection close, which is after this side gave up on
+/// the request, and it may take a moment more to make an object of it; a look sent at once could
+/// find no object and miss the one the store makes after it. A second is many times what a store
+/// on the same network takes. This is the default of [`S3Tuning::cut_put_look_after`].
+pub(super) const CUT_PUT_LOOK_AFTER: Duration = Duration::from_secs(1);
+
 /// The settings of a store that are the same for every bucket. `S3Store::new` takes the
 /// defaults; [`S3Store::new_tuned`](super::S3Store::new_tuned) takes these.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -47,8 +55,8 @@ pub struct S3Tuning {
     /// The wait before the first resend of a read; each resend waits twice the one before.
     pub read_retry_wait: Duration,
     /// How many times at most a request is sent when each send before it failed to connect (so
-    /// the store never saw it), each to the next endpoint; 1 sends it once. See
-    /// [`ENDPOINT_ATTEMPTS`].
+    /// the store never saw it), or was a GET or HEAD whose endpoint stalled and was set aside,
+    /// each to the next endpoint; 1 sends it once. See [`ENDPOINT_ATTEMPTS`].
     pub endpoint_attempts: u32,
     /// The longest object written with one streamed PUT; a longer one is a multipart upload. At
     /// most [`SINGLE_PUT_MAX`](super::SINGLE_PUT_MAX), S3's limit for one PUT (a larger value is
@@ -60,6 +68,10 @@ pub struct S3Tuning {
     /// [`MAX_PARTS`](super::MAX_PARTS) parts of this size gets larger parts (see
     /// [`part_size_of`](super::part_size_of)).
     pub part_bytes: u64,
+    /// How long after a single PUT that got no answer the key is looked at for an object of the
+    /// wrong length the PUT left (`cut_put.rs`). The look runs in a task of its own; the failed
+    /// put gives its error at once (`cleanup.rs`).
+    pub cut_put_look_after: Duration,
 }
 
 impl Default for S3Tuning {
@@ -71,6 +83,7 @@ impl Default for S3Tuning {
             endpoint_attempts: ENDPOINT_ATTEMPTS,
             single_put_max: SINGLE_PUT_MAX,
             part_bytes: PART_BYTES,
+            cut_put_look_after: CUT_PUT_LOOK_AFTER,
         }
     }
 }
@@ -89,5 +102,6 @@ mod tests {
         assert_eq!(tuning.endpoint_attempts, 3);
         assert_eq!(tuning.single_put_max, 5 << 30);
         assert_eq!(tuning.part_bytes, 16 << 20);
+        assert_eq!(tuning.cut_put_look_after, Duration::from_secs(1));
     }
 }

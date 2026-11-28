@@ -1,14 +1,16 @@
-//! The control socket over a real Unix socket and a core on a fake fill socket.
+//! The control socket over a real Unix socket and a core over the node's cache.
 
 use std::io::{BufRead as _, BufReader, Write as _};
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
+use std::time::Duration;
 
 use serde_json::{Value, json};
 
 use super::{Control, handle};
-use crate::server::treefs::testing::{Rig, open_cached, sample};
+use crate::server::treefs::attach::Attachments;
+use crate::server::treefs::testing::{Built, Logged, Rig, file, logged, open_cached, sample};
 
 /// A connection to the control socket.
 struct Client {
@@ -38,7 +40,12 @@ impl Client {
 
 /// A rig and the control socket served over its core.
 fn served(name: &str) -> (Rig, Control) {
-    let rig = Rig::new(name, sample());
+    served_over(name, sample())
+}
+
+/// A rig whose upstream holds `built`, and the control socket served over its core.
+fn served_over(name: &str, built: Built) -> (Rig, Control) {
+    let rig = Rig::new(name, built);
     let path = rig.dir.path().join("control.sock");
     let gid = std::fs::metadata(&rig.runtime).unwrap().gid();
     let control = Control::serve(rig.core.clone(), &path, gid).unwrap();
@@ -47,6 +54,16 @@ fn served(name: &str) -> (Rig, Control) {
 
 fn root(rig: &Rig) -> String {
     rig.upstream.built.lock().unwrap().root.clone()
+}
+
+/// The value of the sample of the node's cache's `/metricz` text that begins with `series`.
+fn metric(rig: &Rig, series: &str) -> u64 {
+    let prefix = format!("{series} ");
+    let text = rig.node.metrics();
+    let found = text
+        .lines()
+        .find_map(|line| line.strip_prefix(&prefix).map(|n| n.parse().unwrap()));
+    found.unwrap_or_else(|| panic!("no sample {series} in the cache's metrics"))
 }
 
 /// Asserts the conversation: an attach is answered with the path, an attach again with the same;
@@ -72,7 +89,7 @@ fn a_client_attaches_lists_and_detaches_over_the_socket() {
     );
     assert_eq!(
         client.ask("detach run-1"),
-        json!({"ok": true, "failures": []})
+        json!({"ok": true, "failures": [], "stall_ms": 0})
     );
     assert_eq!(
         client.ask("detach run-1"),
@@ -107,12 +124,12 @@ fn a_detach_answers_the_failures_the_run_recorded() {
         .failing
         .lock()
         .unwrap()
-        .insert(cc.clone(), "no space".to_owned());
+        .insert(cc.clone(), "mismatch".to_owned());
     assert!(open_cached(&rig.core, crate::server::treefs::ino::of(1, 3), false).is_err());
     let answer = client.ask("detach run-1");
     assert_eq!(
         answer["failures"],
-        json!([{"path": "/bin/cc", "digest": cc, "reason": "no space"}])
+        json!([{"path": "/bin/cc", "digest": cc, "reason": "mismatch"}])
     );
 }
 
@@ -192,7 +209,11 @@ fn an_attach_that_asks_for_prefetch_has_the_tree_filled() {
     let root = root(&rig);
     let answer = client.ask(&format!("attach {root} for run-1 prefetch all"));
     assert_eq!(answer["ok"], json!(true));
-    crate::server::treefs::testing::until(|| !rig.upstream.asked("pin").is_empty());
+    let total: u64 = {
+        let built = rig.upstream.built.lock().unwrap();
+        built.blobs.values().map(|blob| blob.len() as u64).sum()
+    };
+    crate::server::treefs::testing::until(|| rig.node.pinned_bytes() == total);
     crate::server::treefs::testing::until(|| rig.core.prefetching() == 0);
     let blobs = rig.upstream.asked("fill");
     assert_eq!(
@@ -308,24 +329,33 @@ fn a_group_the_process_is_not_in_is_an_error_unless_it_is_root() {
 
 /// Asserts that `set tree_list_ram_bytes` makes the cap of the lists mapped what it names, from
 /// the least the file allows (4096) to the most a number of bytes holds, answers it with the id
-/// of the mount, and has the node told each cap at once (`treelists`), with no look for idle
-/// trees. Catches a set that the node's gauge `tierstore_fs_tree_list_ram_bytes` never shows.
+/// of the mount, and has the node's cache told each cap at once, with no look for idle trees: its
+/// gauge for the mount shows the cap, with nothing mapped and nothing released. Catches a set that
+/// the node's gauge `tierstore_fs_tree_list_ram_bytes` never shows.
 #[test]
 fn a_set_of_the_tree_list_cap_is_answered_with_the_mount_and_told_to_the_node() {
     let (rig, _control) = served("tfs-control-set");
     let mut client = Client::connect(&rig.dir.path().join("control.sock"));
-    let process = std::process::id();
-    let mut told = Vec::new();
     for bytes in [4096, 1 << 30, u64::MAX] {
         assert_eq!(
             client.ask(&format!("set tree_list_ram_bytes {bytes}")),
             json!({"ok": true, "tree_list_ram_bytes": bytes, "mount": "mount-1"})
         );
-        told.push(format!("treelists mount-1 {process} 0 0 {bytes} 0 0 0"));
-        crate::server::treefs::testing::until(|| {
-            rig.upstream.asked("treelists").len() == told.len()
-        });
-        assert_eq!(rig.upstream.asked("treelists"), told);
+        let gauge = |name: &str| {
+            let series = format!("tierstore_fs_{name}{{mount=\"mount-1\"}}");
+            metric(&rig, &series)
+        };
+        assert_eq!(gauge("tree_list_ram_bytes"), bytes);
+        assert_eq!(gauge("tree_lists_mapped"), 0);
+        assert_eq!(gauge("tree_list_mapped_bytes"), 0);
+        let counter = |name: &str, why: &str| {
+            let labels = format!("mount=\"mount-1\"{why}");
+            let series = format!("tierstore_fs_{name}{{{labels}}}");
+            metric(&rig, &series)
+        };
+        assert_eq!(counter("tree_list_releases_total", ",why=\"cap\""), 0);
+        assert_eq!(counter("tree_list_releases_total", ",why=\"idle\""), 0);
+        assert_eq!(counter("tree_list_over_cap_total", ""), 0);
     }
 }
 
@@ -451,4 +481,243 @@ fn a_closed_gate_waits_for_the_requests_that_passed_it() {
     );
     gate.open();
     assert!(gate.enter().is_some());
+}
+
+/// Asserts that the gate counts each request that passed it: with two passed, the end of one
+/// leaves the other counted, and only the end of the last leaves none, so that a close then
+/// returns at once.
+#[test]
+fn a_gate_counts_each_request_until_the_last_ends() {
+    let gate = super::Gate::default();
+    let first = gate.enter().unwrap();
+    let second = gate.enter().unwrap();
+    drop(second);
+    assert_eq!(*gate.state.lock().unwrap(), (false, 1));
+    drop(first);
+    assert_eq!(*gate.state.lock().unwrap(), (false, 0));
+    gate.close_and_drain();
+    assert!(gate.enter().is_none());
+}
+
+/// The inode of `bin/cc` of the sample tree, the first tree a rig numbers.
+fn cc_ino() -> u64 {
+    crate::server::treefs::ino::of(1, 3)
+}
+
+/// The bytes of `bin/cc` of the sample tree.
+fn cc_bytes() -> Vec<u8> {
+    (0..3000u32).map(|i| (i % 241) as u8).collect()
+}
+
+/// Opens `ino` on a thread of its own while every fill (`verb`) is held at the rig's upstream,
+/// moves the rig's clock on by `waited` once one is received, lets it go, and gives the open's
+/// handle or error.
+fn open_while_held(
+    rig: &Rig,
+    ino: u64,
+    verb: &str,
+    waited: Duration,
+) -> Result<u64, crate::server::treefs::core::Errno> {
+    rig.upstream.gate_verb(verb);
+    let core = rig.core.clone();
+    let opening = std::thread::spawn(move || open_cached(&core, ino, false));
+    rig.upstream.wait_for_verb(verb, 1);
+    rig.clock.advance(waited);
+    rig.upstream.permit_verb(verb, 1);
+    opening.join().unwrap()
+}
+
+/// Opens `ino` through a fill the rig's upstream holds while the rig's clock moves on by
+/// `waited`.
+fn open_through_a_held_fill(rig: &Rig, ino: u64, waited: Duration) {
+    assert!(open_while_held(rig, ino, "fill", waited).is_ok());
+}
+
+/// The answer of a detach with no failures and a stall of `ms`.
+fn stalled(ms: u64) -> Value {
+    json!({"ok": true, "failures": [], "stall_ms": ms})
+}
+
+/// Asserts that a detach answers, as `stall_ms`, the time the run's open of a blob waited on its
+/// fill: 1500 ms on the rig's clock, which moved while the upstream held the fill.
+#[test]
+fn detach_answers_the_fill_wait_of_the_runs_opens_as_stall_ms() {
+    let (rig, _control) = served("tfs-control-stall");
+    let mut client = Client::connect(&rig.dir.path().join("control.sock"));
+    let root = root(&rig);
+    assert_eq!(client.ask(&format!("attach {root} for r1"))["ok"], true);
+    open_through_a_held_fill(&rig, cc_ino(), Duration::from_millis(1500));
+    assert_eq!(
+        client.ask("detach r1"),
+        json!({"ok": true, "failures": [], "stall_ms": 1500})
+    );
+}
+
+/// Asserts that a run whose opens the cache answered has a stall of 0, though the clock moved:
+/// the blob was filled before the run attached, and the opens of the run ask no fill.
+#[test]
+fn a_run_whose_opens_were_all_cached_answers_stall_ms_0() {
+    let (rig, _control) = served("tfs-control-stall-cached");
+    let mut client = Client::connect(&rig.dir.path().join("control.sock"));
+    let root = root(&rig);
+    assert_eq!(client.ask(&format!("attach {root} for r0"))["ok"], true);
+    open_through_a_held_fill(&rig, cc_ino(), Duration::from_millis(900));
+    assert_eq!(client.ask(&format!("attach {root} for r1"))["ok"], true);
+    for _ in 0..3 {
+        assert!(open_cached(&rig.core, cc_ino(), false).is_ok());
+        rig.clock.advance(Duration::from_millis(400));
+    }
+    assert_eq!(client.ask("detach r1"), stalled(0));
+    assert_eq!(client.ask("detach r0"), stalled(900));
+}
+
+/// Asserts that two runs that attach one tree each get the wait of their own opens only: the
+/// first run's open of `bin/cc` waits 1500 ms on its fill; the second run's open of the same blob
+/// in a tree of its own is answered from the cache, and the 700 ms the clock moves on after it add
+/// to neither.
+#[test]
+fn two_runs_of_a_tree_each_get_the_wait_of_their_own_opens_only() {
+    let mut built = sample();
+    let other = built.add_tree(vec![("cc", file(&cc_bytes()))]);
+    let (rig, _control) = served_over("tfs-control-stall-two", built);
+    let mut client = Client::connect(&rig.dir.path().join("control.sock"));
+    let root = root(&rig);
+    assert_eq!(client.ask(&format!("attach {root} for r1"))["ok"], true);
+    assert_eq!(client.ask(&format!("attach {other} for r2"))["ok"], true);
+    open_through_a_held_fill(&rig, cc_ino(), Duration::from_millis(1500));
+    let other_cc = crate::server::treefs::ino::of(2, 1);
+    assert!(open_cached(&rig.core, other_cc, false).is_ok());
+    rig.clock.advance(Duration::from_millis(700));
+    let cc = crate::server::treefs::testing::sha(&cc_bytes());
+    let blob_fills = rig.upstream.asked("fill");
+    let blob_fills = blob_fills
+        .iter()
+        .filter(|line| line.starts_with(&format!("fill {cc} ")));
+    assert_eq!(
+        blob_fills.count(),
+        1,
+        "the second open of the blob is not filled"
+    );
+    assert_eq!(client.ask("detach r2"), stalled(0));
+    assert_eq!(client.ask("detach r1"), stalled(1500));
+}
+
+/// Asserts that an open under a tree two runs attach adds its wait to both: the time is the
+/// tree's, as its failures are, and each run's detach answers it.
+#[test]
+fn every_run_that_attaches_the_tree_gets_the_wait_of_an_open_under_it() {
+    let (rig, _control) = served("tfs-control-stall-shared");
+    let mut client = Client::connect(&rig.dir.path().join("control.sock"));
+    let root = root(&rig);
+    assert_eq!(client.ask(&format!("attach {root} for r1"))["ok"], true);
+    assert_eq!(client.ask(&format!("attach {root} for r2"))["ok"], true);
+    open_through_a_held_fill(&rig, cc_ino(), Duration::from_millis(250));
+    assert_eq!(client.ask(&format!("attach {root} for r1"))["ok"], true);
+    assert_eq!(client.ask("detach r1"), stalled(250));
+    assert_eq!(client.ask("detach r2"), stalled(250));
+}
+
+/// Asserts that an open whose fill waited and then failed adds its wait as well as its failure.
+#[test]
+fn an_open_whose_fill_failed_adds_its_wait_and_its_failure() {
+    let (rig, _control) = served("tfs-control-stall-failed");
+    let mut client = Client::connect(&rig.dir.path().join("control.sock"));
+    let root = root(&rig);
+    assert_eq!(client.ask(&format!("attach {root} for r1"))["ok"], true);
+    let cc = crate::server::treefs::testing::sha(&cc_bytes());
+    let _ = rig
+        .upstream
+        .failing
+        .lock()
+        .unwrap()
+        .insert(cc.clone(), "upstream 404".to_owned());
+    let opened = open_while_held(&rig, cc_ino(), "fill", Duration::from_millis(60));
+    assert!(opened.is_err());
+    assert_eq!(
+        client.ask("detach r1"),
+        json!({
+            "ok": true,
+            "failures": [{"path": "/bin/cc", "digest": cc, "reason": "upstream 404"}],
+            "stall_ms": 60,
+        })
+    );
+}
+
+/// Asserts that a detach of a run that attached nothing still answers `not attached`, with no
+/// `stall_ms`, and so does a second detach of a run that had a stall.
+#[test]
+fn a_detach_of_a_run_that_attached_nothing_answers_not_attached_with_no_stall_ms() {
+    let (rig, _control) = served("tfs-control-stall-none");
+    let mut client = Client::connect(&rig.dir.path().join("control.sock"));
+    let not_attached = json!({"ok": false, "error": "not attached"});
+    assert_eq!(client.ask("detach r9"), not_attached);
+    let root = root(&rig);
+    assert_eq!(client.ask(&format!("attach {root} for r1"))["ok"], true);
+    open_through_a_held_fill(&rig, cc_ino(), Duration::from_millis(5));
+    assert_eq!(client.ask("detach r1"), stalled(5));
+    assert_eq!(client.ask("detach r1"), not_attached);
+}
+
+/// Asserts that the stall survives a restart: a start that reads an attachments file with the
+/// stall of an attachment and of a record it cannot attach again answers each run's stall, and
+/// writes the file back with both.
+#[test]
+fn a_restart_answers_the_stall_the_attachments_file_held() {
+    let rig = Rig::new("tfs-control-stall-restart", sample());
+    let root = root(&rig);
+    let gone = "ab".repeat(32);
+    let text = format!("{root} r1\nstall_ms {root} r1 1500\n{gone} r2\nstall_ms {gone} r2 40\n");
+    let file = rig.runtime.join("attachments");
+    std::fs::write(&file, &text).unwrap();
+    rig.core
+        .restore(Attachments::saved(&rig.runtime).unwrap(), 4);
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), text);
+    assert_eq!(handle(&rig.core, "detach r1"), stalled(1500));
+    assert_eq!(handle(&rig.core, "detach r2"), stalled(40));
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "");
+}
+
+/// Asserts that a hand-over keeps the stall: the hold before a successor takes over writes the
+/// stall of the run to the attachments file, and the successor's detach of the run answers it.
+#[test]
+fn a_successor_answers_the_stall_its_predecessor_counted() {
+    let (rig, _control) = served("tfs-control-stall-handover");
+    let mut client = Client::connect(&rig.dir.path().join("control.sock"));
+    let root = root(&rig);
+    assert_eq!(client.ask(&format!("attach {root} for r1"))["ok"], true);
+    open_through_a_held_fill(&rig, cc_ino(), Duration::from_millis(1500));
+    rig.core.hold(true);
+    let file = rig.runtime.join("attachments");
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        format!("{root} r1\nstall_ms {root} r1 1500\n")
+    );
+    let successor = rig.successor();
+    successor.restore(Attachments::saved(&rig.runtime).unwrap(), 4);
+    assert_eq!(handle(&successor, "detach r1"), stalled(1500));
+}
+
+/// Asserts that a hold whose write of the stall fails says so on stderr and still holds: the file
+/// is a directory by then, and a rename over it fails.
+#[test]
+fn a_hold_that_cannot_write_the_stall_says_so_and_holds() {
+    let (rig, _control) = served("tfs-control-stall-unwritten");
+    let mut client = Client::connect(&rig.dir.path().join("control.sock"));
+    let root = root(&rig);
+    assert_eq!(client.ask(&format!("attach {root} for r1"))["ok"], true);
+    open_through_a_held_fill(&rig, cc_ino(), Duration::from_millis(20));
+    let file = rig.runtime.join("attachments");
+    std::fs::remove_file(&file).unwrap();
+    std::fs::create_dir(&file).unwrap();
+    std::fs::write(file.join("in-the-way"), "").unwrap();
+    let log = Logged::default();
+    let guard = logged(&log, tracing::Level::WARN);
+    rig.core.hold(true);
+    drop(guard);
+    assert!(rig.core.is_held());
+    let said = log.text();
+    assert!(
+        said.contains("tierstore fs: cannot write the attachments file: "),
+        "{said}"
+    );
 }

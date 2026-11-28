@@ -1,17 +1,18 @@
-//! `tierstore fs`: the virtual build file system, a subcommand of the `tierstore` binary
-//! (`docs/design/virtual-build-fs.md`). One FUSE mount per node, `fs.mountpoint`, shows the trees
-//! that clients attach by digest for their runs, and any tree whose digest a lookup names
-//! (`core/implicit.rs`, until it is idle for `fs.tree_idle_secs`), lazily: a file's bytes are
-//! fetched from the node's tierstore on the file's first open, over its fill socket, or, in the one
-//! process whose file has an `fs` interface (`interface` on Linux, `nfs` on macOS), by calls of its
-//! cache (`fills`, `in_process`).
+//! The virtual build file system (`docs/design/virtual-build-fs.md`): the `fs` interface of a
+//! build node's file, served by the node's own process (`interface` on Linux, `nfs` on macOS). One
+//! mount per node, `fs.mountpoint`, shows the trees that clients attach by digest for their runs,
+//! and any tree whose digest a lookup names (`core/implicit.rs`, until it is idle for
+//! `fs.tree_idle_secs`), lazily: a file's bytes are filled into the node's cache on the file's
+//! first open, by calls of the cache of this process (`in_process`, with the values of `fills`).
+//! The verb `tierstore fs` serves nothing: it lists the attachments and checks an `[fs]` file.
 //!
 //! - [`config`]: the `[fs]` table of the file.
 //! - [`ino`], [`table`], [`tree`]: the inode numbers (invariant I1), the table of tree numbers in
 //!   the runtime directory, and a flattened tree.
 //! - [`attach`], [`control`]: the attachments (of runs, and of lookups) and the control socket
 //!   the attachments of runs are made on.
-//! - [`fill_client`]: the client of the fill socket (fills, touches and pins).
+//! - [`in_process`]: the core's requests of the node's cache and tree store (fills, touches and
+//!   pins, the placements, the put, the reports).
 //! - [`core`]: the operations of a filesystem on inode numbers, with no protocol in them.
 //! - `start`: what a start does before a frontend serves (the runtime directory, the core, the
 //!   attachments made again, the control socket), and the signals that end the process. It has no
@@ -54,21 +55,10 @@ mod backing;
 mod config;
 pub(in crate::server) mod control;
 pub(in crate::server) mod core;
-mod fill_client;
 mod fills;
 mod groups;
 #[cfg(any(target_os = "linux", test))]
 mod handle;
-// The core's requests as calls of the cache and the tree store of this process: made by the start
-// of the one process's `fs` interface (`interface` on Linux, `nfs/interface.rs` on macOS); a
-// system that serves neither front builds them for the tests.
-#[cfg_attr(
-    all(not(test), not(target_os = "linux"), not(target_os = "macos")),
-    expect(
-        dead_code,
-        reason = "the one process serves the `fs` interface on Linux and macOS alone"
-    )
-)]
 mod in_process;
 mod ino;
 // The put directory: served by the FUSE frontend on Linux; its NFS frontend is a later change.
@@ -144,12 +134,8 @@ pub(super) use config::{
 pub(super) use config::{builders, from_text};
 pub(super) use groups::{Database, Found, system as system_names};
 #[cfg(target_os = "linux")]
-pub(super) use interface::{Served, Service};
-#[cfg(target_os = "linux")]
-pub(super) use launch::serve;
+pub(super) use interface::{Mounted, Served, Service};
 pub(super) use nfs::config::NfsTable;
-#[cfg(not(target_os = "linux"))]
-pub(super) use nfs::{NfsError, serve};
 #[cfg(any(target_os = "macos", test))]
 pub(super) use nfs::{NfsServed, NfsService};
 pub(super) use put::config::PutTable;
@@ -186,6 +172,8 @@ mod recovery_tests;
 pub(in crate::server) mod testing;
 #[cfg(test)]
 pub(in crate::server) mod testing_image;
+#[cfg(test)]
+pub(in crate::server) mod testing_upstream;
 
 #[cfg(test)]
 mod tests {

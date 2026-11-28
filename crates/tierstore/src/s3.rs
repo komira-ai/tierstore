@@ -39,6 +39,8 @@
 //!   of an object (a suffix) and a range the store answers 416 to are a HEAD and then a ranged
 //!   GET, as the size is needed to say what they cover. An answer without a `Content-Length`, a
 //!   `Last-Modified` or an `ETag` is an [`Error::Other`].
+//! - `copy_in_store` is the store's CopyObject (no condition on the key, as a plain PUT) or
+//!   UploadPartCopy, with the source's conditions as `x-amz-copy-source-if-*` (`s3/copy.rs`).
 //! - `head` is a HEAD: `Content-Length`, `ETag` (the content tag, without its quotes, as the
 //!   other backends give it and the S3 front, which quotes it, expects) and `Last-Modified`.
 //! - `get_tagged` is one GET, whole or ranged, and the content tag is the `ETag` (without its
@@ -155,10 +157,13 @@ use tokio::sync::mpsc;
 
 use crate::backend::open_by_head;
 use crate::{
-    Backend, ByteRange, Error, Listed, Meta, OpenUpload, Opened, PartBody, PutAnswer, PutClaim,
-    PutOutcome, ReadBody, Span, TreeDigest, UploadedPart, UploadsAfter, Window,
+    Backend, BodyDigests, ByteRange, Error, Listed, Meta, OpenUpload, Opened, PartBody, PutAnswer,
+    PutClaim, PutKind, PutOutcome, ReadBody, ShortObjects, Span, StoreCopy, TreeDigest,
+    UploadedPart, UploadsAfter, Window,
 };
 
+mod copy;
+mod digested;
 mod sha256;
 
 pub use objstore_s3::Capabilities;
@@ -639,12 +644,8 @@ impl Backend for S3Backend {
         body: PartBody<'_>,
         _hot_only: bool,
     ) -> Result<Option<PutAnswer>, Error> {
-        let object = object_key(key)?;
-        let store = &self.store;
-        let sending = |len, source| store.put_stream_new_answered(&object, len, source);
-        let sent = streamed(body, len, self.chunks_waiting, sending).await?;
-        let answer = sent.map_err(|e| map_error(e, key))?;
-        Ok(put_answer(answer))
+        let none = BodyDigests::default();
+        digested::put(self, key, len, body, PutKind::Creates, none).await
     }
 
     /// A plain `PUT`: the request carries no `If-None-Match` and no `If-Match`, so the store
@@ -656,14 +657,28 @@ impl Backend for S3Backend {
         key: &str,
         len: Option<u64>,
         body: PartBody<'_>,
-        _claim: &PutClaim,
+        claim: &PutClaim,
     ) -> Result<Option<PutAnswer>, Error> {
-        let object = object_key(key)?;
-        let store = &self.store;
-        let sending = |len, source| store.put_stream_replacing_answered(&object, len, source);
-        let sent = streamed(body, len, self.chunks_waiting, sending).await?;
-        let answer = sent.map_err(|e| map_error(e, key))?;
-        Ok(put_answer(answer))
+        let (kind, none) = (PutKind::Replaces(claim), BodyDigests::default());
+        digested::put(self, key, len, body, kind, none).await
+    }
+
+    /// The digests go on the PUT for the store to check (`s3/digested.rs`); the kind decides
+    /// between a create-only PUT and a plain one, and `claim` is not used.
+    async fn put_stream_digested(
+        &self,
+        key: &str,
+        len: Option<u64>,
+        body: PartBody<'_>,
+        kind: PutKind<'_>,
+        digests: BodyDigests,
+    ) -> Result<Option<PutAnswer>, Error> {
+        digested::put(self, key, len, body, kind, digests).await
+    }
+
+    /// The counts of the store's look at the key after a PUT that got no answer.
+    fn short_objects(&self) -> ShortObjects {
+        digested::short_objects(self)
     }
 
     /// The digest goes to the store as the body's checksum and the object's metadata, and a
@@ -785,6 +800,12 @@ impl Backend for S3Backend {
             meta,
             body: body.boxed(),
         })
+    }
+
+    /// The store's CopyObject or UploadPartCopy, for a copy of at most `server.s3_single_put_max`
+    /// bytes (`s3/copy.rs`).
+    async fn copy_in_store(&self, copy: &StoreCopy<'_>) -> Result<Option<PutAnswer>, Error> {
+        copy::copy(self, copy).await
     }
 
     async fn head(&self, key: &str) -> Result<Meta, Error> {

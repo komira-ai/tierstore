@@ -1,6 +1,6 @@
 //! The attachments made again at a start (`fs.reattach_concurrency`): before a frontend serves,
 //! every pair of tree digest and run the attachments file holds is attached in memory, which reads
-//! the tree's manifests (through the fill socket where the cache does not hold them: a fill is a
+//! the tree's manifests (through the cache where the cache does not hold them: a fill is a
 //! request of its own, so reading them one tree after the other makes the start as long as the sum
 //! of the fills).
 //!
@@ -9,7 +9,7 @@
 //! served while others are read would answer `ENOENT` for a path the job was given, and a client
 //! that retries a lookup on a hard mount waits for the mount either way. The results are applied
 //! in the order of the file, one thread, so the outcome does not depend on which read finished
-//! first.
+//! first. The stall each attachment had in the file is given back to it (`attach.rs`).
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -46,6 +46,8 @@ impl Core {
             .filter(|(number, _)| seen.insert(*number))
             .collect();
         let failed = self.load_all(&trees, concurrency);
+        // Read under the lock of the state, which no request takes before the restore ends.
+        let stalls = self.state().attachments.saved_stalls();
         for (digest, run, number) in numbered {
             let outcome = number.and_then(|number| match failed.get(&number) {
                 Some(why) => Err(why.clone()),
@@ -61,9 +63,25 @@ impl Core {
                     state.attachments.keep(&run, digest);
                 }
             }
+            if let Some(ms) = stalls.get(&(digest.to_string(), run.clone())) {
+                state.attachments.carry(&run, digest, *ms);
+            }
         }
         let snapshot = self.state().attachments.snapshot();
         if let Err(why) = self.write_attachments(&snapshot) {
+            tracing::warn!("tierstore fs: cannot write the attachments file: {why}");
+        }
+    }
+
+    /// Writes the attachments file when a successor is to take over (`on`) and an attachment has a
+    /// stall, so that the successor reads the time the runs' opens waited here (`Core::hold`). The
+    /// caller holds the lifecycle lock.
+    pub(super) fn hand_stall_over(&self, on: bool) {
+        let snapshot = {
+            let state = self.state();
+            (on && state.attachments.has_stall()).then(|| state.attachments.snapshot())
+        };
+        if let Some(Err(why)) = snapshot.map(|snapshot| self.write_attachments(&snapshot)) {
             tracing::warn!("tierstore fs: cannot write the attachments file: {why}");
         }
     }

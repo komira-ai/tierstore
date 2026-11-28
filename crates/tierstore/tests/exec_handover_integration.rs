@@ -231,7 +231,7 @@ fn a_launchd_job_keeps_its_pid_and_is_not_restarted_across_the_exec() {
     }
     let pid = std::process::id();
     // A system job's program, file and plist must be root's, in a directory root owns all the way
-    // up, which the build's scratch directory is not: the place `fs_launchd_integration.rs` uses.
+    // up, which the build's scratch directory is not.
     let dir = PathBuf::from(format!("/private/var/tmp/tierstore-exec-launchd-{pid}"));
     let mut scratch = Scratch {
         dir: dir.clone(),

@@ -6,7 +6,6 @@ use std::time::Duration;
 use super::*;
 use crate::Mono;
 use crate::server::treefs::core::{Handle, Settings};
-use crate::server::treefs::fill_client::FillClient;
 use crate::server::treefs::table::TreeTable;
 use crate::server::treefs::testing::{Logged, Rig, logged, open_cached, sample, until};
 
@@ -15,11 +14,11 @@ const RUN: &str = "run-1";
 /// The time an answer is waited for in the rigs of these tests: the length of an open's end.
 const WAIT: Duration = Duration::from_secs(30);
 
-/// The pauses a fill client took, in order.
+/// The pauses the core took between its tries, in order.
 type Pauses = Arc<Mutex<Vec<Duration>>>;
 
 /// A rig over the sample tree with `RUN` attached, whose core opens the files of the cache with
-/// `open`, and whose fill client's pauses move the rig's clock by what they pause, as a real
+/// `open`, and whose pauses between its tries move the rig's clock by what they pause, as a real
 /// pause takes its time; and those pauses.
 fn rig_ticking(
     name: &str,
@@ -30,20 +29,15 @@ fn rig_ticking(
     std::fs::create_dir_all(&runtime).unwrap();
     let pauses = Pauses::default();
     let (taken, clock): (Pauses, Arc<Mono>) = (Arc::clone(&pauses), Arc::clone(&rig.clock));
-    let fills = FillClient::pausing(
-        rig.dir.path().join("fill.sock"),
-        3,
-        WAIT,
-        Arc::new(move |pause| {
-            taken.lock().unwrap().push(pause);
-            clock.advance(pause);
-        }),
-    );
+    let fills = rig.asks_pausing(Arc::new(move |pause| {
+        taken.lock().unwrap().push(pause);
+        clock.advance(pause);
+    }));
     let settings: Settings = rig.core.settings().clone();
     rig.core = Arc::new(
         Core::new(
             settings,
-            Arc::new(fills),
+            fills,
             TreeTable::create(&runtime).unwrap(),
             &runtime,
         )
@@ -65,7 +59,7 @@ fn blob_for(rig: &Rig, len: usize) -> String {
         .unwrap()
 }
 
-/// The fills of blobs the fake received, for the blob `sha`.
+/// The fills of blobs the upstream received, for the blob `sha`.
 fn blob_fills(rig: &Rig, sha: &str) -> usize {
     rig.upstream
         .asked("fill")
@@ -83,8 +77,8 @@ fn fail_with(rig: &Rig, sha: &str, why: &str) {
         .insert(sha.to_owned(), why.to_owned());
 }
 
-/// Opens `/bin/cc` while its fills wait at the fake's gate, moving the clock by `taken` while the
-/// first fill waits for its answer, and answers every fill; the open's answer.
+/// Opens `/bin/cc` while its fills wait at the upstream's gate, moving the clock by `taken` while
+/// the first fill waits for its answer, and answers every fill; the open's answer.
 fn open_taking(rig: &Rig, taken: Duration) -> Result<u64, Errno> {
     rig.upstream.gate_verb("fill");
     std::thread::scope(|scope| {
@@ -97,22 +91,20 @@ fn open_taking(rig: &Rig, taken: Duration) -> Result<u64, Errno> {
 }
 
 /// Asserts that a fill whose answer took the whole of `fs.fetch_timeout` (the clock passed the
-/// open's end while it waited) is not asked again, whatever reason it answers: the open fails with
-/// `EIO` after one fill and no pause. So an open holds a reader no longer than one
+/// open's end while it waited) is not asked again, though its answer is one that can pass: the open
+/// fails with `EIO` after one fill and no pause. So an open holds a reader no longer than one
 /// `fs.fetch_timeout`, however many tries `FILL_TRIES` allows.
 #[test]
 fn a_fill_that_took_the_whole_fetch_timeout_is_not_asked_again() {
-    for why in ["busy", "the fill socket gave no answer in time"] {
-        let (rig, pauses) = rig_ticking("tfs-deadline-spent", |path| File::open(path));
-        let cc = blob_for(&rig, 3000);
-        fail_with(&rig, &cc, why);
-        assert_eq!(open_taking(&rig, WAIT), Err(Errno::Io), "{why}");
-        assert_eq!(blob_fills(&rig, &cc), 1, "{why}");
-        assert_eq!(pauses.lock().unwrap().len(), 0, "{why}");
-        let failures = rig.core.detach(RUN).unwrap();
-        assert_eq!(failures.len(), 1);
-        assert_eq!(failures[0].reason, why);
-    }
+    let (rig, pauses) = rig_ticking("tfs-deadline-spent", |path| File::open(path));
+    let cc = blob_for(&rig, 3000);
+    fail_with(&rig, &cc, "upstream 503");
+    assert_eq!(open_taking(&rig, WAIT), Err(Errno::Io));
+    assert_eq!(blob_fills(&rig, &cc), 1);
+    assert_eq!(pauses.lock().unwrap().len(), 0);
+    let failures = rig.core.detach(RUN).unwrap().failures;
+    assert_eq!(failures.len(), 1);
+    assert_eq!(failures[0].reason, "upstream 503");
 }
 
 /// Asserts the boundary of the pause before another try: with a second or less left before the
@@ -131,19 +123,22 @@ fn a_pause_is_taken_only_while_more_than_a_second_is_left_before_the_end() {
     ] {
         let (rig, pauses) = rig_ticking(name, |path| File::open(path));
         let cc = blob_for(&rig, 3000);
-        fail_with(&rig, &cc, "busy");
+        fail_with(&rig, &cc, "upstream 503");
         assert_eq!(open_taking(&rig, taken), Err(Errno::Io), "{name}");
         assert_eq!(blob_fills(&rig, &cc), 1, "{name}");
         assert_eq!(pauses.lock().unwrap().len(), 0, "{name}");
-        assert_eq!(rig.core.detach(RUN).unwrap()[0].reason, "busy", "{name}");
+        let failures = rig.core.detach(RUN).unwrap().failures;
+        assert_eq!(failures[0].reason, "upstream 503", "{name}");
     }
     let (rig, pauses) = rig_ticking("tfs-deadline-over", |path| File::open(path));
     let cc = blob_for(&rig, 3000);
-    fail_with(&rig, &cc, "busy");
+    fail_with(&rig, &cc, "upstream 503");
     let taken = WAIT - second - Duration::from_millis(1);
     assert_eq!(open_taking(&rig, taken), Err(Errno::Io));
     assert_eq!(*pauses.lock().unwrap(), [second]);
-    assert_eq!(blob_fills(&rig, &cc), 2);
+    // The second try had a millisecond left: the fill it asked goes on after its caller stopped
+    // waiting, so it reaches the upstream when it reaches it.
+    until(|| blob_fills(&rig, &cc) == 2);
 }
 
 /// Asserts that with time left a fill that can pass is asked again after a pause, and the open
@@ -152,7 +147,7 @@ fn a_pause_is_taken_only_while_more_than_a_second_is_left_before_the_end() {
 fn a_fill_that_passes_with_time_left_is_asked_again_and_the_open_succeeds() {
     let (rig, pauses) = rig_ticking("tfs-deadline-left", |path| File::open(path));
     let cc = blob_for(&rig, 3000);
-    fail_with(&rig, &cc, "busy");
+    fail_with(&rig, &cc, "upstream 503");
     rig.upstream.gate_verb("fill");
     let opened = std::thread::scope(|scope| {
         let open = scope.spawn(|| open_cached(&rig.core, ino::of(1, 3), false));
@@ -192,6 +187,7 @@ fn a_read_of_an_open_file_that_fails_is_said_with_the_file_and_the_error() {
     let core = &rig.core;
     let root = rig.upstream.built.lock().unwrap().root.clone();
     let cc = blob_for(&rig, 3000);
+    let cc_at = rig.upstream.built.lock().unwrap().offsets[&cc];
     let fh = open_cached(core, ino::of(1, 3), false).unwrap();
     break_handle(&rig, fh, ino::of(1, 3));
     let log = Logged::default();
@@ -199,7 +195,7 @@ fn a_read_of_an_open_file_that_fails_is_said_with_the_file_and_the_error() {
     let line = |offset: u64, more: &str| {
         format!(
             "tierstore fs: cannot read /bin/cc in the tree {root} (number 1) at {offset}: the \
-             blob {cc} of 3000 bytes from packs/one @ 4096: Is a directory (os error 21){more}"
+             blob {cc} of 3000 bytes from packs/one @ {cc_at}: Is a directory (os error 21){more}"
         )
     };
     assert_eq!(core.read(fh, 10, 4), Err(Errno::Io));
@@ -230,10 +226,11 @@ fn one_failed_read_not_said_is_counted_in_the_singular() {
     drop(guard);
     let root = rig.upstream.built.lock().unwrap().root.clone();
     let cc = blob_for(&rig, 3000);
+    let cc_at = rig.upstream.built.lock().unwrap().offsets[&cc];
     let line = |offset: u64, more: &str| {
         format!(
             "tierstore fs: cannot read /bin/cc in the tree {root} (number 1) at {offset}: the \
-             blob {cc} of 3000 bytes from packs/one @ 4096: Is a directory (os error 21){more}"
+             blob {cc} of 3000 bytes from packs/one @ {cc_at}: Is a directory (os error 21){more}"
         )
     };
     let more = "; 1 more failed read of an open file of this tree since the last line";
@@ -277,10 +274,25 @@ fn a_failed_read_of_a_tree_not_in_memory_names_the_inode_and_an_adopted_read_say
     );
 }
 
-/// Asserts what a look of the sweep tells the node: `descriptors <mount> <process> <held>
-/// <short>`, with the cache files open now and the opens that failed for lack of descriptors
-/// since the process started (the same total at the next looks, with none since); and that it says the counts of failed opens not said once
-/// their last line is ten seconds old, and not before.
+/// The series of the cache's metrics that say what the mount reported of its descriptors: the
+/// cache files open now, and the opens that failed for lack of descriptors.
+fn descriptor_series(rig: &Rig) -> Vec<String> {
+    rig.node
+        .metrics()
+        .lines()
+        .filter(|line| {
+            line.starts_with("tierstore_fs_cache_descriptors{")
+                || line.starts_with("tierstore_fs_open_descriptor_failures_total{")
+        })
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Asserts what a look of the sweep tells the node's cache: the cache files open now (the gauge)
+/// and the opens that failed for lack of descriptors since the process started (the counter, which
+/// the next looks, with none since, leave as it is), and that the gauge follows each look; and
+/// that it says the counts of failed opens not said once their last line is ten seconds old, and
+/// not before.
 #[test]
 fn a_look_reports_the_descriptors_and_says_the_counts_not_said() {
     let short = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -306,34 +318,34 @@ fn a_look_reports_the_descriptors_and_says_the_counts_not_said() {
     for _ in 0..3 {
         assert_eq!(open_cached(core, header, false), Err(Errno::Io));
     }
-    let reports = || rig.upstream.asked("descriptors");
-    let process = std::process::id();
+    let series = |held: u32| {
+        [
+            format!("tierstore_fs_cache_descriptors{{mount=\"mount-1\"}} {held}"),
+            "tierstore_fs_open_descriptor_failures_total{mount=\"mount-1\"} 3".to_owned(),
+        ]
+    };
+    assert!(descriptor_series(&rig).is_empty());
     core.look_around();
-    until(|| reports().len() == 1);
+    assert_eq!(descriptor_series(&rig), series(2));
     rig.clock.advance(Duration::from_millis(SAY_EVERY_MS - 1));
+    core.release(held[0]);
+    core.release(held[1]);
     core.look_around();
-    until(|| reports().len() == 2);
+    assert_eq!(descriptor_series(&rig), series(1));
     rig.clock.advance(Duration::from_millis(1));
     core.look_around();
-    until(|| reports().len() == 3);
+    assert_eq!(descriptor_series(&rig), series(1));
     drop(guard);
-    assert_eq!(
-        reports(),
-        [
-            format!("descriptors mount-1 {process} 2 3"),
-            format!("descriptors mount-1 {process} 2 3"),
-            format!("descriptors mount-1 {process} 2 3"),
-        ]
-    );
     let header_blob = testing_sha(b"int a;");
+    let header_at = rig.upstream.built.lock().unwrap().offsets[&header_blob];
     let said: Vec<String> = log.text().lines().map(str::to_owned).collect();
     assert_eq!(
         said,
         [
             format!(
                 "tierstore fs: cannot open /include/a.h in the tree {root} (number 1): the blob \
-                 {header_blob} of 6 bytes from packs/one @ 4096: no descriptor: Too many open \
-                 files (os error 24) (after 1 fills)"
+                 {header_blob} of 6 bytes from packs/one @ {header_at}: no descriptor: Too many \
+                 open files (os error 24) (after 1 fills)"
             ),
             format!(
                 "tierstore fs: 2 more failed opens of the tree {root} (number 1) since the last \
@@ -341,9 +353,7 @@ fn a_look_reports_the_descriptors_and_says_the_counts_not_said() {
             ),
         ]
     );
-    for fh in held {
-        core.release(fh);
-    }
+    core.release(held[2]);
 }
 
 /// Asserts that a tree that leaves memory says the counts of its failures not said as it leaves,

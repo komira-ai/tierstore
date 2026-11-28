@@ -21,6 +21,7 @@ use tierstore_fetch_api::page::CELL_SHIFT;
 use tierstore_fetch_api::upstream::{DeviceRef, DriveSignals, Source, SourceKind, Upstream};
 use tierstore_fetch_api::verify::Verifier;
 use tierstore_format::ids::Generation;
+use tierstore_metrics::Cache;
 use tokio::runtime::Handle;
 use tokio::sync::{Notify, watch};
 use tokio::task::JoinHandle;
@@ -28,7 +29,9 @@ use tokio::task::JoinHandle;
 use crate::baseline::Baselines;
 use crate::config::EngineConfig;
 use crate::fill::{Fill, FillSched, Phase, SUB_ITEM, Want};
+use crate::gate::{Gate, Level};
 use crate::plan::cell_count;
+use crate::pool::CellPool;
 use crate::queue::{ClassQueue, Queued};
 use crate::route::{DeviceBook, Routing};
 use crate::stats::{GetKind, Stats, TimerKind};
@@ -47,6 +50,9 @@ pub struct EngineParts {
     pub verifier: Arc<dyn Verifier>,
     /// The injected clock, and sleeping on it.
     pub timer: Arc<dyn Timer>,
+    /// The node cache's families the engine counts into: `dirty_bytes` and
+    /// `writeback_stall_seconds` (4.8). `None` counts only into [`Stats`].
+    pub cache_metrics: Option<Arc<Cache>>,
 }
 
 impl std::fmt::Debug for EngineParts {
@@ -90,7 +96,11 @@ pub(crate) struct Inner {
     pub rt: Handle,
     state: Mutex<State>,
     pub wake: [Notify; 3],
-    pub progress: watch::Sender<u64>,
+    pub progress: Arc<watch::Sender<u64>>,
+    /// The cell buffers parts are received into (4.8).
+    pub pool: CellPool,
+    /// The dirty-byte cap before publish (4.8), in bytes.
+    pub dirty: Gate,
 }
 
 impl Inner {
@@ -224,6 +234,20 @@ impl FetchEngine {
     pub fn new(parts: EngineParts, config: EngineConfig, rt: &Handle) -> Self {
         let jitter = config.jitter_seed;
         let window = config.window_packs;
+        let progress = Arc::new(watch::Sender::new(0));
+        let pool = CellPool::new(config.buffer_bytes, Box::new(bumps(&progress)));
+        let dirty_bytes = parts.cache_metrics.clone();
+        let bump = bumps(&progress);
+        let dirty = Gate::new(
+            config.dirty_cap_bytes,
+            Box::new(move |level: &Level| {
+                for m in dirty_bytes.iter() {
+                    // A gauge of bytes: exact up to 2^53.
+                    m.dirty_bytes.set((), level.used as f64);
+                }
+                bump(level);
+            }),
+        );
         let inner = Arc::new(Inner {
             parts,
             config,
@@ -248,7 +272,9 @@ impl FetchEngine {
                 jitter,
             }),
             wake: [Notify::new(), Notify::new(), Notify::new()],
-            progress: watch::Sender::new(0),
+            progress,
+            pool,
+            dirty,
         });
         let loops = CLASSES
             .iter()
@@ -260,7 +286,9 @@ impl FetchEngine {
     /// The counters now.
     #[must_use]
     pub fn stats(&self) -> Stats {
-        self.inner.lock().stats.clone()
+        let mut s = self.inner.lock().stats.clone();
+        s.memory(&self.inner.pool.level(), &self.inner.dirty.level());
+        s
     }
 
     /// Waits until `f` holds of the counters: the progress event a test (or a caller that waits
@@ -284,6 +312,12 @@ impl FetchEngine {
         self.inner.lock().book.signals(device, signals);
         self.inner.bump();
     }
+}
+
+/// A gate's observer that wakes the waiters of progress.
+fn bumps(progress: &Arc<watch::Sender<u64>>) -> impl Fn(&Level) + Send + Sync + 'static {
+    let progress = progress.clone();
+    move |_: &Level| progress.send_modify(|v| *v = v.wrapping_add(1))
 }
 
 /// Dropping the engine stops its class loops, so no new part starts. Parts, timers and `LOCATE`s

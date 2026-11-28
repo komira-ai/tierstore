@@ -4,7 +4,6 @@ use crate::server::config_testing::{DEFAULTS, loads};
 
 /// A whole file that turns the put directory on, as the page's example does.
 const PUT_FILE: &str = "[fs]\nclient_group = \"builders\"\nowner = \"1000:1000\"\n\
-                        fill_socket = \"/var/lib/tierstore/fill.sock\"\n\
                         cache_path = \"/var/cache/tierstore\"\n\n[fs.put]\nenabled = true\n\
                         prefixes = [\"cas/b/\"]\nstage_dir = \"/var/cache/tierstore/put-stage\"\n";
 

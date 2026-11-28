@@ -28,12 +28,18 @@
 //!
 //! A PUT, and the parts of an upload begun with `x-amz-checksum-algorithm: SHA256`, are checked
 //! against the `x-amz-checksum-sha256` they carry, the checksum is kept, and a HEAD gives it when
-//! asked; `x-amz-meta-*` headers are kept with the object (`fake/checksums.rs`). A test can make
-//! the service ignore checksums ([`FakeS3::ignore_checksums`]).
+//! asked; a PUT that carries `Content-MD5` is checked against it; `x-amz-meta-*` headers are kept
+//! with the object (`fake/checksums.rs`). A test can make the service ignore checksums
+//! ([`FakeS3::ignore_checksums`]).
 //!
 //! A request whose body ends before its `Content-Length` (the client went away) reaches nothing,
 //! unless a test makes the service keep the bytes that came of a PUT cut short, as SeaweedFS 4.54
-//! can ([`FakeS3::keep_cut_bodies`], `fake/cut.rs`).
+//! can ([`FakeS3::keep_cut_bodies`], `fake/cut.rs`). A test can hold every HEAD until it lets
+//! them go ([`FakeS3::hold_heads`], `fake/held.rs`), so that the service has taken such a PUT
+//! before it answers the HEAD a client sends after it.
+//!
+//! A PUT that carries `x-amz-copy-source` is CopyObject, or UploadPartCopy with an upload id and a
+//! part number, with S3's four source conditions (`fake/copy.rs`).
 //!
 //! It keeps what a test asks about: the uploads begun and not yet completed or aborted
 //! ([`FakeS3::incomplete_uploads`]), how many single PUTs and parts it took and the
@@ -47,7 +53,9 @@
 //!
 //! It serves plain HTTP ([`FakeS3::start`]) or HTTPS with a certificate a test makes
 //! ([`FakeS3::start_tls`]), and takes a request in path style or, through a store that reaches
-//! it by a host name ([`FakeS3::store_resolving`]), in virtual-hosted style (`fake/tls.rs`).
+//! it by a host name ([`FakeS3::store_resolving`]), in virtual-hosted style (`fake/tls.rs`). More
+//! fronts of one service, each on a port of its own, hold the same objects and uploads and keep
+//! their own log of requests ([`FakeS3::start_front`]).
 
 use std::collections::BTreeMap;
 use std::collections::hash_map::DefaultHasher;
@@ -61,9 +69,11 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::Notify;
 
 mod checksums;
+mod copy;
 mod cut;
 mod dates;
 mod escape;
+mod held;
 mod kept;
 mod tls;
 mod uploads;
@@ -116,6 +126,12 @@ pub enum Failure {
     /// The `n`th DELETE of a whole object from now on answers 500 (`Delete(1)` is the next
     /// one); the object stays.
     Delete(u32),
+    /// The next CopyObject answers 200 with an `<Error>` body, as S3 does when a copy fails after
+    /// its answer started; nothing is written.
+    CopyLate,
+    /// The next copy, of an object or of a part, answers 501 `NotImplemented`, as a store that
+    /// does not copy does.
+    CopyUnsupported,
 }
 
 impl State {
@@ -215,7 +231,10 @@ struct State {
     next: u64,
     failures: Vec<Failure>,
     stats: FakeStats,
-    requests: Vec<String>,
+    /// Every request so far, with the front that took it (0 is the first, [`FakeS3::start_front`]).
+    requests: Vec<(usize, String)>,
+    /// How many fronts were started beside the first.
+    fronts: usize,
     /// The only key pair a request may be signed with, when a test set one.
     credentials: Option<(String, String)>,
     /// The host name under which a request is virtual-hosted style ([`FakeS3::store_resolving`]).
@@ -233,6 +252,8 @@ struct State {
     keep_cut: bool,
     /// How many requests had a body cut short ([`FakeS3::cut_requests`]).
     cut: u64,
+    /// How many requests the service has read the head of ([`FakeS3::requests_begun`]).
+    begun: u64,
     /// How many HEADs, and how many DELETEs of a whole object, the service has taken.
     heads: u32,
     deletes: u32,
@@ -240,6 +261,9 @@ struct State {
     hold_abort: bool,
     /// AbortMultipartUpload requests held and not yet dropped.
     held_aborts: usize,
+    /// HEADs wait unanswered until a test lets them go, after this many more are let through
+    /// ([`FakeS3::hold_heads`]); none: no HEAD is held.
+    hold_heads: Option<u32>,
 }
 
 /// An S3 service on loopback (module docs). It serves until the runtime it was
@@ -251,6 +275,8 @@ pub struct FakeS3 {
     state: Arc<Mutex<State>>,
     /// Woken each time a request changed what the service holds ([`FakeS3::wait_for`]).
     changed: Arc<Notify>,
+    /// Which front of the service this is: 0 for the first, [`FakeS3::start_front`].
+    front: usize,
 }
 
 impl FakeS3 {
@@ -434,15 +460,21 @@ impl FakeS3 {
         self.lock().time = Some(seconds);
     }
 
-    /// Every request so far, as `METHOD /path?query`.
+    /// Every request this front took so far, as `METHOD /path?query`.
     #[must_use]
     pub fn requests(&self) -> Vec<String> {
-        self.lock().requests.clone()
+        let state = self.lock();
+        let own = state
+            .requests
+            .iter()
+            .filter(|(front, _)| *front == self.front);
+        own.map(|(_, line)| line.clone()).collect()
     }
 }
 
-/// One request: method, path, query pairs, lowercase headers, body.
+/// One request: the front that took it, method, path, query pairs, lowercase headers, body.
 struct Request {
+    front: usize,
     method: String,
     path: String,
     query: BTreeMap<String, String>,
@@ -455,6 +487,7 @@ async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
     mut sock: S,
     state: Arc<Mutex<State>>,
     changed: Arc<Notify>,
+    front: usize,
 ) -> Option<()> {
     let mut buf = Vec::new();
     let mut chunk = vec![0u8; RUN];
@@ -467,7 +500,9 @@ async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
         }
         let head_end = head_end?;
         let head = String::from_utf8_lossy(&buf[..head_end]).into_owned();
-        let mut request = parse_head(&head)?;
+        let mut request = parse_head(&head, front)?;
+        state.lock().unwrap_or_else(PoisonError::into_inner).begun += 1;
+        changed.notify_waiters();
         let len: usize = request
             .headers
             .get("content-length")
@@ -484,22 +519,11 @@ async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
         let rest = buf.split_off(head_end + len);
         request.body = buf.split_off(head_end);
         buf = rest;
-        let held = {
-            let mut state = state.lock().unwrap_or_else(PoisonError::into_inner);
-            let abort = request.method == "DELETE" && request.query.contains_key("uploadId");
-            let held = abort && std::mem::take(&mut state.hold_abort);
-            state.held_aborts += usize::from(held);
-            held
-        };
-        if held {
-            changed.notify_waiters();
-            // Until the caller closes the connection; then the request is lost.
-            let _ = tokio::io::copy(&mut sock, &mut tokio::io::sink()).await;
-            let mut state = state.lock().unwrap_or_else(PoisonError::into_inner);
-            state.held_aborts -= 1;
-            drop(state);
-            changed.notify_waiters();
+        if held::abort_dropped(&mut sock, &state, &changed, &request).await {
             return None;
+        }
+        if request.method == "HEAD" {
+            held::heads_let_go(&state, &changed).await;
         }
         let answer = {
             let mut state = state.lock().unwrap_or_else(PoisonError::into_inner);
@@ -516,7 +540,7 @@ fn end_of_head(buf: &[u8]) -> Option<usize> {
     blank.map(|at| at + 4)
 }
 
-fn parse_head(head: &str) -> Option<Request> {
+fn parse_head(head: &str, front: usize) -> Option<Request> {
     let mut lines = head.split("\r\n");
     let mut first = lines.next()?.split(' ');
     let method = first.next()?.to_owned();
@@ -535,6 +559,7 @@ fn parse_head(head: &str) -> Option<Request> {
         .map(|(k, v)| (k.trim().to_ascii_lowercase(), v.trim().to_owned()))
         .collect();
     Some(Request {
+        front,
         method,
         path: path.to_owned(),
         query,
@@ -572,7 +597,7 @@ fn handle(state: &mut State, request: &Request) -> Vec<u8> {
         .map(|(k, v)| format!("{k}={v}"))
         .collect();
     let line = format!("{} {}?{}", request.method, request.path, query.join("&"));
-    state.requests.push(line);
+    state.requests.push((request.front, line));
     let signed_region = request
         .headers
         .get("authorization")
@@ -593,6 +618,10 @@ fn handle(state: &mut State, request: &Request) -> Vec<u8> {
         && !signed_with(request, id, secret)
     {
         return error("403 Forbidden", "SignatureDoesNotMatch");
+    }
+    if let ("PUT", Some(source)) = (method, request.headers.get("x-amz-copy-source")) {
+        let upload = q("uploadId").zip(q("partNumber"));
+        return copy::copy(state, &key, source, upload, request);
     }
     match (method, q("uploads"), q("uploadId"), q("partNumber")) {
         ("POST", Some(_), None, None) => {

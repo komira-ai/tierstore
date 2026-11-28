@@ -131,6 +131,28 @@ fn a_version_shared_with_the_remote_package_keeps_the_source_suffix() {
     assert_eq!(set_lock(&text, "0.3.0").expect("set"), text);
 }
 
+const SECOND_REF: &str = " \"tierstore 0.3.0 (git+https://example.invalid/tierstore?rev=def)\",\n";
+const SECOND_PKG: &str = "[[package]]\nname = \"tierstore\"\nversion = \"0.3.0\"\nsource = \"git+https://example.invalid/tierstore?rev=def#def\"\n\n";
+
+/// Asserts that with two remote packages at one version (two pinned releases), moving the local
+/// package to another version keeps the source suffix on the references to each remote one, as
+/// cargo writes them (a reference to a name and version two packages share names its source),
+/// keeps the two remote entries in their order, and puts the local entry after them by version.
+#[test]
+fn references_to_two_remote_packages_at_one_version_keep_their_sources() {
+    let text = format!(
+        "{}{REMOTE_PKG}{SECOND_PKG}{}",
+        local_pkg("0.3.0"),
+        compat(&format!("{}{REMOTE_REF}{SECOND_REF}", local_ref("0.3.0")))
+    );
+    let expected = format!(
+        "{REMOTE_PKG}{SECOND_PKG}{}{}",
+        local_pkg("1.2.3"),
+        compat(&format!("{REMOTE_REF}{SECOND_REF}{}", local_ref("1.2.3")))
+    );
+    assert_eq!(set_lock(&text, "1.2.3").expect("set"), expected);
+}
+
 /// Asserts that a lock holding only a remote tierstore is refused as having no local package,
 /// rather than rewriting the remote one.
 #[test]

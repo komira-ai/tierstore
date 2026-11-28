@@ -8,33 +8,61 @@
 //! job, and the provider makes the source's tree local while the agent readies the container:
 //!
 //! - **`Prepare(source, ref)`** checks the ref, which must be the key of a tree list
-//!   (`cas/l/<64 hex>`, version 1, [`parse_tree_list`](crate::parse_tree_list), or version 2,
-//!   [`TreeListV2`](crate::TreeListV2), told apart by their first bytes), and answers at once. In
-//!   the background it reads that one object through the cache, checks that it hashes to its key,
-//!   builds the tree of exactly its entries, and places it in the tree store at the path of the
-//!   source under the mount of `tierstore fs` (module `names`). It reads the bytes of every file
-//!   into the cache (a version 2 list's as its walk meets them, before the tree is placed; a
-//!   version 1 list's once it is placed), at most `trees.fill_concurrency` files at once across
-//!   the node, each with the call an open of the mount makes for it (`TreeStore::fetch_span`), so that an open of
-//!   a file still being read waits for that one read instead of starting another. With
+//!   (`cas/l/<64 hex>`, `<id>` the tree id), and answers at once. In the background it reads the
+//!   tree's L2 sidecar `cas/l2/<id>` (`docs/design/fetch-cache-serve.md`, 3.5) through the cache,
+//!   checks it whole and that its version 2 projection hashes to the id, keeps that list as the
+//!   tree of exactly its entries, and places it in the tree store at the path of the source under
+//!   the mount of `tierstore fs` (module `names`). A sidecar of a version it does not read is
+//!   refused with `ListVersionUnsupported` (`tree list not supported: <reason>`) and counted. A
+//!   tree with no sidecar is placed from the list at the ref, as the release before the sidecar
+//!   placed every tree (version 1, [`parse_tree_list`](crate::parse_tree_list), or version 2,
+//!   [`TreeListV2`](crate::TreeListV2), told apart by their first bytes, each checked to hash to
+//!   the id), and counted. It reads the bytes of every file into the cache (a version 2 list's as
+//!   the walk of the list meets them, before the tree is placed; a version 1 list's once it is
+//!   placed), at most `trees.fill_concurrency` files at once across the node, each with the call
+//!   an open of the mount makes for it (`TreeStore::fetch_span`), so that an open of a file still
+//!   being read waits for that one read instead of starting another. With
 //!   `trees.prepare_prefetch = "none"` it reads no file and pins nothing: each file is read on its
 //!   first open.
 //! - **`Mount(source)`** answers the tree's directory once it is placed (its files may still be
 //!   filling), or `UNAVAILABLE` "not ready" after [`MOUNT_WAIT`], and the agent asks again; a ref
-//!   the provider cannot use (no such object, a malformed list, a tree the store refuses) is
-//!   `FAILED_PRECONDITION` with the reason.
-//! - **`Release(source)`** stops the source's reads and removes its placement; the tree goes when
-//!   nothing else holds it, and its packs stay in the cache to be evicted in their turn.
-//! - **`Sweep(agent, keep)`** releases every source of the agent whose run is not in `keep`, both
-//!   those this process prepared and the placements it finds under the agent's path.
+//!   the provider cannot use (a sidecar refused, no sidecar and no list or a list refused, a tree
+//!   the store refuses) is `FAILED_PRECONDITION` with the reason.
+//! - **`Release(source)`** stops the source's reads and removes its placement at once, ending
+//!   the hold `tierstore fs`'s mount took on it at a lookup, so that it no longer counts toward
+//!   `trees.max_placements`. A tree in the mount's memory keeps serving its open files and
+//!   inodes; one the mount has to read again is `ENOENT`. The tree goes, and its packs are
+//!   unpinned and stay in the cache to be evicted in their turn, unless another source's placement
+//!   has it.
+//! - **`Sweep(agent, keep, keep_attempts)`** releases every source of the agent whose run is not
+//!   kept, both those this process prepared and the placements it finds under the agent's path; a
+//!   run kept from an attempt on also loses its sources of earlier attempts.
+//!
+//! A source may name its attempt (`Source.attempt`, 1 or more: the agent counts the times it was
+//! given the same job). Two attempts of a run are two sources, each at a path of its own (module
+//! `names`), so a late `Release` of an earlier attempt, which the agent retries for a while, never
+//! removes the tree of a later attempt of the same job. A source that names no attempt (an agent
+//! that does not count them) is at the path it always was, and every call of it is as before; a
+//! `Mount` or a `Release` of a source that names its attempt also finds the same source placed
+//! without one, as a provider before attempts placed it.
 //!
 //! The first `Prepare` of a run stamps it in the cache, and a `Release` or a `Sweep` of a source of
 //! it forgets it: the request end of `tierstore_request_to_start_seconds`, whose other end is the
 //! first look of `tierstore fs` inside one of the run's trees (`local_cache/starts.rs`).
 //!
+//! The trees are served by the `fs` interface of the node's file, in this process, and the load
+//! refuses a file with a `mount-provider` entry and no `fs` entry (`tierstore fs` is no longer a
+//! process of its own, so a node of the earlier two-process layout would keep its `mountpoint`
+//! with nothing behind it). A provider whose `served` flag is clear anyway, which no file makes,
+//! answers every `Prepare` and `Mount` `UNAVAILABLE` with the reason `sources::no_fs` gives, and
+//! answers no directory under the mount, so the agent's start fails `input-unavailable` saying so
+//! instead of on a directory that is not there.
+//! Every answer `UNAVAILABLE` counts once under its reason in
+//! `tierstore_provider_unavailable_total{reason}` (`local_cache/provider_unavailable.rs`).
+//!
 //! Every call is idempotent by its source. Every read of the store has a bound,
 //! `params.fetch_timeout`; a read that passes it fails that file (an open reads it again) or, for
-//! the tree list, the preparation, which the next `Mount` starts again. A placement lasts
+//! the sidecar or the list, the preparation, which the next `Mount` starts again. A placement lasts
 //! `trees.ttl_max` from its preparation unless it is released, so a source an agent never released
 //! goes in its turn.
 
@@ -43,21 +71,33 @@ mod groups;
 mod listener;
 mod names;
 mod prepare;
+mod queued;
 mod service;
+mod socket;
 mod sources;
 
+#[cfg(test)]
+mod attempts_tests;
 #[cfg(test)]
 mod groups_tests;
 #[cfg(test)]
 mod names_tests;
 #[cfg(test)]
+mod prepare_bound_tests;
+#[cfg(test)]
 mod prepare_image_tests;
 #[cfg(test)]
 mod prepare_lazy_tests;
 #[cfg(test)]
+mod prepare_list_tests;
+#[cfg(test)]
 mod prepare_tests;
 #[cfg(test)]
+mod prepare_turns_tests;
+#[cfg(test)]
 mod prepare_v2_tests;
+#[cfg(test)]
+mod release_tests;
 #[cfg(test)]
 mod serve_tests;
 #[cfg(test)]
@@ -68,6 +108,8 @@ mod sources_tests;
 mod start_tests;
 #[cfg(test)]
 pub(in crate::server) mod testing;
+#[cfg(test)]
+mod unavailable_tests;
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -93,10 +135,14 @@ pub(super) const MAX_REASON_BYTES: usize = 256;
 pub(super) struct ProviderFlags {
     /// The path of the socket.
     pub socket: PathBuf,
-    /// The mount of `tierstore fs`, under which a source's directory is answered.
+    /// The mount of the node's file system, under which a source's directory is answered.
     pub mountpoint: PathBuf,
     /// How long one read of the store may take.
     pub fetch_timeout: Duration,
+    /// Whether this process serves the file system at `mountpoint`: the node's file has an `fs`
+    /// interface, which every file that loads with a provider has (the load refuses one without).
+    /// A provider whose flag is clear answers every `Prepare` and `Mount` `UNAVAILABLE`.
+    pub served: bool,
 }
 
 /// Why a call is not answered with success: the three other answers of the contract.

@@ -5,7 +5,9 @@ use bytes::{Bytes, BytesMut};
 use futures::StreamExt;
 use futures::stream::BoxStream;
 
-use crate::{Error, PutClaim, PutOutcome, TreeDigest};
+use crate::{
+    BodyDigests, Error, PutClaim, PutKind, PutOutcome, ShortObjects, StoreCopy, TreeDigest,
+};
 
 /// The body of a part of a multipart upload, as the chunks it arrives in, so that a part of any
 /// size is stored without being held in memory whole.
@@ -499,6 +501,39 @@ pub trait Backend: Send + Sync {
         self.put_stream(key, len, body).await.map(|()| None)
     }
 
+    /// [`Backend::put_stream_answered`] (for [`PutKind::Creates`], and with `hot_only` for
+    /// [`PutKind::CreatesHotOnly`]) or [`Backend::put_stream_replacing`] (for
+    /// [`PutKind::Replaces`]) of a body whose request named `digests` of it (see [`BodyDigests`]).
+    /// A backend whose store checks a body against its digests sends them with the write, so that
+    /// the store refuses a body that is not them, one cut short included: the S3 backend does, and
+    /// the local cache passes them to its upstream. The provided implementation ignores them, so a
+    /// wrapper of another backend that does not override it does not pass them on.
+    ///
+    /// # Errors
+    /// As the call it stands for, and the store's refusal of a body that is not `digests`.
+    async fn put_stream_digested(
+        &self,
+        key: &str,
+        len: Option<u64>,
+        body: PartBody<'_>,
+        kind: PutKind<'_>,
+        digests: BodyDigests,
+    ) -> Result<Option<PutAnswer>, Error> {
+        let _ = digests;
+        match kind {
+            PutKind::Creates => self.put_stream_answered(key, len, body, false).await,
+            PutKind::CreatesHotOnly => self.put_stream_answered(key, len, body, true).await,
+            PutKind::Replaces(claim) => self.put_stream_replacing(key, len, body, claim).await,
+        }
+    }
+
+    /// What the backend did about the objects its store kept of its puts that got no answer (see
+    /// [`ShortObjects`]). The provided implementation is none: a backend whose store keeps
+    /// nothing of a put that failed has nothing to do.
+    fn short_objects(&self) -> ShortObjects {
+        ShortObjects::default()
+    }
+
     /// [`Backend::put_tagged`] for a body that arrives as chunks (`len` is the number of bytes it
     /// is to give, or `None` if the caller does not know): create-only, and gives the content
     /// tag of the object this write made, with no read after it.
@@ -536,7 +571,7 @@ pub trait Backend: Send + Sync {
     /// with [`Error::BadDigest`] in place of its last chunk, so the backend stores nothing (as for
     /// [`Backend::put_stream`]). The S3 backend also sends the digest for the store to check,
     /// records it in the object's metadata and, for a key that exists, compares the digest a
-    /// HEAD reads back (the `put` request of the fill socket, in the operations guide). The provided
+    /// HEAD reads back (the put of the file system's staged file through the cache, in the operations guide). The provided
     /// implementation is [`Backend::put_stream`] of the checked body and, for a key that exists,
     /// a read of the whole object to hash it.
     ///
@@ -685,6 +720,24 @@ pub trait Backend: Send + Sync {
     /// # Errors
     /// [`Error::NotFound`] if no object has the key.
     async fn head(&self, key: &str) -> Result<Meta, Error>;
+
+    /// A copy that the store makes of its own object, with no byte of it passing through the
+    /// caller (S3's CopyObject and UploadPartCopy): the object [`StoreCopy::source`] into the object
+    /// [`StoreCopy::key`], replacing one the key has, or into a part of an open upload of it, if
+    /// the source's conditions hold of the object the store copies. The answer is the content tag
+    /// of the object or the part made, as [`Meta::tag`] has it, and its time when the store says.
+    ///
+    /// `None`: the backend makes no such copy (the provided implementation), or not this one (S3:
+    /// more bytes than one request copies). The caller then copies with a read and a put. A
+    /// backend that keeps a copy of what it reads (a cache) forwards the call and forgets the key.
+    ///
+    /// # Errors
+    /// [`Error::NotFound`] naming the source if it does not exist, or the upload id for an upload
+    /// the backend does not hold; [`Error::PreconditionFailed`] if a condition fails, and nothing
+    /// is written.
+    async fn copy_in_store(&self, _copy: &StoreCopy<'_>) -> Result<Option<PutAnswer>, Error> {
+        Ok(None)
+    }
 
     /// Deletes the object. Deleting a key that does not exist succeeds, so a retried delete
     /// is safe.

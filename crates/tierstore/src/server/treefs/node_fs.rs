@@ -34,10 +34,10 @@
 //! - FORGET and BATCH_FORGET reach the core (or the put directory) through [`Fs::forget`].
 //!
 //! Every request of the core is answered on the reader that read it, inline, but those that may
-//! wait on the fill socket: an open whose bytes the core cannot have without asking the node
+//! wait on the node's cache: an open whose bytes the core cannot have without asking the cache
 //! (`core/now.rs`), a read of a handle an earlier process gave out, and a lookup in the namespace
 //! are parked and answered by the fetches' threads (`fetches.rs`), so that a node that takes fills
-//! and does not answer holds none of the readers. (A rename of the put
+//! and does not end holds none of the readers. (A rename of the put
 //! directory whose commit waits or uploads is parked and answered from the commit's thread,
 //! `put_fs.rs`.) The session leaves INTERRUPTs unanswered (`serving.rs`), so every request gets
 //! its own answer; where the kernel does not take one (the connection is gone, or a session that
@@ -46,8 +46,13 @@
 //! by a lookup the kernel never forgets.
 //!
 //! Every OPEN is timed from its arrival to its answer, on the reader or on a thread of the
-//! fetches, and counted as waiting meanwhile (`core/opens.rs`); the stop of the readers tells the
-//! node of the opens once they are all answered ([`NodeFs::drain`]).
+//! fetches, and counted as waiting meanwhile (`core/opens.rs`); so is every request the session
+//! hands the frontend, by the kind of its opcode ([`request_kind`], `core/requests.rs`): LOOKUP,
+//! GETATTR, OPEN, READ, READDIR and READDIRPLUS, READLINK, and any other as `other`, a body too
+//! short for its opcode among them. The requests of the put directory are not, nor FORGET and
+//! BATCH_FORGET, which have no answer, nor what the session answers itself (INIT, INTERRUPT, an
+//! opcode it does not know). The stop of the readers tells the node of the opens and the requests
+//! once they are all answered ([`NodeFs::drain`]).
 
 use std::io;
 use std::num::NonZeroUsize;
@@ -64,6 +69,7 @@ use super::core::{self, Core, FIXED_MTIME, Failing, Kind, Looked, Opened};
 use super::fetches::Fetches;
 use super::ino;
 use super::put_fs::PutFs;
+use crate::server::local_cache::opens::requests::RequestKind;
 
 /// `ENOENT`.
 const ENOENT: Errno = Errno(2);
@@ -165,11 +171,24 @@ pub(super) struct NodeFs {
     core: Arc<Core>,
     /// The put directory, where it is served (the core's).
     put: Option<PutFs>,
-    /// The threads that answer the requests that may wait on the fill socket (`fetches.rs`).
+    /// The threads that answer the requests that may wait on the node's cache (`fetches.rs`).
     fetches: Fetches,
 }
 
-/// Whether a LOOKUP of `name` in `parent` may ask the fill socket: one in the namespace (a tree
+/// The kind of the request `op`, for `tierstore_fs_request_seconds` (`core/requests.rs`).
+fn request_kind(op: &Operation<'_>) -> RequestKind {
+    match op {
+        Operation::Lookup { .. } => RequestKind::Lookup,
+        Operation::Getattr(_) => RequestKind::Getattr,
+        Operation::Open(_) => RequestKind::Open,
+        Operation::Read(_) => RequestKind::Read,
+        Operation::Readdir(_) | Operation::Readdirplus(_) => RequestKind::Readdir,
+        Operation::Readlink => RequestKind::Readlink,
+        _ => RequestKind::Other,
+    }
+}
+
+/// Whether a LOOKUP of `name` in `parent` may ask the node's cache: one in the namespace (a tree
 /// of `trees/` resolved, a placement looked up), but that of `trees` in the root.
 fn lookup_asks(parent: u64, name: &[u8]) -> bool {
     let namespace = ino::split(parent).0 == 0 || ino::is_placed_dir(parent);
@@ -253,7 +272,7 @@ fn answer_open(
 }
 
 impl NodeFs {
-    /// A frontend over `core`, whose requests that may wait on the fill socket are answered by
+    /// A frontend over `core`, whose requests that may wait on the node's cache are answered by
     /// `fetchers` threads of their own (`fetches.rs`).
     ///
     /// # Errors
@@ -267,11 +286,13 @@ impl NodeFs {
     }
 
     /// Waits until every request parked on the fetches is answered (`Fetches::drain`), then tells
-    /// the node of the opens (`core/opens.rs`) and of the tree lists (`core/lists.rs`): the stop of
-    /// the readers for a hand-over or a restart, after which this process answers no more opens.
+    /// the node of the opens (`core/opens.rs`), of the requests (`core/requests.rs`) and of the
+    /// tree lists (`core/lists.rs`): the stop of the readers for a hand-over or a restart, after
+    /// which this process answers no more opens.
     pub(super) fn drain(&self) {
         self.fetches.drain();
         self.core.report_opens();
+        self.core.report_requests();
         self.core.report_tree_lists();
     }
 
@@ -363,18 +384,25 @@ impl Fs for NodeFs {
         if let Some(put) = self.put.as_ref().filter(|_| PutFs::owns(&req)) {
             return put.handle(req, replier);
         }
+        // Timed from now to the answer, under the kind of its opcode (`core/requests.rs`).
+        let arrival = self.core.request_begins();
         let node = req.header.nodeid;
         let op = match Operation::parse(&req) {
             Ok(op) => op,
             Err(error) => {
                 send(replier, Err(error.errno()));
+                self.core.request_ends(arrival, RequestKind::Other);
                 return Handled::Done;
             }
         };
+        let kind = request_kind(&op);
         match op {
             Operation::Lookup { name } if lookup_asks(node, name) => {
                 let name = name.to_vec();
-                return self.park(move |core| lookup(core, node, &name, replier));
+                return self.park(move |core| {
+                    lookup(core, node, &name, replier);
+                    core.request_ends(arrival, kind);
+                });
             }
             Operation::Lookup { name } => lookup(&self.core, node, name, replier),
             Operation::Getattr(_) => {
@@ -400,6 +428,7 @@ impl Fs for NodeFs {
                         let opened = core.open_from(node, writing, &mut timing);
                         let ok = answer_open(core, node, opened, replier);
                         core.open_ends(timing, ok);
+                        core.request_ends(arrival, kind);
                     });
                 };
                 let ok = answer_open(&self.core, node, opened, replier);
@@ -409,6 +438,7 @@ impl Fs for NodeFs {
                 return self.park(move |core| {
                     let read = core.read_open(node, arg.fh, arg.offset, arg.size);
                     send(replier, read.as_deref().map_err(|&error| errno(error)));
+                    core.request_ends(arrival, kind);
                 });
             }
             Operation::Read(arg) => {
@@ -461,6 +491,7 @@ impl Fs for NodeFs {
                 send(replier, Err(Errno::ENOSYS));
             }
         }
+        self.core.request_ends(arrival, kind);
         Handled::Done
     }
 

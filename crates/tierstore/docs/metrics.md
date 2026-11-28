@@ -54,7 +54,7 @@ Every name in this section starts with `tierstore_cache_`; the text below shorte
 
 What they do not count:
 
-- A fill that the fill socket asks for (see [operations](operations.md#the-fill-socket)) is counted as any fill is: in `fills_total`, in `fill_failures_total` under its reason, in `fills_skipped_total` when it finds no room, and in `upstream_reads_total` and `upstream_bytes_read_total`. It is a read of no client, so it counts no hit, miss or bytes served.
+- A fill that the file system asks of the cache (see [operations](operations.md#fills-for-the-file-system)), in this process, is counted as any fill is: in `fills_total`, in `fill_failures_total` under its reason, in `fills_skipped_total` when it finds no room, and in `upstream_reads_total` and `upstream_bytes_read_total`. It is a read of no client, so it counts no hit, miss or bytes served.
 - A key the cache is not set to keep (outside every keep policy, or under a reserved prefix) is passed through to the upstream. It counts bytes under `bytes_served_upstream` and is neither a hit nor a miss.
 - A miss counts once for each reader. Readers that share one fill each count a miss, and the fill counts once.
 - A ranged GET of a key that is not held first asks the upstream for the size. If that HEAD fails (the key does not exist, the upstream is down) the GET counts no miss. A ranged GET of an object over the whole-object limit counts a miss and is passed through: it fills nothing and counts bytes under `bytes_served_upstream`. Any other GET of a key that is not held counts its miss before the fill starts, so a failed fill still shows as a miss. A file that could not be read from disk is a miss on the paths that count one.
@@ -123,18 +123,18 @@ Blobs queued to be filled before a read asks for them (see [operations](operatio
 | `tierstore_cache_hydrate_trees_total` | counter | `outcome`: `expanded`, `refused`, `cut`, `access_denied` | a tree of a call was walked to its end, was refused (a manifest could not be fetched or read, or the library refused it or the tree it makes), was cut (the walk stopped at a bound of the call, or because its hold ended, or never began because the call had reached one), or was not expanded because the scoped key of the call may not read its manifest (`access_denied`) |
 | `tierstore_cache_prefetch_fill_failures_total` | counter | `reason`: `upstream`, `not_found`, `bad_digest`, `no_space`, `changed`, `expired`, `other` | a queued blob was dropped or its fill left nothing: `no_space` is a blob that would take the cache past its high water mark when its turn came (or past `critical` when it started), `expired` one that waited longer than `prefetch_queue_ttl`; a blob the cache held by its turn is dropped and counted nowhere |
 | `tierstore_cache_prefetch_promotions_total` | counter | none | a read of a queued blob started it before a worker did |
-| `tierstore_cache_fill_joins_total` | counter | `path`: `mount`, `s3` | a request of the fill socket (`mount`) or a read of the S3 front joined a fill that was running instead of starting one; a read that started a queued blob counts a promotion, not a join |
-| `tierstore_cache_fill_socket_waiting` | gauge | none | requests of the fill socket (blob, manifest and range fills) waiting now for a permit of `fill_socket_concurrency`; counts down when the request gets a permit, is answered `busy` or is dropped |
+| `tierstore_cache_fill_joins_total` | counter | `path`: `mount`, `s3` | a fill the file system asked of the cache (`mount`) or a read of the S3 front joined a fill that was running instead of starting one; a read that started a queued blob counts a promotion, not a join |
+| `tierstore_cache_fill_socket_waiting` | gauge | none | fills the file system asks of the cache (blob, manifest and range fills) waiting now for a permit of `fill_socket_concurrency`; counts down when the request gets a permit, is answered `busy` or is dropped |
 | `tierstore_cache_fill_socket_running` | gauge | none | fills that hold a permit of `fill_socket_concurrency` now (the size of the pool less its free permits) |
-| `tierstore_cache_upstream_reads_in_flight` | gauge | none | HEADs and GETs the cache has sent the upstream and not had answered: a GET counts until its body has been read; a call that is dropped counts down. Requests waiting in `tierstore_cache_fill_socket_waiting` while this is 0 for a long time are a stall of the cache itself (see [the fill socket](operations.md#the-fill-socket)) |
-| `tierstore_cache_fill_socket_busy_total` | counter | none | requests of the fill socket answered `busy` because no permit of `fill_socket_concurrency` came free within `fill_socket_wait` |
+| `tierstore_cache_upstream_reads_in_flight` | gauge | none | HEADs and GETs the cache has sent the upstream and not had answered: a GET counts until its body has been read; a call that is dropped counts down. Requests waiting in `tierstore_cache_fill_socket_waiting` while this is 0 for a long time are a stall of the cache itself (see [fills for the file system](operations.md#fills-for-the-file-system)) |
+| `tierstore_cache_fill_socket_busy_total` | counter | none | fills the file system asked of the cache answered `busy` because no permit of `fill_socket_concurrency` came free within `fill_socket_wait` |
 | `tierstore_cache_prefetch_queue_depth` | gauge | none | blobs waiting for a worker now |
 | `tierstore_cache_holds_open` | gauge | none | holds open now (see [holds](operations.md#holds)): opened and not yet released or expired |
 | `tierstore_cache_extent_entries` | gauge | none | the packs the cache holds only some ranges of (entries by extents, in `extents-v1/` beside `obj/`); `tierstore_cache_objects` does not count them |
 | `tierstore_cache_extent_bytes` | gauge | none | the bytes those entries have filled, each counted once; they are in `tierstore_cache_bytes`, in the budget and in the marks |
 | `tierstore_cache_extent_fills_total` | counter | none | ranges filled from the upstream and hashed against the digest the caller gave |
 | `tierstore_cache_extent_fill_bytes_total` | counter | none | the bytes those fills added to the cache (a byte a held range has is not added again) |
-| `tierstore_cache_extent_fill_failures_total` | counter | `reason`: `upstream`, `mismatch`, `short`, `no_space`, `busy`, `read_only`, `io`, `changed`, `aborted` | a fill of a range left nothing: the upstream failed or has no such pack, the bytes did not hash to the digest, the upstream gave another length, the range does not fit the budget or the critical mark, no permit of the fill socket's pool came free in `fill_socket_wait`, this process does not hold the lock of the cache directory, the directory could not be written, the entry was removed or replaced while it was read, or the task did not end |
+| `tierstore_cache_extent_fill_failures_total` | counter | `reason`: `upstream`, `mismatch`, `short`, `no_space`, `busy`, `read_only`, `io`, `changed`, `aborted` | a fill of a range left nothing: the upstream failed or has no such pack, the bytes did not hash to the digest, the upstream gave another length, the range does not fit the budget or the critical mark, no permit of the file system's fill pool came free in `fill_socket_wait`, this process does not hold the lock of the cache directory, the directory could not be written, the entry was removed or replaced while it was read, or the task did not end |
 | `tierstore_cache_extent_joins_total` | counter | none | a request for a range joined a fill of the same range that was running |
 | `tierstore_cache_extent_held_total` | counter | none | a request for a range found it in the cache (an entry by extents or the whole pack) and asked the upstream nothing |
 | `tierstore_cache_extent_promotions_total` | counter | none | an entry filled to the whole pack and was moved into `obj/` as an ordinary object |
@@ -392,6 +392,114 @@ What they do not count:
 - A put that failed at the upstream, or at the HEAD before it, counts no bytes, whatever part of its body was sent. The one put the client is told failed that counts bytes is a `bad_digest` put the upstream had already taken (above).
 - `writes_through_total` counts whole-body puts only, `upstream_puts_total` counts those and completions, and `write_exists_total` counts the HEAD's answer and the upstream's together.
 
+### Failed puts and the short objects they leave
+
+Two families count the puts of an object that fail, and what is done about an object of the wrong
+length a failed put can leave in the upstream S3 store (some stores keep a PUT whose body was cut
+short as an object of the bytes that came, 0 of them for a body that failed before its first byte).
+
+| name | type | labels | increments when |
+|---|---|---|---|
+| `tierstore_s3_put_failures_total` | counter | `reason`: `timeout`, `incomplete`, `bad_digest`, `too_large`, `busy`, `exists`, `upstream`, `other` | a `PUT` of an object on the S3 listener whose body the front streams (no `If-Match`, no `If-None-Match` but `*`) was answered with an error, by the code of the answer |
+| `tierstore_cache_upstream_short_objects_total` | counter | `result`: `removed`, `left`, `failed`, `skipped` | a single PUT the cache sent its S3 upstream got no answer (its body or its connection failed) and the one HEAD of the key after it found an object of another length than the put declared, or could not be made, or was not made |
+| `tierstore_cache_upstream_failed_aborts` | gauge | none | the multipart uploads of the cache's S3 upstream whose abort failed (or found no room to run), kept to be aborted again when the store next answers; at most 1024 |
+| `tierstore_cache_upstream_failed_aborts_dropped_total` | counter | none | a failed abort was dropped from that list (it was full, or the abort was sent 8 times) and is left to the bucket's lifecycle rule (`AbortIncompleteMultipartUpload`) |
+
+The reasons of a failed put on the front:
+
+- `timeout`: no byte of the body came within `server.body_idle_timeout`, or the body came slower than `server.put_min_bytes_per_sec` (`RequestTimeout`).
+- `incomplete`: the body ended before its length or could not be read, as when the client goes away (`IncompleteBody`).
+- `bad_digest`: the body is not the digest its request named (`BadDigest`, `XAmzContentSHA256Mismatch`, `InvalidDigest`).
+- `too_large`: the body is over the limit (`EntityTooLarge`).
+- `busy`: the server was taking as many bodies as it may, or the store had no room (`SlowDown`).
+- `exists`: a create-only put of a key that exists (`PreconditionFailed`).
+- `upstream`: the store did not answer, or failed (`ServiceUnavailable`, `InternalError`).
+- `other`: any other refusal.
+
+The results of the look after a single PUT that got no answer:
+
+- `removed`: the object carried the token that PUT sent as its metadata `x-amz-meta-write-token`, so the PUT made it; it was deleted on its entity tag.
+- `left`: the object did not carry that token: it was there before the put began (the store refused a create-only PUT on it), or another writer made it. It is left as it is.
+- `failed`: the HEAD or the DELETE failed, they did not end within 10 s, or the object had no entity tag; an object of the wrong length may have stayed.
+- `skipped`: the look was not made: 16 looks and aborts after failed writes were running already. An object of the wrong length may have stayed.
+
+An object of the length the put declared, or no object, counts nothing. A put the store answered
+(even with an error) is not looked after, nor is one that never reached it (the connection could not
+be made), and a body sent as a multipart upload never leaves an object of a failed put. The series
+stay 0 for an upstream that is not an S3 store.
+
+The look, and the abort of a multipart upload that failed, run after the put has given its error, so
+the put's write permit is free as soon as the error is known: at most 16 of them run at once, each
+ends within 10 s, and an abort that fails is kept, at most 1024 of them, and sent again when the store
+next answers a request (after a pass that failed, the next waits 1 s, doubling to at most 60 s).
+A `tierstore_cache_upstream_failed_aborts` that stays above 0 says the store answers other requests
+but refuses the aborts.
+
+### Build node: the reads the mount provider queues
+
+The mount provider's `Prepare` queues a read of every file of a source's tree (unless
+`trees.prepare_prefetch = "none"`), and the queue drains only as fast as the node's
+`trees.fill_concurrency` reads go. A queued read holds about a hundred bytes of heap for each file until it is made or dropped.
+While the upstream does not answer, the reads drain at a few a minute, so the queues of every
+source prepared meanwhile stay in memory. The reads of every source together are held under a
+bound of 256 MiB: a source whose reads do not fit queues none, and its files are read when they
+are first opened, as with `"none"`. A release of a source drops its queued reads at once.
+
+| name | type | labels | value |
+|---|---|---|---|
+| `tierstore_provider_prefetch_queued_bytes` | gauge | none | the bytes of heap the reads queued by every source's `Prepare` hold now (the reads and their spans; not the pack names they share) |
+| `tierstore_provider_prefetch_skipped_total` | counter | none | the sources whose reads were not queued because they did not fit under the bound |
+
+```promql
+# The queued reads near their bound: the upstream is slow to answer the node's reads.
+tierstore_provider_prefetch_queued_bytes > 200 * 1024 * 1024
+# Sources prepared with no read queued: their files are read when first opened.
+increase(tierstore_provider_prefetch_skipped_total[10m]) > 0
+```
+
+### Build node: the sources and preparations of the mount provider
+
+The mount provider holds a source from its `Prepare` to its `Release` or a `Sweep`, at most
+`trees.max_sources` of them: a `Prepare` of a new source past that is answered `UNAVAILABLE`. A
+preparation holds its tree's list whole (at most 256 MiB) and the walk of it while it reads the list
+and makes the tree, so at most `trees.prepare_concurrency` do that at once; the others wait for a
+turn, and a `Mount` of their source waits for them as for any preparation.
+
+| name | type | labels | value |
+|---|---|---|---|
+| `tierstore_provider_sources` | gauge | none | the sources the provider holds now |
+| `tierstore_provider_preparing` | gauge | none | the preparations that read their list or make their tree now |
+| `tierstore_provider_prepare_refused_total` | counter | none | the `Prepare` calls of a new source refused because the provider held `trees.max_sources` |
+
+```promql
+# Sources that jobs prepare and never release or sweep: the table fills toward its bound.
+tierstore_provider_sources > 0.8 * 16384
+# Preparations at their bound: Mounts wait for a turn.
+tierstore_provider_preparing >= 8
+```
+
+### The bounds of the S3 front
+
+The S3 front holds at most `server.max_connections` connections open (past it, it accepts no more
+until one closes), streams at most `server.max_concurrent_reads` GETs of objects at once (past it,
+a GET is answered 503 `SlowDown`), and takes at most `server.max_concurrent_puts` request bodies
+at once, streamed or read whole (past it, a body waits `server.put_permit_wait` and is then
+answered 503 `SlowDown`). Every process with an S3 front has these series.
+
+| name | type | labels | value |
+|---|---|---|---|
+| `tierstore_s3_connections_open` | gauge | none | the connections of the S3 front open now, those waiting for a request included |
+| `tierstore_s3_reads_in_flight` | gauge | none | the GETs of objects whose answers hold a permit now, from before the object is opened until the answer is over |
+| `tierstore_s3_reads_refused_total` | counter | none | the GETs answered 503 `SlowDown` because every permit of the reads was taken |
+| `tierstore_s3_bodies_in_flight` | gauge | none | the request bodies, streamed or read whole, that hold a permit now |
+
+```promql
+# Reads refused for want of a permit: raise server.max_concurrent_reads, or add nodes.
+increase(tierstore_s3_reads_refused_total[5m]) > 0
+# Connections near their bound: new clients wait in the listen queue.
+tierstore_s3_connections_open > 0.9 * 8192
+```
+
 ### Build node: request to start
 
 A build node whose cache has a tree store and serves jobscheduler's mount provider (the
@@ -410,15 +518,15 @@ every process with a cache, and stays at zero on one that serves no provider.
 The two ends:
 
 - **Request.** jobscheduler's agent sends `Prepare` for a job's sources the moment it has the job. The first `Prepare` of a run that the process takes starts its span; a `Prepare` of another source of the run, or the same one again, does not move it.
-- **Start.** The agent opens each tree's root, and the kernel looks the roots up when it mounts the job's overlay; neither reads below a root. The first lookup in a directory of one of the run's trees, or listing of one, is the container runtime making the job's root, or the command itself. `tierstore fs` reports it to the node on the fill socket, from a thread of its own, so the request it serves does not wait for the report.
+- **Start.** The agent opens each tree's root, and the kernel looks the roots up when it mounts the job's overlay; neither reads below a root. The first lookup in a directory of one of the run's trees, or listing of one, is the container runtime making the job's root, or the command itself. The file system reports it to the node's cache, in this process, so the request it serves does not wait for the report.
 
 What it does not count:
 
 - A run whose command never looks inside its trees, and a run released or swept first.
-- A run whose `Prepare` this process did not take. This happens when the process started after it, when the run's request was forgotten because 4096 runs were kept at once (the oldest is forgotten first), or when an `fs` report was lost. A report is lost when 1024 reports wait at once, when the fill socket is away, or when the node is of a release before this one.
+- A run whose `Prepare` this process did not take. This happens when the process started after it, when the run's request was forgotten because 4096 runs were kept at once (the oldest is forgotten first), or when an `fs` report was lost. A report is lost when 1024 reports wait at once, or when the cache is not answering the mount.
 - A tree placed through the trees API rather than the provider.
 
-A report that waits while the fill socket is away (an update of the node's tierstore) ends its
+A report that waits while the cache is not answering the mount (an update of the node's tierstore) ends its
 span when the node takes it, so such a span is longer than the job's real start.
 
 The span is on the node's wall clock: a span across a step of the clock back is 0. Fraction of
@@ -434,12 +542,74 @@ The 99th percentile, over an hour:
 histogram_quantile(0.99, sum by (le) (rate(tierstore_request_to_start_seconds_bucket[1h])))
 ```
 
+### Build node: tree lists the mount provider refused
+
+The mount provider reads a tree's L2 sidecar, `cas/l2/<id>`, and refuses a tree whose sidecar is
+there and not of a version it reads with `tree list not supported: <reason>`
+(`ListVersionUnsupported`, `docs/design/fetch-cache-serve.md`, 3.5). A tree whose sidecar is not
+there is not refused: the provider places it from its list `cas/l/<id>`, as the release before
+the sidecar did ([operations](operations.md#the-mount-provider)). The three families are in the
+cache's block, with a `# TYPE` line, on every process with a cache, and stay at zero on one that
+serves no provider.
+
+| name | type | labels | what it says |
+|---|---|---|---|
+| `tierstore_list_refused_total` | counter | `reason`: `v1_list`, `missing_sidecar`, `unknown_cell_digest`, `unknown_version` | the preparations refused because the object at the sidecar's key is a version 1 or 2 list (`v1_list`) or an L2 list of a major version or a cell digest function this release does not read; `missing_sidecar` is kept and stays at zero, since a tree with no sidecar is placed from its list |
+| `tierstore_l2_sidecar_missing_total` | counter | none | the preparations that found no sidecar of their tree, whether its list was then placed or refused: the one the rollout watches |
+| `tierstore_l2_sidecar_fallback_total` | counter | none | the trees placed from their list `cas/l/<id>` for want of a sidecar; the preparations it is below `tierstore_l2_sidecar_missing_total` by are those whose list was not there, not read or refused |
+
+What it does not count:
+
+- A sidecar that is there and refused as malformed (another tree's, a projection that does not hash to the id, a cell shift other than 20): the provider's log line names it.
+- A `Mount` asked again of a refused source: a preparation is counted once.
+
+Trees with no sidecar, over a day, which must stay at zero for 7 days before the CAS service stops
+writing version 2 lists:
+
+```promql
+sum(increase(tierstore_l2_sidecar_missing_total[1d]))
+```
+
+Preparations with no sidecar whose list did not place the tree either, over an hour: a list not
+there or refused, which fails the job's start, or one not read, which the next `Mount` reads
+again:
+
+```promql
+sum(increase(tierstore_l2_sidecar_missing_total[1h])) - sum(increase(tierstore_l2_sidecar_fallback_total[1h]))
+```
+
+### Build node: the mount provider's answers UNAVAILABLE
+
+The job agent asks the mount provider again after each `UNAVAILABLE` until its
+--mount-provider-wait has passed (120 s by default), and then fails the start
+`input-unavailable` with the last reason it was given. The family counts every such answer of
+the provider once, under its reason, so a node's own `/metricz` says why its starts wait or fail
+on the provider's side without a look at the jobs
+([operations](operations.md#the-mount-provider)). It is in the cache's block, with a `# TYPE`
+line and every reason, on every process with a cache, and stays at zero on one that serves no
+provider.
+
+| name | type | labels | what it says |
+|---|---|---|---|
+| `tierstore_provider_unavailable_total` | counter | `reason`: `no_fs`, `not_ready`, `not_prepared_here`, `tree_gone`, `read_failed`, `store_failed`, `not_released` | the provider's answers `UNAVAILABLE`: a `Prepare` or `Mount` of a provider whose mount no process serves (`no_fs`; a file with a mount provider and no `fs` interface is refused at load, so a node that started does not count it); a `Mount` whose tree was not placed within its wait (`not_ready`), of a source this process has no preparation and finds no placement of, as after a restart between the agent's `Prepare` and `Mount` (`not_prepared_here`), whose placement ended without a release (`tree_gone`), whose preparation could not read the tree's sidecar or list (`read_failed`) or whose tree the store could not make now, such as at `trees.max_placements` (`store_failed`); a `Release` or `Sweep` whose placement the store could not remove now (`not_released`). A `Prepare` refused at `trees.max_sources` is counted in `tierstore_provider_prepare_refused_total` instead |
+
+What it does not count: a start the agent fails on its own look at the directory the provider
+answered (the agent's failure text says so), and the waits a `Mount` ends with its directory.
+
+Starts held by a provider whose mount no process serves, over an hour (a node whose file has a
+mount provider and no `fs` interface does not start, so this stays at zero; any value above zero
+would mean every start through that node's provider fails):
+
+```promql
+sum by (instance) (increase(tierstore_provider_unavailable_total{reason="no_fs"}[1h]))
+```
+
 ### Build node: tree attach on a lookup
 
 A lookup of `trees/<digest>` that no run has attached reads the tree's manifests (or the one tree
 list it is) and attaches it
 (see [the virtual build file system](operations.md#the-virtual-build-file-system)). `tierstore fs`
-reports to the node, on the fill socket, how long each such attach took, where the manifests of
+reports to the node's cache how long each such attach took, where the manifests of
 each read of a tree came from and how many levels and rounds of fills each read took, and the node's
 cache counts the reports in its block; the node also times each fill of a manifest it makes itself.
 The families are on every process with a cache, with a `# TYPE` line, and stay at zero on a node
@@ -452,25 +622,24 @@ whose mount reports nothing. The buckets of the histograms are `0.001`, `0.002`,
 | `tierstore_fs_tree_attach_seconds_bucket` | counter | `outcome`, `le` | the attaches of that outcome at or under `le` seconds |
 | `tierstore_fs_tree_attach_seconds_sum` | counter | `outcome` | their seconds |
 | `tierstore_fs_tree_attach_seconds_count` | counter | `outcome` | the attaches of that outcome |
-| `tierstore_fs_manifest_fetch_total` | counter | `result`: `cache`, `fill`, `error` | a manifest a read of a tree fetched: read from the cache directory, filled through the fill socket and then read, or not had (the fill failed, or the file was not there after it). A read of a tree attached for a run, or read again into memory, counts too |
-| `tierstore_fs_manifest_fill_seconds` | histogram | `le` on `_bucket` | one sample per manifest a read asked the fill socket for, whatever the answer: the seconds of the round trip on the mount's clock, to the millisecond |
+| `tierstore_fs_manifest_fetch_total` | counter | `result`: `cache`, `fill`, `error` | a manifest a read of a tree fetched: read from the cache directory, filled through the cache and then read, or not had (the fill failed, or the file was not there after it). A read of a tree attached for a run, or read again into memory, counts too |
+| `tierstore_fs_manifest_fill_seconds` | histogram | `le` on `_bucket` | one sample per manifest a read asked the cache for, whatever the answer: the seconds of the call on the mount's clock, to the millisecond |
 | `tierstore_fs_manifest_fill_seconds_bucket` | counter | `le` | the fills at or under `le` seconds |
 | `tierstore_fs_manifest_fill_seconds_sum` | counter | none | their seconds |
 | `tierstore_fs_manifest_fill_seconds_count` | counter | none | the fills |
 | `tierstore_fs_tree_levels_total` | counter | none | the levels of the trees read from their manifests (a tree that is a root alone has 1), summed over the reads; one `levels` report per read |
-| `tierstore_fs_tree_fill_rounds_total` | counter | none | the rounds of fills over the fill socket those reads waited for one after another: one for each level in which a read filled a manifest, and one for each `fill-tree` it asked, summed |
-| `tierstore_cache_manifest_fill_seconds` | histogram | `via`: `fill`, `tree`; `le` on `_bucket` | one sample per fill of a manifest this node made: the seconds from the request to its answer on the node's own clock (a permit of the fill socket's pool, the upstream's answers, the write into the cache), to the millisecond. `fill` is a `fill <sha256>` of the fill socket or the same call made in process; `tree` is a manifest filled for a `fill-tree` |
+| `tierstore_fs_tree_fill_rounds_total` | counter | none | the rounds of fills those reads waited for one after another: one for each level in which a read filled a manifest, and one for each fill of a tree it asked, summed |
+| `tierstore_cache_manifest_fill_seconds` | histogram | `via`: `fill`, `tree`; `le` on `_bucket` | one sample per fill of a manifest this node made: the seconds from the request to its answer on the node's own clock (a permit of the file system's fill pool, the upstream's answers, the write into the cache), to the millisecond. `fill` is a fill of a manifest asked by the file system or by a read of the S3 front; `tree` is a manifest filled for a fill of a tree |
 | `tierstore_cache_manifest_fill_seconds_bucket` | counter | `via`, `le` | those fills at or under `le` seconds |
 | `tierstore_cache_manifest_fill_seconds_sum` | counter | `via` | their seconds |
 | `tierstore_cache_manifest_fill_seconds_count` | counter | `via` | those fills |
 
 A read of a tree whose root manifest the cache does not hold first asks the node to fill the tree's
-new manifests itself (`fill-tree`, see [the fill socket](operations.md#the-fill-socket)): the node
-goes down the tree in its cache, a level at a time, and answers once, so the socket is crossed once
+new manifests itself (a fill of a tree, see [fills for the file system](operations.md#fills-for-the-file-system)): the node
+goes down the tree in its cache, a level at a time, and answers once, so the call is made once
 for the tree. The read then fetches the manifests of a level of the tree at once, up to 16, before
-the level below, filling through the socket what it does not find in the cache: on a node of a
-release before `fill-tree`, every new manifest, so the attach of a tree whose manifests the cache
-does not hold takes about one fill for each level, not one for each directory. The fills of a level
+the level below, filling through the cache what it does not find there, so the attach of a tree whose manifests
+the cache does not hold takes about one fill for each level, not one for each directory. The fills of a level
 overlap, so their seconds add up to more than the attach took.
 
 What they do not count: a report that was lost, as a `started` is lost (above); a lookup of a tree
@@ -478,12 +647,11 @@ that was attached already; a placement's tree, which is read whole with no manif
 also said on stderr, with the levels of the read, the fills of each and the slowest of them, and
 the `fill-tree` if the read asked one: `tierstore fs: lookup of <digest>: ok in 12 ms; 40
 manifests: 40 from the cache, 0 filled, 0 not had; 4 levels; fills by level: 0 0 0 0, slowest ms
-by level: 0 0 0 0; fill-tree ok in 9 ms, 8 ms at the node, fills by level: 1 1 1 0`. The answer of
-a node of a release before the request is said as `fill-tree unknown to the node in <ms> ms`, and
-any other answer as `fill-tree failed in <ms> ms: <words>`.
+by level: 0 0 0 0; fill-tree ok in 9 ms, 8 ms at the node, fills by level: 1 1 1 0`. Any other answer
+is said as `fill-tree failed in <ms> ms: <words>`.
 
 The share of the manifests read that needed a fill of the read's own, over an hour (a manifest the
-node filled for a `fill-tree` is read from the cache, and counts as `cache`):
+node filled for a fill of a tree is read from the cache, and counts as `cache`):
 
 ```promql
 sum(increase(tierstore_fs_manifest_fetch_total{result="fill"}[1h])) / sum(increase(tierstore_fs_manifest_fetch_total[1h]))
@@ -495,7 +663,7 @@ The median attach, over an hour:
 histogram_quantile(0.5, sum by (le) (rate(tierstore_fs_tree_attach_seconds_bucket{outcome="ok"}[1h])))
 ```
 
-The rounds of fills over the socket an attach waited for, on average, over an hour: one for each
+The rounds of fills an attach waited for, on average, over an hour: one for each
 level with a new manifest where the node fills them one at a time, about one where it fills the
 tree's new manifests itself:
 
@@ -503,7 +671,7 @@ tree's new manifests itself:
 sum(increase(tierstore_fs_tree_fill_rounds_total[1h])) / sum(increase(tierstore_fs_tree_attach_seconds_count[1h]))
 ```
 
-What the fill socket adds to a fill of a manifest, over an hour: the mount's mean time for its
+What the file system's call adds to a fill of a manifest, over an hour: the mount's mean time for its
 fills, less the node's for the same fills.
 
 ```promql
@@ -514,9 +682,9 @@ sum(increase(tierstore_fs_manifest_fill_seconds_sum[1h])) / sum(increase(tiersto
 
 `tierstore fs` shares one descriptor per cache file (a blob or a pack) across all its open handles,
 and at each look for idle trees (every quarter of `fs.tree_idle_secs`, at most a minute apart: a
-minute by default) reports to the node, on the fill socket, how many cache files it holds open and
+minute by default) reports to the node's cache how many cache files it holds open and
 how many opens failed for lack of descriptors since its previous report (the cache file could not
-be opened, or no connection to the fill socket could be made). The families are on
+be opened, or the call of the cache could not be made). The families are on
 every process with a cache, with a `# TYPE` line, and have no series until a mount reports. The
 node keeps at most 64 mounts; a report of a 65th mount is answered `ok` and dropped, so a client
 that makes up mount ids cannot grow the node's memory. The fs unit's descriptor limit is 1,048,576.
@@ -529,8 +697,7 @@ that makes up mount ids cannot grow the node's memory. The fs unit's descriptor 
 What they do not count: a report that was lost, as a `started` is lost (above), so the gauge may be
 a minute old and a failure whose report was lost is never counted; the store process's own
 descriptors; descriptors that are not cache files, such as the copies of the FUSE device, the
-splice pipes and the fill-socket connections. A node of an earlier release answers the report
-`refused unknown request`, which the mount ignores, so these families stay empty there.
+splice pipes and the sockets.
 
 An alert when a mount holds more than nine tenths of the limit:
 
@@ -550,7 +717,7 @@ increase(tierstore_fs_open_descriptor_failures_total[1h]) > 0
 on the mount's clock, to the millisecond, and counts the opens waiting for an answer. Over FUSE that
 is an `OPEN`, answered at once by the reader that read it or parked until the node answers a fill;
 over NFS, which has no open, it is the fill of the file's descriptor that the first read of the file
-starts, from that read's arrival. The mount reports the counts to the node, on the fill socket, at
+starts, from that read's arrival. The mount reports the counts to the node's cache at
 each look for idle trees (every quarter of `fs.tree_idle_secs`, at most a minute apart: a minute by
 default) and when its readers stop for a hand-over or a restart, as running totals of the process;
 the node adds what each process's totals grew by since its previous report, so a report that was
@@ -592,8 +759,8 @@ tree store where the mount runs in the node's process. It keeps the bytes of tho
 whole pages and each list once, under `fs.tree_list_ram_bytes` (512 MiB by default): before a list
 is attached it releases, the least recently used first, the lists that no run attaches and no
 request is reading, and a list that still does not fit is mapped past the cap and counted (see
-[operations](operations.md#the-virtual-build-file-system)). The mount reports to the node, on the
-fill socket, at each look for idle trees (every quarter of `fs.tree_idle_secs`, at most a minute
+[operations](operations.md#the-virtual-build-file-system)). The mount reports to the node's cache at
+each look for idle trees (every quarter of `fs.tree_idle_secs`, at most a minute
 apart: a minute by default) and when its readers stop for a hand-over or a restart, the lists mapped
 in its process now and their bytes, the cap, and as running totals of the process the lists it
 released and those it mapped past the cap; the node adds what each process's totals grew by since
@@ -621,6 +788,87 @@ A mount whose held lists alone pass its cap, over the last hour:
 
 ```promql
 increase(tierstore_fs_tree_list_over_cap_total[1h]) > 0
+```
+
+### Build node: the requests of the mount
+
+`tierstore fs` times every request its frontend answers, from the request's arrival to its answer
+on the mount's clock, to the millisecond, by its kind, for the requests by kind and their latency
+of the Q-B measurement (`docs/design/virtual-build-fs.md`, section 11). Over FUSE a request is
+one the session hands the frontend, by its opcode, answered at once by the reader that read it or
+parked until the node answers; over NFS it is a call of the protocol layer into the file system,
+so the attributes a LOOKUP or a READ also reads are a `getattr` of their own. The mount reports the
+counts to the node's cache, by a call in the process, at each look for idle trees (every quarter of
+`fs.tree_idle_secs`, at most a minute apart: a minute by default) and when its readers stop for a
+hand-over or a restart, as running totals of the process, and only when it answered a request
+since its previous report; the node adds what each process's totals grew by, as for the opens
+above, so a report that was lost loses nothing the next one carries. The family is on every
+process with a cache, with a `# TYPE` line, and stays at zero on a node whose mount reports
+nothing. The buckets are those of the attach histogram above. The node keeps at most 64 mounts, as
+for the descriptors.
+
+| name | type | labels | what it says |
+|---|---|---|---|
+| `tierstore_fs_request_seconds` | histogram | `kind`: `lookup`, `getattr`, `access`, `open`, `read`, `readdir`, `readlink`, `other`; `le` on `_bucket` | one sample per request of the mount's frontend: the seconds from its arrival to its answer, whatever the answer. `lookup` is FUSE's and NFS's LOOKUP; `getattr` FUSE's GETATTR and NFS's GETATTR and the attributes NFS reads for its other procedures; `access` NFS's ACCESS; `open` FUSE's OPEN; `read` FUSE's and NFS's READ; `readdir` FUSE's READDIR and READDIRPLUS and NFS's READDIR and READDIRPLUS; `readlink` FUSE's and NFS's READLINK; `other` any other request: a RELEASE, an OPENDIR, a STATFS, NFS's FSINFO, a change refused with `EROFS`, an opcode the frontend does not serve, a request too short for its opcode |
+| `tierstore_fs_request_seconds_bucket` | counter | `kind`, `le` | the requests of that kind at or under `le` seconds |
+| `tierstore_fs_request_seconds_sum` | counter | `kind` | their seconds |
+| `tierstore_fs_request_seconds_count` | counter | `kind` | the requests of that kind |
+
+What it does not count: a report that was lost, so the histogram may be behind by the requests
+since the last report that arrived; the requests of the put directory (`put/`); FORGET and
+BATCH_FORGET, which have no answer; what the FUSE session or the NFS protocol layer answers itself
+with no call into the file system (INIT, INTERRUPT, an opcode the session does not know, NFS's
+NULL and an unknown procedure); a parked request that is never answered. A node of an earlier
+release answers the report `refused unknown request`, which the mount ignores, and no request
+waits for it: the report is sent by a thread of its own, and a request only adds to counters of
+its process.
+
+The 99th percentile of a request over five minutes, by kind:
+
+```promql
+histogram_quantile(0.99, sum by (kind, le) (rate(tierstore_fs_request_seconds_bucket[5m])))
+```
+
+### Build node: the attaches and detaches of runs
+
+`tierstore fs` times each `attach <digest> for <run>` and each `detach <run>` of its control
+socket, from the request to its answer on the mount's clock, to the millisecond, and splits each
+attach into three parts that add up to it, the `attach_ms` and `detach_ms` of the Q-B measurement
+(`docs/design/virtual-build-fs.md`, section 11): the **fetch**, to the end of the last manifest
+the attach's read of the tree fetched from the cache directory or filled through the cache
+(its `fill-tree` included); the **flatten**, from there to the end of the read (the entries made
+of the manifests, or the tree list mapped); and the **append**, from there to the answer (the
+tree's number in the table of tree numbers, the tree kept in memory, the attachments file
+written). A tree in memory already, or one another request is reading, or one read again into
+memory under the number it has, has its whole read under the fetch; an attach refused before its
+read (a digest or a run that is not one, a process being replaced) has no fetch and no flatten.
+The mount reports each to the node's cache, by a call in the process, when it ends; the families are on
+every process with a cache, with a `# TYPE` line, and stay at zero on a node whose mount reports
+nothing. The buckets are those of the attach histogram above.
+
+| name | type | labels | what it says |
+|---|---|---|---|
+| `tierstore_fs_run_attach_seconds` | histogram | `outcome`: `ok`, `failed`; `le` on `_bucket` | one sample per attach of a tree for a run: the seconds from the request to its answer. `ok` is an attach that answered the run's path, `failed` one refused, whatever the reason |
+| `tierstore_fs_run_attach_seconds_bucket` | counter | `outcome`, `le` | the attaches of that outcome at or under `le` seconds |
+| `tierstore_fs_run_attach_seconds_sum` | counter | `outcome` | their seconds |
+| `tierstore_fs_run_attach_seconds_count` | counter | `outcome` | the attaches of that outcome |
+| `tierstore_fs_run_attach_part_seconds` | histogram | `part`: `fetch`, `flatten`, `append`; `outcome`: `ok`, `failed`; `le` on `_bucket` | one sample of each part per attach of a tree for a run, under the attach's outcome: the seconds of that part. A failed attach has the parts it ran, and 0 for those it did not |
+| `tierstore_fs_run_attach_part_seconds_bucket` | counter | `part`, `outcome`, `le` | those parts at or under `le` seconds |
+| `tierstore_fs_run_attach_part_seconds_sum` | counter | `part`, `outcome` | their seconds |
+| `tierstore_fs_run_attach_part_seconds_count` | counter | `part`, `outcome` | those parts: the attaches of that outcome |
+| `tierstore_fs_run_detach_seconds` | histogram | `outcome`: `ok`, `failed`; `le` on `_bucket` | one sample per detach of a run (and per run that `detach-all-except` detaches): the seconds from the request to its answer, the unpins of the trees it freed included. `ok` is a detach that ended the run's attachments, `failed` one of a run that attached nothing, or refused while the process is being replaced |
+| `tierstore_fs_run_detach_seconds_bucket` | counter | `outcome`, `le` | the detaches of that outcome at or under `le` seconds |
+| `tierstore_fs_run_detach_seconds_sum` | counter | `outcome` | their seconds |
+| `tierstore_fs_run_detach_seconds_count` | counter | `outcome` | the detaches of that outcome |
+
+What they do not count: a report that was lost, as a `started` is lost (above); an attach of a tree
+on a lookup, which is `tierstore_fs_tree_attach_seconds`. A node of an earlier release answers
+the reports `refused unknown request`, which the mount ignores.
+
+The share of an attach's time that is its fetch, over an hour:
+
+```promql
+sum(increase(tierstore_fs_run_attach_part_seconds_sum{part="fetch",outcome="ok"}[1h])) / sum(increase(tierstore_fs_run_attach_seconds_sum{outcome="ok"}[1h]))
 ```
 
 ## Cache queries (v1)

@@ -5,6 +5,9 @@
 //! rig's settings; the reader is a thread that reads every file of the sample tree through the
 //! mount again and again and compares the bytes to what `sample` wrote.
 //!
+//! A file can also be mapped (`vm-memory`'s `MmapRegion`, a private read-only mapping) before the
+//! hand-over and read through the mapping after it.
+//!
 //! Every wait is on an event: the manager's `READY=1`, the end of a serve thread, the hand-over
 //! socket's file, and the number of rounds the reader has finished. A mount needs `/dev/fuse` and
 //! `fusermount3` (the mounting user is not root); where either is missing a test says so on
@@ -16,7 +19,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread::JoinHandle;
 
+use vm_memory::{FileOffset, MmapRegion, VolatileMemory as _};
+
 use super::config::FsSettings;
+use super::fills::Calls;
 use super::handover::{self, HandoverError, Paths};
 use super::init_record;
 use super::launch::{Platform, serve_with};
@@ -142,9 +148,13 @@ fn platform(manager: Option<&Path>) -> Platform {
 }
 
 /// An instance serving on a thread of its own.
-fn serving(settings: &FsSettings, manager: &FakeManager) -> JoinHandle<Result<(), StartError>> {
+fn serving(
+    (settings, reach): (&FsSettings, &Calls),
+    manager: &FakeManager,
+) -> JoinHandle<Result<(), StartError>> {
     let (settings, platform) = (settings.clone(), platform(Some(manager.socket())));
-    std::thread::spawn(move || serve_with(&settings, platform))
+    let reach = reach.clone();
+    std::thread::spawn(move || serve_with((&settings, &reach), platform))
 }
 
 /// Waits until the manager is told the unit is ready; a serve thread that ended first fails the
@@ -197,7 +207,7 @@ fn hand_over_under_read() {
     let mount = Mount(rig.mountpoint.clone());
     let settings = rig.settings();
     let old_manager = FakeManager::start(&rig.dir.path().join("old.sock"));
-    let old = serving(&settings, &old_manager);
+    let old = serving((&settings, &rig.calls()), &old_manager);
     until_ready(&old_manager, &old);
     assert!(mount.present());
     let at = tree_at(&rig);
@@ -213,7 +223,7 @@ fn hand_over_under_read() {
     let reader = Reader::start(at);
     reader.after(2);
     let new_manager = FakeManager::start(&rig.dir.path().join("new.sock"));
-    let new = serving(&settings, &new_manager);
+    let new = serving((&settings, &rig.calls()), &new_manager);
     until_ready(&new_manager, &new);
     // The old instance ends by itself, with success, once the new one serves.
     old.join().unwrap().unwrap();
@@ -250,6 +260,63 @@ fn hand_over_under_read() {
     assert!(mount.present(), "the store keeps the mount");
 }
 
+/// Asserts that a file mapped through the mount before the hand-over, as a compiler maps its
+/// inputs, is read whole through its mapping after it: every page, none of which the kernel held
+/// at the hand-over, is answered by the new instance with the file's bytes, and the process that
+/// holds the mapping takes no fault (a page the new instance answered with an error would end it
+/// with SIGBUS). Catches a hand-over that leaves the pages of a mapped file unreadable.
+#[test]
+fn a_file_mapped_before_the_hand_over_is_read_through_its_mapping_after_it() {
+    with_fuse(mapped_across_the_hand_over);
+}
+
+fn mapped_across_the_hand_over() {
+    let _one_at_a_time = SIGNALS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let rig = rig("tfs-handover-mapped");
+    let mount = Mount(rig.mountpoint.clone());
+    let settings = rig.settings();
+    let old_manager = FakeManager::start(&rig.dir.path().join("old.sock"));
+    let old = serving((&settings, &rig.calls()), &old_manager);
+    until_ready(&old_manager, &old);
+    let at = tree_at(&rig);
+
+    // Each file that has bytes, mapped by way of the process the mount is taken from, and no page
+    // of it read.
+    let mapped: Vec<_> = expected()
+        .into_iter()
+        .filter(|(_, bytes)| !bytes.is_empty())
+        .map(|(name, bytes)| {
+            let file = std::fs::File::open(at.join(name)).unwrap();
+            forget_pages(&file);
+            let map = MmapRegion::<()>::build(
+                Some(FileOffset::new(file, 0)),
+                bytes.len(),
+                libc::PROT_READ,
+                libc::MAP_PRIVATE,
+            )
+            .unwrap();
+            (name, map, bytes)
+        })
+        .collect();
+
+    let new_manager = FakeManager::start(&rig.dir.path().join("new.sock"));
+    let new = serving((&settings, &rig.calls()), &new_manager);
+    until_ready(&new_manager, &new);
+    old.join().unwrap().unwrap();
+    for (name, map, bytes) in &mapped {
+        let mut read = vec![0u8; bytes.len()];
+        let copied = map.get_slice(0, read.len()).unwrap().copy_to(&mut read[..]);
+        assert_eq!(copied, bytes.len(), "{name}: every page");
+        assert_eq!(&read, bytes, "{name} through its mapping");
+    }
+    drop(mapped);
+    sigterm();
+    new.join().unwrap().unwrap();
+    assert!(mount.present(), "the store keeps the mount");
+}
+
 /// Asserts that take-overs that fail before the new instance says it has the descriptor leave
 /// the old instance serving a reader: one that names another control socket is answered `nak`
 /// after the offer and its start returns the error that says what the old instance serves, with
@@ -270,7 +337,7 @@ fn refused_take_over() {
     let mount = Mount(rig.mountpoint.clone());
     let settings = rig.settings();
     let old_manager = FakeManager::start(&rig.dir.path().join("old.sock"));
-    let old = serving(&settings, &old_manager);
+    let old = serving((&settings, &rig.calls()), &old_manager);
     until_ready(&old_manager, &old);
     let reader = Reader::start(tree_at(&rig));
     reader.after(2);
@@ -281,7 +348,8 @@ fn refused_take_over() {
         ..settings.clone()
     };
     let refused_manager = FakeManager::start(&rig.dir.path().join("refused.sock"));
-    let error = serve_with(&other, platform(Some(refused_manager.socket()))).unwrap_err();
+    let refused = platform(Some(refused_manager.socket()));
+    let error = serve_with((&other, &rig.calls()), refused).unwrap_err();
     match &error {
         StartError::Handover(HandoverError::Mismatch { .. }) => {}
         other => panic!("{other}"),
@@ -297,7 +365,7 @@ fn refused_take_over() {
 
     // A manager that cannot be reached cannot store the descriptor.
     let nobody = rig.dir.path().join("nobody-home");
-    let error = serve_with(&settings, platform(Some(&nobody))).unwrap_err();
+    let error = serve_with((&settings, &rig.calls()), platform(Some(&nobody))).unwrap_err();
     match &error {
         StartError::Handover(HandoverError::Unprepared(_)) => {}
         other => panic!("{other}"),
@@ -336,7 +404,7 @@ fn taker_gone() {
     let mount = Mount(rig.mountpoint.clone());
     let settings = rig.settings();
     let old_manager = FakeManager::start(&rig.dir.path().join("old.sock"));
-    let old = serving(&settings, &old_manager);
+    let old = serving((&settings, &rig.calls()), &old_manager);
     until_ready(&old_manager, &old);
     let at = tree_at(&rig);
     let (name, whole) = expected().remove(0);

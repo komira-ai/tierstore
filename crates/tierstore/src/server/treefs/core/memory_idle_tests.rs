@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use super::super::{Core, Entry, Errno, Looked};
 use super::{Footprint, lists, memory_line};
+use crate::Backend as _;
 use crate::server::local_cache::trees::Mapped;
 use crate::server::treefs::ino;
 use crate::server::treefs::locked;
@@ -28,6 +29,20 @@ fn attached(name: &str) -> (Rig, u64) {
     let _ = rig.core.attach(&root, RUN).unwrap();
     let bin = found(&rig.core, root_ino(), "bin");
     (rig, bin)
+}
+
+/// Takes the manifests out of the upstream, as an object store that has lost them.
+fn forget_manifests(rig: &Rig) {
+    let digests: Vec<String> = {
+        let mut built = rig.upstream.built.lock().unwrap();
+        built.manifests.drain().map(|(digest, _)| digest).collect()
+    };
+    for digest in digests {
+        let _ = rig
+            .work
+            .handle()
+            .block_on(rig.upstream.delete(&format!("cas/l/{digest}")));
+    }
 }
 
 fn found(core: &Core, parent: u64, name: &str) -> u64 {
@@ -92,7 +107,7 @@ fn a_tree_gone_after_the_sweep_took_it_out_is_no_entry() {
     rig.clock.advance(TREE_IDLE);
     let _ = core.detach_idle();
     assert_eq!(core.trees_in_memory(), 0);
-    rig.upstream.built.lock().unwrap().manifests.clear();
+    forget_manifests(&rig);
     std::fs::remove_dir_all(&rig.cache).unwrap();
     std::fs::create_dir_all(&rig.cache).unwrap();
     assert_eq!(core.getattr(bin), Err(Errno::NoEnt));
@@ -159,7 +174,7 @@ fn a_tree_a_run_has_attached_never_leaves_at_the_sweep() {
     assert_eq!(core.drop_idle(0), 0);
     assert_eq!(core.trees_in_memory(), 1);
     assert_eq!(core.times_read(1), 1);
-    assert_eq!(core.detach(RUN).map(|failures| failures.len()), Some(0));
+    assert_eq!(core.detach(RUN).map(|got| got.failures.len()), Some(0));
     assert_eq!(
         core.trees_in_memory(),
         0,

@@ -7,11 +7,14 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use super::{End, Platform, ended, hang, serve, serve_with};
+use super::{End, Platform, ended, hang, serve_with};
 use crate::Mono;
 use crate::server::handoff::testing::within;
+use crate::server::local_cache::testing as cache_rig;
+use crate::server::local_cache::{Mode, Tick};
 use crate::server::treefs::config::FsSettings;
 use crate::server::treefs::fakedev;
+use crate::server::treefs::fills::Calls;
 use crate::server::treefs::init_record::{self, Record};
 use crate::server::treefs::run::Kernel;
 use crate::server::treefs::sd::{FUSE_NAME, Manager, Stored};
@@ -99,7 +102,8 @@ fn fresh_start() {
     let manager = FakeManager::start(&rig.dir.path().join("notify.sock"));
     let platform = platform(&manager, None, Kernel::real());
     let mine = settings.clone();
-    let thread = std::thread::spawn(move || serve_with(&mine, platform));
+    let calls = rig.calls();
+    let thread = std::thread::spawn(move || serve_with((&mine, &calls), platform));
     until_ready(&manager);
     assert_eq!(
         manager.texts(),
@@ -140,7 +144,8 @@ fn no_manager() {
         clock: Arc::new(Mono::new()),
     };
     let mine = settings.clone();
-    let thread = std::thread::spawn(move || serve_with(&mine, platform));
+    let calls = rig.calls();
+    let thread = std::thread::spawn(move || serve_with((&mine, &calls), platform));
     until(|| settings.handoff_socket.exists());
     assert!(mounted(&rig.mountpoint));
     sigterm();
@@ -165,7 +170,8 @@ fn a_restart_serves_the_descriptor_the_manager_kept_and_asks_for_the_requests_ag
     kernel.getattr(5, 1);
     let platform = platform(&manager, Some(device.as_raw_fd()), kernel_of(&rig, ""));
     let mine = settings.clone();
-    let thread = std::thread::spawn(move || serve_with(&mine, platform));
+    let calls = rig.calls();
+    let thread = std::thread::spawn(move || serve_with((&mine, &calls), platform));
     until_ready(&manager);
     let first = kernel.reply();
     let second = kernel.reply();
@@ -182,24 +188,35 @@ fn a_restart_serves_the_descriptor_the_manager_kept_and_asks_for_the_requests_ag
     drop(device);
 }
 
-/// Asserts that a start tells the service manager it is ready while the node's fill socket has not
-/// answered the mount's pins (`pins-live`), as after a boot, when the node's tierstore reads its
-/// whole cache before it answers: at `READY=1` no `places-live`, which follows that answer, has
-/// been asked. Once the socket answers, the pins and then the placements reach it. Each step of
-/// the start is said on stderr as it ends, in order, and the launch's own steps and the time to
-/// ready on the platform's clock, which the test does not move: 0 ms. Catches a start that waits
-/// for the fill socket before it says ready.
+/// Asserts that a start tells the service manager it is ready while the node's cache is read-only
+/// (another process holds the lock of its directory, as after a boot, when the node's cache reads
+/// its whole directory before it takes the write role), so that the mount's pins, which wait for
+/// the write role, have not been answered at `READY=1`. Once the cache takes the lock, the process
+/// serves on and ends at the signal. Each step of the start is said on stderr as it ends, in order,
+/// and the launch's own steps and the time to ready on the platform's clock, which the test does
+/// not move: 0 ms. Catches a start that waits for the write role of the cache before it says
+/// ready.
 #[test]
-fn a_start_says_ready_before_the_fill_socket_answers_the_mount_pins() {
+fn a_start_says_ready_before_the_cache_takes_the_pins() {
     let _one_at_a_time = SIGNALS
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let rig = Rig::new("tfs-launch-ready-first", sample());
     leave_record(&rig, true);
     let mut settings = rig.settings();
-    // Long enough that the pins wait for the test, not for the client's own time.
+    // Long enough that the pins wait for the test, not for the core's own time.
     settings.fetch_timeout = std::time::Duration::from_secs(600);
-    rig.upstream.gate_verb("pins-live");
+    let work = rig.work.handle();
+    let _entered = work.enter();
+    let node = cache_rig::Rig::new("tfs-launch-ready-cache");
+    let holder = node.locked();
+    let waiting = node.locked();
+    assert_eq!(waiting.mode(), Mode::ReadOnly);
+    let calls = Calls {
+        cache: waiting.clone(),
+        trees: None,
+        runtime: rig.work.handle(),
+    };
     let manager = FakeManager::start(&rig.dir.path().join("notify.sock"));
     let (device, _kernel) = fakedev::pair();
     let platform = platform(&manager, Some(device.as_raw_fd()), kernel_of(&rig, ""));
@@ -208,14 +225,13 @@ fn a_start_says_ready_before_the_fill_socket_answers_the_mount_pins() {
     let logging = log.clone();
     let thread = std::thread::spawn(move || {
         let _logging = logged(&logging, tracing::Level::INFO);
-        serve_with(&mine, platform)
+        serve_with((&mine, &calls), platform)
     });
     until_ready(&manager);
-    assert!(rig.upstream.asked("places-live").is_empty());
-    rig.upstream.wait_for_verb("pins-live", 1);
-    rig.upstream.permit_verb("pins-live", 1);
-    until(|| !rig.upstream.asked("places-live").is_empty());
-    assert_eq!(rig.upstream.asked("pins-live").len(), 1);
+    assert_eq!(waiting.mode(), Mode::ReadOnly, "ready with no write role");
+    drop(holder);
+    assert_eq!(waiting.tick().unwrap(), Tick::Took);
+    assert_eq!(waiting.mode(), Mode::ReadWrite);
     sigterm();
     thread.join().unwrap().unwrap();
     drop(device);
@@ -269,7 +285,7 @@ fn a_restart_without_resend_aborts_a_connection_that_stays_hung() {
     let manager = FakeManager::start(&rig.dir.path().join("notify.sock"));
     let (device, _kernel) = fakedev::pair();
     let platform = platform(&manager, Some(device.as_raw_fd()), kernel.clone());
-    let error = serve_with(&settings, platform).unwrap_err();
+    let error = serve_with((&settings, &rig.calls()), platform).unwrap_err();
     assert!(matches!(error, StartError::Aborted));
     assert_eq!(error.status(), 1);
     assert_eq!(
@@ -295,7 +311,8 @@ fn a_restart_without_resend_aborts_a_connection_that_stays_hung() {
         clock: Arc::new(Mono::new()),
     };
     let mine = settings.clone();
-    let thread = std::thread::spawn(move || serve_with(&mine, platform));
+    let calls = rig.calls();
+    let thread = std::thread::spawn(move || serve_with((&mine, &calls), platform));
     until(|| mine_exists(&settings));
     sigterm();
     thread.join().unwrap().unwrap();
@@ -333,7 +350,7 @@ fn a_restart_whose_resend_is_refused_is_watched_and_aborted_when_the_requests_st
         kernel: kernel.clone(),
         clock: Arc::new(Mono::new()),
     };
-    let error = serve_with(&settings, platform).unwrap_err();
+    let error = serve_with((&settings, &rig.calls()), platform).unwrap_err();
     assert!(matches!(error, StartError::Aborted));
     assert_eq!(
         std::fs::read_to_string(kernel.connections.join("79/abort")).unwrap(),
@@ -356,7 +373,7 @@ fn the_manager_is_not_told_ready_before_the_hand_over_socket_is_bound() {
     let manager = FakeManager::start(&rig.dir.path().join("notify.sock"));
     let (device, _kernel) = fakedev::pair();
     let platform = platform(&manager, Some(device.as_raw_fd()), kernel_of(&rig, ""));
-    let error = serve_with(&settings, platform).unwrap_err();
+    let error = serve_with((&settings, &rig.calls()), platform).unwrap_err();
     assert!(error.to_string().contains("hand-over socket"), "{error}");
     assert!(!manager.texts().iter().any(|text| text == "READY=1"));
 }
@@ -390,7 +407,8 @@ fn a_restart_on_a_connection_the_kernel_does_not_show_is_served_unwatched() {
         clock: Arc::new(Mono::new()),
     };
     let mine = settings.clone();
-    let thread = std::thread::spawn(move || serve_with(&mine, platform));
+    let calls = rig.calls();
+    let thread = std::thread::spawn(move || serve_with((&mine, &calls), platform));
     until(|| settings.handoff_socket.exists());
     sigterm();
     thread.join().unwrap().unwrap();
@@ -427,7 +445,8 @@ fn dropped_and_remade(bogus: bool) {
     let number = if bogus { i32::MAX } else { device.as_raw_fd() };
     let platform = platform(&manager, Some(number), kernel.clone());
     let mine = settings.clone();
-    let thread = std::thread::spawn(move || serve_with(&mine, platform));
+    let calls = rig.calls();
+    let thread = std::thread::spawn(move || serve_with((&mine, &calls), platform));
     until_ready(&manager);
     assert_eq!(
         manager.texts(),
@@ -467,13 +486,14 @@ async fn a_start_takes_the_mount_from_the_running_instance() {
     };
     let platform = platform(&manager, None, kernel);
     let settings = old.settings.clone();
+    let calls = old.rig.calls();
     let ended = Arc::new(AtomicBool::new(false));
     let done = Arc::clone(&ended);
     let thread = std::thread::spawn(move || {
         let _one_at_a_time = SIGNALS
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let served = serve_with(&settings, platform);
+        let served = serve_with((&settings, &calls), platform);
         done.store(true, Ordering::Release);
         served
     });
@@ -561,7 +581,8 @@ async fn the_wait_for_a_hang_ends_only_when_one_is_reported() {
     }
 }
 
-/// Asserts that the process, started by hand, refuses a start it cannot make and says what.
+/// Asserts that the process, started with no service manager, refuses a start it cannot make and says
+/// what.
 #[test]
 fn a_start_that_cannot_be_made_is_the_error_of_serve() {
     let rig = Rig::new("tfs-launch-refused", sample());
@@ -569,7 +590,13 @@ fn a_start_that_cannot_be_made_is_the_error_of_serve() {
         cache_path: rig.dir.path().join("none"),
         ..rig.settings()
     };
-    let error = serve(&settings).unwrap_err();
+    let platform = Platform {
+        manager: Manager::new(None),
+        stored: Vec::new(),
+        kernel: Kernel::real(),
+        clock: Arc::new(Mono::new()),
+    };
+    let error = serve_with((&settings, &rig.calls()), platform).unwrap_err();
     assert!(error.to_string().contains("fs.cache_path"), "{error}");
 }
 
@@ -593,7 +620,8 @@ fn a_hand_over_between_two_processes_ends_the_first_with_success() {
         kernel_of(&rig, ""),
     );
     let mine = settings.clone();
-    let first_thread = std::thread::spawn(move || serve_with(&mine, first));
+    let calls = rig.calls();
+    let first_thread = std::thread::spawn(move || serve_with((&mine, &calls), first));
     until_ready(&first_manager);
     kernel.getattr(1, 1);
     assert_eq!(kernel.reply().unique, 1);
@@ -602,7 +630,8 @@ fn a_hand_over_between_two_processes_ends_the_first_with_success() {
     // The stand-in for the device is a socket, not the FUSE device.
     let second = platform(&second_manager, None, kernel_of(&rig, ""));
     let mine = settings.clone();
-    let second_thread = std::thread::spawn(move || serve_with(&mine, second));
+    let calls = rig.calls();
+    let second_thread = std::thread::spawn(move || serve_with((&mine, &calls), second));
     until_ready(&second_manager);
     first_thread.join().unwrap().unwrap();
     assert_eq!(
@@ -641,7 +670,8 @@ fn unreachable_manager() {
         clock: Arc::new(Mono::new()),
     };
     let mine = settings.clone();
-    let thread = std::thread::spawn(move || serve_with(&mine, platform));
+    let calls = rig.calls();
+    let thread = std::thread::spawn(move || serve_with((&mine, &calls), platform));
     until(|| settings.handoff_socket.exists());
     assert!(mounted(&rig.mountpoint));
     sigterm();
@@ -666,7 +696,8 @@ async fn a_start_that_cannot_store_the_descriptor_leaves_the_running_instance_se
         clock: Arc::new(Mono::new()),
     };
     let settings = old.settings.clone();
-    let refused = tokio::task::spawn_blocking(move || serve_with(&settings, platform))
+    let calls = old.rig.calls();
+    let refused = tokio::task::spawn_blocking(move || serve_with((&settings, &calls), platform))
         .await
         .unwrap();
     match refused {

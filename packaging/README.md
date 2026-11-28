@@ -31,8 +31,7 @@ fails a build whose binary asks for a newer `GLIBC_` symbol version (`docs/ci-an
 | `tierstore-guard.service` | the nft guard the deb and rpm packages install at `/usr/lib/systemd/system`: it loads `/etc/tierstore/guard.nft` when the host has that file, and `tierstore@.service` wants it and starts after it ([The nft guard unit](#the-nft-guard-unit)) |
 | `config.toml` | the example of `/etc/tierstore/config.toml`, the configuration file of every Linux route (`tierstore.service`, `tierstore@.service`, hostkeeper's template): one `s3` interface, the keys, and an S3 bucket for each tier |
 | `hostkeeper/units/tierstore@.service` | the instance template of the update hook on Linux: `tierstore@a.service` and `tierstore@b.service`, each running `/usr/local/libexec/tierstore/tierstore`, the copy the hook makes of the binary of hostkeeper's release link `current`, and starting only under its marker file ([Moving to the update hook](#moving-to-the-update-hook)) |
-| `hostkeeper/units/tierstore.plist` | the LaunchDaemon of the update hook on a Mac: one job, labelled `tierstore`, running the same copy |
-| `hostkeeper/units/tierstore-fs.plist` | the LaunchDaemon of `tierstore fs` on a Mac, labelled `tierstore-fs`, running the same copy; the Mac's installer package installs it (`macos-pkg/tierstore-fs.plist`, the same file with the package's binary as the program) |
+| `hostkeeper/units/tierstore.plist` | the LaunchDaemon of the update hook on a Mac: one job, labelled `tierstore`, running the same copy, which serves the whole Mac, the file system of its `fs` interface included |
 
 The values in the unit are examples (`192.0.2.10`, `s3-hot.example`, the bucket names, the
 sizes): edit them to the setup's. `crates/tierstore/tests/packaging.rs` reads `tierstore.service`
@@ -46,6 +45,55 @@ that the template's start condition is the marker file the hook writes, that it 
 boot, that both wait for the drain, that no secret is on the command line, and that the plist is
 the file the hook bootstraps.
 
+
+## Installing from a package manager
+
+A user who wants tierstore on a host without hostkeeper has three package channels, besides the
+script (`curl -fsSL https://tierstore.dev/install.sh | sh`, which puts the binary in
+`~/.local/bin`, checks its SHA-256 and starts nothing) and the tarball. The same steps are on the
+site's install page (`crates/tierstore/site/content/install.html`) and in the install guide
+(`crates/tierstore/docs/install.md`). Every channel serves a release that has passed the install
+checks (`docs/ci-and-release.md`); none starts a server.
+
+Homebrew (macOS on Apple silicon, Linux x86_64 and aarch64) puts `tierstore` on the `PATH`:
+
+```sh
+brew install komira-ai/tap/tierstore
+tierstore --version
+```
+
+apt (Debian and Ubuntu, amd64 and arm64) uses the repository `packages.komira.ai`, suite `stable`.
+The first lines fetch the repository's key and trust it for this source only (`Signed-By`):
+
+```sh
+sudo install -d -m 0755 /usr/share/keyrings
+sudo curl -fsSL https://packages.komira.ai/apt/komira-archive-keyring.gpg -o /usr/share/keyrings/komira-archive-keyring.gpg
+sudo tee /etc/apt/sources.list.d/komira.sources >/dev/null <<'EOF'
+Types: deb
+URIs: https://packages.komira.ai/apt
+Suites: stable
+Components: main
+Signed-By: /usr/share/keyrings/komira-archive-keyring.gpg
+EOF
+sudo apt update
+sudo apt install tierstore
+/usr/libexec/tierstore/tierstore --version
+```
+
+dnf (AlmaLinux, Rocky Linux and RHEL 8 and newer, Fedora, Amazon Linux 2023; x86_64 and aarch64)
+saves the repository file, which names the repository's key, then installs:
+
+```sh
+sudo curl -fsSLo /etc/yum.repos.d/komira.repo https://packages.komira.ai/rpm/komira.repo
+sudo dnf install tierstore
+/usr/libexec/tierstore/tierstore --version
+```
+
+The `.deb` and the `.rpm` put the binary at `/usr/libexec/tierstore/tierstore` and nothing on the
+`PATH`. They add the service account, the unit template `tierstore@.service` and an example
+configuration, and start no instance: write `/etc/tierstore/config.toml` and start an instance as
+"Starting it" below says. The suite `testing` of the apt and rpm repositories holds a release before
+it is promoted; it is for the release process, not for users.
 
 ## Placing the binary
 
@@ -159,7 +207,7 @@ bootout`, then `launchctl bootstrap`.
 The edits of the host's configuration file (the bucket, the tiers, the endpoints, `hot_store.budget`)
 go into `/etc/tierstore/config.toml` on Linux and `/usr/local/tierstore/etc/tierstore.toml` on a
 Mac, the files the two units name. `packaging/macos/tierstore.toml` is the example of that
-file for a Mac (only a read cache on loopback, its proxy id from hostkeeper's facts file, its upstream the storage nodes' S3 servers); `packaging/macos/fs.toml` is the example of `/usr/local/tierstore/etc/fs.toml`, the file of the `tierstore-fs` job; the declaration and plist that directory held for the earlier update path are removed.
+file for a Mac (only a read cache on loopback, its proxy id from hostkeeper's facts file, its upstream the storage nodes' S3 servers); the file has the Mac's `fs` interface, so that the one process serves the mount; the declaration and plist that directory held for the earlier update path are removed.
 
 ## Presigned PUT URLs
 
@@ -263,7 +311,8 @@ in it (`a..b`, `.hidden`) is a name, and tab, line feed, carriage return, U+007F
 | AbortMultipartUpload | `write_prefixes` (a GC key: its abort prefix) | of an upload of such a key (a delete prefix does not allow an abort) |
 | DeleteObject | `delete_prefixes` | from both tiers, on the entry of the key as for any delete |
 | DeleteObjects (`POST ?delete`) | none | no: the keys are in the body, and only the full key calls it |
-| a put with `If-Match` or any other `If-None-Match`, a copy (`x-amz-copy-source`, also on a part) | none | no: a scoped key never replaces or copies |
+| a put with `If-Match` or any other `If-None-Match` | none | no: a scoped key never replaces |
+| a copy (`x-amz-copy-source`, CopyObject or UploadPartCopy) | `read_prefixes` for the source and `write_prefixes` for the destination | of a source such a key may read into a key it may write; a CopyObject creates only (`412` if the key exists) |
 | the calls on the bucket (CreateBucket, HeadBucket, GetBucketLocation, the reads of its settings, delete) and the root (ListBuckets), any other method | none | no |
 | `_journal/`, `_tiering/`, `_entries/`, any key outside the list the call needs | none | no |
 
@@ -395,8 +444,14 @@ it is a hit (a multipart upload is not kept: the first read fills it; see "What 
 below). Create-only
 puts (`If-None-Match: *`), plain puts (no `If-None-Match`), presigned PUTs, multipart uploads (start, part,
 completion, abort) and deletes go to the upstream; the roles of the full, read-only, scoped,
-presigning and GC keys apply as on a storage node, and a put that replaces on a tag (`If-Match`) and a copy
-are still refused. A create-only put makes one HEAD of the key at the upstream before the body is
+presigning and GC keys apply as on a storage node, and a copy is still refused. A put or a
+completion with `If-Match` (the full key's, with no `If-None-Match`) goes to the upstream with its
+`If-Match`, and the upstream compares the ETag and replaces in one step: another ETag is `412
+PreconditionFailed`, a key with no object `404 NoSuchKey` (`NoSuchUpload` for a completion of an
+upload that is not open), and the answer to a put that replaced carries the new `ETag`; of two
+writers that name one ETag, one replaces and the other gets 412. The cache forgets the key before
+and after such a write and keeps no copy of it: the next read fills the object. An upstream of two
+tiers does not replace on a tag and answers it 501 `NotImplemented`, saying why. A create-only put makes one HEAD of the key at the upstream before the body is
 read, and answers 412 at once if the object is there; the upstream's conditional put is the
 arbiter of two writers. A plain put makes no HEAD: it is sent to the upstream as its plain put and
 replaces the object where the upstream does (a proxy on `active-marks`, an S3 bucket; a proxy on the
@@ -590,9 +645,9 @@ put 403.
 | `local_cache.forget_limit` | the most keys a read-only cache remembers it deleted or replaced through the upstream (1 to 100000000, default 65536); past it the cache is emptied when it takes the lock |
 | `local_cache.fill_chunk` | the bytes a fill reads from the upstream at a time (4KiB to 1GiB, default `8MiB`) |
 | `local_cache.keep_queue_bytes` | the most bytes of a put's body that may wait for the disk before its copy is dropped (1 byte to 1GiB, default `4MiB`) |
-| `local_cache.fill_socket` | the Unix socket over which the node's filesystem process asks it to put blobs in the cache; default `fill.sock` in the service's state directory; a build node's key (not in a release yet; see crates/tierstore/docs/configuration.md) |
-| `local_cache.fill_socket_concurrency` | the most fills the fill socket runs at once (1 to 1024, default 16), a pool apart from `max_concurrent_fills` |
-| `local_cache.fill_socket_wait` | the longest a request of the fill socket waits for a permit of that pool (1ms to 1h, default `60s`) |
+| `local_cache.fill_socket` | read and ignored, with a line on stderr: no fill socket is served, the file system of an `fs` interface calls the cache in the process (see crates/tierstore/docs/configuration.md) |
+| `local_cache.fill_socket_concurrency` | the most fills of the file system the cache runs at once (1 to 1024, default 16), a pool apart from `max_concurrent_fills` |
+| `local_cache.fill_socket_wait` | the longest a fill of the file system waits for a permit of that pool (1ms to 1h, default `60s`) |
 | `local_cache.put_ingest` | a Mac's: the root of the jobs' put directories (`cas/b/<build>/<nonce>`), whose committed objects the node stores and removes; an absolute path apart from the cache, and it needs `write_through = true` (default none: nothing is ingested; see `crates/tierstore/docs/operations.md`, "The put ingest") |
 | `local_cache.prefetch_concurrency` | the blobs the prefetch queue fills at once (0 to 64, default 2; 0 turns the queue off), a pool apart from the pools of the reads; a build node's key (not in a release yet) |
 | `local_cache.prefetch_queue` | the most blobs that may wait in the prefetch queue (1 to 1000000, default 16384); past it a blob is turned away |
@@ -653,9 +708,10 @@ type   = "mount-provider"
 params = { socket = "/var/lib/tierstore/provider.sock", mountpoint = "/run/tierstore/fs" }
 ```
 
-`mountpoint` is the node's mount of `tierstore fs` (`fs.mountpoint` of `/etc/tierstore/fs.toml`),
-under which the provider places each job's tree; `tierstore fs` must run on the node for a job to
-read it. jobscheduler's agent on the node takes the socket and the provider's directory as a
+`mountpoint` is the node's file system mount, under which the provider places each job's tree:
+the `fs` interface's `params.mountpoint` in the same file. Since 0.3.196 `tierstore fs` is no longer
+a process of its own, so a file with a `mount-provider` entry and no `fs` interface has no process
+serving the mount, and the load refuses it. jobscheduler's agent on the node takes the socket and the provider's directory as a
 read-only mount root, in flags of its own:
 
 ```text
@@ -765,7 +821,7 @@ instead of running with settings it did not read.
 | `hot_store.budget` | the bytes the hot tier is meant to hold; the water marks are shares of it (`hot_store.high_water`, `hot_store.low_water`, `hot_store.critical`) |
 | `hot_store.usage_stale_after` | how old the usage that the reconciler publishes may be (2m by default, longer than `hot_store.lease_ttl`) before `/usagez` says 503 with the reason |
 | an `oci` interface | the registry front (read-only unless it asks for keys), off unless the file has one; see The OCI read front |
-| a `mount-provider` interface | a build node's mount provider for jobscheduler's agent: `params.socket` and the mount of `tierstore fs`; see The mount provider of a build node |
+| a `mount-provider` interface | a build node's mount provider for jobscheduler's agent: `params.socket` and the mount of the node's `fs` interface; see The mount provider of a build node |
 
 The drain on SIGTERM is two keys of `[server]`: `drain_lb_wait` is how long `/readyz` says 503
 while the server goes on accepting and serving (the settle, `10s`; `1s` on macOS), and `drain_deadline` is how long it
@@ -818,7 +874,7 @@ undo the others. A build node (a read cache) refuses it, as it refuses every wri
 The front serves one bucket, path-style or (with `server.domains`) virtual-hosted-style, over plain HTTP (over HTTPS when the file has `server.tls_cert_file` and `server.tls_key_file`), and checks SigV4 in the `Authorization`
 header only. An SDK with its defaults sends some things the front refuses, so a client needs these
 settings. `crates/tierstore/tests/s3_front/sdk.rs` drives the front with aws-sdk-rust (the
-`aws-sdk-s3` crate, version 1.96.0, in this repository's tests only) set this way, and that test is
+`aws-sdk-s3` crate, version 1.162.0, in this repository's tests only) set this way, and that test is
 what "tested" means below.
 
 | setting | value | why |

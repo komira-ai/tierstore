@@ -1,6 +1,6 @@
 //! One preparation run to its end, and the reads of its files: the stage it leaves the source at,
 //! whether the tree is marked ready, a release that comes before the placement or during the
-//! reads, a stop of the process, the bound of a read, and spans shared by several files.
+//! reads, a stop of the process, and the bound of a read.
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -8,17 +8,16 @@ use std::time::Duration;
 
 use tokio::sync::watch;
 
-use super::groups::{Group, alone};
+use super::groups::Group;
 use super::names::SourceId;
 use super::prepare::{Job, fill, report, run};
+use super::queued::{Queued, admit};
 use super::sources::Shared;
 use super::sources::Stage;
 use super::testing::{AGENT, READ_ONLY, Rig, member, source};
 use crate::server::local_cache::testing::until;
 use crate::server::local_cache::trees::TreesConfig;
-use crate::{
-    BlobSource, BuiltFile, ListEntry, ListKind, Mode, Op, TreeDigest, TreeList, tree_list_digest,
-};
+use crate::{BlobSource, ListEntry, ListKind, Mode, Op, TreeDigest, TreeList, tree_list_digest};
 
 /// A preparation of the source `run`/0 with `key` that the provider does not hold (its source was
 /// released, or prepared again by another), and the stage it reports.
@@ -29,6 +28,7 @@ fn job(run: &str, key: &str, released: bool) -> (Job, watch::Receiver<Stage>) {
             agent: AGENT.to_owned(),
             run: run.to_owned(),
             index: 0,
+            attempt: 0,
         },
         key: key.to_owned(),
         digest: tree_list_digest(key).expect("a list key"),
@@ -44,6 +44,7 @@ fn held(rig: &Rig, run: &str, key: &str) -> (Job, watch::Receiver<Stage>) {
         agent: AGENT.to_owned(),
         run: run.to_owned(),
         index: 0,
+        attempt: 0,
     };
     rig.provider.hold(id, key)
 }
@@ -53,52 +54,37 @@ fn pack_reads(rig: &Rig) -> u64 {
     rig.bench.rig.calls_on(Op::Get, &rig.bench.pack.key)
 }
 
-/// The files of the pack, as the built tree has them, with the first listed twice.
-fn files(rig: &Rig) -> Vec<BuiltFile> {
-    let pack = &rig.bench.pack;
-    let file = |path: &str, blob: usize| {
-        let (sha, offset, size) = &pack.blobs[blob];
-        BuiltFile {
-            path: path.to_owned(),
-            sha256: TreeDigest::from_hex(sha).unwrap(),
-            size: *size,
-            source: Some(BlobSource {
-                key: pack.key.as_str().into(),
-                offset: *offset,
-            }),
-        }
-    };
-    let empty = BuiltFile {
-        path: "zero".to_owned(),
-        sha256: TreeDigest::of(b""),
-        size: 0,
-        source: None,
-    };
-    // The same bytes in a pack that is not there: the tree store keeps the first file's span for
-    // the digest, and so does the fill.
-    let elsewhere = BuiltFile {
-        path: "z".to_owned(),
-        source: Some(BlobSource {
-            key: "cas/pack/two".into(),
-            offset: 0,
-        }),
-        ..file("z", 0)
-    };
-    vec![
-        file("a", 0),
-        file("b", 0),
-        file("c", 1),
-        file("d", 2),
-        empty,
-        elsewhere,
-    ]
+/// The reads of the pack's three blobs, each alone, in the pack at `pack`.
+fn singles(rig: &Rig, pack: &str) -> Vec<Group> {
+    rig.bench
+        .pack
+        .blobs
+        .iter()
+        .map(|(sha, offset, size)| Group {
+            pack: pack.into(),
+            parts: vec![(*offset, *size, TreeDigest::from_hex(sha).unwrap())],
+        })
+        .collect()
 }
 
-/// Reads the spans of `files` as a version 1 list's preparation does, each alone, with no
-/// refusal.
-async fn fill_files(shared: &Shared, files: &[BuiltFile], released: &AtomicBool) -> (usize, usize) {
-    let spans = futures::stream::iter(alone(files));
-    fill(shared, spans, released, &AtomicBool::new(false)).await
+/// `groups` queued as a preparation queues them, under no bound.
+fn queued(
+    shared: &Shared,
+    groups: Vec<Group>,
+) -> futures::stream::Iter<std::vec::IntoIter<Queued>> {
+    let reads = admit(&shared.queued, groups, u64::MAX).expect("no bound");
+    futures::stream::iter(reads)
+}
+
+/// The ends of a fill with the release flag `released` and a stage that is never released.
+fn ends(released: &AtomicBool) -> (&AtomicBool, watch::Receiver<Stage>) {
+    (released, watch::channel(Stage::Placed).1)
+}
+
+/// Reads `groups`, with no refusal.
+async fn fill_groups(shared: &Shared, groups: Vec<Group>, released: &AtomicBool) -> (usize, usize) {
+    let reads = queued(shared, groups);
+    fill(shared, reads, ends(released), &AtomicBool::new(false)).await
 }
 
 /// Asserts that the spans of a refused list still queued are not read: each is counted as not
@@ -106,14 +92,10 @@ async fn fill_files(shared: &Shared, files: &[BuiltFile], released: &AtomicBool)
 #[tokio::test]
 async fn a_refused_list_reads_no_more_files() {
     let rig = Rig::new("prov-fill-refused").await;
-    let spans = futures::stream::iter(alone(&files(&rig)));
-    let read = fill(
-        &rig.provider.shared,
-        spans,
-        &AtomicBool::new(false),
-        &AtomicBool::new(true),
-    )
-    .await;
+    let shared = &rig.provider.shared;
+    let spans = queued(shared, singles(&rig, &rig.bench.pack.key));
+    let unreleased = AtomicBool::new(false);
+    let read = fill(shared, spans, ends(&unreleased), &AtomicBool::new(true)).await;
     assert_eq!(read, (0, 3));
     assert_eq!(pack_reads(&rig), 0);
 }
@@ -159,7 +141,7 @@ async fn a_tree_with_a_file_not_read_is_placed_and_not_marked_ready() {
     let list = TreeList {
         entries: vec![member(pack, "bin/other", 1, 0o644), wrong],
     };
-    let key = rig.put_list(&list).await;
+    let key = rig.put_list_v2(&list).await;
     let (job, seen) = held(&rig, "js.1", &key);
     run(Arc::clone(&rig.provider.shared), job).await;
     assert_eq!(*seen.borrow(), Stage::Placed);
@@ -187,39 +169,30 @@ async fn a_source_released_before_its_tree_is_placed_gives_the_placement_up() {
 
 /// Asserts that a source released while its files are being read ends its preparation without
 /// error once the reads in flight end, its tree gone with its placement.
+///
+/// The reads are queued as soon as the list is walked, before the tree is placed, so the read can
+/// be at the upstream before the stage is `Placed`: the test waits for each of the two, the stage
+/// first.
 #[tokio::test]
 async fn a_source_released_during_its_reads_ends_with_its_tree_gone() {
     let rig = Rig::new("prov-run-release-reads").await;
     let gate = rig.bench.rig.tamper.hold_key(&rig.bench.pack.key);
-    let (job, seen) = held(&rig, "js.1", &rig.key);
+    let (job, mut seen) = held(&rig, "js.1", &rig.key);
     let released = Arc::clone(&job.released);
     let running = tokio::spawn(run(Arc::clone(&rig.provider.shared), job));
-    until("the three reads are at the upstream", || {
-        pack_reads(&rig) == 3
-    })
-    .await;
-    assert_eq!(*seen.borrow(), Stage::Placed);
+    let reported = seen.wait_for(|stage| *stage != Stage::Preparing).await;
+    let reported = reported.expect("the preparation reports").clone();
+    assert_eq!(reported, Stage::Placed);
+    // The three files are one range of the list: one read of the pack, held at the upstream.
+    until("the read is at the upstream", || pack_reads(&rig) == 1).await;
     released.store(true, std::sync::atomic::Ordering::SeqCst);
     let store = &rig.bench.store;
     let located = store.locate_fs(&Rig::place_of("js.1", 0)).unwrap();
     store.release(&located.placement).unwrap();
-    gate.add_permits(3);
+    gate.add_permits(1);
     running.await.unwrap();
     assert!(store.placement(&located.placement).is_none());
     assert_eq!(store.sizes(), (0, 0));
-}
-
-/// Asserts that files of one digest are read once, at the first file's span (the one the tree store
-/// keeps, so the one an open reads), that a file of size 0 is not read, and that every span is
-/// counted as in the cache.
-#[tokio::test]
-async fn files_sharing_a_span_are_read_once() {
-    let rig = Rig::new("prov-fill-shared").await;
-    let released = AtomicBool::new(false);
-    let read = fill_files(&rig.provider.shared, &files(&rig), &released).await;
-    assert_eq!(read, (3, 0));
-    assert_eq!(pack_reads(&rig), 3);
-    assert_eq!(rig.bench.rig.calls_on(Op::Get, "cas/pack/two"), 0);
 }
 
 /// Asserts that a provider whose process is stopping reads no file: every span is counted as not
@@ -229,7 +202,12 @@ async fn a_halted_provider_reads_no_file() {
     let rig = Rig::new("prov-fill-halted").await;
     rig.provider.halt();
     let released = AtomicBool::new(false);
-    let read = fill_files(&rig.provider.shared, &files(&rig), &released).await;
+    let read = fill_groups(
+        &rig.provider.shared,
+        singles(&rig, &rig.bench.pack.key),
+        &released,
+    )
+    .await;
     assert_eq!(read, (0, 3));
     assert_eq!(pack_reads(&rig), 0);
 }
@@ -239,7 +217,12 @@ async fn a_halted_provider_reads_no_file() {
 async fn a_released_source_reads_no_more_files() {
     let rig = Rig::new("prov-fill-released").await;
     let released = AtomicBool::new(true);
-    let read = fill_files(&rig.provider.shared, &files(&rig), &released).await;
+    let read = fill_groups(
+        &rig.provider.shared,
+        singles(&rig, &rig.bench.pack.key),
+        &released,
+    )
+    .await;
     assert_eq!(read, (0, 3));
     assert_eq!(pack_reads(&rig), 0);
 }
@@ -254,18 +237,17 @@ async fn files_not_read_within_their_bound_or_not_there_are_counted() {
     .await;
     let _gate = rig.bench.rig.tamper.hold_key(&rig.bench.pack.key);
     let released = AtomicBool::new(false);
-    let read = fill_files(&rig.provider.shared, &files(&rig), &released).await;
+    let read = fill_groups(
+        &rig.provider.shared,
+        singles(&rig, &rig.bench.pack.key),
+        &released,
+    )
+    .await;
     assert_eq!(read, (0, 3));
 
     let rig = Rig::new("prov-fill-missing").await;
-    let mut missing = files(&rig);
-    for file in &mut missing {
-        file.source = file.source.take().map(|source| BlobSource {
-            key: "cas/pack/missing".into(),
-            ..source
-        });
-    }
-    let read = fill_files(&rig.provider.shared, &missing, &released).await;
+    let missing = singles(&rig, "cas/pack/missing");
+    let read = fill_groups(&rig.provider.shared, missing, &released).await;
     assert_eq!(read, (0, 3));
 }
 
@@ -280,6 +262,7 @@ fn a_released_stage_is_never_replaced() {
     for later in [
         Stage::Placed,
         Stage::Failed("x".into()),
+        Stage::Unmade("z".into()),
         Stage::Refused("y".into()),
     ] {
         report(&stage, later);
@@ -336,14 +319,9 @@ fn group_of(rig: &Rig, blobs: &[usize], wrong: Option<usize>) -> Group {
 
 /// Reads `group` alone, with no release and no refusal.
 async fn fill_group(shared: &Shared, group: Group, refused: bool) -> (usize, usize) {
-    let reads = futures::stream::iter([group]);
-    fill(
-        shared,
-        reads,
-        &AtomicBool::new(false),
-        &AtomicBool::new(refused),
-    )
-    .await
+    let reads = queued(shared, vec![group]);
+    let unreleased = AtomicBool::new(false);
+    fill(shared, reads, ends(&unreleased), &AtomicBool::new(refused)).await
 }
 
 /// Asserts that a group of three spans read in one GET of the pack is counted as three spans in

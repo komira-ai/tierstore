@@ -25,7 +25,15 @@ fn built(
     let store = S3Store::new(config("http://127.0.0.1:9000", "example-bucket")).unwrap();
     let request = store
         .conn
-        .signed_payload(keys_of, Method::GET, None, &[], Vec::new(), EMPTY_SHA256)
+        .signed_payload(
+            keys_of,
+            &store.conn.targets[0],
+            Method::GET,
+            None,
+            &[],
+            Vec::new(),
+            EMPTY_SHA256,
+        )
         .build()
         .unwrap();
     let date = request.headers()["x-amz-date"].to_str().unwrap().to_owned();

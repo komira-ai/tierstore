@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use super::super::{Core, Errno, Looked};
 use super::{look_every, sweep};
+use crate::server::local_cache::manifest_path;
 use crate::server::treefs::ino;
 use crate::server::treefs::testing::{
     Built, Logged, Rig, TREE_IDLE, file, logged, open_cached, sample, sha, until,
@@ -16,6 +17,29 @@ use crate::server::treefs::testing::{
 
 /// The inode number of the root of the tree numbered 1.
 const ROOT: u64 = 1 << 24;
+
+/// The mount the rigs' core pins and attaches for.
+const MOUNT: &str = "mount-1";
+
+/// The bytes of `big.bin` of the sample tree: what the cache pins when it is opened.
+const BIG: u64 = 300_000;
+
+/// The digest of the blob of the sample tree that is `len` bytes long.
+fn blob_of_len(rig: &Rig, len: usize) -> String {
+    let built = rig.upstream.built.lock().unwrap();
+    built
+        .blobs
+        .iter()
+        .find(|(_, bytes)| bytes.len() == len)
+        .map(|(sha, _)| sha.clone())
+        .unwrap()
+}
+
+/// Opens and lets go the file `ino`, which pins its blob for its tree when the tree is attached.
+fn opened(rig: &Rig, ino: u64) {
+    rig.core
+        .release(open_cached(&rig.core, ino, false).unwrap());
+}
 
 /// The root digest of the rig's tree.
 fn root_of(rig: &Rig) -> String {
@@ -38,6 +62,18 @@ fn child(core: &Core, parent: u64, name: &str) -> u64 {
     }
 }
 
+/// The digests of the manifests of the rig's tree.
+fn root_manifests(rig: &Rig) -> Vec<String> {
+    rig.upstream
+        .built
+        .lock()
+        .unwrap()
+        .manifests
+        .keys()
+        .cloned()
+        .collect()
+}
+
 /// The manifest fills the upstream was asked for.
 fn manifest_fills(rig: &Rig) -> Vec<String> {
     rig.upstream
@@ -47,11 +83,11 @@ fn manifest_fills(rig: &Rig) -> Vec<String> {
         .collect()
 }
 
-/// Asserts that a lookup of a digest no run has attached reads the tree's manifests through the
-/// fill socket, the root as `fill <digest>`, once each; answers the tree's root, numbered 1, with
-/// no timeout; and attaches it with no run: listed as implicit, absent from the runs' listing and
-/// the attachments file, and told to the cache by `pins-live` as an attached tree. A second lookup
-/// reads nothing more.
+/// Asserts that a lookup of a digest no run has attached has the cache fill the tree's manifests,
+/// the root as `fill <digest>`, once each; answers the tree's root, numbered 1, with no timeout;
+/// and attaches it with no run: listed as implicit, absent from the runs' listing and the
+/// attachments file, and told to the cache as an attached tree by `tell_live`: the pins of the
+/// tree stay, those of a tree that is not attached go. A second lookup reads nothing more.
 #[test]
 fn a_lookup_reads_the_tree_and_attaches_it_with_no_run() {
     let rig = Rig::new("tfs-imp-lookup", sample());
@@ -66,26 +102,35 @@ fn a_lookup_reads_the_tree_and_attaches_it_with_no_run() {
     assert_eq!(rig.core.implicit(), vec![1]);
     assert!(rig.core.attachments().is_empty());
     assert!(!rig.runtime.join("attachments").exists());
+    let big = child(&rig.core, ROOT, "big.bin");
+    opened(&rig, big);
+    assert_eq!(rig.node.pinned_bytes(), BIG);
+    let blob = blob_of_len(&rig, 300_000);
+    let stale = rig.node.pin(MOUNT, "a-tree-no-run-has", &[blob]).unwrap();
+    assert_eq!((stale.pinned, stale.refused, stale.absent), (1, 0, 0));
     rig.core.tell_live().unwrap();
-    assert_eq!(
-        rig.upstream.asked("pins-live"),
-        vec![format!("pins-live mount-1 {root}")]
-    );
+    assert_eq!(rig.node.unpin(MOUNT, "a-tree-no-run-has").unwrap(), 0);
+    assert_eq!(rig.node.unpin(MOUNT, &root).unwrap(), 1);
     assert_eq!(resolved(&rig.core, &root), ROOT);
     assert_eq!(manifest_fills(&rig).len(), 3);
     assert_eq!(child(&rig.core, ROOT, "big.bin"), ROOT + 1);
 }
 
 /// Asserts that a digest whose root manifest the upstream does not have is `ENOENT`, asked of the
-/// upstream again at each lookup (a tree written later is found), and takes no tree number: the
-/// tree that resolves next is numbered 1.
+/// upstream again at each lookup (a tree written later is found; the root is asked for by the
+/// cache's fill of the tree and by the read's own fill), and takes no tree number: the tree that
+/// resolves next is numbered 1.
 #[test]
 fn a_digest_the_upstream_has_no_tree_of_is_not_there_and_takes_no_number() {
     let rig = Rig::new("tfs-imp-absent", sample());
     let other = sha(b"a tree nobody wrote");
-    for asked in 1..=2 {
+    let mut seen = 0;
+    for _ in 0..2 {
         assert_eq!(rig.core.lookup(ino::TREES, &other), Err(Errno::NoEnt));
-        assert_eq!(manifest_fills(&rig), vec![format!("fill {other}"); asked]);
+        let fills = manifest_fills(&rig);
+        assert!(fills.len() > seen, "{fills:?}");
+        assert!(fills.iter().all(|line| *line == format!("fill {other}")));
+        seen = fills.len();
     }
     assert!(rig.core.implicit().is_empty());
     assert_eq!(
@@ -106,7 +151,7 @@ fn a_digest_the_upstream_has_no_tree_of_is_not_there_and_takes_no_number() {
 
 /// Asserts that a tree that cannot be read for any reason but its root's absence is `EIO` and
 /// takes no tree number: a manifest below the root that the upstream does not have, a root the
-/// fill socket refuses (`mismatch`), and a table of tree numbers with every number taken.
+/// cache refuses (`mismatch`), and a table of tree numbers with every number taken.
 #[test]
 fn a_tree_that_cannot_be_read_or_numbered_is_an_io_error() {
     let rig = Rig::new("tfs-imp-broken", sample());
@@ -174,6 +219,8 @@ fn an_implicit_attachment_ends_after_the_idle_time_with_no_use() {
     let rig = Rig::new("tfs-imp-idle", sample());
     let root = root_of(&rig);
     assert_eq!(resolved(&rig.core, &root), ROOT);
+    opened(&rig, child(&rig.core, ROOT, "big.bin"));
+    assert_eq!(rig.node.pinned_bytes(), BIG);
     let step = TREE_IDLE / 2;
     rig.clock.advance(step);
     assert_eq!(rig.core.detach_idle(), 0);
@@ -181,16 +228,13 @@ fn an_implicit_attachment_ends_after_the_idle_time_with_no_use() {
     rig.clock.advance(step);
     assert_eq!(rig.core.detach_idle(), 0);
     assert_eq!(rig.core.implicit(), vec![1]);
-    assert!(rig.upstream.asked("unpin").is_empty());
+    assert_eq!(rig.node.pinned_bytes(), BIG);
     rig.clock.advance(step - Duration::from_millis(1));
     assert_eq!(rig.core.detach_idle(), 0);
     rig.clock.advance(Duration::from_millis(1));
     assert_eq!(rig.core.detach_idle(), 1);
     assert!(rig.core.implicit().is_empty());
-    assert_eq!(
-        rig.upstream.asked("unpin"),
-        vec![format!("unpin mount-1 {root}")]
-    );
+    assert_eq!(rig.node.pinned_bytes(), 0);
     // The kernel holds the root; the tree leaves all the same, and the forget finds nothing.
     assert_eq!(rig.core.trees_in_memory(), 0);
     rig.core.forget(ROOT, 1);
@@ -202,7 +246,7 @@ fn an_implicit_attachment_ends_after_the_idle_time_with_no_use() {
 
 /// Asserts that a tree a lookup attaches while it is still in memory (its run detached, the kernel
 /// holds an inode of it, and it is not idle yet) is not read again: its manifests are gone from
-/// the cache and the upstream, and the lookup still answers it.
+/// the cache and the upstream answers 404 for each, and the lookup still answers it.
 #[test]
 fn a_tree_in_memory_is_attached_again_without_a_read() {
     let rig = Rig::new("tfs-imp-again", sample());
@@ -211,9 +255,16 @@ fn a_tree_in_memory_is_attached_again_without_a_read() {
     let _ = child(&rig.core, ROOT, "bin");
     assert!(rig.core.detach("run-1").is_some());
     assert_eq!(rig.core.trees_in_memory(), 1);
-    rig.upstream.built.lock().unwrap().manifests.clear();
-    std::fs::remove_dir_all(&rig.cache).unwrap();
-    std::fs::create_dir_all(&rig.cache).unwrap();
+    let manifests: Vec<String> = root_manifests(&rig);
+    for sha in manifests {
+        std::fs::remove_file(manifest_path(&rig.cache, &sha)).unwrap();
+        let _ = rig
+            .upstream
+            .failing
+            .lock()
+            .unwrap()
+            .insert(sha, "upstream 404".to_owned());
+    }
     let before = manifest_fills(&rig).len();
     assert_eq!(resolved(&rig.core, &root), ROOT);
     assert_eq!(manifest_fills(&rig).len(), before);
@@ -248,13 +299,14 @@ fn a_tree_is_pinned_only_while_attached() {
     let bin = child(&rig.core, ROOT, "bin");
     let cc = child(&rig.core, bin, "cc");
     let _ = open_cached(&rig.core, big, false).unwrap();
-    assert_eq!(rig.upstream.asked("pin").len(), 1);
+    assert_eq!(rig.node.pinned_bytes(), BIG);
     rig.clock.advance(TREE_IDLE);
     assert_eq!(rig.core.detach_idle(), 1);
+    assert_eq!(rig.node.pinned_bytes(), 0);
     let blob_fills = rig.upstream.asked("fill").len();
     let _ = open_cached(&rig.core, cc, false).unwrap();
     assert_eq!(rig.upstream.asked("fill").len(), blob_fills + 1);
-    assert_eq!(rig.upstream.asked("pin").len(), 1);
+    assert_eq!(rig.node.pinned_bytes(), 0);
 }
 
 /// Asserts that a run's attachment and an implicit one of the same tree end apart: the idle end
@@ -266,17 +318,16 @@ fn a_tree_a_run_also_has_stays_attached_when_its_implicit_attachment_ends() {
     let root = root_of(&rig);
     assert_eq!(resolved(&rig.core, &root), ROOT);
     let _ = rig.core.attach(&root, "run-1").unwrap();
+    opened(&rig, child(&rig.core, ROOT, "big.bin"));
+    assert_eq!(rig.node.pinned_bytes(), BIG);
     rig.clock.advance(TREE_IDLE);
     assert_eq!(rig.core.detach_idle(), 0);
     assert!(rig.core.implicit().is_empty());
-    assert!(rig.upstream.asked("unpin").is_empty());
+    assert_eq!(rig.node.pinned_bytes(), BIG);
     assert_eq!(resolved(&rig.core, &root), ROOT);
     assert!(rig.core.implicit().is_empty());
     assert!(rig.core.detach("run-1").is_some());
-    assert_eq!(
-        rig.upstream.asked("unpin"),
-        vec![format!("unpin mount-1 {root}")]
-    );
+    assert_eq!(rig.node.pinned_bytes(), 0);
 }
 
 /// Asserts that a run's detach leaves a tree a lookup attached: it stays attached, and is not
@@ -294,11 +345,14 @@ fn a_runs_detach_leaves_an_implicit_attachment() {
         .add_tree(vec![("x", file(b"x"))]);
     assert_eq!(resolved(&rig.core, &other), 2 << 24);
     let _ = rig.core.attach(&other, "run-1").unwrap();
+    opened(&rig, child(&rig.core, ROOT, "big.bin"));
+    opened(&rig, child(&rig.core, 2 << 24, "x"));
+    assert_eq!(rig.node.pinned_bytes(), BIG + 1);
     assert!(rig.core.detach("run-1").is_some());
-    assert_eq!(
-        rig.upstream.asked("unpin"),
-        vec![format!("unpin mount-1 {root}")]
-    );
+    // The tree only the run had is unpinned; the one a lookup attached too keeps its pin.
+    assert_eq!(rig.node.pinned_bytes(), 1);
+    assert_eq!(rig.node.unpin(MOUNT, &root).unwrap(), 0);
+    assert_eq!(rig.node.unpin(MOUNT, &other).unwrap(), 1);
     assert_eq!(rig.core.implicit(), vec![2]);
     assert_eq!(resolved(&rig.core, &other), 2 << 24);
 }
@@ -350,14 +404,11 @@ fn the_idle_thread_detaches_an_idle_tree() {
     let rig = Rig::new("tfs-imp-thread", sample());
     let root = root_of(&rig);
     assert_eq!(resolved(&rig.core, &root), ROOT);
+    opened(&rig, child(&rig.core, ROOT, "big.bin"));
+    assert_eq!(rig.node.pinned_bytes(), BIG);
     rig.core.sweep_idle(Duration::from_millis(1)).unwrap();
     rig.clock.advance(TREE_IDLE);
-    until(|| !rig.upstream.asked("unpin").is_empty());
-    assert!(rig.core.implicit().is_empty());
-    assert_eq!(
-        rig.upstream.asked("unpin"),
-        vec![format!("unpin mount-1 {root}")]
-    );
+    until(|| rig.core.implicit().is_empty() && rig.node.pinned_bytes() == 0);
 }
 
 /// Asserts that the loop of the idle thread detaches the idle trees of the core between its waits,
@@ -612,7 +663,7 @@ fn a_runs_detach_answers_a_failure_that_the_implicit_attachment_also_says() {
     assert_eq!(open_cached(&rig.core, cc, false), Err(Errno::Io));
     let log = Logged::default();
     let guard = logged(&log, tracing::Level::WARN);
-    let failures = rig.core.detach("run-1").unwrap();
+    let failures = rig.core.detach("run-1").unwrap().failures;
     drop(guard);
     assert_eq!(failures.len(), 1);
     assert_eq!(

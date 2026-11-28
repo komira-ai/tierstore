@@ -1,37 +1,36 @@
-//! What `tierstore fs` tells the node of the trees it reads, for the cache's `/metricz`: how long
-//! each attach of a tree on a lookup took, and where each manifest of a tree it read came from.
+//! What the file system's core tells the cache of the trees it reads, for the cache's `/metricz`:
+//! how long each attach of a tree on a lookup took, and where each manifest of a tree it read came
+//! from. The core calls the cache in this process (`treefs/in_process.rs`), which hands each
+//! report to the methods of [`LocalCache`] below.
 //!
 //! - **Attach.** A lookup of `trees/<digest>` that no run has attached reads the tree and attaches
-//!   it (`treefs/core/implicit.rs`). When it ends, the mount sends `attached <outcome> <ms>`: the
-//!   milliseconds from the lookup's start to its answer on the mount's clock, and the outcome
+//!   it (`treefs/core/implicit.rs`). When it ends, the core reports an [`Attach`]: the
+//!   milliseconds from the lookup's start to its answer on the core's clock, and the outcome
 //!   (`ok`, `absent` for a tree the upstream has no root manifest of, `failed` for any other that
 //!   cannot be read or numbered). One sample of `tierstore_fs_tree_attach_seconds` each.
-//! - **Manifests.** Every read of a tree from its manifests (`treefs/core/placed.rs`) sends, when
-//!   it ends, `fetched <cache> <filled> <failed> <fill-ms> <counts>`: the manifests read from the
-//!   cache directory, filled through the fill socket and then read, and not had (the fill failed,
-//!   or the file was not there after it); the milliseconds of all its fills; and how many of those
-//!   fills took each bucket of [`BOUNDS_MS`] and above the last, one count each. They add to
-//!   `tierstore_fs_manifest_fetch_total` and `tierstore_fs_manifest_fill_seconds`. A read that
-//!   fetched no manifest (a placement's tree, which is read whole) sends nothing.
+//! - **Manifests.** Every read of a tree from its manifests (`treefs/core/placed.rs`) reports,
+//!   when it ends, its [`Fetches`]: the manifests read from the cache directory, filled by the
+//!   cache and then read, and not had (the fill failed, or the file was not there after it); the
+//!   milliseconds of all its fills; and how many of those fills took each bucket of [`BOUNDS_MS`]
+//!   and above the last, one count each. They add to `tierstore_fs_manifest_fetch_total` and
+//!   `tierstore_fs_manifest_fill_seconds`. A read that fetched no manifest (a placement's tree,
+//!   which is read whole) reports nothing.
 //!
-//! - **Levels.** The same read sends, after its `fetched`, `levels <levels> <rounds>`: how many
-//!   levels of the tree it went down (1 for a tree that is a root alone), and its rounds of fills
-//!   over the fill socket, each waited for before the next: one for each level in which it filled
-//!   a manifest, and one for a `fill-tree` it asked (`local_cache/tree_fill.rs`). They add to
+//! - **Levels.** The same read reports, after its fetches, its [`Levels`]: how many levels of the
+//!   tree it went down (1 for a tree that is a root alone), and its rounds of fills, each waited
+//!   for before the next: one for each level in which it filled a manifest, and one for a
+//!   `fill-tree` it asked (`local_cache/tree_fill.rs`). They add to
 //!   `tierstore_fs_tree_levels_total` and `tierstore_fs_tree_fill_rounds_total`, so that the
 //!   rounds of an attach can be held against its time.
 //!
-//! The mount sends them from the thread that sends `started` (`fill_client.rs`), so no lookup
-//! waits on them; one is lost when that thread has a queue of 1024, when the fill socket is away,
-//! or when the node is of a release before the report. A report this node cannot read (another
-//! number of buckets, from a mount of another release) is refused and adds nothing.
+//! A report reaches the cache's counts at once, on the caller's thread, with no queue.
 //!
 //! The node also times each fill of a manifest it makes itself, on its own clock, from the request
-//! to the end of the fill (a permit of the fill socket's pool, the upstream's answers, the write
-//! into the cache): `tierstore_cache_manifest_fill_seconds`, by the way it was asked (`via`):
-//! `fill`, a `fill <sha256>` of the fill socket or the same call made in process, or `tree`, a
-//! manifest filled for a `fill-tree`. Held against `tierstore_fs_manifest_fill_seconds`, the
-//! mount's time for the same fills, it says what the socket adds to each.
+//! to the end of the fill (a permit of the pool of `fill_socket_concurrency`, the upstream's
+//! answers, the write into the cache): `tierstore_cache_manifest_fill_seconds`, by the way it was
+//! asked (`via`): `fill`, a fill of one manifest asked for by the core, or `tree`, a manifest
+//! filled for a `fill-tree`. Held against `tierstore_fs_manifest_fill_seconds`, the core's time
+//! for the same fills, it says what the call adds to each.
 
 use std::fmt::Write as _;
 use std::sync::Mutex;
@@ -91,7 +90,7 @@ impl Outcome {
     /// Every outcome, in the order they are rendered.
     const ALL: [Self; 3] = [Self::Ok, Self::Absent, Self::Failed];
 
-    /// The word of the outcome, in a report and as the label `outcome`.
+    /// The word of the outcome, as the label `outcome`.
     pub(in crate::server) fn word(self) -> &'static str {
         match self {
             Self::Ok => "ok",
@@ -99,42 +98,21 @@ impl Outcome {
             Self::Failed => "failed",
         }
     }
-
-    fn of(word: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|outcome| outcome.word() == word)
-    }
 }
 
-/// An attach on a lookup: how it ended and how long it took. The report `attached`.
+/// An attach on a lookup: how it ended and how long it took.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::server) struct Attach {
     pub outcome: Outcome,
     pub ms: u64,
 }
 
-impl Attach {
-    /// The line of the report.
-    pub(in crate::server) fn line(&self) -> String {
-        format!("attached {} {}", self.outcome.word(), self.ms)
-    }
-
-    /// The report whose words after `attached` are `rest`; none for words that are not one.
-    pub(in crate::server) fn parse(rest: &str) -> Option<Self> {
-        let (outcome, ms) = rest.split_once(' ')?;
-        Some(Self {
-            outcome: Outcome::of(outcome)?,
-            ms: number(ms)?,
-        })
-    }
-}
-
-/// Where the manifests of one read of a tree came from, and how long their fills took. The report
-/// `fetched`.
+/// Where the manifests of one read of a tree came from, and how long their fills took.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(in crate::server) struct Fetches {
     /// Read from the cache directory.
     pub cache: u64,
-    /// Filled through the fill socket, then read.
+    /// Filled by the cache, then read.
     pub filled: u64,
     /// Not had: the fill failed, or the file was not there after it.
     pub failed: u64,
@@ -149,68 +127,23 @@ impl Fetches {
     pub(in crate::server) fn manifests(&self) -> u64 {
         self.cache + self.filled + self.failed
     }
-
-    /// The line of the report.
-    pub(in crate::server) fn line(&self) -> String {
-        let mut line = format!(
-            "fetched {} {} {} {}",
-            self.cache, self.filled, self.failed, self.fill_ms
-        );
-        for count in self.fills {
-            let _ = write!(line, " {count}");
-        }
-        line
-    }
-
-    /// The report whose words after `fetched` are `rest`: four numbers and one for each bucket.
-    /// None for anything else.
-    pub(in crate::server) fn parse(rest: &str) -> Option<Self> {
-        let numbers: Vec<u64> = rest.split(' ').map(number).collect::<Option<_>>()?;
-        let [cache, filled, failed, fill_ms, counts @ ..] = numbers.as_slice() else {
-            return None;
-        };
-        Some(Self {
-            cache: *cache,
-            filled: *filled,
-            failed: *failed,
-            fill_ms: *fill_ms,
-            fills: counts.try_into().ok()?,
-        })
-    }
 }
 
-/// The levels of one read of a tree from its manifests, and its rounds of fills over the fill
-/// socket. The report `levels`.
+/// The levels of one read of a tree from its manifests, and its rounds of fills.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(in crate::server) struct Levels {
     /// The levels of the tree the read went down.
     pub levels: u64,
-    /// Its fills over the fill socket that waited for one another: one for each level with a fill
+    /// Its fills that waited for one another: one for each level with a fill
     /// of a manifest, and one for a `fill-tree`.
     pub rounds: u64,
-}
-
-impl Levels {
-    /// The line of the report.
-    pub(in crate::server) fn line(&self) -> String {
-        format!("levels {} {}", self.levels, self.rounds)
-    }
-
-    /// The report whose words after `levels` are `rest`: two numbers. None for anything else.
-    pub(in crate::server) fn parse(rest: &str) -> Option<Self> {
-        let (levels, rounds) = rest.split_once(' ')?;
-        Some(Self {
-            levels: number(levels)?,
-            rounds: number(rounds)?,
-        })
-    }
 }
 
 /// The way the node was asked for a fill of a manifest it times: the label `via` of
 /// `tierstore_cache_manifest_fill_seconds`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::server) enum Via {
-    /// A `fill <sha256>` of the fill socket, or the same call made in process.
+    /// A fill of one manifest, asked for by the core.
     Fill,
     /// A manifest the node filled for a `fill-tree`.
     Tree,
@@ -227,14 +160,6 @@ impl Via {
             Self::Tree => "tree",
         }
     }
-}
-
-/// The number `word` writes in decimal digits, with no sign; none for anything else.
-fn number(word: &str) -> Option<u64> {
-    if word.is_empty() || !word.bytes().all(|byte| byte.is_ascii_digit()) {
-        return None;
-    }
-    word.parse().ok()
 }
 
 /// A histogram of spans in milliseconds over [`BOUNDS_MS`]; `opens.rs` keeps its own of these.
@@ -368,17 +293,17 @@ impl Attaches {
 }
 
 impl LocalCache {
-    /// A mount reported an attach of a tree on a lookup.
+    /// The core reported an attach of a tree on a lookup.
     pub(in crate::server) fn tree_attached(&self, attach: Attach) {
         self.inner.starts.attaches.attached(attach);
     }
 
-    /// A mount reported where the manifests of a read of a tree came from.
+    /// The core reported where the manifests of a read of a tree came from.
     pub(in crate::server) fn manifests_fetched(&self, fetches: &Fetches) {
         self.inner.starts.attaches.fetched(fetches);
     }
 
-    /// A mount reported the levels of a read of a tree and its rounds of fills.
+    /// The core reported the levels of a read of a tree and its rounds of fills.
     pub(in crate::server) fn tree_levels(&self, levels: Levels) {
         self.inner.starts.attaches.levels(levels);
     }
@@ -388,6 +313,10 @@ impl LocalCache {
         self.inner.starts.attaches.node_filled(via, ms);
     }
 }
+
+// The attaches and detaches of runs, which the mount reports as it reports the attaches above.
+#[path = "runs.rs"]
+pub(in crate::server) mod runs;
 
 #[cfg(test)]
 #[path = "attaches_tests.rs"]

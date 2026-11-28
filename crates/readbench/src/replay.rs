@@ -479,6 +479,7 @@ impl Rig {
             budget: Arc::new(budget),
             verifier,
             timer,
+            cache_metrics: None,
         };
         Ok(Self {
             engine: FetchEngine::new(parts, knobs.engine.clone(), rt),
@@ -557,7 +558,6 @@ pub async fn run_engine(
     let input = PlanInput {
         list,
         needed: &needed,
-        profile: &[],
         media: &media,
         backlog: Backlog::default(),
     };

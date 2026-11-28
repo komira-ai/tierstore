@@ -1,5 +1,5 @@
 //! What one read of a tree from its manifests fetched (`core/placed.rs`): each manifest read from
-//! the cache directory, filled through the fill socket and then read, or not had; and how long each
+//! the cache directory, filled through the cache and then read, or not had; and how long each
 //! fill took on the core's clock. The fetches of a read run on several threads at once, so the
 //! counts are atomic. The read reports them to the node when it ends (`fetched`, see
 //! `local_cache/attaches.rs`), and an attach on a lookup says them on stderr.
@@ -7,8 +7,9 @@
 //! The fetches are also counted by the level of the tree they are of (0 for the root): how many
 //! levels the read went down, the fills of each level and the longest of them, since a level's
 //! fills are waited for before the level below is asked for. A read that asked the node to fill the
-//! tree's new manifests itself (`fill-tree`) keeps its answer and how long it took on the socket.
-//! The levels of the read and its rounds of fills over the socket go to the node too (`levels`).
+//! tree's new manifests itself (`fill-tree`) keeps its answer and how long it took.
+//! The levels of the read and its rounds of fills go to the node's cache too (`levels`).
+//! The end of its last fetch is kept for the attach of a run, which splits its time there.
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -29,6 +30,8 @@ pub(in crate::server::treefs) struct Fetched {
     levels: Mutex<Vec<Level>>,
     /// The `fill-tree` of the read, if it asked one.
     tree: Mutex<Option<TreeAsked>>,
+    /// When the last fetch of the read ended, on the core's clock: none before the first.
+    last: Mutex<Option<u64>>,
 }
 
 /// The fills of one level of a read.
@@ -56,6 +59,18 @@ fn spaced(of: impl Iterator<Item = u64>) -> String {
 }
 
 impl Fetched {
+    /// A fetch of the read ended at `now`, whatever it had.
+    pub(super) fn fetched_at(&self, now: u64) {
+        let mut last = locked(&self.last);
+        *last = Some(last.map_or(now, |last| last.max(now)));
+    }
+
+    /// When the last fetch of the read ended, if it made one: the end of the fetch of an attach of
+    /// a run (`core/runs.rs`).
+    pub(super) fn last_fetch(&self) -> Option<u64> {
+        *locked(&self.last)
+    }
+
     /// The level `level` of the read, made with those above it if it is the first fetch of it.
     fn at(&self, level: usize, change: impl FnOnce(&mut Level)) {
         let mut levels = locked(&self.levels);
@@ -77,7 +92,7 @@ impl Fetched {
         self.at(0, |_| {});
     }
 
-    /// A manifest of the level `level` was asked of the fill socket, which took `ms` milliseconds
+    /// A manifest of the level `level` was asked of the node's cache, which took `ms` milliseconds
     /// to answer; `had` says whether the manifest was then read from the cache directory.
     pub(super) fn filled(&self, level: usize, ms: u64, had: bool) {
         bump(if had { &self.filled } else { &self.failed });
@@ -106,7 +121,7 @@ impl Fetched {
         }
     }
 
-    /// The levels the read went down and its rounds of fills over the socket so far: one for each
+    /// The levels the read went down and its rounds of fills so far: one for each
     /// level with a fill, since each waits for the one above it, and one for a `fill-tree`.
     pub(in crate::server::treefs) fn levels(&self) -> Levels {
         let levels = locked(&self.levels);
@@ -140,7 +155,6 @@ impl Fetched {
                     filled.ms,
                     spaced(filled.levels.iter().copied()),
                 ),
-                TreeAnswer::Unknown => format!("; fill-tree unknown to the node in {ms} ms"),
                 TreeAnswer::Failed(why) => format!("; fill-tree failed in {ms} ms: {why}"),
             });
         }

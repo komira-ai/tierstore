@@ -4,11 +4,13 @@
 use std::sync::Arc;
 
 use super::super::{Core, Errno, Opened};
-use crate::server::local_cache::trees::testing::fs_at;
+use crate::server::local_cache::Tick;
+use crate::server::local_cache::trees::testing::{Bench, fs_at};
+use crate::server::lock::Received;
 use crate::server::treefs::backing::{self, Saved};
 use crate::server::treefs::handle;
 use crate::server::treefs::ino;
-use crate::server::treefs::live_testing::{Live, Over, over_both, walk};
+use crate::server::treefs::live_testing::{Live, walk};
 use crate::server::treefs::locked;
 use crate::server::treefs::testing::open_cached;
 use crate::server::treefs::testing::{FakeKernel, Rig, sample, sha};
@@ -216,13 +218,13 @@ fn a_core_with_no_adopted_ids_opens_every_file_cached() {
     assert!(matches!(next.open(tool(), false), Ok(Opened::Cached(_))));
 }
 
-over_both!(a_foreign_handle_of_a_placed_file_is_made_again_as_its_span);
 /// Asserts that a read of a handle of a placed file that the process before gave out makes the
 /// open again as the file's span of the pack: the bytes are the file's, not the first bytes of the
 /// pack, a read from the middle and one past the end are clipped to the file, and the release ends
 /// the open.
-async fn a_foreign_handle_of_a_placed_file_is_made_again_as_its_span(over: Over) {
-    let live = Live::over("tfs-adopt-placed", over).await;
+#[tokio::test(flavor = "multi_thread")]
+async fn a_foreign_handle_of_a_placed_file_is_made_again_as_its_span() {
+    let live = Live::new("tfs-adopt-placed").await;
     let _ = live.place(vec![fs_at("jobs/1f3a/root")]);
     let (ino, fh) = live
         .on_core(|core| {
@@ -253,12 +255,58 @@ async fn a_foreign_handle_of_a_placed_file_is_made_again_as_its_span(over: Over)
     assert_eq!((open, closed), (1, 0));
 }
 
-over_both!(a_foreign_handle_of_a_placed_empty_file_or_link_is_as_for_a_manifest_tree);
+/// Asserts that the process that takes the mount over reads a file the process before it opened,
+/// under a placement made after the successor's tree store was opened, as soon as its cache takes
+/// the write role it was handed: the read is the file's bytes, not `EIO`. The successor reaches
+/// its own cache and tree store in process, as the one process of a build node does; its store
+/// read the directory at its start, before the placement was made, while the cache was read-only.
+/// It would catch a successor that answers such a read from the store as it read it at its start
+/// until its loop reads the directory again, which is how the jobs that mapped their input files
+/// were killed with SIGBUS (exit 135) at an update.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_opened_before_the_hand_over_under_a_newer_placement_is_read_by_the_successor() {
+    let live = Live::in_process_with(
+        "tfs-adopt-newer-placement",
+        |bench| bench.rig.locked(),
+        std::time::Duration::from_secs(30),
+    )
+    .await;
+    let waiting = live.bench.rig.locked();
+    let store = Bench::reopen(waiting.clone());
+    // Made after the successor's store read the directory, and opened by a job through the mount
+    // of the process before it.
+    let made = live.place(vec![fs_at("jobs/1f3a/root")]);
+    assert!(store.placement(&made.placement).is_none());
+    let (ino, fh) = live
+        .on_core(|core| {
+            let ino = walk(core, &["jobs", "1f3a", "root", "bin", "other"]);
+            let fh = open_cached(core, ino, false).unwrap();
+            (ino, fh)
+        })
+        .await;
+    let next = live.successor_over((&waiting, &store));
+    let holder = live.cache.clone();
+    let took = tokio::task::spawn_blocking(move || {
+        let (path, fd) = holder.lock_to_hand().unwrap().unwrap();
+        let received = Received::of(fd, &path).unwrap();
+        holder.hand_writes();
+        waiting.take_handed(received).unwrap()
+    })
+    .await
+    .unwrap();
+    assert_eq!(took, Tick::Took);
+    let read = tokio::task::spawn_blocking(move || next.read_open(ino, fh, 0, u32::MAX))
+        .await
+        .unwrap();
+    assert_eq!(read, Ok(live.bench.pack.content(1).to_vec()));
+}
+
 /// Asserts that the handles of the other kinds of member of a placed tree that an earlier process
 /// gave out are treated as those of a tree of manifests: the handle of the empty file is made
 /// again as an empty open, and that of a symbolic link is `EINVAL`.
-async fn a_foreign_handle_of_a_placed_empty_file_or_link_is_as_for_a_manifest_tree(over: Over) {
-    let live = Live::over("tfs-adopt-placed-kinds", over).await;
+#[tokio::test(flavor = "multi_thread")]
+async fn a_foreign_handle_of_a_placed_empty_file_or_link_is_as_for_a_manifest_tree() {
+    let live = Live::new("tfs-adopt-placed-kinds").await;
     let _ = live.place(vec![fs_at("jobs/1f3a/root")]);
     let (zero, link) = live
         .on_core(|core| {
@@ -294,7 +342,22 @@ fn a_read_of_an_earlier_processs_handle_whose_tree_is_gone_is_an_io_error_said()
     for entry in std::fs::read_dir(&rig.cache).unwrap() {
         let _ = std::fs::remove_dir_all(entry.unwrap().path());
     }
-    rig.upstream.built.lock().unwrap().manifests.clear();
+    // The upstream's store keeps what it published, so the tree is made gone by the answer the
+    // upstream gives for each of its manifests.
+    let gone: Vec<String> = {
+        let mut built = rig.upstream.built.lock().unwrap();
+        let gone = built.manifests.keys().cloned().collect();
+        built.manifests.clear();
+        gone
+    };
+    for digest in gone {
+        let _ = rig
+            .upstream
+            .failing
+            .lock()
+            .unwrap()
+            .insert(digest, "upstream 404".to_owned());
+    }
     let next = rig.successor();
     let log = Logged::default();
     let guard = logged(&log, tracing::Level::WARN);

@@ -6,7 +6,7 @@
 //! at the mount point; the cache directory must be on a file system that is not stacked (the job's
 //! overlay above this mount must stay within the kernel's depth of stacking); the neutral start is
 //! done (`Setup`: a table of tree numbers afresh, the attachments made again, the thread started
-//! that tells the cache which trees are attached once its fill socket answers, the control socket
+//! that tells the cache which trees are attached once the cache answers, the control socket
 //! bound); the mount is made and the record of its `INIT` handshake written. Each step's time is
 //! said as it ends (`steps.rs`). That is [`Running::start`]. [`Running::adopt`] is the
 //! start of a process that takes a connection over (after a crash or a restart, with the
@@ -29,7 +29,7 @@ use super::backing::{self, Saved};
 use super::config::FsSettings;
 use super::control::Control;
 use super::core::Core;
-use super::fills::Reach;
+use super::fills::Calls;
 use super::init_record::{self, Record};
 use super::locked;
 use super::put::carry;
@@ -45,15 +45,15 @@ use super::table::TreeTable;
 use crate::server::local_cache::SystemDisk;
 use crate::{MonotonicClock, SystemClock};
 
-/// Serves the put directory of `settings` from `core`, where `fs.put` is enabled, its puts asked by
-/// `reach`: the stage opened
-/// and its journal replayed, the hand-over of the process before taken over (`handed`, none for a
-/// fresh mount or a start after a crash), and the sweep started. `generation` numbers the handles.
+/// Serves the put directory of `settings` from `core`, where `fs.put` is enabled, its puts made
+/// by the cache of `reach`: the stage opened and its journal replayed, the hand-over of the
+/// process before taken over (`handed`, none for a fresh mount or a start after a crash), and the
+/// sweep started. `generation` numbers the handles.
 ///
 /// # Errors
 /// [`StartError::Put`] for a stage that cannot be used, [`StartError::Io`] for the sweep's thread.
 fn serve_put(
-    (settings, reach): (&FsSettings, &Reach),
+    (settings, reach): (&FsSettings, &Calls),
     core: &Core,
     generation: u32,
     handed: Option<Option<carry::Handed>>,
@@ -71,7 +71,7 @@ fn serve_put(
     tracing::info!(?replayed, "tierstore fs: the put directory's stage is open");
     let clock = Arc::new(MonotonicClock::new());
     let uploader = Uploader::new(
-        reach.puts(settings, put.commit_deadline),
+        reach.puts(put.commit_deadline),
         put.commit_deadline,
         clock.clone(),
         Arc::new(std::thread::sleep),
@@ -223,7 +223,7 @@ impl Running {
     /// # Errors
     /// [`StartError`]: why nothing was mounted.
     pub(super) fn start(
-        (settings, reach): (&FsSettings, &Reach),
+        (settings, reach): (&FsSettings, &Calls),
         kernel: &Kernel,
     ) -> Result<Self, StartError> {
         let mut steps = Steps::new(Arc::new(MonotonicClock::new()));
@@ -259,7 +259,7 @@ impl Running {
     /// # Errors
     /// [`StartError`]: why the connection is not served.
     pub(super) fn adopt(
-        (settings, reach): (&FsSettings, &Reach),
+        (settings, reach): (&FsSettings, &Calls),
         prepared: Prepared,
         device: OwnedFd,
         (control, resend): (Option<std::os::unix::net::UnixListener>, bool),
@@ -276,7 +276,7 @@ impl Running {
     /// # Errors
     /// As [`Running::adopt`].
     pub(super) fn take_over(
-        (settings, reach): (&FsSettings, &Reach),
+        (settings, reach): (&FsSettings, &Calls),
         prepared: Prepared,
         device: OwnedFd,
         control: std::os::unix::net::UnixListener,
@@ -292,7 +292,7 @@ impl Running {
 
     /// [`Running::adopt`], with the readers and the control socket started when `reading`.
     fn adopt_as(
-        (settings, reach): (&FsSettings, &Reach),
+        (settings, reach): (&FsSettings, &Calls),
         prepared: Prepared,
         device: OwnedFd,
         (control, resend): (Option<std::os::unix::net::UnixListener>, bool),
@@ -424,11 +424,11 @@ impl Running {
     /// commit waiting for a release ends at once; one that uploads, by its deadline). Blocks until
     /// then.
     ///
-    /// What asks the node's tierstore over the fill socket is waited for first, while the readers
-    /// still serve: the uploads of the commits that run now, the unpins of the detaches decided
-    /// now, and the announcement being sent. Each lasts until its deadline while that socket does
-    /// not answer (the tierstore restarting), and with the readers stopped the mount would answer
-    /// nothing for that long. A request that takes the lifecycle lock (a lookup that attaches a
+    /// What asks the node's cache is waited for first, while the readers still serve: the uploads
+    /// of the commits that run now, the unpins of the detaches decided now, and the announcement
+    /// being sent. Each lasts until its deadline while the cache does not answer (it is read-only
+    /// while another process holds the lock of its directory, as at the node's restart), and with
+    /// the readers stopped the mount would answer nothing for that long. A request that takes the lifecycle lock (a lookup that attaches a
     /// tree) can still wait for the unpins, as a detach decided in the meantime waits for them under
     /// that lock. What begins after this first wait is waited for after the stop, as before.
     pub(super) fn quiesce(&self) {

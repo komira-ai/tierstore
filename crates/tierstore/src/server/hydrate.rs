@@ -198,7 +198,8 @@ fn ok(status: StatusCode, body: &serde_json::Value) -> Answer {
 
 impl Server {
     /// Does the call a signed request is: see the module. The body is read here, up to what
-    /// `hydrate_max_trees` digests take, and checked against the hash the signature covers.
+    /// `hydrate_max_trees` digests take, and checked against the hash the signature covers; it
+    /// is held whole, so it holds a permit of the bodies (`whole_body`) while it is read and used.
     pub(super) async fn hydrate<B>(
         &self,
         parts: &Parts,
@@ -223,14 +224,12 @@ impl Server {
             .min(BODY_BASE.saturating_add(trees.saturating_mul(BODY_PER_TREE)));
         let check = Check::new(&signed.payload, &parts.headers, false)?;
         let config = &self.config;
-        let bytes = Reader::new(body, limit, config.body_idle_timeout)
-            .with_floor(
-                config.put_min_bytes_per_sec,
-                config.put_rate_grace,
-                Arc::clone(&config.rate_clock),
-            )
-            .read_all(check)
-            .await?;
+        let reader = Reader::new(body, limit, config.body_idle_timeout).with_floor(
+            config.put_min_bytes_per_sec,
+            config.put_rate_grace,
+            Arc::clone(&config.rate_clock),
+        );
+        let (bytes, _held) = self.whole_body(reader, check).await?;
         match call {
             Call::Hydrate => hydrate(cache, &bytes, caller),
             Call::Release => release(cache, &bytes, caller.key),

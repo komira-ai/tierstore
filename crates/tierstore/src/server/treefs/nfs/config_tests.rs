@@ -15,7 +15,7 @@ use super::NfsSettings;
 
 /// The keys every file needs.
 const NEEDED: &str = "client_group = \"77\"\nowner = \"1000:1001\"\n\
-    fill_socket = \"/run/tierstore/fill.sock\"\ncache_path = \"/var/cache/tierstore\"\n";
+    cache_path = \"/var/cache/tierstore\"\n";
 
 fn with(nfs: &str) -> String {
     format!("[fs]\n{NEEDED}\n[fs.nfs]\n{nfs}")

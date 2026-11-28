@@ -38,6 +38,8 @@ pub enum Addressing {
 
 /// One endpoint of the store, with the bucket in it as the store's [`Addressing`] puts it.
 pub(super) struct Target {
+    /// The endpoint as the store was given it, for the operator's eyes ([`super::EndpointState`]).
+    pub(super) endpoint: String,
     /// The scheme, host (with the bucket for virtual-hosted style) and port requests go to.
     pub(super) base: Url,
     /// `host[:port]` as the `Host` header carries it and the signature covers it.
@@ -101,6 +103,7 @@ pub(super) fn target_of(
     // the scheme's default.
     let host = base.authority().to_owned();
     Ok(Target {
+        endpoint: endpoint.to_owned(),
         base,
         host,
         bucket_path,

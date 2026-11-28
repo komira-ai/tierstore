@@ -26,7 +26,6 @@ use crate::server::handoff::testing::within;
 use crate::server::local_cache::{Disk, SystemDisk};
 use crate::server::treefs::config::FsSettings;
 use crate::server::treefs::fakedev::{self, FakeDevice};
-use crate::server::treefs::fills::Reach;
 use crate::server::treefs::handover::{HandoverError, Offer};
 use crate::server::treefs::init_record::{self, Record};
 use crate::server::treefs::ino;
@@ -207,8 +206,8 @@ fn left_state(settings: &FsSettings) {
 }
 
 /// A running `tierstore fs` process of the two-process layout over a stand-in for the kernel, on
-/// the paths of `settings`, answering `take-fs 1` on its hand-over socket. Its fill socket is a
-/// stand-in for the old `tierstore`'s, which answers it.
+/// the paths of `settings`, answering `take-fs 1` on its hand-over socket. Its core calls the cache
+/// of a rig, which stands for the cache of the old `tierstore`.
 struct OldFs {
     running: Arc<Running>,
     kernel: FakeDevice,
@@ -219,14 +218,10 @@ struct OldFs {
 fn old_fs(settings: &FsSettings) -> OldFs {
     left_state(settings);
     let fill = Rig::new("tsfs-one-oldfill", sample());
-    let settings = FsSettings {
-        fill_socket: Some(fill.dir.path().join("fill.sock")),
-        ..settings.clone()
-    };
     let (device, kernel) = fakedev::pair();
-    let prepared = Prepared::load(&settings).unwrap();
+    let prepared = Prepared::load(settings).unwrap();
     let running =
-        Running::adopt((&settings, &Reach::Socket), prepared, device, (None, false)).unwrap();
+        Running::adopt((settings, &fill.calls()), prepared, device, (None, false)).unwrap();
     let running = Arc::new(running);
     let offer = Offer::bind(
         &settings.handoff_socket,
@@ -825,5 +820,9 @@ async fn a_start_whose_s3_address_is_taken_leaves_the_mount_it_served() {
 
 #[path = "interface_handover_tests.rs"]
 mod handover;
+#[path = "live_config_tests.rs"]
+mod live_config;
+#[path = "interface_service_tests.rs"]
+mod service;
 #[path = "switch_tests.rs"]
 mod switch;

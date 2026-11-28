@@ -7,7 +7,7 @@
 //! ```
 //!
 //! The sidecar's `origin` says whether the bytes are the upstream object of the key (the default,
-//! left out of the file) or a `span` cut out of a pack; the fill socket's blobs are entries named
+//! left out of the file) or a `span` cut out of a pack; the core's blobs are entries named
 //! by their digest like any `cas/l/<sha256>` object.
 //!
 //! `<hex>` is the SHA-256 of the key's name, except for a key `cas/l/<sha256>`, which is the
@@ -37,7 +37,7 @@ const SIDECAR: &str = ".meta";
 /// The prefix of the keys that are named by the SHA-256 of their bytes.
 const WHOLE_BLOBS: &str = "cas/l/";
 
-/// The prefix of the keys that the previous release kept the fill socket's blobs under.
+/// The prefix of the keys that the previous release kept the blobs of the file system under.
 const OLD_FILL_PREFIX: &str = "_tiering/fill/";
 
 /// What a key is called on disk, and what its bytes must hash to.

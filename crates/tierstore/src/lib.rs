@@ -198,6 +198,7 @@ mod memory;
 mod metrics;
 #[cfg(test)]
 mod metrics_names_tests;
+mod put_digests;
 mod put_sha256;
 #[cfg(test)]
 mod put_sha256_tests;
@@ -215,6 +216,9 @@ pub mod server;
 mod sleeper;
 #[cfg(test)]
 mod sleeper_tests;
+mod store_copy;
+#[cfg(test)]
+mod store_copy_tests;
 mod tiered;
 mod tree_image;
 #[cfg(feature = "server")]
@@ -269,11 +273,13 @@ pub use marks_evict::{CopyRecord, CopyRecords, EvictConfig, EvictReport, Evicted
 pub use marks_leader::LeaderLease;
 pub use marks_sweep::{StraySweep, SweepConfig, SweepReport, SweepTime};
 pub use memory::{MemoryBackend, TestClock};
+pub use put_digests::{BodyDigests, PutKind, ShortObjects};
 pub use put_sha256::PutOutcome;
 pub use reconciler::ReconcilerConfig;
 #[cfg(feature = "s3")]
 pub use s3::S3Backend;
 pub use sleeper::{RecordingSleeper, Sleeper, TokioSleeper};
+pub use store_copy::{CopyTarget, SourceConditions, StoreCopy};
 pub use tiered::{
     DeleteWait, MarkReads, MarkedPutConfig, PlainPut, Proxy, ProxyConfig, PutBody, PutClaim,
     StepRetry,

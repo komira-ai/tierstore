@@ -27,10 +27,14 @@
 //!   `SIGUSR2` and executes the next image of its program, keeping its sockets and its mount.
 //!   Any other update is a restart with a gap: `bootout`, then `bootstrap` of the linked plist
 //!   ([`LAUNCHD_PLIST`]), which unmounts, so a node whose file has an `fs` interface refuses it
-//!   ([`Reason::ModeUnsupported`]) unless the params say `mode = "restart"`. When the params name
-//!   the job of `tierstore fs` (`fs_launchd_label`, plist [`FS_LAUNCHD_PLIST`]), the update is a
-//!   restart; that job is booted out before the main one, the update goes on only when its mount
-//!   is gone, and it is booted in after the main job serves.
+//!   ([`Reason::ModeUnsupported`]) unless the params say `mode = "restart"`. An update of a node
+//!   whose file has a mount provider and no `fs` interface (the two-process layout, whose
+//!   `tierstore fs` job no release runs since 0.3.196) is refused too, and `verify` requires the
+//!   mount of a node's `fs` interface listed and answering. When the params name the job of
+//!   `tierstore fs` (`fs_launchd_label`, plist [`FS_LAUNCHD_PLIST`]; the config hook's switch
+//!   names it for its rollback, and no release's manifest does), the update is a restart; that
+//!   job is booted out before the main one, the update goes on only when its mount is gone, and it
+//!   is booted in after the main job serves.
 //!
 //! hostkeeper switches the release link `current` before `cutover` and back before `rollback`;
 //! the hook never moves it. hostkeeper keeps every package closed to every user but root, so the
@@ -45,7 +49,7 @@
 
 mod args;
 pub mod config_hook;
-mod launchd;
+pub(super) mod launchd;
 mod look;
 pub mod machine;
 mod params;
@@ -111,8 +115,21 @@ pub const RELEASE_BINARY: &str = "bin/tierstore";
 /// The binary of a release of the Debian or RPM package, under its version directory: hostkeeper
 /// extracts a native package's files into the version directory's `tree/`, and the package puts
 /// the binary at `/usr/libexec/tierstore/tierstore`, the path its unit template runs. The hook
-/// asks this one when nothing is at [`RELEASE_BINARY`].
+/// of the systemd arm asks this one when nothing is at [`RELEASE_BINARY`].
 pub const PACKAGE_RELEASE_BINARY: &str = "tree/usr/libexec/tierstore/tierstore";
+/// The binary of a release of the macOS installer package, under its version directory:
+/// hostkeeper's `macos-pkg` installer expands the `.pkg`'s payload (install location `/`) into
+/// the version directory's `tree/`, and the package puts the binary at
+/// `/Library/Application Support/tierstore/bin/tierstore`, the path its plist runs. The hook of
+/// the launchd arm asks this one when nothing is at [`RELEASE_BINARY`].
+pub(crate) const MACOS_PACKAGE_RELEASE_BINARY: &str =
+    "tree/Library/Application Support/tierstore/bin/tierstore";
+/// Where a root hook on a Mac puts a copy of the binary of a release of the installer package
+/// (from [`MACOS_PACKAGE_RELEASE_BINARY`]) to have `_tierstore` check the node's file with it:
+/// hostkeeper keeps such a version directory root's alone (mode 0700), so the account cannot
+/// execute the binary inside it, and `sudo` hands it no descriptor. Beside [`SERVICE_BINARY`],
+/// held to the same checks; the hook removes it when the check has answered.
+pub(crate) const CHECK_BINARY: &str = "/usr/local/libexec/tierstore/tierstore-check";
 /// Where the units of the archive package run the binary from, on Linux and on a Mac alike: a
 /// copy of the binary of the release `current` names, which the hook puts there before it starts
 /// the service ([`Host::install_binary`]). hostkeeper keeps the release itself closed to every

@@ -10,8 +10,16 @@
 //! attachment ends (`core/implicit.rs`). The file holds one line, `<digest> <run>`, for each
 //! attachment of a run; it is rewritten by a rename after every change. The implicit attachments are not in it: a start has none, and a lookup
 //! attaches again.
+//!
+//! The time the opens under a tree waited on a fill is added to every run's attachment of the
+//! tree (its `stall_ms`, `docs/design/virtual-build-fs.md` section 7.4), and the run's `detach`
+//! answers the sum over its attachments. An attachment whose stall is not zero has a second line
+//! in the file, `stall_ms <digest> <run> <ms>`, after its own: a release before it passes that
+//! line over (its first word is not a digest), and a file with no such line is one with no stall.
+//! The file is written with the stall when it is written for an attach, a detach or a restore,
+//! and when a successor is to take over (`Core::hold`); the implicit attachments have no stall.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -31,8 +39,16 @@ pub(super) struct Failure {
     pub path: String,
     /// The SHA-256 of the file's contents.
     pub digest: String,
-    /// The words of the fill socket's answer, or what else failed.
+    /// The words of the cache's answer to the fill, or what else failed.
     pub reason: String,
+}
+
+/// What a run's `detach` answers: the opens under its attachments that failed, and the
+/// milliseconds its opens waited on fills (`docs/design/virtual-build-fs.md` section 7.4).
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(super) struct Detached {
+    pub failures: Vec<Failure>,
+    pub stall_ms: u64,
 }
 
 /// One run's attachment of one tree.
@@ -41,16 +57,23 @@ struct Attached {
     digest: TreeDigest,
     /// The failures since the attach, by path, so that a file opened again is one failure.
     failures: BTreeMap<String, Failure>,
+    /// The milliseconds the opens under the tree waited on fills since the attach, on the core's
+    /// clock.
+    stall_ms: u64,
 }
 
 impl Attached {
-    fn new(digest: TreeDigest) -> Self {
+    fn new(digest: TreeDigest, stall_ms: u64) -> Self {
         Self {
             digest,
             failures: BTreeMap::new(),
+            stall_ms,
         }
     }
 }
+
+/// The first word of a line of the file that holds the stall of an attachment.
+const STALL: &str = "stall_ms";
 
 /// Whether `run` is a name the control socket takes: one word of visible ASCII, not empty.
 pub(super) fn is_run(run: &str) -> bool {
@@ -64,8 +87,8 @@ pub(super) struct Attachments {
     /// The tree number of each tree of each run.
     runs: BTreeMap<String, BTreeMap<u64, Attached>>,
     /// The pairs of tree digest and run a restart could not attach again: not served, but kept in
-    /// the file so that a transient failure does not delete the record.
-    kept: BTreeSet<(String, String)>,
+    /// the file so that a transient failure does not delete the record; each with its stall.
+    kept: BTreeMap<(String, String), u64>,
     /// The trees a lookup attached with no run, by tree number.
     implicit: BTreeMap<u64, Attached>,
 }
@@ -76,7 +99,7 @@ impl Attachments {
         Self {
             file: dir.join(FILE),
             runs: BTreeMap::new(),
-            kept: BTreeSet::new(),
+            kept: BTreeMap::new(),
             implicit: BTreeMap::new(),
         }
     }
@@ -101,14 +124,54 @@ impl Attachments {
             .collect())
     }
 
-    /// Records that `run` uses the tree `number`, `digest`; whether it was new.
+    /// The stall of each attachment the file of this holds, by tree digest and run: none if the
+    /// file has no such line or cannot be read. A line that is not a digest, a run and a whole
+    /// number is passed over.
+    pub(super) fn saved_stalls(&self) -> BTreeMap<(String, String), u64> {
+        let text = std::fs::read_to_string(&self.file).unwrap_or_default();
+        text.lines()
+            .filter_map(|line| {
+                let words: Vec<&str> = line.split(' ').collect();
+                let &[STALL, digest, run, ms] = words.as_slice() else {
+                    return None;
+                };
+                let digest = TreeDigest::from_hex(digest)?;
+                let ms: u64 = ms.parse().ok().filter(|_| is_run(run))?;
+                Some(((digest.to_string(), run.to_owned()), ms))
+            })
+            .collect()
+    }
+
+    /// Records that `run` uses the tree `number`, `digest`; whether it was new. An attachment the
+    /// run has of the tree already is kept as it is, with its failures and its stall; a record kept
+    /// for it gives the new attachment its stall.
     pub(super) fn add(&mut self, run: &str, number: u64, digest: TreeDigest) -> bool {
-        let _ = self.kept.remove(&(digest.to_string(), run.to_owned()));
-        self.runs
-            .entry(run.to_owned())
-            .or_default()
-            .insert(number, Attached::new(digest))
-            .is_none()
+        let carried = self
+            .kept
+            .remove(&(digest.to_string(), run.to_owned()))
+            .unwrap_or(0);
+        let trees = self.runs.entry(run.to_owned()).or_default();
+        if trees.contains_key(&number) {
+            return false;
+        }
+        let _ = trees.insert(number, Attached::new(digest, carried));
+        true
+    }
+
+    /// Gives the record of `run` of the tree `digest`, attached or kept, the stall `ms`: what the
+    /// file said before a restart.
+    pub(super) fn carry(&mut self, run: &str, digest: TreeDigest, ms: u64) {
+        if let Some(kept) = self.kept.get_mut(&(digest.to_string(), run.to_owned())) {
+            *kept = ms;
+        }
+        let attached = self
+            .runs
+            .get_mut(run)
+            .into_iter()
+            .flat_map(BTreeMap::values_mut);
+        for got in attached.filter(|got| got.digest == digest) {
+            got.stall_ms = ms;
+        }
     }
 
     /// Takes away the one attachment of `run` to the tree `number`, and nothing else.
@@ -122,14 +185,46 @@ impl Attachments {
 
     /// Keeps the record of `run` using the tree `digest`, which a restart could not attach again.
     pub(super) fn keep(&mut self, run: &str, digest: TreeDigest) {
-        let _ = self.kept.insert((digest.to_string(), run.to_owned()));
+        let _ = self
+            .kept
+            .entry((digest.to_string(), run.to_owned()))
+            .or_insert(0);
+    }
+
+    /// The milliseconds the opens under the attachments of `run` waited on fills, with the stall of
+    /// the records kept for it.
+    pub(super) fn stall_of(&self, run: &str) -> u64 {
+        let attached = self.runs.get(run).into_iter().flat_map(BTreeMap::values);
+        let kept = self.kept.iter().filter(|((_, kept), _)| kept == run);
+        attached
+            .map(|got| got.stall_ms)
+            .chain(kept.map(|(_, ms)| *ms))
+            .fold(0, u64::saturating_add)
+    }
+
+    /// Adds `ms`, the time an open under the tree `number` waited on a fill, to the attachment of
+    /// every run that has the tree.
+    pub(super) fn stalled(&mut self, number: u64, ms: u64) {
+        let runs = self
+            .runs
+            .values_mut()
+            .filter_map(|trees| trees.get_mut(&number));
+        for got in runs {
+            got.stall_ms = got.stall_ms.saturating_add(ms);
+        }
+    }
+
+    /// Whether any attachment of a run, or record kept, has a stall that is not zero.
+    pub(super) fn has_stall(&self) -> bool {
+        let mut attached = self.runs.values().flat_map(BTreeMap::values);
+        attached.any(|got| got.stall_ms > 0) || self.kept.values().any(|ms| *ms > 0)
     }
 
     /// Takes away every attachment of `run`, and the records kept for it; the trees it had, with
     /// their failures, or none if it attached nothing and nothing is kept for it.
     pub(super) fn remove(&mut self, run: &str) -> Option<Vec<(u64, TreeDigest, Vec<Failure>)>> {
         let before = self.kept.len();
-        self.kept.retain(|(_, kept)| kept != run);
+        self.kept.retain(|(_, kept), _| kept != run);
         let dropped = self.kept.len() != before;
         let trees = self.runs.remove(run).unwrap_or_default();
         (dropped || !trees.is_empty()).then(|| {
@@ -143,7 +238,7 @@ impl Attachments {
     /// The runs there are.
     pub(super) fn runs(&self) -> Vec<String> {
         let mut runs: Vec<String> = self.runs.keys().cloned().collect();
-        runs.extend(self.kept.iter().map(|(_, run)| run.clone()));
+        runs.extend(self.kept.keys().map(|(_, run)| run.clone()));
         runs.sort();
         runs.dedup();
         runs
@@ -165,7 +260,7 @@ impl Attachments {
         let _ = self
             .implicit
             .entry(number)
-            .or_insert_with(|| Attached::new(digest));
+            .or_insert_with(|| Attached::new(digest, 0));
     }
 
     /// Ends the implicit attachment of the tree `number`; the opens that failed under it, by path.
@@ -221,12 +316,20 @@ impl Attachments {
     /// not hold the lock of the attachments.
     pub(super) fn snapshot(&self) -> Snapshot {
         let mut text = String::new();
-        let attached = self
-            .listing()
-            .into_iter()
-            .map(|(digest, run)| (digest.to_string(), run));
-        for (digest, run) in attached.chain(self.kept.iter().cloned()) {
+        let attached = self.runs.iter().flat_map(|(run, trees)| {
+            trees
+                .values()
+                .map(move |got| (got.digest.to_string(), run.clone(), got.stall_ms))
+        });
+        let kept = self
+            .kept
+            .iter()
+            .map(|((digest, run), ms)| (digest.clone(), run.clone(), *ms));
+        for (digest, run, ms) in attached.chain(kept) {
             text.push_str(&format!("{digest} {run}\n"));
+            if ms > 0 {
+                text.push_str(&format!("{STALL} {digest} {run} {ms}\n"));
+            }
         }
         Snapshot {
             file: self.file.clone(),
@@ -259,3 +362,7 @@ impl Snapshot {
 #[cfg(test)]
 #[path = "attach_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "attach_stall_tests.rs"]
+mod stall_tests;

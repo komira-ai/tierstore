@@ -9,15 +9,16 @@
 //! - **Start.** The job's command is the first to look inside the run's trees: the agent opens
 //!   each tree's root and the kernel looks the roots up when it mounts the job's overlay, and
 //!   neither reads below a root (jobscheduler's `docs/design/job-rootfs.md`, section 7.2). So
-//!   `tierstore fs` tells the node, on the fill socket's `started <path>`, the first time a lookup
+//!   the file system's core tells the cache, on its report `started <path>`, the first time a lookup
 //!   in a directory of a tree placed at `path`, or a listing of one, reaches it, and the first
 //!   such report of any source of the run ends the span ([`LocalCache::run_started`]).
 //!
 //! A run is sampled once: a report of another source of it, or of the same tree read into the
 //! mount's memory again, adds nothing. A run is known by the directory its sources' paths are in,
-//! `mount-provider/<agent>/<run>` (the provider's module `names`); a report of a path in any other
-//! directory, such as that of a placement of the trees API, or of a run this process did not see
-//! a `Prepare` of (it started after the `Prepare`), adds nothing. A release or a sweep of a source
+//! `mount-provider/<agent>/<run>`, or `mount-provider/<agent>/<run>/a<attempt>` for an attempt
+//! the agent named, each attempt a run of its own (the provider's module `names`); a report of a
+//! path in any other directory, such as that of a placement of the trees API, or of a run this
+//! process did not see a `Prepare` of (it started after the `Prepare`), adds nothing. A release or a sweep of a source
 //! of the run forgets it ([`LocalCache::run_forgotten`]), so a run that ends before its command
 //! touches its trees is not sampled. At most [`MOST_RUNS`] runs are kept: a request beyond them
 //! forgets the run requested longest ago.
@@ -28,9 +29,13 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::sync::Mutex;
 
+use self::list_refusals::ListRefusals;
+use self::provider_unavailable::ProviderUnavailable;
 use super::attaches::Attaches;
+use super::attaches::runs::Runs;
 use super::descriptors::Held;
 use super::opens::Opened;
+use super::opens::requests::Answered;
 use super::tree_lists::Lists;
 use super::{LocalCache, locked};
 
@@ -83,6 +88,14 @@ pub(super) struct Starts {
     pub(super) opens: Opened,
     /// The tree lists the mounts hold mapped (`tree_lists`).
     pub(super) tree_lists: Lists,
+    /// The requests of the mounts' frontends (`requests`).
+    pub(super) requests: Answered,
+    /// The attaches and detaches of runs the mounts report (`runs`).
+    pub(super) runs: Runs,
+    /// The tree lists the mount provider refused (`list_refusals`).
+    list_refusals: ListRefusals,
+    /// The mount provider's answers `UNAVAILABLE`, by reason (`provider_unavailable`).
+    provider_unavailable: ProviderUnavailable,
 }
 
 impl Starts {
@@ -140,7 +153,8 @@ impl Starts {
 
     /// The family in the Prometheus text format: cumulative buckets, the sum in seconds and the
     /// count, all of one moment; then the families of the mounts' reports (`attaches`,
-    /// `descriptors`, `opens`, `tree_lists`).
+    /// `descriptors`, `opens`, `tree_lists`, `requests`, `runs`), of the provider's refused lists
+    /// (`list_refusals`) and of its answers `UNAVAILABLE` (`provider_unavailable`).
     pub(super) fn render(&self) -> String {
         let state = locked(&self.state);
         let mut text = format!("# TYPE {REQUEST_TO_START} histogram\n");
@@ -157,6 +171,10 @@ impl Starts {
         text.push_str(&self.descriptors.render());
         text.push_str(&self.opens.render());
         text.push_str(&self.tree_lists.render());
+        text.push_str(&self.requests.render());
+        text.push_str(&self.runs.render());
+        text.push_str(&self.list_refusals.render());
+        text.push_str(&self.provider_unavailable.render());
         text
     }
 }
@@ -197,6 +215,12 @@ impl LocalCache {
         self.inner.starts.runs()
     }
 }
+
+// Declared here, not in the cache's root module, since the counters are a field of `Starts`.
+#[path = "list_refusals.rs"]
+mod list_refusals;
+#[path = "provider_unavailable.rs"]
+pub(super) mod provider_unavailable;
 
 #[cfg(test)]
 #[path = "starts_tests.rs"]

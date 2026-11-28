@@ -1,5 +1,6 @@
 //! The provider on its socket: the four calls and a refusal over gRPC, the codes and the bound of a
-//! refusal's reason, and when the socket is bound, rebound and removed.
+//! refusal's reason, a tree with no L2 sidecar mounted from its list, and when the socket is bound,
+//! rebound and removed.
 
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
@@ -8,19 +9,20 @@ use std::time::Duration;
 
 use tierstore_testkit::dir::TestDir;
 use tierstore_trees_api::provider::v1::{
-    MountRequest, MountResponse, PrepareRequest, PrepareResponse, ReleaseRequest, ReleaseResponse,
-    SweepRequest, SweepResponse,
+    KeptAttempt, MountRequest, MountResponse, PrepareRequest, PrepareResponse, ReleaseRequest,
+    ReleaseResponse, SweepRequest, SweepResponse,
 };
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use tonic::Code;
 
 use super::service::status_of;
-use super::testing::{AGENT, Client, READ_ONLY, Rig, source};
+use super::testing::{AGENT, Client, READ_ONLY, Rig, attempt_of, member, source};
 use super::{MAX_REASON_BYTES, Provider, ProviderError, serve};
 use crate::server::local_cache::LocalCache;
 use crate::server::local_cache::Tick;
 use crate::server::local_cache::testing::{until, wait_advancing};
+use crate::{Op, TreeList};
 
 /// The directory of a socket, and the path of the socket in it.
 struct Place {
@@ -55,6 +57,52 @@ impl Served {
         self.halt.notify_one();
         self.task.await.unwrap();
     }
+}
+
+/// Asserts that the attempt of a source and the runs a sweep keeps from an attempt on reach the
+/// provider over the socket: two attempts of one source are prepared and mounted at their own
+/// directories, a late release of the first leaves the second placed, and a sweep that keeps the
+/// run from attempt 3 releases the second.
+#[tokio::test]
+async fn attempts_are_answered_over_the_socket() {
+    let rig = Rig::new("prov-socket-attempt").await;
+    let place = Place::new("prov-socket-attempt");
+    let served = Served::start(&rig.provider, &rig.bench.rig.cache, &place.path);
+    let mut client = Client::connect(&place.path).await;
+    for attempt in [1, 2] {
+        let prepare = PrepareRequest {
+            source: attempt_of("js.1", 0, attempt),
+            r#ref: rig.key.clone(),
+            mode: READ_ONLY,
+            host: "host-1".into(),
+        };
+        let _: PrepareResponse = client.call("Prepare", &prepare).await.unwrap();
+        let mount = MountRequest {
+            source: attempt_of("js.1", 0, attempt),
+        };
+        let mounted: MountResponse = client.call("Mount", &mount).await.unwrap();
+        let expected =
+            Path::new(super::testing::MOUNT).join(Rig::attempt_place_of("js.1", 0, attempt));
+        assert_eq!(mounted.path, expected.to_string_lossy());
+    }
+    let release = ReleaseRequest {
+        source: attempt_of("js.1", 0, 1),
+    };
+    let _: ReleaseResponse = client.call("Release", &release).await.unwrap();
+    let placed = vec![Rig::attempt_place_of("js.1", 0, 2)];
+    assert_eq!(rig.bench.store.mount_paths(), placed);
+    let sweep = SweepRequest {
+        agent: AGENT.into(),
+        keep: vec!["js.1".into()],
+        keep_attempts: vec![KeptAttempt {
+            run: "js.1".into(),
+            attempt: 3,
+        }],
+    };
+    let swept: SweepResponse = client.call("Sweep", &sweep).await.unwrap();
+    assert_eq!(swept.released, 1);
+    assert!(rig.bench.store.mount_paths().is_empty());
+    served.stop().await;
 }
 
 /// Asserts the code of each answer that is not a success, and that a reason over the contract's
@@ -118,6 +166,7 @@ async fn the_four_calls_are_answered_over_the_socket() {
     let sweep = SweepRequest {
         agent: AGENT.into(),
         keep: vec!["js.1".into()],
+        keep_attempts: Vec::new(),
     };
     let swept: SweepResponse = client.call("Sweep", &sweep).await.unwrap();
     assert_eq!(swept.released, 0);
@@ -163,6 +212,7 @@ async fn the_four_calls_are_answered_over_the_socket() {
     let sweep_none = SweepRequest {
         agent: String::new(),
         keep: Vec::new(),
+        keep_attempts: Vec::new(),
     };
     let refused = client
         .call::<SweepResponse>("Sweep", &sweep_none)
@@ -179,6 +229,57 @@ async fn the_four_calls_are_answered_over_the_socket() {
     assert_eq!(swept.released, 0);
     served.stop().await;
     assert!(!place.path.exists());
+}
+
+/// Asserts that a tree whose version 2 list is in the store but whose L2 sidecar (`cas/l2/<id>`) is
+/// not is mounted over the socket from its list: `Mount` answers the source's directory, and a
+/// `Mount` asked again answers the same; the list is read once, and the preparation is counted
+/// once as a missing sidecar and once as a tree placed from its list, and as no refusal.
+#[tokio::test]
+async fn a_tree_with_no_sidecar_is_mounted_from_its_list_and_counted() {
+    let rig = Rig::new("prov-no-sidecar").await;
+    let place = Place::new("prov-no-sidecar");
+    let served = Served::start(&rig.provider, &rig.bench.rig.cache, &place.path);
+    let mut client = Client::connect(&place.path).await;
+    let list = TreeList {
+        entries: vec![member(&rig.bench.pack, "only", 0, 0o644)],
+    };
+    let key = rig.put_bytes(&list.encode_v2().unwrap()).await;
+    let prepare = PrepareRequest {
+        source: source("js.1", 0),
+        r#ref: key.clone(),
+        mode: READ_ONLY,
+        host: "host-1".into(),
+    };
+    let prepared: PrepareResponse = client.call("Prepare", &prepare).await.unwrap();
+    assert_eq!(prepared, PrepareResponse {});
+    let mount = MountRequest {
+        source: source("js.1", 0),
+    };
+    for _ in 0..2 {
+        let mounted: MountResponse = client.call("Mount", &mount).await.unwrap();
+        assert_eq!(
+            mounted.path,
+            Rig::path_of("js.1", 0).to_string_lossy().into_owned()
+        );
+    }
+    let metricz = rig.bench.rig.cache.metrics();
+    for counted in [
+        "tierstore_list_refused_total{reason=\"missing_sidecar\"} 0\n",
+        "tierstore_list_refused_total{reason=\"v1_list\"} 0\n",
+        "tierstore_l2_sidecar_missing_total 1\n",
+        "tierstore_l2_sidecar_fallback_total 1\n",
+    ] {
+        assert!(metricz.contains(counted), "{counted} in {metricz}");
+    }
+    assert!(
+        rig.bench
+            .store
+            .locate_fs(&Rig::place_of("js.1", 0))
+            .is_some()
+    );
+    assert_eq!(rig.bench.rig.calls_on(Op::Get, &key), 1);
+    served.stop().await;
 }
 
 /// Asserts that an instance whose cache does not hold the lock of its directory binds no socket
@@ -200,6 +301,7 @@ async fn a_read_only_instance_binds_nothing_until_it_takes_the_lock() {
     let sweep = SweepRequest {
         agent: AGENT.into(),
         keep: Vec::new(),
+        keep_attempts: Vec::new(),
     };
     let swept: SweepResponse = client.call("Sweep", &sweep).await.unwrap();
     assert_eq!(swept.released, 0);

@@ -644,34 +644,31 @@ fn the_fs_template_is_a_notify_unit_on_unix_sockets_alone() {
 }
 
 /// Asserts that the units of `tierstore fs` and of the store process set `LimitNOFILE` to exactly
-/// 1048576, and that the launchd jobs of both set the soft and the hard `NumberOfFiles` to the
-/// same. It would catch any one of the four files going back to a smaller limit, with which a
-/// build's open files run the process out of descriptors and every open after them fails.
+/// 1048576, and that the launchd job sets the soft and the hard `NumberOfFiles` to the same. It
+/// would catch any one of the three files going back to a smaller limit, with which a build's open
+/// files run the process out of descriptors and every open after them fails.
 #[test]
 fn every_unit_and_job_allows_1048576_open_files() {
     for file in ["tierstore@.service", "tierstore-fs@.service"] {
         assert_eq!(value(&read(file), "LimitNOFILE"), "1048576", "{file}");
     }
-    for file in ["tierstore.plist", "tierstore-fs.plist"] {
-        let job = plist_of(file);
-        for limits in ["SoftResourceLimits", "HardResourceLimits"] {
-            let Some(Plist::Dict(limit)) = job.get(limits) else {
-                panic!("{file}: {limits} is a dictionary");
-            };
-            assert_eq!(
-                limit.get("NumberOfFiles"),
-                Some(&Plist::Integer(1_048_576)),
-                "{file}: {limits}"
-            );
-        }
+    let job = plist();
+    for limits in ["SoftResourceLimits", "HardResourceLimits"] {
+        let Some(Plist::Dict(limit)) = job.get(limits) else {
+            panic!("tierstore.plist: {limits} is a dictionary");
+        };
+        assert_eq!(
+            limit.get("NumberOfFiles"),
+            Some(&Plist::Integer(1_048_576)),
+            "tierstore.plist: {limits}"
+        );
     }
 }
 
 /// Asserts that the unit of `tierstore fs` runs the `fs` verb of the installed binary with
-/// a `--config` the binary reads (a file that is not there is status 2, naming it, which a flag the
-/// binary did not parse would not be), starts only under a marker of its own after the S3
-/// instances, and is enabled at boot. It would catch a verb or a flag that is renamed under the
-/// unit, which would leave the instance failing at every start.
+/// a `--config`, starts only under a marker of its own after the S3 instances, and is enabled at
+/// boot; and that the verb, which serves nothing now, exits 2 with the line that names the `fs`
+/// interface, so a unit left behind fails loudly and its `RestartPreventExitStatus=2` stops it.
 #[test]
 fn the_fs_template_runs_the_fs_verb_of_the_installed_binary() {
     let unit = read(FS_TEMPLATE);
@@ -695,9 +692,12 @@ fn the_fs_template_runs_the_fs_verb_of_the_installed_binary() {
         .output()
         .expect("the binary runs");
     assert_eq!(out.status.code(), Some(2));
-    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-    assert!(stderr.contains("fs.toml"), "{stderr}");
+    assert_eq!(String::from_utf8_lossy(&out.stderr), NOT_A_PROCESS);
 }
+
+/// What the `fs` verb says before it exits 2: the file system is the node's `fs` interface.
+const NOT_A_PROCESS: &str = "tierstore fs is no longer a process of its own: the file system is \
+     the [[interface]] with type = \"fs\" of the node's file\n";
 
 /// Asserts that the unit of `tierstore fs` looks at its marker at every start, its automatic
 /// restarts included: one `ExecCondition=` that tests, as root (`+`, as systemd tests the
@@ -727,59 +727,6 @@ fn the_fs_marker_is_not_a_marker_of_the_s3_instances() {
         let ours = marker.replace("%i", instance.letter());
         assert_ne!(Path::new(&ours), theirs.as_path());
     }
-}
-
-/// Asserts the launchd job of `tierstore fs`: its label is its file's name, it runs the `fs` verb of
-/// the installed binary with a `--config` the binary reads (a file that is not there is
-/// status 2, naming it), as the user and group of the store's job (the fill socket answers only a
-/// peer of its own user, so a job of any other user, root included, has every fill refused), it is
-/// restarted when it exits, launchd waits 150 seconds after SIGTERM (the process's unmount is at
-/// most 120) before it kills it and kills the whole process group (no `AbandonProcessGroup`), it
-/// sets no environment variable, and no word of it names a secret. It would catch a verb or a flag
-/// renamed under the job, a job that runs as root, and a stop time that kills an unmount in
-/// progress.
-#[test]
-fn the_fs_launchd_job_runs_the_fs_verb_of_the_installed_binary() {
-    let job = plist_of("tierstore-fs.plist");
-    assert_eq!(
-        job.get("Label"),
-        Some(&Plist::Text("tierstore-fs".to_owned()))
-    );
-    let store = plist();
-    for key in ["UserName", "GroupName"] {
-        assert_eq!(text(&job, key), "_tierstore", "{key}");
-        assert_eq!(text(&job, key), text(&store, key), "{key}");
-    }
-    let Some(Plist::Array(words)) = job.get("ProgramArguments") else {
-        panic!("ProgramArguments is an array");
-    };
-    let words: Vec<String> = words
-        .iter()
-        .map(|word| match word {
-            Plist::Text(text) => text.clone(),
-            other => panic!("an argument is {other:?}"),
-        })
-        .collect();
-    assert_eq!(words[0], SERVICE_BINARY);
-    assert_eq!(
-        words[1..],
-        ["fs", "--config", "/usr/local/tierstore/etc/fs.toml"]
-    );
-    assert_eq!(job.get("KeepAlive"), Some(&Plist::Bool(true)));
-    assert_eq!(job.get("RunAtLoad"), Some(&Plist::Bool(true)));
-    assert_eq!(job.get("ExitTimeOut"), Some(&Plist::Integer(150)));
-    assert!(!job.contains_key("AbandonProcessGroup"));
-    for key in job.keys() {
-        assert!(!key.contains("Environment"), "{key}");
-    }
-    let scratch = tierstore_testkit::dir::TestDir::under(std::env::temp_dir(), "tfs-plist");
-    let out = std::process::Command::new(env!("CARGO_BIN_EXE_tierstore"))
-        .args(["fs", "--config"])
-        .arg(scratch.path().join("fs.toml"))
-        .output()
-        .expect("the binary runs");
-    assert_eq!(out.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&out.stderr).contains("fs.toml"));
 }
 
 /// The template the deb and rpm packages install.
@@ -920,15 +867,15 @@ fn exit_timeout(file: &str) -> Duration {
 }
 
 /// Asserts that the manifest's bounds of `cutover` and `rollback`, the same on both systems, cover
-/// what those steps wait for on a Mac at the longest: the bootout of the file service's job (its
-/// `ExitTimeOut`), the bootout of the main job (its `ExitTimeOut`, 210 s), and the hook's looks
-/// for the release to serve and its probe. It would catch an `ExitTimeOut` raised past what the
-/// bound leaves room for, after which hostkeeper would kill a step that launchd and the hook were
-/// still within.
+/// what those steps wait for on a Mac at the longest, a restart (`mode = "restart"`, the one
+/// process of a Mac whose release cannot hand over): the bootout of the one job (its `ExitTimeOut`,
+/// 210 s) and the hook's looks for the release to serve and its probe. It would catch an
+/// `ExitTimeOut` raised past what the bound leaves room for, after which hostkeeper would kill a
+/// step that launchd and the hook were still within.
 #[test]
-fn the_manifests_cutover_and_rollback_cover_both_bootouts_and_the_looks() {
+fn the_manifests_cutover_and_rollback_cover_the_bootout_and_the_looks() {
     let looks = POLL_INTERVAL * (READY_ATTEMPTS + PROBE_ATTEMPTS);
-    let longest = exit_timeout("tierstore-fs.plist") + exit_timeout("tierstore.plist") + looks;
+    let longest = exit_timeout("tierstore.plist") + looks;
     let bounds = step_bounds();
     for step in ["cutover", "rollback"] {
         let bound = Duration::from_secs(bounds[step]);
@@ -953,16 +900,17 @@ fn no_unit_or_job_runs_a_program_inside_the_package_directories() {
         assert_eq!(value(&unit, "User"), "tierstore", "{file}");
         assert!(!unit.contains(PACKAGES), "{file}");
     }
-    for file in ["tierstore.plist", "tierstore-fs.plist"] {
-        let job = plist_of(file);
-        let Some(Plist::Array(words)) = job.get("ProgramArguments") else {
-            panic!("{file}: ProgramArguments is an array");
-        };
-        assert_eq!(
-            words.first(),
-            Some(&Plist::Text(SERVICE_BINARY.to_owned())),
-            "{file}"
-        );
-        assert!(!read(file).contains(PACKAGES), "{file}");
-    }
+    let job = plist();
+    let Some(Plist::Array(words)) = job.get("ProgramArguments") else {
+        panic!("tierstore.plist: ProgramArguments is an array");
+    };
+    assert_eq!(
+        words.first(),
+        Some(&Plist::Text(SERVICE_BINARY.to_owned())),
+        "tierstore.plist"
+    );
+    assert!(
+        !read("tierstore.plist").contains(PACKAGES),
+        "tierstore.plist"
+    );
 }

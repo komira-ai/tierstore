@@ -1,5 +1,12 @@
 # The tsfuse kernel conformance suite
 
+Status: **built, except the io_uring half of item 7 and the privileged farm environment.** Items 1
+to 6 and 8 to 11 each have the tests the table names (komira-ai/tierstore#391 and the earlier tsfuse
+pull requests), and the `/dev/fuse` half of item 7 has two. The io_uring half of item 7 is not
+built: `Session::resume` refuses a connection granted io_uring, and the test for it (a server
+killed under load on io_uring) is open as komira-ai/tierstore#552. The privileged farm environment (row T-ENV) is not in
+this repository; until it exists, the targets are run on a farm node by hand.
+
 Row T-F7 of `docs/design/fetch-cache-serve.md`: the kernel conformance suite of 5.2 ("Kernel
 conformance tests, on a farm node", items 1 to 11). This page says which test proves each item,
 and which parts wait for which task. The suite is the integration targets of `crates/tsfuse`
@@ -42,8 +49,8 @@ The io_uring halves of items 3 and 4 are in `kernel_uring_integration` (T-F5), w
 `fuse.enable_uring` is on: a READ answered by a commit, a parked READ completed from another
 thread, and a killed caller's INTERRUPT arriving on the `/dev/fuse` reader and answered by a
 commit of the READ's entry. The io_uring half of item 7 (a ring request is not resent;
-`ECANCELED` for a request caught mid-dispatch, K14) is still to run: `Session::resume` refuses a
-connection granted io_uring.
+`ECANCELED` for a request caught mid-dispatch, K14) is still to run (komira-ai/tierstore#552):
+`Session::resume` refuses a connection granted io_uring.
 
 ## What the kernel does that the suite asserts
 

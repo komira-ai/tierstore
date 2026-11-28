@@ -1,5 +1,5 @@
 //! The mapped tree lists of a mount over the node's real tree store: a placement whose tree is an
-//! image, made by the store, and the mount's tree of it, over the fill socket and in process.
+//! image, made by the store, and the mount's tree of it, called in process.
 
 use std::sync::Arc;
 
@@ -9,7 +9,7 @@ use crate::TreeDigest;
 use crate::server::local_cache::trees::testing::fs_at;
 use crate::server::local_cache::trees::{Created, Mapped};
 use crate::server::treefs::ino;
-use crate::server::treefs::live_testing::{Live, Over, over_both};
+use crate::server::treefs::live_testing::Live;
 use crate::server::treefs::testing::TREE_IDLE;
 use crate::tree_image_list::in_pages;
 
@@ -37,13 +37,11 @@ fn mapped_by_core(core: &Core, placement: &str, tree: &TreeDigest) -> (Mapped, b
     (core.lists.mapped.mapped(), Arc::ptr_eq(list, &ours))
 }
 
-over_both!(the_store_and_the_fs_share_one_mapping_of_a_list_and_it_is_budgeted_once);
 /// Asserts that the store maps the list it makes from its image file; that the mount of the same
-/// process reads that very mapping, so the process maps the list once and counts its pages once;
-/// and that a mount of its own process (over the fill socket) maps the file itself, once, in its
-/// own budget.
-async fn the_store_and_the_fs_share_one_mapping_of_a_list_and_it_is_budgeted_once(over: Over) {
-    let live = Live::over("tfs-lists-shared", over).await;
+/// process reads that very mapping, so the process maps the list once and counts its pages once.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_store_and_the_fs_share_one_mapping_of_a_list_and_it_is_budgeted_once() {
+    let live = Live::new("tfs-lists-shared").await;
     let created = placed(&live);
     let store = Arc::clone(live.bench.store.lists());
     let page = in_pages(live.bench.image_bytes().len() as u64);
@@ -64,17 +62,17 @@ async fn the_store_and_the_fs_share_one_mapping_of_a_list_and_it_is_budgeted_onc
     assert_eq!(core_mapped, one);
     assert_eq!(store.mapped(), one);
     let shared = live.core.lists.mapped.get(&created.tree).unwrap();
-    assert_eq!(Arc::ptr_eq(&shared, &kept), over == Over::InProcess);
+    assert!(Arc::ptr_eq(&shared, &kept));
     assert!(same);
 }
 
-over_both!(an_image_the_store_drops_while_a_request_holds_it_is_still_read);
 /// Asserts that a list whose tree the store drops, and whose directory it removes, while a request
 /// of the mount still holds the tree (after the sweep for idle trees ended its attachment and gave
 /// the hold back) is still read through the mapping: removing the image file never changes what is
 /// mapped of it, and nothing cuts an image short. The mapping is released with the request.
-async fn an_image_the_store_drops_while_a_request_holds_it_is_still_read(over: Over) {
-    let live = Live::over("tfs-lists-dropped", over).await;
+#[tokio::test(flavor = "multi_thread")]
+async fn an_image_the_store_drops_while_a_request_holds_it_is_still_read() {
+    let live = Live::new("tfs-lists-dropped").await;
     let created = placed(&live);
     let key = key_of(&created.placement.to_string(), "img").unwrap();
     let request = live

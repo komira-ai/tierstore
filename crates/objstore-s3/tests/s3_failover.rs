@@ -44,6 +44,7 @@ fn tuning(attempts: u32) -> S3Tuning {
     S3Tuning {
         endpoint_attempts: attempts,
         read_retries: 0,
+        cut_put_look_after: Duration::ZERO,
         ..S3Tuning::default()
     }
 }
@@ -218,7 +219,8 @@ async fn an_answer_of_5xx_is_not_sent_again() {
 
 /// Asserts that a read whose answer is cut inside its body is not sent again, and that a
 /// create-only PUT and a streamed create-only PUT read by a server that closes the connection
-/// without an answer are each sent once: the server saw one request, the other endpoint none.
+/// without an answer are each sent once: the server saw one request, the other endpoint none but
+/// the HEAD that looks at the key after the streamed PUT.
 #[tokio::test]
 async fn a_request_that_reached_a_server_is_not_sent_again() {
     let cut: &'static [u8] = b"HTTP/1.1 206 Partial Content\r\ncontent-length: 100\r\n\
@@ -252,7 +254,12 @@ async fn a_request_that_reached_a_server_is_not_sent_again() {
     let err = s.put_stream(&key(2), 4, body.boxed()).await.unwrap_err();
     assert!(matches!(err, ObjectStoreError::Transport(_)), "{err}");
     assert_eq!(count.load(Ordering::SeqCst), 1, "streamed put");
-    assert!(fake.requests().is_empty());
+    // The PUT got no answer, so the store looks at the key once (`s3/cut_put.rs`): that HEAD is
+    // the next request, and goes to the next endpoint; the PUT itself is not sent there.
+    s.cleanups_idle().await;
+    let seen = fake.requests();
+    assert_eq!(seen.len(), 1, "{seen:?}");
+    assert!(seen[0].starts_with("HEAD "), "{seen:?}");
 }
 
 /// Asserts that a streamed PUT whose first endpoint refuses the connection is sent whole to the

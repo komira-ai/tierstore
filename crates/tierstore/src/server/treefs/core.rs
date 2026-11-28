@@ -36,12 +36,12 @@ use crate::Clock;
 
 use crate::tree_manifest::{EntryKind, TreeDigest, TreeEntry};
 
-use super::attach::{Attachments, Failure, Snapshot, is_run};
+use super::attach::{Attachments, Snapshot};
 #[cfg(any(target_os = "linux", test))]
 use super::backing::{Adopted, Guard};
-use super::fills::Fills;
 #[cfg(any(target_os = "linux", test))]
 use super::handle;
+use super::in_process::InProcess;
 use super::ino;
 use super::locked;
 #[cfg(target_os = "linux")]
@@ -220,10 +220,10 @@ pub(super) struct Settings {
 /// The core.
 pub(in crate::server) struct Core {
     settings: Settings,
-    fills: Arc<dyn Fills>,
+    fills: Arc<InProcess>,
     table: TreeTable,
     /// The attachments, for short looks and changes: never held across a write of the attachments
-    /// file or a round trip on the fill socket.
+    /// file or a call of the cache.
     state: Mutex<State>,
     /// The trees in memory, read with no lock (`core/loaded.rs`).
     trees: Trees,
@@ -232,7 +232,7 @@ pub(in crate::server) struct Core {
     /// Held by an attach, a restore and a detach for the work that changes the table of tree
     /// numbers or the attachments (and their file), and by a lookup that attaches a tree: so that
     /// `Core::hold` waits for that work and none starts after it, and two of them never write the
-    /// attachments file at once. Not held across a round trip on the fill socket, nor while a
+    /// attachments file at once. Not held across a call of the cache, nor while a
     /// manifest is read, but by the restore at a start, before any request is served.
     lifecycle: Mutex<()>,
     /// The locks of the pins and unpins of the trees (`core/pins.rs`): a pin is never made after the
@@ -249,7 +249,7 @@ pub(in crate::server) struct Core {
     /// Whether a successor is taking over: no attach or detach is done, so that this process
     /// writes neither the table of tree numbers nor the attachments file (`Core::hold`).
     held: AtomicBool,
-    /// Whether the fill socket is still to be told the mount's pins and placements, or is being
+    /// Whether the node's cache is still to be told the mount's pins and placements, or is being
     /// told them (`core/live.rs`).
     live: live::Announcement,
     /// The trees a thread is filling now for an attach that asked for `prefetch = "all"`, each
@@ -278,6 +278,8 @@ pub(in crate::server) struct Core {
     open_files: blob::OpenFiles,
     /// How long the opens took, and how many wait now (`core/opens.rs`): shared with their timings.
     opens: Arc<opens::OpenTimes>,
+    /// How long the requests of the frontend took, by kind (`core/requests.rs`).
+    requests: requests::RequestTimes,
     /// The lines said about the requests that failed, and the counts not said (`core/said.rs`).
     lines: said::Lines,
     /// What the trees in memory held at the last line that said it (`Core::say_memory`).
@@ -308,13 +310,16 @@ pub(super) struct Hooks {
     pub(super) saving: Mutex<Option<Hook>>,
     /// After a tree is marked as removed and before it is taken out of the map.
     pub(super) marked: Mutex<Option<Hook>>,
+    /// In a read of a tree from its manifests, after its entries are made of them and before the
+    /// read ends (`core/placed.rs`).
+    pub(super) flattened: Mutex<Option<Hook>>,
 }
 
 impl Core {
     /// A core with no tree attached, whose attachments are kept in `runtime_dir`.
     pub(super) fn new(
         settings: Settings,
-        fills: Arc<dyn Fills>,
+        fills: Arc<InProcess>,
         table: TreeTable,
         runtime_dir: &Path,
     ) -> Self {
@@ -347,6 +352,7 @@ impl Core {
             next_handle: AtomicU64::new(1),
             open_files: blob::OpenFiles::new(),
             opens: Arc::default(),
+            requests: requests::RequestTimes::default(),
             lines: said::Lines::default(),
             memory_said: Mutex::new(None),
             #[cfg(test)]
@@ -442,71 +448,6 @@ impl Core {
         self.settings.clock.now()
     }
 
-    /// Makes `run` use the tree `digest` (sixty-four hex digits): reads and flattens it, records
-    /// the attachment, and gives the path the job is to be given.
-    ///
-    /// # Errors
-    /// [`AttachError`]: why nothing was attached.
-    pub(super) fn attach(
-        self: &Arc<Self>,
-        digest: &str,
-        run: &str,
-    ) -> Result<PathBuf, AttachError> {
-        self.attach_asking(digest, run, false)
-    }
-
-    /// [`Core::attach`], and, with `prefetch` (`prefetch = "all"`), every blob of the tree is
-    /// filled in the background, in manifest order, without delaying the answer.
-    pub(super) fn attach_asking(
-        self: &Arc<Self>,
-        digest: &str,
-        run: &str,
-        prefetch: bool,
-    ) -> Result<PathBuf, AttachError> {
-        let digest = TreeDigest::from_hex(digest)
-            .filter(|digest| placed::placement_of(digest).is_none())
-            .ok_or(AttachError::Digest)?;
-        if !is_run(run) {
-            return Err(AttachError::Run);
-        }
-        if self.is_held() {
-            return Err(AttachError::Replaced);
-        }
-        // Read before the lifecycle lock, as a lookup that attaches a tree reads it: a slow fill
-        // holds up no attach, no detach and no lookup.
-        let tree = self
-            .read_ahead(&digest, &fetched::Fetched::default())
-            .map_err(|why| AttachError::Tree(why.to_string()))?;
-        let _lifecycle = locked(&self.lifecycle);
-        if self.is_held() {
-            return Err(AttachError::Replaced);
-        }
-        let number = self.table.number_of(&digest)?;
-        if let Some(tree) = tree {
-            let _ = self.keep(number, digest, tree);
-            let _ = self.read_done(number);
-        }
-        let (added, snapshot) = {
-            let mut state = self.state();
-            let added = state.attachments.add(run, number, digest);
-            (added, state.attachments.snapshot())
-        };
-        if let Err(error) = self.write_attachments(&snapshot) {
-            if added {
-                self.state().attachments.remove_one(run, number);
-            }
-            return Err(error.into());
-        }
-        if prefetch {
-            self.start_prefetch(number);
-        }
-        Ok(self
-            .settings
-            .mountpoint
-            .join("trees")
-            .join(digest.to_string()))
-    }
-
     /// The tree `number` in memory, read if it is not.
     fn load_unless_loaded(
         &self,
@@ -520,45 +461,9 @@ impl Core {
             .map_err(|why| AttachError::Tree(why.to_string()))
     }
 
-    /// Ends every attachment of `run`: the failures its attachments recorded, or none if it
-    /// attached nothing. A tree no run has now and no lookup attached is unpinned, with no lock of
-    /// the core's held but that of its pins (`Core::free_tree`), and leaves memory when the kernel
-    /// forgets its inodes, or at the sweep once no request has named it for `fs.tree_idle_secs`.
-    pub(super) fn detach(&self, run: &str) -> Option<Vec<Failure>> {
-        let (freed, failures, _freeing) = {
-            let _lifecycle = locked(&self.lifecycle);
-            if self.is_held() {
-                return None;
-            }
-            let freeing = self.freeing();
-            let (freed, failures, snapshot) = {
-                let mut state = self.state();
-                let trees = state.attachments.remove(run)?;
-                let mut failures = Vec::new();
-                let mut freed = Vec::new();
-                for (number, digest, mut failed) in trees {
-                    failures.append(&mut failed);
-                    if !state.attachments.is_attached(number) {
-                        freed.push((number, digest));
-                    }
-                }
-                (freed, failures, state.attachments.snapshot())
-            };
-            let _ = self.write_attachments(&snapshot);
-            for (number, _) in &freed {
-                let _ = locked(&self.prefetching).remove(number);
-            }
-            (freed, failures, freeing)
-        };
-        for (number, digest) in freed {
-            self.free_tree(number, &digest);
-        }
-        Some(failures)
-    }
-
     /// Unpins the tree `number`, `digest`, which a detach has found that nothing attaches, and
     /// takes it out of memory if the kernel holds none of its inodes. The caller has released
-    /// the lifecycle lock: the round trip to the cache holds only the lock of the tree's pins
+    /// the lifecycle lock: the call of the cache holds only the lock of the tree's pins
     /// (`core/pins.rs`), and a tree that was attached again since the caller decided is left as
     /// it is, pinned.
     pub(super) fn free_tree(&self, number: u64, digest: &TreeDigest) {
@@ -578,14 +483,14 @@ impl Core {
     /// Stops this process from changing the table of tree numbers and the attachments file
     /// (`on`), or lets it do so again. A successor that takes over reads both once it has taken
     /// the sockets, and this process must have written its last by then: the call waits for the
-    /// attach or detach that is changing them, and for the unpins of the detaches decided
-    /// before it, and every later one is refused (`AttachError::Replaced`, and, for a detach, an
-    /// answer of none; ask `Core::is_held`). A hold also waits, with the lifecycle lock released,
-    /// for the announcement of the mount's pins that is being sent, and none is sent after it
-    /// (`core/live.rs`).
+    /// attach or detach that is changing them, writes the runs' stall (`Core::hand_stall_over`),
+    /// waits for the unpins of the detaches decided before it, and every later one is refused
+    /// (`AttachError::Replaced`; for a detach, none: ask `Core::is_held`). It also waits, the
+    /// lifecycle lock released, for the mount's pins being announced (`core/live.rs`); none after.
     pub(super) fn hold(&self, on: bool) {
         {
             let _lifecycle = locked(&self.lifecycle);
+            self.hand_stall_over(on);
             self.held.store(on, Ordering::SeqCst);
             // The unpins of the detaches decided before, which run with the lifecycle lock
             // released.
@@ -640,12 +545,12 @@ impl Core {
 
     /// Looks up `name` in the directory `parent`. A digest in `trees/` that no run has attached is
     /// attached by the lookup (`Core::resolve`); a name in the root or in a directory above the fs
-    /// locations is asked of the node's tree store over the fill socket (`Core::lookup_placed`).
+    /// locations is asked of the node's tree store from the node's cache (`Core::lookup_placed`).
     ///
     /// # Errors
     /// [`Errno::NoEnt`] for a name the namespace does not have (a digest of a tree the upstream
     /// does not have, a path that is no location and above none), [`Errno::NotDir`] for a parent
-    /// that is not a directory, [`Errno::Io`] for a tree that cannot be read or a fill socket that
+    /// that is not a directory, [`Errno::Io`] for a tree that cannot be read or a node's cache that
     /// does not answer.
     pub(super) fn lookup(&self, parent: u64, name: &str) -> Result<Looked, Errno> {
         let (number, index) = ino::split(parent);
@@ -978,7 +883,9 @@ mod pins;
 mod placed;
 mod prefetch;
 mod read;
+mod requests;
 mod restore;
+mod runs;
 mod said;
 
 pub(super) use implicit::look_every;

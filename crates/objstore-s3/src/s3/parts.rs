@@ -206,7 +206,8 @@ impl S3Store {
         ];
         let resp = (self.conn)
             .send_streamed(key, &query, Vec::new(), len, body)
-            .await?;
+            .await
+            .map_err(|failed| failed.error)?;
         if resp.status() != StatusCode::OK {
             return Err(self.conn.within(failure(resp)).await?);
         }
@@ -293,7 +294,8 @@ impl Conn {
     /// The request is cut short, as `Stalled`, when it makes no progress for `request_timeout`
     /// (see the module docs). A send that fails to connect is made again to the next endpoint,
     /// with the same source and no copy of it (see [`Conn::watched`]); any other failure ends
-    /// the request, since the source may have been read.
+    /// the request, since the source may have been read. The failure says whether the store
+    /// never saw the request ([`Failed::unsent`]).
     pub(super) async fn send_streamed(
         &self,
         key: &ObjectKey,
@@ -301,14 +303,15 @@ impl Conn {
         headers: Vec<(&'static str, String)>,
         len: u64,
         source: BodyStream,
-    ) -> Result<Response, ObjectStoreError> {
+    ) -> Result<Response, Failed> {
         let source = Arc::new(Mutex::new(source.fuse()));
-        self.failing_over(|keys| {
+        self.failing_over_marked(false, |keys, target| {
             let pulse = Arc::new(Pulse::default());
             let body = Streamed::sharing(Arc::clone(&source), len, Arc::clone(&pulse));
             let request = self
                 .signed_payload(
                     &keys,
+                    target,
                     Method::PUT,
                     Some(key),
                     query,
@@ -344,13 +347,17 @@ impl Conn {
                     return Err(Failed {
                         error: caused_by(&pulse, e),
                         unsent,
+                        stalled: false,
                     });
                 }
                 Err(_) if pulse.moved(&mut seen) => {}
                 Err(_) => {
+                    // Not a stall of the endpoint: a body that makes no progress may be a
+                    // source that gives nothing, which says nothing of the store.
                     return Err(Failed {
                         error: ObjectStoreError::Transport(Arc::new(Stalled)),
                         unsent: false,
+                        stalled: false,
                     });
                 }
             }

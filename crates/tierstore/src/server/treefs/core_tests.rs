@@ -1,16 +1,25 @@
-//! The core against a fake fill socket and the sample tree: attach and detach, the namespace, the
-//! lookups, listings and opens below a tree's root, the failures an open records, and the tree
-//! leaving memory when nothing holds it.
+//! The core over the node's cache, in process, and the sample tree: attach and detach, the
+//! namespace, the lookups, listings and opens below a tree's root, the failures an open records,
+//! and the tree leaving memory when nothing holds it.
 
-use std::os::unix::fs::MetadataExt as _;
+use std::fs::File;
+use std::io;
+use std::path::Path;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
-use super::{AttachError, Attr, Core, DirItem, Entry, Errno, Failure, Kind, Looked, TREE_TTL};
+use super::{AttachError, Attr, Core, DirItem, Entry, Errno, Kind, Looked, TREE_TTL};
+use crate::Backend as _;
+use crate::server::local_cache::Blob;
+use crate::server::treefs::attach::{Detached, Failure};
 use crate::server::treefs::ino;
+use crate::server::treefs::table::TreeTable;
 use crate::server::treefs::testing::{
-    Built, Logged, OWNER, Rig, file, logged, open_cached, sample, sha, until,
+    Built, Logged, OWNER, Rig, file, logged, open_cached, sample, sha,
 };
+
+#[path = "core_pins_tests.rs"]
+mod pins;
 
 const RUN: &str = "run-1";
 
@@ -54,7 +63,77 @@ fn blob_of(rig: &Rig, content_len: usize) -> String {
         .unwrap()
 }
 
-/// Asserts that an attach reads the manifests of the tree through the fill socket, once each, and
+/// The digest of the blob of `content_len` bytes, and where the upstream's pack holds it, if it
+/// is packed.
+fn blob_at(rig: &Rig, content_len: usize) -> (String, Option<u64>) {
+    let sha = blob_of(rig, content_len);
+    let at = rig
+        .upstream
+        .built
+        .lock()
+        .unwrap()
+        .offsets
+        .get(&sha)
+        .copied();
+    (sha, at)
+}
+
+/// Puts the blob `sha` of the sample tree in the node's cache, as a fill of it does.
+fn fill_blob(rig: &Rig, sha: &str) {
+    let (size, at) = {
+        let built = rig.upstream.built.lock().unwrap();
+        (
+            built.blobs[sha].len() as u64,
+            built.offsets.get(sha).copied(),
+        )
+    };
+    let from = at.map_or_else(|| format!("cas/l/{sha}"), |_| "packs/one".to_owned());
+    let blob = Blob {
+        sha256: sha,
+        size,
+        from: &from,
+        offset: at.unwrap_or(0),
+    };
+    rig.work
+        .handle()
+        .block_on(rig.node.fill_blob(&blob))
+        .unwrap();
+}
+
+/// Takes the manifests out of the upstream, as an object store that has lost them.
+fn forget_manifests(rig: &Rig) {
+    let digests: Vec<String> = {
+        let mut built = rig.upstream.built.lock().unwrap();
+        built.manifests.drain().map(|(digest, _)| digest).collect()
+    };
+    for digest in digests {
+        let _ = rig
+            .work
+            .handle()
+            .block_on(rig.upstream.delete(&format!("cas/l/{digest}")));
+    }
+}
+
+/// A core of the rig's mount with its own table of tree numbers, whose cache files open with
+/// `open`.
+fn core_opening(
+    rig: &Rig,
+    open: impl Fn(&Path) -> io::Result<File> + Send + Sync + 'static,
+) -> Arc<Core> {
+    let runtime = rig.dir.path().join("run-opening");
+    std::fs::create_dir_all(&runtime).unwrap();
+    Arc::new(
+        Core::new(
+            rig.core.settings().clone(),
+            rig.asks(),
+            TreeTable::create(&runtime).unwrap(),
+            &runtime,
+        )
+        .opening(Box::new(open)),
+    )
+}
+
+/// Asserts that an attach reads the manifests of the tree through the node's cache, once each, and
 /// answers the path of the tree below the mount; that a second run attaching it reads nothing
 /// more; and that the tree is numbered 1 and its root's inode number is derived from it.
 #[test]
@@ -335,7 +414,7 @@ fn a_listing_has_the_dots_then_the_children_and_resumes_from_a_position() {
     assert_eq!(core.opendir(root_ino()), Ok(()));
 }
 
-/// Asserts an open: the blob is filled through the socket from its source, or from the object
+/// Asserts an open: the blob is filled through the cache from its source, or from the object
 /// `cas/l/<sha256>` where the manifest names none; the file reads back whole and in parts; a read
 /// at the end gives fewer bytes and past it none; a file of no bytes opens with no fill; and a
 /// release closes the file.
@@ -346,10 +425,10 @@ fn an_open_fills_the_blob_and_reads_its_bytes() {
     let built = rig.upstream.built.lock().unwrap().blobs.clone();
     let big = built[&blob_of(&rig, 300_000)].clone();
     let fh = open_cached(core, ino::of(1, 1), false).unwrap();
-    let blob = blob_of(&rig, 300_000);
+    let (blob, at) = blob_at(&rig, 300_000);
     assert_eq!(
         rig.upstream.asked("fill").last().unwrap(),
-        &format!("fill {blob} 300000 from packs/one @ 4096")
+        &format!("fill {blob} 300000 from packs/one @ {}", at.unwrap())
     );
     assert_eq!(core.read(fh, 0, 300_000).unwrap(), big);
     assert_eq!(core.read(fh, 1000, 5).unwrap(), big[1000..1005]);
@@ -378,31 +457,24 @@ fn an_open_fills_the_blob_and_reads_its_bytes() {
 }
 
 /// Asserts that a blob already in the cache is not asked for again, by this open or the next, and
-/// that it is pinned for the tree, and touched, once however many times it is opened, and again for
-/// another blob.
+/// that it is pinned in the cache for the tree once however many times it is opened (the core asks
+/// for the pin once: the cache's pinned bytes are the blob's, and the core's lock of the tree's pins
+/// is asked for once), and again for another blob.
 #[test]
 fn a_blob_in_the_cache_is_not_filled_again_and_is_pinned_once_per_tree() {
     let rig = attached("tfs-core-pin");
     let core = &rig.core;
-    let root = rig.upstream.built.lock().unwrap().root.clone();
-    let cc = blob_of(&rig, 3000);
     let fills = |rig: &Rig| rig.upstream.asked("fill").len();
+    assert_eq!(rig.node.pinned_bytes(), 0);
     let first = open_cached(core, ino::of(1, 3), false).unwrap();
     let after_first = fills(&rig);
     let second = open_cached(core, ino::of(1, 3), false).unwrap();
     assert_eq!(fills(&rig), after_first);
-    assert_eq!(
-        rig.upstream.asked("pin"),
-        [format!("pin mount-1 {root} {cc}")]
-    );
-    assert_eq!(rig.upstream.asked("touch"), [format!("touch {cc}")]);
-    let a = blob_of(&rig, 6);
+    assert_eq!(rig.node.pinned_bytes(), 3000);
+    assert_eq!(core.pins.pins_asked(), 1);
     let third = open_cached(core, ino::of(1, 7), false).unwrap();
-    assert_eq!(rig.upstream.asked("pin").len(), 2);
-    assert_eq!(
-        rig.upstream.asked("pin")[1],
-        format!("pin mount-1 {root} {a}")
-    );
+    assert_eq!(rig.node.pinned_bytes(), 3006);
+    assert_eq!(core.pins.pins_asked(), 2);
     for fh in [first, second, third] {
         core.release(fh);
     }
@@ -421,13 +493,14 @@ fn an_open_is_refused_for_writing_and_for_what_is_not_a_file() {
     assert_eq!(open_cached(core, ino::of(1, 99), false), Err(Errno::NoEnt));
     assert_eq!(core.open_files(), 0);
     assert!(rig.upstream.asked("fill").len() == 3);
+    assert_eq!(rig.node.pinned_bytes(), 0);
 }
 
 /// Asserts that a fill that fails fails the open with `EIO`, records the path, the digest and the
 /// words of the failure on every run that has the tree, once for a path however often it is opened,
-/// and gives them at `detach`; that a fill answered `ok` that left no file is a failure whose
-/// reason is `io: ` and what the system says of a file that is not there, and a blob the upstream
-/// does not have is `upstream 404`; and that the file opens once the upstream has it again.
+/// and gives them at `detach`, with nothing pinned; that the cache's words are the record (`mismatch`
+/// for bytes that are not the digest's, `upstream 404` for a blob the upstream does not have); and
+/// that the file opens once the upstream has it again.
 #[test]
 fn a_failed_fill_fails_the_open_and_is_recorded_for_every_run_of_the_tree() {
     let rig = attached("tfs-core-fail");
@@ -435,53 +508,64 @@ fn a_failed_fill_fails_the_open_and_is_recorded_for_every_run_of_the_tree() {
     let root = rig.upstream.built.lock().unwrap().root.clone();
     let _ = core.attach(&root, "run-2").unwrap();
     let cc = blob_of(&rig, 3000);
-    let tool = blob_of(&rig, 10);
     let a = blob_of(&rig, 6);
     let _ = rig
         .upstream
         .failing
         .lock()
         .unwrap()
-        .insert(cc.clone(), "no space".to_owned());
+        .insert(cc.clone(), "mismatch".to_owned());
     let _ = rig
         .upstream
         .failing
         .lock()
         .unwrap()
-        .insert(tool.clone(), "ok".to_owned());
-    let held = rig.upstream.built.lock().unwrap().blobs.remove(&a).unwrap();
+        .insert(a.clone(), "upstream 404".to_owned());
     assert_eq!(open_cached(core, ino::of(1, 3), false), Err(Errno::Io));
     assert_eq!(open_cached(core, ino::of(1, 3), false), Err(Errno::Io));
-    assert_eq!(open_cached(core, ino::of(1, 4), false), Err(Errno::Io));
     assert_eq!(open_cached(core, ino::of(1, 7), false), Err(Errno::Io));
     assert_eq!(core.open_files(), 0);
-    assert!(rig.upstream.asked("pin").is_empty());
+    assert_eq!(rig.node.pinned_bytes(), 0);
     let want = vec![
         Failure {
             path: "/bin/cc".into(),
             digest: cc.clone(),
-            reason: "no space".into(),
-        },
-        Failure {
-            path: "/bin/tool".into(),
-            digest: tool,
-            reason: format!(
-                "io: {}",
-                std::fs::File::open(rig.cache.join("none")).unwrap_err()
-            ),
+            reason: "mismatch".into(),
         },
         Failure {
             path: "/include/a.h".into(),
-            digest: a.clone(),
+            digest: a,
             reason: "upstream 404".into(),
         },
     ];
-    let _ = rig.upstream.built.lock().unwrap().blobs.insert(a, held);
-    assert_eq!(core.detach("run-1").unwrap(), want);
+    assert_eq!(core.detach("run-1").unwrap().failures, want);
     rig.upstream.failing.lock().unwrap().clear();
     assert!(open_cached(core, ino::of(1, 3), false).is_ok());
-    assert_eq!(core.detach("run-2").unwrap(), want);
+    assert_eq!(core.detach("run-2").unwrap().failures, want);
     assert!(core.detach("run-2").is_none());
+}
+
+/// Asserts that a fill the cache answered `ok` that left no file the core can open is a failure of
+/// the open whose reason is `io: ` and what the system says of a file that is not there, recorded
+/// on the tree like any other.
+#[test]
+fn a_fill_that_leaves_no_file_to_open_is_an_io_failure() {
+    let rig = Rig::new("tfs-core-nofile", sample());
+    let root = rig.upstream.built.lock().unwrap().root.clone();
+    let core = core_opening(&rig, |_| Err(io::Error::from_raw_os_error(2)));
+    let _ = core.attach(&root, RUN).unwrap();
+    let tool = blob_of(&rig, 10);
+    assert_eq!(open_cached(&core, ino::of(1, 4), false), Err(Errno::Io));
+    assert_eq!(core.open_files(), 0);
+    let failures = core.detach(RUN).unwrap().failures;
+    assert_eq!(
+        failures,
+        [Failure {
+            path: "/bin/tool".into(),
+            digest: tool,
+            reason: "io: No such file or directory (os error 2)".into(),
+        }]
+    );
 }
 
 /// Asserts that an open file keeps being served after the cache file is removed (evicted), and
@@ -522,23 +606,25 @@ fn a_read_that_the_system_fails_is_an_io_error() {
 }
 
 /// Asserts the detach: a run's failures come back, a tree that another run has stays attached and
-/// pinned, the last run's detach unpins the tree, a run that attached nothing is `None`, and the
-/// attachments file follows.
+/// pinned in the cache, the last run's detach unpins the tree there, a run that attached nothing is
+/// `None`, and the attachments file follows.
 #[test]
 fn a_detach_unpins_a_tree_only_when_its_last_run_goes() {
     let rig = attached("tfs-core-detach");
     let core = &rig.core;
     let root = rig.upstream.built.lock().unwrap().root.clone();
     let _ = core.attach(&root, "run-2").unwrap();
-    assert_eq!(core.detach("run-1"), Some(Vec::new()));
-    assert!(rig.upstream.asked("unpin").is_empty());
+    let open = open_cached(core, ino::of(1, 3), false).unwrap();
+    assert_eq!(rig.node.pinned_bytes(), 3000);
+    assert_eq!(core.detach("run-1"), Some(Detached::default()));
+    assert_eq!(core.pins.unpins_asked(), 0);
+    assert_eq!(rig.node.pinned_bytes(), 3000);
     assert_eq!(core.attachments().len(), 1);
     assert_eq!(core.detach("run-1"), None);
-    assert_eq!(core.detach("run-2"), Some(Vec::new()));
-    assert_eq!(
-        rig.upstream.asked("unpin"),
-        [format!("unpin mount-1 {root}")]
-    );
+    assert_eq!(core.detach("run-2"), Some(Detached::default()));
+    assert_eq!(core.pins.unpins_asked(), 1);
+    assert_eq!(rig.node.pinned_bytes(), 0);
+    core.release(open);
     assert_eq!(
         std::fs::read_to_string(rig.runtime.join("attachments")).unwrap(),
         ""
@@ -565,24 +651,38 @@ fn detach_all_except_ends_the_runs_not_named() {
     assert_eq!(core.detach_all_except(&[]), 1);
 }
 
-/// Asserts that `tell_live` names the trees attached now once each, and none when there are none.
+/// Asserts that `tell_live` names the trees attached now, once each, and none when there are none:
+/// what the cache pins for the mount under any other tree is taken away (a blob the cache holds,
+/// pinned under a tree nothing attaches, is let go), and what the attached tree pins stays; with
+/// nothing attached, every pin of the mount goes.
 #[test]
 fn tell_live_names_the_trees_attached_now() {
     let rig = attached("tfs-core-live");
     let core = &rig.core;
     let root = rig.upstream.built.lock().unwrap().root.clone();
     let _ = core.attach(&root, "run-2").unwrap();
+    let a = blob_of(&rig, 6);
+    fill_blob(&rig, &a);
+    let stale = "cd".repeat(32);
+    let open = open_cached(core, ino::of(1, 3), false).unwrap();
+    assert_eq!(
+        rig.node
+            .pin("mount-1", &stale, std::slice::from_ref(&a))
+            .unwrap()
+            .pinned,
+        1
+    );
+    assert_eq!(rig.node.pinned_bytes(), 3006);
     core.tell_live().unwrap();
+    assert_eq!(rig.node.pinned_bytes(), 3000);
+    core.release(open);
     let _ = core.detach("run-1");
     let _ = core.detach("run-2");
+    assert_eq!(rig.node.pinned_bytes(), 0);
+    assert_eq!(rig.node.pin("mount-1", &stale, &[a]).unwrap().pinned, 1);
+    assert_eq!(rig.node.pinned_bytes(), 6);
     core.tell_live().unwrap();
-    assert_eq!(
-        rig.upstream.asked("pins-live"),
-        [
-            format!("pins-live mount-1 {root}"),
-            "pins-live mount-1 ".to_owned()
-        ]
-    );
+    assert_eq!(rig.node.pinned_bytes(), 0);
 }
 
 /// Asserts that a tree that is not idle stays in memory while the kernel holds an inode of it,
@@ -653,7 +753,7 @@ fn a_tree_that_is_gone_is_no_entry_and_a_table_that_cannot_be_read_is_an_io_erro
     for entry in std::fs::read_dir(&rig.cache).unwrap() {
         let _ = std::fs::remove_dir_all(entry.unwrap().path());
     }
-    rig.upstream.built.lock().unwrap().manifests.clear();
+    forget_manifests(&rig);
     assert_eq!(core.getattr(root_ino()), Err(Errno::NoEnt));
     assert_eq!(core.getattr(ino::of(5, 0)), Err(Errno::NoEnt));
     // A table that cannot be read.
@@ -703,136 +803,54 @@ fn the_path_of_an_entry_is_its_names_from_the_root() {
 }
 
 /// Asserts that a blob pinned for a tree is pinned again when the tree is attached again after its
-/// detach, even though the tree stayed in memory because the kernel held an inode of it. Catches a
-/// pinned set that outlives the unpin.
+/// detach (which unpinned it in the cache), even though the tree stayed in memory because the
+/// kernel held an inode of it. Catches a pinned set that outlives the unpin.
 #[test]
 fn a_tree_attached_again_pins_the_blobs_it_opens_again() {
     let rig = attached("tfs-core-repin");
     let core = &rig.core;
     let root = rig.upstream.built.lock().unwrap().root.clone();
-    let cc = blob_of(&rig, 3000);
     let _ = found(core, ino::TREES, &root);
     let first = open_cached(core, ino::of(1, 3), false).unwrap();
+    assert_eq!(rig.node.pinned_bytes(), 3000);
     assert!(core.detach(RUN).is_some());
     assert_eq!(core.trees_in_memory(), 1);
+    assert_eq!(rig.node.pinned_bytes(), 0);
     let _ = core.attach(&root, "run-2").unwrap();
     let second = open_cached(core, ino::of(1, 3), false).unwrap();
-    assert_eq!(
-        rig.upstream.asked("pin"),
-        vec![format!("pin mount-1 {root} {cc}"); 2]
-    );
+    assert_eq!(rig.node.pinned_bytes(), 3000);
+    assert_eq!(core.pins.pins_asked(), 2);
     core.release(first);
     core.release(second);
 }
 
-/// Asserts that a pin the cache refuses is not recorded as done: the next open of the blob asks
-/// again, and once an answer is `ok` it asks no more.
+/// Asserts that a pin the cache refuses is not recorded as done: a core whose mount id is the one
+/// the cache's holds pin under (`hold`, which no mount may name) has every pin refused, the opens
+/// still succeed, and each open of the blob asks again, where one the cache accepts is asked once
+/// (`a_blob_in_the_cache_is_not_filled_again_and_is_pinned_once_per_tree`).
 #[test]
 fn a_refused_pin_is_asked_again_by_the_next_open() {
-    let rig = attached("tfs-core-pin-refused");
-    let core = &rig.core;
-    *rig.upstream.pin_answer.lock().unwrap() = Some("busy".to_owned());
-    let first = open_cached(core, ino::of(1, 3), false).unwrap();
-    *rig.upstream.pin_answer.lock().unwrap() = None;
-    let second = open_cached(core, ino::of(1, 3), false).unwrap();
-    let third = open_cached(core, ino::of(1, 3), false).unwrap();
-    assert_eq!(rig.upstream.asked("pin").len(), 2);
+    let rig = Rig::new("tfs-core-pin-refused", sample());
+    let root = rig.upstream.built.lock().unwrap().root.clone();
+    let runtime = rig.dir.path().join("run-refused");
+    std::fs::create_dir_all(&runtime).unwrap();
+    let mut settings = rig.core.settings().clone();
+    settings.mount_id = "hold".to_owned();
+    let core = Arc::new(Core::new(
+        settings,
+        rig.asks(),
+        TreeTable::create(&runtime).unwrap(),
+        &runtime,
+    ));
+    let _ = core.attach(&root, RUN).unwrap();
+    let first = open_cached(&core, ino::of(1, 3), false).unwrap();
+    let second = open_cached(&core, ino::of(1, 3), false).unwrap();
+    let third = open_cached(&core, ino::of(1, 3), false).unwrap();
+    assert_eq!(core.pins.pins_asked(), 3);
+    assert_eq!(rig.node.pinned_bytes(), 0);
     for fh in [first, second, third] {
         core.release(fh);
     }
-}
-
-/// Asserts that the first opens of two blobs of an attached tree have their pins in flight on the
-/// fill socket at once, and that a later open of a pinned blob asks nothing while those pins are
-/// still unanswered. Catches pins that hold one lock of the core across their round trip, which
-/// makes every open of the mount wait for each other open's pin in turn.
-#[test]
-fn the_pins_of_two_opens_are_asked_at_once_and_an_open_of_a_pinned_blob_waits_for_neither() {
-    let rig = attached("tfs-core-pins-at-once");
-    let core = &rig.core;
-    let pinned = open_cached(core, ino::of(1, 3), false).unwrap();
-    assert_eq!(rig.upstream.pins_received(), 1);
-    rig.upstream.gate_pins();
-    let opening: Vec<_> = [4, 7]
-        .into_iter()
-        .map(|index| {
-            let core = Arc::clone(core);
-            std::thread::spawn(move || open_cached(&core, ino::of(1, index), false).unwrap())
-        })
-        .collect();
-    until(|| rig.upstream.pins_received() == 3);
-    let again = open_cached(core, ino::of(1, 3), false).unwrap();
-    assert_eq!(rig.upstream.pins_received(), 3);
-    rig.upstream.permit_pins(2);
-    let handles: Vec<u64> = opening
-        .into_iter()
-        .map(|thread| thread.join().unwrap())
-        .collect();
-    assert_eq!(rig.upstream.most_pins(), 2);
-    assert_eq!(rig.upstream.asked("pin").len(), 3);
-    for fh in handles.into_iter().chain([pinned, again]) {
-        core.release(fh);
-    }
-}
-
-/// Every name in the runtime directory of `rig` with its inode and modification time, and the
-/// directory's own modification time: a file written, or replaced by a rename, changes it.
-fn runtime_state(rig: &Rig) -> (Vec<(String, u64, SystemTime)>, SystemTime) {
-    let mut names: Vec<_> = std::fs::read_dir(&rig.runtime)
-        .unwrap()
-        .map(|entry| {
-            let entry = entry.unwrap();
-            let meta = entry.metadata().unwrap();
-            let name = entry.file_name().into_string().unwrap();
-            (name, meta.ino(), meta.modified().unwrap())
-        })
-        .collect();
-    names.sort();
-    let dir = std::fs::metadata(&rig.runtime).unwrap().modified().unwrap();
-    (names, dir)
-}
-
-/// Asserts that the first opens of four different blobs, from four threads, are all inside their
-/// pin at once, past their fill, with none finished (a lock shared by the opens and held to their
-/// end would let one through at a time); and that those opens and their last releases, also from
-/// four threads, write nothing to the runtime directory: no table of opens is rewritten at a first
-/// open or a last release under a lock every open shares.
-#[test]
-fn first_opens_and_last_releases_of_different_blobs_run_at_once_and_write_nothing() {
-    let rig = attached("tfs-core-opens-at-once");
-    let core = &rig.core;
-    let before = runtime_state(&rig);
-    rig.upstream.gate_pins();
-    let blobs = [1, 3, 4, 7];
-    let opening: Vec<_> = blobs
-        .into_iter()
-        .map(|index| {
-            let core = Arc::clone(core);
-            std::thread::spawn(move || open_cached(&core, ino::of(1, index), false).unwrap())
-        })
-        .collect();
-    until(|| rig.upstream.pins_received() == blobs.len());
-    assert_eq!(core.open_files(), 0);
-    rig.upstream.permit_pins(blobs.len());
-    let handles: Vec<u64> = opening
-        .into_iter()
-        .map(|thread| thread.join().unwrap())
-        .collect();
-    assert_eq!(rig.upstream.most_pins(), blobs.len());
-    assert_eq!(core.open_files(), blobs.len());
-    let releasing: Vec<_> = handles
-        .into_iter()
-        .map(|fh| {
-            let core = Arc::clone(core);
-            std::thread::spawn(move || core.release(fh))
-        })
-        .collect();
-    for thread in releasing {
-        thread.join().unwrap();
-    }
-    assert_eq!(core.open_files(), 0);
-    assert_eq!(runtime_state(&rig), before);
-    assert!(!rig.runtime.join("backing").exists());
 }
 
 /// Asserts that an attach whose attachments file cannot be written takes back only the attachment
@@ -946,5 +964,5 @@ fn a_held_core_changes_neither_the_table_nor_the_attachments() {
     assert_eq!(std::fs::read(rig.runtime.join("trees")).unwrap(), table);
     core.hold(false);
     let _ = core.attach(&first, "run-2").unwrap();
-    assert_eq!(core.detach("run-1"), Some(Vec::new()));
+    assert_eq!(core.detach("run-1"), Some(Detached::default()));
 }

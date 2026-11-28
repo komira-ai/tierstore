@@ -1,5 +1,14 @@
 # tsfuse: the kernel behaviour the design assumes, checked on the farm kernel (T-F0)
 
+Status: main has every part of this page that can run on `/dev/fuse`: the raw-protocol harness and
+the five kernel test targets (21 tests; komira-ai/tierstore#385, komira-ai/tierstore#390, komira-ai/tierstore#391), and the design changes
+the page lists. The io_uring transport (komira-ai/tierstore#392) is built, and AGENTS.md R2 grants
+its `unsafe` in `crates/tsfuse/src/uring/sys.rs`, so no exception is waited for. K10 to K14 are
+still read from the kernel's source: a fake kernel (`crates/tsfuse/src/uring/tests/`) covers part of
+them, and `crates/tsfuse/tests/kernel_uring_integration.rs` runs part on a node with
+`fuse.enable_uring=1`, but no node runs it by default. The rest is open against the real kernel:
+komira-ai/tierstore#552, komira-ai/tierstore#553 and komira-ai/tierstore#554.
+
 Row T-F0 of `docs/design/fetch-cache-serve.md` (section 18): every Linux behaviour the design labels
 **[K]** (kernel behaviour from source knowledge, not yet checked), and the kernel facts it states
 without a label in 4.8, 5.1, 5.2 and 5.3, checked against the kernel the build nodes run. Each
@@ -58,12 +67,13 @@ cargo test -p tsfuse --test kernel_dev_integration --test kernel_takeover_integr
   --test kernel_interrupt_integration --test kernel_cache_integration --test kernel_mm_integration
 ```
 
-**Not run, and why.** FUSE over io_uring (K10 to K14) and the `mmap` half of K24 are from the source
-only. `fuse.enable_uring` is `N` on every node and is set at boot only (5.2 item 4), and a ring
-needs `io_uring_setup`, `io_uring_enter`, `io_uring_register` and `mmap`, which are `unsafe` in Rust
-(also through `rustix`); AGENTS.md R2 allows no new `unsafe`. The run of K10 to K14 waits for a node
-booted with `fuse.enable_uring=1` and for a scoped exception to R2, which the io_uring transport
-itself (T-F5) needs as well ("What is left", below).
+**Not run, and why.** FUSE over io_uring (K10 to K14) was not run against the real kernel when this
+page was written, and the verdicts above are from the source only. `fuse.enable_uring` is `N` on
+every node and is set at boot only (5.2 item 4), and a ring needs `io_uring_setup`,
+`io_uring_enter` and `mmap`, which are `unsafe` in Rust (also through `rustix`). AGENTS.md R2 now
+grants that `unsafe`, in `crates/tsfuse/src/uring/sys.rs` and nowhere else, so the run waits only
+for a node booted with `fuse.enable_uring=1` ("What is left", below). The `mmap` half of K24 is run
+on the state memfd of the store (also "What is left").
 
 ## Summary
 
@@ -111,7 +121,7 @@ itself (T-F5) needs as well ("What is left", below).
 | State memfd sealed with `F_SEAL_FUTURE_WRITE` | go | made with `MFD_ALLOW_SEALING \| MFD_NOEXEC_SEAL`, sealed before any other mapping (K24, K25) |
 | DONTNEED on `durable` cells | go (policy (a) stays the default) | from a thread that may block; counts bytes asked for (K26) |
 | Request timeouts | off on every node | `tsfuse` never sends one (K22) |
-| FUSE over io_uring | no-go as the default, not run | not enabled on any node; 88 MiB per mount at depth 1 with `max_pages` 256; no takeover (K10 to K14) |
+| FUSE over io_uring | no-go as the default, not run on the real kernel | not enabled on any node; 88 MiB per mount at depth 1 with `max_pages` 256; no takeover (K10 to K14) |
 
 ## The findings
 
@@ -557,18 +567,48 @@ reads K15 to K17), and the T-F0 row and the "what was not run" notes. The measur
 
 ## What is left
 
-- **The io_uring run (K10 to K14).** It needs a build node booted with `fuse.enable_uring=1` (a
-  drained node and a reboot, by the node's operator) and a scoped exception to AGENTS.md R2 for the
-  ring's `mmap` and `io_uring_*` calls, which the io_uring transport (T-F5) needs in any case. The
-  checks to run then: REGISTER before INIT (`EAGAIN`) and after; the ring carries nothing until every
-  possible CPU's queue has an entry; one failed REGISTER turns io_uring off for the connection; a
-  parked READ holds its entry and requests from that CPU wait behind it; FORGET and INTERRUPT arrive
-  on `/dev/fuse`; a server killed under load (`ECANCELED`, K14). The io_uring transport's own
-  test, `tests/kernel_uring_integration.rs` (T-F5), runs part of this on a node with the parameter
-  on (set for the run, the kernel reads it at INIT, K10): REGISTER after INIT on every possible
-  CPU's queue (88), requests answered by COMMIT_AND_FETCH and read by the queues' threads, a parked
-  READ holding its entry until another thread completes it, and an INTERRUPT arriving on
-  `/dev/fuse` and answered by a commit of the READ's entry. The rest is still to run.
+- **The io_uring run (K10 to K14).** AGENTS.md R2 grants the ring's `unsafe` (`mmap`, `munmap`,
+  `io_uring_setup`, `io_uring_enter` and the views of the mapped rings, all in
+  `crates/tsfuse/src/uring/sys.rs`), so the transport (T-F5, komira-ai/tierstore#392) is built and
+  needs no further exception. What waits is a build node booted with `fuse.enable_uring=1` (a
+  drained node and a reboot, by the node's operator).
+
+  *Covered by a fake kernel* (`crates/tsfuse/src/uring/tests/`, which models REGISTER and
+  COMMIT_AND_FETCH but is not the kernel, so it shows what `tsfuse` does, not what the kernel does):
+  - REGISTER order and buffers: `every_queue_but_the_last_registers_first_then_the_last_with_the_right_buffers`
+    (serve.rs). The memory rule and the INIT flag: `the_registered_memory_is_queues_times_depth_times_header_and_payload`,
+    `the_plan_checks_the_parameter_the_offer_the_cpus_and_the_memory_in_that_order`,
+    `init_asks_for_io_uring_only_when_the_plan_and_the_rings_allow_it` (plan.rs).
+  - One failed REGISTER turns io_uring off and the session serves on `/dev/fuse`:
+    `a_refused_register_before_the_last_queue_leaves_the_session_on_dev_fuse`,
+    `a_refused_register_of_the_last_queue_leaves_the_session_on_dev_fuse`,
+    `a_ring_setup_failure_answers_init_without_io_uring`.
+  - A parked READ holds its entry, and a request for that queue waits:
+    `a_parked_read_holds_its_entry_until_another_thread_completes_it`.
+  - FORGET and INTERRUPT: `a_forget_on_the_ring_is_committed_at_once_and_reaches_only_fs_forget`,
+    and in interrupt.rs
+    `an_interrupt_on_dev_fuse_for_a_ring_request_not_yet_delivered_is_held_and_answers_it_once`,
+    `an_interrupt_of_a_delivered_ring_request_answers_it_eintr_by_a_commit`.
+  - The end of a queue: `a_queue_ends_with_the_kernel_s_end_of_its_entries` (the kernel's end of the
+    entries, `ENOTCONN`, `ECONNABORTED` and `ECANCELED`, read as the end of the reader).
+
+  *Still open against the real kernel:* REGISTER before INIT is `EAGAIN` and after it works; the ring
+  carries nothing until every possible CPU's queue has an entry (the fake dispatches per queue and
+  does not model this); the kernel itself turns io_uring off after one failed REGISTER
+  (komira-ai/tierstore#553); FORGET arrives on `/dev/fuse` and is not delivered on the ring, and
+  requests from the CPU of a parked READ wait behind it (K9, K11; komira-ai/tierstore#554); a server
+  killed under load ends its in-flight requests with `ECANCELED` and resends none (K14;
+  komira-ai/tierstore#552).
+
+  The io_uring transport's own test, `tests/kernel_uring_integration.rs` (T-F5), runs part of this
+  on a node with the parameter on (set for the run, the kernel reads it at INIT, K10; with the
+  parameter off it expects the `/dev/fuse` fallback): REGISTER after INIT on every possible CPU's
+  queue (88), requests answered by COMMIT_AND_FETCH and read by the queues' threads
+  (`a_session_asked_for_io_uring_serves_on_the_transport_the_kernel_allows`), a parked READ held
+  until another thread completes it (`a_parked_read_completed_from_another_thread_reaches_its_caller`),
+  and an INTERRUPT arriving on `/dev/fuse` and answered by a commit of the READ's entry
+  (`a_parked_read_whose_caller_is_killed_is_answered_eintr_once_on_its_own_transport`). The rest is
+  still to run.
 - **The mapping half of K24** needs no exception: it runs on the store's own state memfd in
   `tierstore-entry` (`a_writable_shared_mapping_of_the_passed_state_memfd_fails_with_eperm`, which
   maps through `vm-memory`'s mapping and writes no `unsafe` of its own), and the conformance suite

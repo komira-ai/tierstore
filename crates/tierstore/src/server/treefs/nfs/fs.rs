@@ -7,6 +7,13 @@
 //! open cache files are kept in a sharded cache, and a read that waits longer than
 //! `fs.nfs.jukebox_after` for a fill is answered `NFS3ERR_JUKEBOX`, which has the client ask
 //! again, while the fill goes on.
+//!
+//! Every call of `nfsserve` into the file system is timed from its start to its end, under its
+//! kind (`core/requests.rs`): `lookup`, `getattr`, `access`, `read`, `readdir` (READDIR and
+//! READDIRPLUS both list through it), `readlink`, and `other` for FSINFO and the changes refused.
+//! The attributes the protocol layer reads for a procedure of another kind are calls of their own
+//! (`getattr`). What `nfsserve` answers with no call (NULL, an unknown procedure, a change it
+//! refuses itself on a read-only file system) is not timed.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -26,6 +33,7 @@ use tokio::sync::watch;
 use super::config::NfsSettings;
 use super::fdcache::FdCache;
 use super::handle;
+use crate::server::local_cache::opens::requests::RequestKind;
 use crate::server::treefs::core::{Attr, Core, Errno, FIXED_MTIME, FileBytes, Kind, Looked};
 use crate::server::treefs::{ino, locked};
 
@@ -136,6 +144,32 @@ fn class_bits(attr: &Attr, auth: &auth_unix) -> u16 {
     }
 }
 
+/// The bits of `requested` the user of `auth` is granted on the inode `id` of `core`: the answer
+/// to ACCESS.
+fn granted(
+    core: &Core,
+    id: fileid3,
+    auth: Option<&auth_unix>,
+    requested: u32,
+) -> Result<u32, nfsstat3> {
+    let auth = auth.ok_or(nfsstat3::NFS3ERR_ACCES)?;
+    let attr = core.getattr(id).map_err(handled)?.attr;
+    let bits = class_bits(&attr, auth);
+    let mut granted = 0;
+    // Nobody lists the namespace, whatever its mode says (the core's rule).
+    if bits & 0o4 != 0 && !namespace(id) {
+        granted |= ACCESS3_READ;
+    }
+    if bits & 0o1 != 0 {
+        granted |= match attr.kind {
+            Kind::Dir => ACCESS3_LOOKUP,
+            _ => ACCESS3_EXECUTE,
+        };
+    }
+    // Modify, extend and delete are never granted: the tree is read-only.
+    Ok(granted & requested)
+}
+
 /// The NFS file system of the core.
 pub(super) struct TreeNfs {
     core: Arc<Core>,
@@ -167,8 +201,23 @@ impl TreeNfs {
         }
     }
 
+    /// What `answer` gives, timed from now to its end under `kind` (`core/requests.rs`).
+    fn timed<T>(&self, kind: RequestKind, answer: impl FnOnce() -> T) -> T {
+        let arrival = self.core.request_begins();
+        let answered = answer();
+        self.core.request_ends(arrival, kind);
+        answered
+    }
+
+    /// A change of a tree, refused (`NFS3ERR_ROFS`) and timed as `other`.
+    fn refused<T>(&self) -> Result<T, nfsstat3> {
+        self.timed(RequestKind::Other, || -> Result<T, nfsstat3> {
+            Err(nfsstat3::NFS3ERR_ROFS)
+        })
+    }
+
     /// The core's answer to a lookup of `name` in `dirid`. A lookup in the namespace may read a
-    /// tree that no run has attached through the fill socket (`core/implicit.rs`), or ask it where
+    /// tree that no run has attached through the cache (`core/implicit.rs`), or ask it where
     /// a path is among the placements (`core/placed.rs`), so it runs on a blocking thread, as a
     /// fill for a read does, and holds up no other request.
     async fn looked(&self, dirid: fileid3, name: &str) -> Result<Looked, Errno> {
@@ -179,6 +228,55 @@ impl TreeNfs {
         tokio::task::spawn_blocking(move || core.lookup(dirid, &name))
             .await
             .unwrap_or(Err(Errno::Io))
+    }
+
+    /// The answer to LOOKUP of `filename` in `dirid`.
+    async fn looked_up(&self, dirid: fileid3, filename: &filename3) -> Result<fileid3, nfsstat3> {
+        let Ok(name) = std::str::from_utf8(filename.as_ref()) else {
+            return Err(nfsstat3::NFS3ERR_NOENT);
+        };
+        match name {
+            "." => self
+                .core
+                .getattr(dirid)
+                .map(|entry| entry.attr.ino)
+                .map_err(handled),
+            ".." => self.core.parent(dirid).map_err(handled),
+            _ => match self.looked(dirid, name).await {
+                Ok(Looked::Found(entry)) => Ok(entry.attr.ino),
+                Ok(Looked::Absent(_)) => Err(nfsstat3::NFS3ERR_NOENT),
+                // A name the namespace lacks is a missing name; a directory the core lacks is a
+                // stale handle.
+                Err(Errno::NoEnt) if namespace(dirid) => Err(nfsstat3::NFS3ERR_NOENT),
+                Err(errno) => Err(handled(errno)),
+            },
+        }
+    }
+
+    /// The answer to READ of `count` bytes of `id` from `offset`.
+    async fn read_bytes(
+        &self,
+        id: fileid3,
+        offset: u64,
+        count: u32,
+    ) -> Result<(Vec<u8>, bool), nfsstat3> {
+        let attr = self.core.getattr(id).map_err(handled)?.attr;
+        match attr.kind {
+            Kind::Dir => return Err(nfsstat3::NFS3ERR_ISDIR),
+            Kind::Symlink => return Err(nfsstat3::NFS3ERR_INVAL),
+            Kind::File => {}
+        }
+        let wanted = attr.size.saturating_sub(offset).min(u64::from(count));
+        if wanted == 0 {
+            return Ok((Vec::new(), offset >= attr.size));
+        }
+        let file = self.file(id).await?;
+        // `wanted` is at most `count`, a `u32`.
+        let data = file
+            .read(offset, wanted as usize)
+            .map_err(|error| status(self.core.unreadable(id, offset, &error.to_string())))?;
+        let end = offset + data.len() as u64 >= attr.size;
+        Ok((data, end))
     }
 
     /// The open cache file of the file `id`: the cached descriptor, else the core's, which fills
@@ -263,55 +361,29 @@ impl NFSFileSystem for TreeNfs {
         auth: Option<&auth_unix>,
         requested: u32,
     ) -> Result<u32, nfsstat3> {
-        let auth = auth.ok_or(nfsstat3::NFS3ERR_ACCES)?;
-        let attr = self.core.getattr(id).map_err(handled)?.attr;
-        let bits = class_bits(&attr, auth);
-        let mut granted = 0;
-        // Nobody lists the namespace, whatever its mode says (the core's rule).
-        if bits & 0o4 != 0 && !namespace(id) {
-            granted |= ACCESS3_READ;
-        }
-        if bits & 0o1 != 0 {
-            granted |= match attr.kind {
-                Kind::Dir => ACCESS3_LOOKUP,
-                _ => ACCESS3_EXECUTE,
-            };
-        }
-        // Modify, extend and delete are never granted: the tree is read-only.
-        Ok(granted & requested)
+        self.timed(RequestKind::Access, || {
+            granted(&self.core, id, auth, requested)
+        })
     }
 
     async fn lookup(&self, dirid: fileid3, filename: &filename3) -> Result<fileid3, nfsstat3> {
-        let Ok(name) = std::str::from_utf8(filename.as_ref()) else {
-            return Err(nfsstat3::NFS3ERR_NOENT);
-        };
-        match name {
-            "." => self
-                .core
-                .getattr(dirid)
-                .map(|entry| entry.attr.ino)
-                .map_err(handled),
-            ".." => self.core.parent(dirid).map_err(handled),
-            _ => match self.looked(dirid, name).await {
-                Ok(Looked::Found(entry)) => Ok(entry.attr.ino),
-                Ok(Looked::Absent(_)) => Err(nfsstat3::NFS3ERR_NOENT),
-                // A name the namespace lacks is a missing name; a directory the core lacks is a
-                // stale handle.
-                Err(Errno::NoEnt) if namespace(dirid) => Err(nfsstat3::NFS3ERR_NOENT),
-                Err(errno) => Err(handled(errno)),
-            },
-        }
+        let arrival = self.core.request_begins();
+        let looked = self.looked_up(dirid, filename).await;
+        self.core.request_ends(arrival, RequestKind::Lookup);
+        looked
     }
 
     async fn getattr(&self, id: fileid3) -> Result<fattr3, nfsstat3> {
-        self.core
-            .getattr(id)
-            .map(|entry| fattr(&entry.attr))
-            .map_err(handled)
+        self.timed(RequestKind::Getattr, || {
+            self.core
+                .getattr(id)
+                .map(|entry| fattr(&entry.attr))
+                .map_err(handled)
+        })
     }
 
     async fn setattr(&self, _id: fileid3, _setattr: sattr3) -> Result<fattr3, nfsstat3> {
-        Err(nfsstat3::NFS3ERR_ROFS)
+        self.refused()
     }
 
     async fn read(
@@ -320,27 +392,13 @@ impl NFSFileSystem for TreeNfs {
         offset: u64,
         count: u32,
     ) -> Result<(Vec<u8>, bool), nfsstat3> {
-        let attr = self.core.getattr(id).map_err(handled)?.attr;
-        match attr.kind {
-            Kind::Dir => return Err(nfsstat3::NFS3ERR_ISDIR),
-            Kind::Symlink => return Err(nfsstat3::NFS3ERR_INVAL),
-            Kind::File => {}
-        }
-        let wanted = attr.size.saturating_sub(offset).min(u64::from(count));
-        if wanted == 0 {
-            return Ok((Vec::new(), offset >= attr.size));
-        }
-        let file = self.file(id).await?;
-        // `wanted` is at most `count`, a `u32`.
-        let data = file
-            .read(offset, wanted as usize)
-            .map_err(|error| status(self.core.unreadable(id, offset, &error.to_string())))?;
-        let end = offset + data.len() as u64 >= attr.size;
-        Ok((data, end))
+        let arrival = self.core.request_begins();
+        let read = self.read_bytes(id, offset, count).await;
+        self.core.request_ends(arrival, RequestKind::Read);
+        read
     }
-
     async fn write(&self, _id: fileid3, _offset: u64, _data: &[u8]) -> Result<fattr3, nfsstat3> {
-        Err(nfsstat3::NFS3ERR_ROFS)
+        self.refused()
     }
 
     async fn create(
@@ -349,7 +407,7 @@ impl NFSFileSystem for TreeNfs {
         _filename: &filename3,
         _attr: sattr3,
     ) -> Result<(fileid3, fattr3), nfsstat3> {
-        Err(nfsstat3::NFS3ERR_ROFS)
+        self.refused()
     }
 
     async fn create_exclusive(
@@ -357,7 +415,7 @@ impl NFSFileSystem for TreeNfs {
         _dirid: fileid3,
         _filename: &filename3,
     ) -> Result<fileid3, nfsstat3> {
-        Err(nfsstat3::NFS3ERR_ROFS)
+        self.refused()
     }
 
     async fn mkdir(
@@ -365,11 +423,11 @@ impl NFSFileSystem for TreeNfs {
         _dirid: fileid3,
         _dirname: &filename3,
     ) -> Result<(fileid3, fattr3), nfsstat3> {
-        Err(nfsstat3::NFS3ERR_ROFS)
+        self.refused()
     }
 
     async fn remove(&self, _dirid: fileid3, _filename: &filename3) -> Result<(), nfsstat3> {
-        Err(nfsstat3::NFS3ERR_ROFS)
+        self.refused()
     }
 
     async fn rename(
@@ -379,7 +437,7 @@ impl NFSFileSystem for TreeNfs {
         _to_dirid: fileid3,
         _to_filename: &filename3,
     ) -> Result<(), nfsstat3> {
-        Err(nfsstat3::NFS3ERR_ROFS)
+        self.refused()
     }
 
     async fn readdir(
@@ -388,23 +446,28 @@ impl NFSFileSystem for TreeNfs {
         start_after: fileid3,
         max_entries: usize,
     ) -> Result<ReadDirResult, nfsstat3> {
-        let mut entries = Vec::new();
-        let mut end = true;
-        self.core
-            .readdir_after(dirid, start_after, &mut |item| {
-                if entries.len() >= max_entries.max(1) {
-                    end = false;
-                    return false;
-                }
-                entries.push(DirEntry {
-                    fileid: item.entry.attr.ino,
-                    name: item.name.into_bytes().into(),
-                    attr: fattr(&item.entry.attr),
-                });
-                true
-            })
-            .map_err(handled)?;
-        Ok(ReadDirResult { entries, end })
+        self.timed(
+            RequestKind::Readdir,
+            || -> Result<ReadDirResult, nfsstat3> {
+                let mut entries = Vec::new();
+                let mut end = true;
+                self.core
+                    .readdir_after(dirid, start_after, &mut |item| {
+                        if entries.len() >= max_entries.max(1) {
+                            end = false;
+                            return false;
+                        }
+                        entries.push(DirEntry {
+                            fileid: item.entry.attr.ino,
+                            name: item.name.into_bytes().into(),
+                            attr: fattr(&item.entry.attr),
+                        });
+                        true
+                    })
+                    .map_err(handled)?;
+                Ok(ReadDirResult { entries, end })
+            },
+        )
     }
 
     async fn symlink(
@@ -414,38 +477,42 @@ impl NFSFileSystem for TreeNfs {
         _symlink: &nfspath3,
         _attr: &sattr3,
     ) -> Result<(fileid3, fattr3), nfsstat3> {
-        Err(nfsstat3::NFS3ERR_ROFS)
+        self.refused()
     }
 
     async fn readlink(&self, id: fileid3) -> Result<nfspath3, nfsstat3> {
-        self.core
-            .readlink(id)
-            .map(|target| target.as_bytes().into())
-            .map_err(handled)
+        self.timed(RequestKind::Readlink, || -> Result<nfspath3, nfsstat3> {
+            self.core
+                .readlink(id)
+                .map(|target| target.as_bytes().into())
+                .map_err(handled)
+        })
     }
 
     async fn fsinfo(&self, root_fileid: fileid3) -> Result<fsinfo3, nfsstat3> {
-        let root = self
-            .core
-            .getattr(root_fileid)
-            .map_or(post_op_attr::Void, |entry| {
-                post_op_attr::attributes(fattr(&entry.attr))
-            });
-        Ok(fsinfo3 {
-            obj_attributes: root,
-            rtmax: 1024 * 1024,
-            rtpref: 1024 * 1024,
-            rtmult: 4096,
-            wtmax: 0,
-            wtpref: 0,
-            wtmult: 0,
-            dtpref: 1024 * 1024,
-            maxfilesize: u64::MAX >> 1,
-            time_delta: nfstime3 {
-                seconds: 1,
-                nseconds: 0,
-            },
-            properties: FSF_SYMLINK | FSF_HOMOGENEOUS,
+        self.timed(RequestKind::Other, || -> Result<fsinfo3, nfsstat3> {
+            let root = self
+                .core
+                .getattr(root_fileid)
+                .map_or(post_op_attr::Void, |entry| {
+                    post_op_attr::attributes(fattr(&entry.attr))
+                });
+            Ok(fsinfo3 {
+                obj_attributes: root,
+                rtmax: 1024 * 1024,
+                rtpref: 1024 * 1024,
+                rtmult: 4096,
+                wtmax: 0,
+                wtpref: 0,
+                wtmult: 0,
+                dtpref: 1024 * 1024,
+                maxfilesize: u64::MAX >> 1,
+                time_delta: nfstime3 {
+                    seconds: 1,
+                    nseconds: 0,
+                },
+                properties: FSF_SYMLINK | FSF_HOMOGENEOUS,
+            })
         })
     }
 
@@ -475,3 +542,7 @@ mod tests;
 #[cfg(test)]
 #[path = "opens_tests.rs"]
 mod opens_tests;
+
+#[cfg(test)]
+#[path = "requests_tests.rs"]
+mod requests_tests;

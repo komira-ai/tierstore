@@ -129,6 +129,10 @@ pub(super) struct Shared {
     /// The number of the next staging directory.
     pub staged: AtomicU64,
     pub state: Mutex<State>,
+    /// Held for each read of the directory that replaces `state` ([`TreeStore::refresh`]).
+    ///
+    /// [`TreeStore::refresh`]: super::TreeStore::refresh
+    pub reading: Mutex<()>,
     /// The tree lists in memory, which the mount of this process shares (`mapped.rs`).
     pub lists: Arc<MappedLists>,
 }

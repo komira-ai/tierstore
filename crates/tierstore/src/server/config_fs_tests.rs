@@ -8,6 +8,7 @@ use tierstore_testkit::dir::TestDir;
 
 use super::{Host, not_served, volume_of};
 use crate::server::config::{PerRun, settings_from_text};
+use crate::server::config_interface::NO_FS;
 use crate::server::config_testing::DEFAULTS;
 use crate::server::treefs::{self, FsSettings, builders};
 
@@ -218,10 +219,10 @@ stage_ttl_secs = 1000
 committed_ttl_secs = 70"#;
 
 /// Asserts that an `fs` interface makes the very settings the `[fs]` table of `tierstore fs` makes
-/// of the same keys, with the node's own `local_cache.path` as the cache directory, its
-/// `local_cache.fill_socket` as the fill socket, and `handoff.sock` in the runtime directory as the
-/// hand-over socket of the mount; and that a file with only the needed params gets the `[fs]`
-/// defaults. The put directory is in it on Linux, where it is served.
+/// of the same keys, with the node's own `local_cache.path` as the cache directory and
+/// `handoff.sock` in the runtime directory as the hand-over socket of the mount; and that a file
+/// with only the needed params gets the `[fs]` defaults. The put directory is in it on Linux,
+/// where it is served.
 #[test]
 fn an_fs_interface_makes_the_settings_the_fs_table_made() {
     let put = if cfg!(target_os = "linux") {
@@ -230,12 +231,12 @@ fn an_fs_interface_makes_the_settings_the_fs_table_made() {
         String::new()
     };
     let table = format!(
-        "[fs]\nclient_group = \"builders\"\nowner = \"1000:1001\"\nfill_socket = \"/var/lib/tierstore/fill.sock\"\ncache_path = \"/var/lib/tierstore-cache\"\n{SAME}\n[fs.nfs]\n{SAME_NFS}\n{put}"
+        "[fs]\nclient_group = \"builders\"\nowner = \"1000:1001\"\ncache_path = \"/var/lib/tierstore-cache\"\n{SAME}\n[fs.nfs]\n{SAME_NFS}\n{put}"
     );
     let want = from_fs_table(&table);
     let put = put.replace("[fs.put]", "[interface.params.put]");
     let params = format!("{SAME}\n[interface.params.nfs]\n{SAME_NFS}\n{put}");
-    let node = build_node("", "fill_socket = \"/var/lib/tierstore/fill.sock\"");
+    let node = build_node("", "");
     let got = fs_of(&[s3(), fs(&params)], &node);
     assert_eq!(got, want);
     assert_eq!(got.cache_path, PathBuf::from("/var/lib/tierstore-cache"));
@@ -245,55 +246,23 @@ fn an_fs_interface_makes_the_settings_the_fs_table_made() {
     );
     assert_eq!(got.put.is_some(), cfg!(target_os = "linux"));
 
-    let defaults = from_fs_table(
-        "[fs]\nclient_group = \"builders\"\nowner = \"1000:1001\"\nfill_socket = \"/f.sock\"\ncache_path = \"/var/lib/tierstore-cache\"\n",
+    let want = from_fs_table(
+        "[fs]\nclient_group = \"builders\"\nowner = \"1000:1001\"\ncache_path = \"/var/lib/tierstore-cache\"\n",
     );
     let got = fs_of(&[s3(), fs("")], &build_node("", ""));
-    let want = FsSettings {
-        fill_socket: None,
-        ..defaults
-    };
     assert_eq!(got, want);
 }
 
-/// Asserts that the node's fill socket in its state directory, where `local_cache.fill_socket` is
-/// left out, is the file system's too, and that a file without an `fs` interface has no settings
-/// of one.
-#[test]
-fn the_fill_socket_is_the_nodes_own_or_none() {
-    let text = format!("{}{}{}", s3(), fs(""), build_node("", ""));
-    let per_run = PerRun {
-        state_dir: Some(PathBuf::from("/var/lib/tierstore")),
-        ..run(one_volume)
-    };
-    let settings = settings_from_text(&text, per_run).expect("a build node");
-    let fs = settings.into_cache().expect("a build node").fs;
-    assert_eq!(
-        fs.expect("an fs interface").fill_socket,
-        Some(PathBuf::from("/var/lib/tierstore/fill.sock"))
-    );
-}
-
-/// Asserts that a file of today, with no `fs` interface, loads as it did: a build node with a
-/// provider at the default mount has no file system and keeps its provider's default mount and
-/// its own given one, and a storage node, a storage node with a cache and a node over the cold
-/// tier load as before.
+/// Asserts that a file of today, with neither an `fs` interface nor a mount provider, loads as it
+/// did: a build node has no file system and no provider, and a storage node, a storage node with
+/// a cache and a node over the cold tier load as before.
 #[test]
 fn a_file_of_today_without_an_fs_interface_loads_as_today() {
-    let text = format!("{}{}{}", s3(), provider(""), build_node("", ""));
+    let text = format!("{}{}", s3(), build_node("", ""));
     let settings = settings_from_text(&text, DEFAULTS).expect("a build node");
     let cache = settings.into_cache().expect("a build node");
     assert_eq!(cache.fs, None);
-    let flags = cache.provider.expect("a provider");
-    assert_eq!(flags.mountpoint, PathBuf::from("/run/tierstore/fs"));
-    let own = provider(", mountpoint = \"/mnt/elsewhere\"");
-    let text = format!("{}{own}{}", s3(), build_node("", ""));
-    let settings = settings_from_text(&text, DEFAULTS).expect("a build node");
-    let flags = settings.into_cache().expect("a build node").provider;
-    assert_eq!(
-        flags.expect("a provider").mountpoint,
-        PathBuf::from("/mnt/elsewhere")
-    );
+    assert_eq!(cache.provider, None);
     for node in [COMBINED_NODE, STORAGE_NODE, COLD_NODE] {
         let text = format!("{}{node}", s3());
         assert!(settings_from_text(&text, DEFAULTS).is_ok(), "{node}");
@@ -468,7 +437,8 @@ fn the_fs_refusals_name_the_param() {
 
 /// Asserts that a mount provider that leaves its `mountpoint` out answers under the `fs`
 /// interface's mount, wherever either entry is, and under the default mount when the `fs`
-/// interface leaves its own out too.
+/// interface leaves its own out too; and that in each it is served, by this process's `fs`
+/// interface.
 #[test]
 fn a_provider_mountpoint_left_out_is_the_fs_mountpoint() {
     let node = build_node("", "");
@@ -480,17 +450,39 @@ fn a_provider_mountpoint_left_out_is_the_fs_mountpoint() {
         let text = format!("{}{node}", entries.concat());
         let settings = settings_from_text(&text, run(one_volume)).expect("a build node");
         let flags = settings.into_cache().expect("a build node").provider;
-        assert_eq!(
-            flags.expect("a provider").mountpoint,
-            PathBuf::from("/private/var/tierstore/fs")
-        );
+        let flags = flags.expect("a provider");
+        assert_eq!(flags.mountpoint, PathBuf::from("/private/var/tierstore/fs"));
+        assert!(flags.served);
     }
     let text = format!("{}{}{}{node}", s3(), provider(""), fs(""));
     let settings = settings_from_text(&text, run(one_volume)).expect("a build node");
     let flags = settings.into_cache().expect("a build node").provider;
+    let flags = flags.expect("a provider");
+    assert_eq!(flags.mountpoint, PathBuf::from("/run/tierstore/fs"));
+    assert!(flags.served);
+}
+
+/// Asserts that a mount provider in a file with no `fs` interface is refused at load, naming the
+/// provider's entry by its place and giving the reason in full, wherever the entry is and whether
+/// it gives its `mountpoint` or not; the Mac's two-process file (`mountpoint` given,
+/// `local_cache.fill_socket` set) is one. Catches a start of a node whose provider would answer
+/// every job's tree `UNAVAILABLE`, because no process serves the mount it names.
+#[test]
+fn a_provider_without_an_fs_interface_is_refused() {
+    let two_process = build_node("", "fill_socket = \"/var/lib/tierstore/fill.sock\"\n");
+    let given = provider(", mountpoint = \"/private/var/tierstore/fs\"");
     assert_eq!(
-        flags.expect("a provider").mountpoint,
-        PathBuf::from("/run/tierstore/fs")
+        refusal(&[s3(), given.clone()], &two_process),
+        format!("interface[1].type: {NO_FS}")
+    );
+    let node = build_node("", "");
+    assert_eq!(
+        refusal(&[given, s3()], &node),
+        format!("interface[0].type: {NO_FS}")
+    );
+    assert_eq!(
+        refusal(&[s3(), provider("")], &node),
+        format!("interface[1].type: {NO_FS}")
     );
 }
 
@@ -567,7 +559,8 @@ fn a_runtime_dir_inside_the_local_cache_is_refused() {
 }
 
 /// Asserts that a control socket that is `server.handoff_socket` is refused, and so is one that is
-/// the fill socket or the mount provider's socket, each naming the other socket.
+/// the mount provider's socket, each naming the other socket; and that a `local_cache.fill_socket`
+/// line, read and ignored, is no socket the control socket can clash with.
 #[test]
 fn a_control_socket_equal_to_the_handoff_socket_is_refused() {
     let socket = "/var/lib/tierstore/node.sock";
@@ -581,12 +574,8 @@ fn a_control_socket_equal_to_the_handoff_socket_is_refused() {
         )
     );
     let fill = build_node("", &format!("fill_socket = \"{socket}\""));
-    assert_eq!(
-        refusal(&[s3(), control.clone()], &fill),
-        format!(
-            "interface[1].params.control_socket: \"{socket}\" is local_cache.fill_socket too; {tail}"
-        )
-    );
+    let got = fs_of(&[s3(), control.clone()], &fill);
+    assert_eq!(got.control_socket, PathBuf::from(socket));
     let shared = fs(&format!("control_socket = \"{PROVIDER_SOCKET}\""));
     assert_eq!(
         refusal(&[s3(), provider(""), shared], &build_node("", "")),
@@ -683,7 +672,7 @@ fn a_start_says_it_does_not_serve_the_fs_interface() {
     assert_eq!(
         not_served(Some(&fs)).as_deref(),
         Some(
-            "tierstore: the fs interface (mountpoint /run/tierstore/fs) is checked and not served by this release on this system; `tierstore fs`, with its own [fs] table, serves the trees"
+            "tierstore: the fs interface (mountpoint /run/tierstore/fs) is checked and not served by this release on this system, where no process serves the trees"
         )
     );
 }

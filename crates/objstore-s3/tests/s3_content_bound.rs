@@ -90,13 +90,34 @@ fn taken(s3: &FakeS3, method: &str) -> usize {
         .count()
 }
 
-/// Makes `k` an object of the bytes that came of a PUT cut short before its first byte, as
-/// SeaweedFS 4.54 keeps one: 0 bytes, no checksum, no recorded digest.
-async fn cut_to_nothing(s3: &FakeS3, store: &S3Store, k: &ObjectKey, len: u64) {
+/// A store that looks at the key at once after a PUT that got no answer.
+fn looking_at_once(s3: &FakeS3) -> S3Store {
+    let tuning = S3Tuning {
+        cut_put_look_after: Duration::ZERO,
+        ..S3Tuning::default()
+    };
+    s3.store_tuned(CONDITIONAL, tuning)
+}
+
+/// Makes `k` an object of the bytes that came of a PUT cut short after `pieces`, as SeaweedFS
+/// 4.54 keeps one: no checksum, no recorded digest. The look after the PUT would delete it
+/// (`cut_put.rs`), so its HEAD fails: the object is what a writer whose look failed leaves, as a
+/// release before the look did.
+async fn cut_and_kept(s3: &FakeS3, k: &ObjectKey, len: u64, pieces: &[&'static [u8]]) {
     s3.keep_cut_bodies();
-    let failed = store.put_stream(k, len, cut(&[])).await.unwrap_err();
+    s3.fail(Failure::Head(1));
+    let store = looking_at_once(s3);
+    let failed = store.put_stream(k, len, cut(pieces)).await.unwrap_err();
     assert!(matches!(failed, ObjectStoreError::Body(_)), "{failed}");
     s3.wait_for(|s| s.object_len(k).is_some()).await;
+    store.cleanups_idle().await;
+    assert_eq!(store.cut_puts().failed, 1);
+}
+
+/// Makes `k` an object of the bytes that came of a PUT cut short before its first byte, as
+/// [`cut_and_kept`] does: 0 bytes.
+async fn cut_to_nothing(s3: &FakeS3, k: &ObjectKey, len: u64) {
+    cut_and_kept(s3, k, len, &[]).await;
     assert_eq!(s3.object_len(k), Some(0));
 }
 
@@ -119,16 +140,11 @@ fn multipart_store(s3: &FakeS3) -> S3Store {
 #[tokio::test]
 async fn a_cut_put_is_kept_without_the_digest_and_refused_with_it() {
     let s3 = FakeS3::start().await;
-    let store = s3.store(CONDITIONAL);
-    cut_to_nothing(&s3, &store, &key("plain-empty"), 10).await;
+    let store = looking_at_once(&s3);
+    cut_to_nothing(&s3, &key("plain-empty"), 10).await;
 
     let short = key("plain-short");
-    let failed = store.put_stream(&short, 10, cut(&[b"ab", b"cd"])).await;
-    assert!(
-        matches!(failed, Err(ObjectStoreError::Body(_))),
-        "{failed:?}"
-    );
-    s3.wait_for(|s| s.object_len(&short).is_some()).await;
+    cut_and_kept(&s3, &short, 10, &[b"ab", b"cd"]).await;
     let kept = s3.object_len(&short).unwrap();
     assert!(kept < 10, "the object is the bytes that came: {kept}");
 
@@ -169,7 +185,7 @@ async fn a_cut_part_is_never_taken() {
 #[tokio::test]
 async fn a_cut_put_reaches_nothing_by_default() {
     let s3 = FakeS3::start().await;
-    let store = s3.store(CONDITIONAL);
+    let store = looking_at_once(&s3);
     let k = key("plain");
     let failed = store.put_stream(&k, 10, cut(&[b"ab", b"cd"])).await;
     assert!(
@@ -215,7 +231,7 @@ async fn a_wrong_size_object_is_replaced_once() {
     let k = key("cas/l/blob");
     let bytes = pattern(1000);
     let digest = sha256(&bytes);
-    cut_to_nothing(&s3, &store, &k, 1000).await;
+    cut_to_nothing(&s3, &k, 1000).await;
 
     let replaced = store.put_stream_content_bound(&k, 1000, body(&bytes), digest);
     assert_eq!(
@@ -311,7 +327,7 @@ async fn a_damaged_object_is_replaced_by_a_multipart_upload() {
     let k = key("large");
     let bytes = pattern(SIX_MIB);
     let digest = sha256(&bytes);
-    cut_to_nothing(&s3, &s3.store(CONDITIONAL), &k, SIX_MIB as u64).await;
+    cut_to_nothing(&s3, &k, SIX_MIB as u64).await;
     let replaced = store.put_stream_content_bound(&k, SIX_MIB as u64, body(&bytes), digest);
     assert_eq!(
         replaced.await.unwrap(),

@@ -1,6 +1,7 @@
 //! What the tests of the provider share: the tree store's bench (a cache over an upstream with a
-//! pack of three blobs, and a tree store over it), a tree list of the pack's files put in the
-//! upstream, the provider over them, and a gRPC client of the provider's socket.
+//! pack of three blobs, and a tree store over it), a tree of the pack's files put in the upstream
+//! as a CAS service writes one (its version 2 list at `cas/l/<id>` and its L2 sidecar at
+//! `cas/l2/<id>`), the provider over them, and a gRPC client of the provider's socket.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -11,6 +12,7 @@ use http_body_util::{BodyExt as _, Full};
 use hyper::client::conn::http2::{self, SendRequest};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use prost::Message;
+use tierstore_list::{PackCells, PackInfo, sidecar_from_v2, sidecar_key};
 use tierstore_trees_api::provider::v1::{MountMode, Source};
 use tokio::net::UnixStream;
 use tonic::Status;
@@ -21,7 +23,9 @@ use crate::server::local_cache::pack_testing::Pack;
 use crate::server::local_cache::testing::until;
 use crate::server::local_cache::trees::TreesConfig;
 use crate::server::local_cache::trees::testing::Bench;
-use crate::{BlobSource, ListEntry, ListKind, Mode, TreeDigest, TreeList, tree_list_key};
+use crate::{
+    BlobSource, ListEntry, ListKind, Mode, TreeDigest, TreeList, tree_list_digest, tree_list_key,
+};
 
 /// The agent of the tests.
 pub(super) const AGENT: &str = "agent-1";
@@ -34,20 +38,28 @@ pub(super) fn settings() -> Settings {
     let long = Duration::from_secs(3600);
     Settings {
         mountpoint: PathBuf::from(MOUNT),
+        served: true,
         list_timeout: long,
         fill_timeout: long,
         mount_wait: long,
         ttl: long,
         max_list_bytes: crate::MAX_TREE_LIST_BYTES,
+        max_queued_bytes: super::sources::PREFETCH_QUEUE_BYTES,
     }
 }
 
-/// The source `index` of the run `run` of [`AGENT`].
+/// The source `index` of the run `run` of [`AGENT`], naming no attempt.
 pub(in crate::server) fn source(run: &str, index: u32) -> Option<Source> {
+    attempt_of(run, index, 0)
+}
+
+/// The source `index` of the attempt `attempt` of the run `run` of [`AGENT`].
+pub(in crate::server) fn attempt_of(run: &str, index: u32, attempt: u64) -> Option<Source> {
     Some(Source {
         agent: AGENT.to_owned(),
         run: run.to_owned(),
         index,
+        attempt,
     })
 }
 
@@ -103,10 +115,11 @@ pub(in crate::server) fn list_of(pack: &Pack) -> TreeList {
     }
 }
 
-/// A provider over the tree store's bench, with the list of the pack's tree in the upstream.
+/// A provider over the tree store's bench, with the pack's tree in the upstream: the version 2 list
+/// of [`list_of`] and its L2 sidecar.
 pub(in crate::server) struct Rig {
     pub bench: Bench,
-    /// The key of the list of [`list_of`].
+    /// The key of the version 2 list of [`list_of`].
     pub key: String,
     pub provider: Provider,
 }
@@ -134,19 +147,32 @@ impl Rig {
         }
     }
 
-    /// Puts the bytes of `list` in the upstream, under its key; the key.
+    /// Puts the version 1 bytes of `list` in the upstream under its key, and no sidecar (none is
+    /// made of a version 1 list); the key.
     pub(super) async fn put_list(&self, list: &TreeList) -> String {
         put(&self.bench, &list.encode()).await
     }
 
-    /// Puts the version 2 bytes of `list` in the upstream, under its key; the key.
+    /// Puts the version 2 bytes of `list` in the upstream under its key, and its L2 sidecar
+    /// beside it; the key.
     pub(super) async fn put_list_v2(&self, list: &TreeList) -> String {
-        put(&self.bench, &list.encode_v2().expect("a list to encode")).await
+        put_tree(&self.bench, &list.encode_v2().expect("a list to encode")).await
     }
 
-    /// Puts raw `bytes` in the upstream under their own tree list key; the key.
+    /// Puts raw `bytes` in the upstream under their own tree list key, and no sidecar; the key.
     pub(super) async fn put_bytes(&self, bytes: &[u8]) -> String {
         put(&self.bench, bytes).await
+    }
+
+    /// Puts the version 2 list `bytes` in the upstream under its key, and the L2 sidecar
+    /// [`sidecar_of`] makes of them beside it; the key.
+    pub(super) async fn put_tree_bytes(&self, bytes: &[u8]) -> String {
+        put_tree(&self.bench, bytes).await
+    }
+
+    /// Puts `bytes` in the upstream as the L2 sidecar of the tree list `key`.
+    pub(super) async fn put_sidecar(&self, key: &str, bytes: &[u8]) {
+        self.bench.rig.put(&sidecar_key_of(key), bytes).await;
     }
 
     /// The directory the provider answers for the source `index` of `run`.
@@ -158,6 +184,16 @@ impl Rig {
     pub(in crate::server) fn place_of(run: &str, index: u32) -> String {
         format!(
             "mount-provider/{}/{}/{index}",
+            hex::encode(AGENT),
+            hex::encode(run)
+        )
+    }
+
+    /// The path under the mount of the source `index` of the attempt `attempt` (1 or more) of
+    /// `run`, as the tree store places it.
+    pub(super) fn attempt_place_of(run: &str, index: u32, attempt: u64) -> String {
+        format!(
+            "mount-provider/{}/{}/a{attempt}/{index}",
             hex::encode(AGENT),
             hex::encode(run)
         )
@@ -175,11 +211,17 @@ impl Rig {
 
     /// Prepares the source `index` of `run` with the pack's list, and mounts it.
     pub(super) async fn mounted(&self, run: &str, index: u32) -> PathBuf {
+        self.mounted_attempt(run, index, 0).await
+    }
+
+    /// Prepares the source `index` of the attempt `attempt` of `run` with the pack's list, and
+    /// mounts it.
+    pub(super) async fn mounted_attempt(&self, run: &str, index: u32, attempt: u64) -> PathBuf {
         self.provider
-            .prepare(source(run, index), &self.key, READ_ONLY)
+            .prepare(attempt_of(run, index, attempt), &self.key, READ_ONLY)
             .expect("prepared");
         self.provider
-            .mount(source(run, index))
+            .mount(attempt_of(run, index, attempt))
             .await
             .expect("mounted")
     }
@@ -193,9 +235,14 @@ impl Rig {
     }
 }
 
-/// Puts the list of [`list_of`] of `bench`'s pack in its upstream, under its key; the key.
+/// Puts the tree of [`list_of`] of `bench`'s pack in its upstream, its version 2 list under its
+/// key and its L2 sidecar beside it; the key.
 pub(super) async fn put_pack_list(bench: &Bench) -> String {
-    put(bench, &list_of(&bench.pack).encode()).await
+    put_tree(
+        bench,
+        &list_of(&bench.pack).encode_v2().expect("a list to encode"),
+    )
+    .await
 }
 
 /// Puts `bytes` under their tree list key; the key.
@@ -203,6 +250,50 @@ async fn put(bench: &Bench, bytes: &[u8]) -> String {
     let key = tree_list_key(bytes);
     bench.rig.put(&key, bytes).await;
     key
+}
+
+/// Puts the version 2 list `v2` under its key and its L2 sidecar beside it; the key.
+async fn put_tree(bench: &Bench, v2: &[u8]) -> String {
+    let key = put(bench, v2).await;
+    bench
+        .rig
+        .put(&sidecar_key_of(&key), &sidecar_of(&bench.pack, v2))
+        .await;
+    key
+}
+
+/// The key of the L2 sidecar of the tree list `key`: `cas/l2/` and the same id.
+pub(super) fn sidecar_key_of(key: &str) -> String {
+    let digest = tree_list_digest(key).expect("a tree list key");
+    sidecar_key(digest.as_bytes())
+}
+
+/// The L2 sidecar of the version 2 list `v2`, as a CAS service writes it: the cells of `pack` for
+/// its key, and for any other key the list names (a pack the tests leave out of the upstream) the
+/// cells of 1 MiB of zeros, which hold every file the tests put in one.
+pub(in crate::server) fn sidecar_of(pack: &Pack, v2: &[u8]) -> Vec<u8> {
+    let zeros = PackCells::of(&vec![0u8; 1 << 20]);
+    sidecar_from_v2(v2, |key| {
+        let cells = if key == pack.key {
+            PackCells::of(pack.bytes())
+        } else {
+            zeros.clone()
+        };
+        Some(PackInfo {
+            cells,
+            ..PackInfo::default()
+        })
+    })
+    .expect("a sidecar")
+}
+
+/// The objects of the tree of [`list_of`] of `pack`, as a CAS service stores them: its version 2
+/// list under its key, first, then its L2 sidecar under the sidecar's key.
+pub(in crate::server) fn tree_objects(pack: &Pack) -> [(String, Vec<u8>); 2] {
+    let v2 = list_of(pack).encode_v2().expect("a list to encode");
+    let key = tree_list_key(&v2);
+    let sidecar = (sidecar_key_of(&key), sidecar_of(pack, &v2));
+    [(key, v2), sidecar]
 }
 
 /// The refusal `error` is, as text.

@@ -14,7 +14,8 @@ use rustix::process::geteuid;
 
 use super::super::ports::{Host, PortError, PortKind};
 use super::super::{
-    MACOS_SERVICE_ACCOUNT, PACKAGE_RELEASE_BINARY, RELEASE_BINARY, SERVICE_ACCOUNT, SERVICE_BINARY,
+    CHECK_BINARY, MACOS_PACKAGE_RELEASE_BINARY, MACOS_SERVICE_ACCOUNT, PACKAGE_RELEASE_BINARY,
+    RELEASE_BINARY, SERVICE_ACCOUNT, SERVICE_BINARY,
 };
 use super::Fault;
 use super::runner::{Call, Runner, checked, run};
@@ -89,6 +90,18 @@ fn dscl_ids(text: &str) -> Option<(u32, u32)> {
     Some((uid, gid))
 }
 
+/// Where the binary a step runs was found.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Source {
+    /// The one binary of [`SystemHost::with_binary`].
+    Given,
+    /// A release's own, at [`RELEASE_BINARY`]: the archive package's.
+    Archive,
+    /// A release's own, at the native package's path ([`PACKAGE_RELEASE_BINARY`] on Linux,
+    /// [`MACOS_PACKAGE_RELEASE_BINARY`] on a Mac).
+    Package,
+}
+
 /// The user and group ids of the account `name` in the text of a password file: the third and
 /// fourth fields of its line.
 fn account_ids(passwd: &str, name: &str) -> Option<(u32, u32)> {
@@ -112,6 +125,8 @@ pub struct SystemHost<'a> {
     hook_uid: u32,
     account: String,
     accounts: Accounts,
+    /// Where a release of the native package has its binary, under its version directory.
+    package_binary: &'static str,
     /// The one binary every release is answered by, when set: the config hook's.
     binary: Option<PathBuf>,
     /// A directory on the host that only root may enter, when set: a configuration file under
@@ -194,6 +209,7 @@ impl<'a> SystemHost<'a> {
             hook_uid: geteuid().as_raw(),
             account: SERVICE_ACCOUNT.to_owned(),
             accounts: Accounts::PasswdFile,
+            package_binary: PACKAGE_RELEASE_BINARY,
             binary: None,
             root_only: None,
         }
@@ -230,11 +246,15 @@ impl<'a> SystemHost<'a> {
     /// The same, for a Mac: a root hook runs the checks as [`MACOS_SERVICE_ACCOUNT`], the
     /// launchd job's `UserName`, whose ids it asks the directory service for with
     /// `dscl . -read /Users/_tierstore UniqueID PrimaryGroupID` (through the runner, within the
-    /// host's time limit). Without this the account is [`SERVICE_ACCOUNT`] in `etc/passwd`.
+    /// host's time limit); and a release that is not the archive's is one of the macOS installer
+    /// package, with its binary at [`MACOS_PACKAGE_RELEASE_BINARY`]. Without this the account is
+    /// [`SERVICE_ACCOUNT`] in `etc/passwd` and such a release is one of the Debian or RPM package
+    /// ([`PACKAGE_RELEASE_BINARY`]).
     #[must_use]
     pub(crate) fn with_directory_service(mut self) -> SystemHost<'a> {
         self.account = MACOS_SERVICE_ACCOUNT.to_owned();
         self.accounts = Accounts::DirectoryService;
+        self.package_binary = MACOS_PACKAGE_RELEASE_BINARY;
         self
     }
 
@@ -282,42 +302,41 @@ impl<'a> SystemHost<'a> {
     }
 
     /// The binary of `release`, checked, and the directory it is in, checked too: neither a link.
-    fn binary_of(&self, release: &Path) -> Result<PathBuf, Fault> {
-        if let Some(binary) = &self.binary {
-            let binary = under(&self.root, binary);
-            self.check(
-                binary.parent().unwrap_or(&binary),
-                fs::FileType::is_dir,
-                "directory",
-            )?;
-            self.check(&binary, fs::FileType::is_file, "regular file")?;
-            return Ok(binary);
-        }
-        let (binary, _) = self.layout_of(release)?;
-        let bin_dir = binary.parent().unwrap_or(&binary);
-        self.check(bin_dir, fs::FileType::is_dir, "directory")?;
+    /// Also where it was found.
+    fn binary_of(&self, release: &Path) -> Result<(PathBuf, Source), Fault> {
+        let (binary, source) = match &self.binary {
+            Some(binary) => (under(&self.root, binary), Source::Given),
+            None => self.layout_of(release)?,
+        };
+        self.check(
+            binary.parent().unwrap_or(&binary),
+            fs::FileType::is_dir,
+            "directory",
+        )?;
         self.check(&binary, fs::FileType::is_file, "regular file")?;
-        Ok(binary)
+        Ok((binary, source))
     }
 
     /// Where the binary of `release` is, unchecked, and whether it is the archive's.
     ///
-    /// An archive release has it at [`RELEASE_BINARY`], a release of the Debian or RPM package at
-    /// [`PACKAGE_RELEASE_BINARY`]. The archive's path is taken when anything is at it or at its
-    /// `bin` (so a link, a directory or a missing file there is refused, never passed over), the
-    /// package's when nothing is at either and something is at the package's path, and neither is
-    /// an error naming both.
-    fn layout_of(&self, release: &Path) -> Result<(PathBuf, bool), Fault> {
+    /// An archive release has it at [`RELEASE_BINARY`]; a release of the native package at the
+    /// package's path, [`PACKAGE_RELEASE_BINARY`] for the Debian or RPM package on Linux and
+    /// [`MACOS_PACKAGE_RELEASE_BINARY`] for the installer package on a Mac
+    /// ([`Self::with_directory_service`]). The archive's path is taken when anything is at it or
+    /// at its `bin` (so a link, a directory or a missing file there is refused, never passed
+    /// over), the package's when nothing is at either and something is at the package's path, and
+    /// neither is an error naming both.
+    fn layout_of(&self, release: &Path) -> Result<(PathBuf, Source), Fault> {
         let (archive, archive_there) = self.archive_of(release);
-        let package = under(&self.root, &release.join(PACKAGE_RELEASE_BINARY));
+        let package = under(&self.root, &release.join(self.package_binary));
         match (archive_there, fs::symlink_metadata(&package).is_ok()) {
-            (false, true) => Ok((package, false)),
+            (false, true) => Ok((package, Source::Package)),
             (false, false) => Err(Fault(format!(
                 "{} is not there, nor {}",
                 archive.display(),
                 package.display()
             ))),
-            (true, _) => Ok((archive, true)),
+            (true, _) => Ok((archive, Source::Archive)),
         }
     }
 
@@ -346,6 +365,18 @@ impl<'a> SystemHost<'a> {
         )?;
         let mut file = self.open_held(&binary)?;
         ServiceBinary::new(&self.root, self.release_owner).install(&mut file)
+    }
+
+    /// Puts a copy of `binary` (checked by [`Self::binary_of`]) at [`CHECK_BINARY`] under the root,
+    /// read through a descriptor opened without following a link and held to the same checks:
+    /// the program a check through `sudo` runs on a Mac when the binary is inside a version
+    /// directory of the installer package, which the service account cannot enter. Returns the
+    /// copy's path.
+    fn check_copy(&self, binary: &Path) -> Result<PathBuf, Fault> {
+        let mut file = self.open_held(binary)?;
+        let copy = ServiceBinary::for_check(&self.root, self.release_owner);
+        copy.install(&mut file)?;
+        Ok(copy.path())
     }
 
     /// The user and group ids of the service account: from `etc/passwd` under the root, or from
@@ -496,6 +527,22 @@ impl Host for SystemHost<'_> {
             .any(|line| marks.iter().any(|mark| line.contains(mark.as_str()))))
     }
 
+    /// Looks `path` up under the root (`stat`): a directory is `true`, anything else or nothing
+    /// there `false`. On a hard NFS mount whose server is gone the look-up waits until the kernel
+    /// marks the mount dead (its `deadtimeout`, `fs.nfs.dead_timeout` of the node's file), and
+    /// then fails.
+    fn is_dir(&self, path: &Path) -> Result<bool, PortError> {
+        let at = under(&self.root, path);
+        match fs::metadata(&at) {
+            Ok(meta) => Ok(meta.is_dir()),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(PortError::failed(
+                KIND,
+                format!("stat {}: {error}", at.display()),
+            )),
+        }
+    }
+
     /// Reads the node's configuration file `path` under the root: at most [`CONFIG_MAX`] bytes of
     /// UTF-8. A file that is not there is `None`.
     fn config(&self, path: &Path) -> Result<Option<String>, PortError> {
@@ -505,9 +552,11 @@ impl Host for SystemHost<'_> {
     }
 
     /// Runs `<release>/bin/tierstore --capabilities` (or, for a release of the Debian or RPM
-    /// package, its `tree/usr/libexec/tierstore/tierstore`): exit 0 and one capability per line. Exit 2,
-    /// the status of an unknown flag, means a release that predates the flag: no capabilities.
-    /// Any other status, a binary that cannot be started and one that does not end are errors.
+    /// package, its `tree/usr/libexec/tierstore/tierstore`, and on a Mac, for a release of the
+    /// installer package, its `tree/Library/Application Support/tierstore/bin/tierstore`): exit 0
+    /// and one capability per line. Exit 2, the status of an unknown flag, means a release that
+    /// predates the flag: no capabilities. Any other status, a binary that cannot be started and
+    /// one that does not end are errors.
     ///
     /// The binary runs as the user the hook runs as; nothing here changes that. It must be the
     /// verified staged tree that the updater names in `updater.staged_release`, and so the
@@ -515,7 +564,7 @@ impl Host for SystemHost<'_> {
     /// release owner (root, unless set otherwise) and no group or others can write them. Its
     /// environment is empty but for a fixed `PATH` and `LC_ALL=C`.
     fn capabilities(&self, release: &Path) -> Result<Vec<String>, PortError> {
-        let binary = self
+        let (binary, _) = self
             .binary_of(release)
             .map_err(|fault| PortError::failed(KIND, fault.to_string()))?;
         let program = binary.to_string_lossy();
@@ -563,13 +612,19 @@ impl Host for SystemHost<'_> {
     /// clears the supplementary groups (`setgroups(0, NULL)`) after it sets the group id, and on
     /// macOS that also resets the effective group to 0, so the check could not enter
     /// `/usr/local/tierstore/etc` (root:_tierstore, 0750) and refused every configuration with
-    /// "Permission denied". The binary a Mac checks with is the installed one, outside every
-    /// staged package (`sudo` closes every descriptor but the standard three, so a descriptor
-    /// could not be handed on); a configuration file under the root-only directory goes on its
-    /// standard input (`--config /dev/stdin`), which on macOS is the descriptor itself.
+    /// "Permission denied". `sudo` closes every descriptor but the standard three, so a
+    /// descriptor cannot be handed on, and the account must reach the binary by its path: the
+    /// config hook's is the installed one, outside every staged package. An archive release's
+    /// binary is run by its path inside the release, as before, so its check needs every directory
+    /// above it to be searchable by the account. The binary of a release of the installer
+    /// package is in a version directory hostkeeper keeps root's alone, and the check runs a copy
+    /// of it at [`CHECK_BINARY`] (made as the copy at [`SERVICE_BINARY`] is, from the binary held
+    /// to the checks above, and removed once the check has answered; a copy that cannot be made
+    /// or removed is an error naming it). A configuration file under the root-only directory goes
+    /// on its standard input (`--config /dev/stdin`), which on macOS is the descriptor itself.
     fn check_config(&self, release: &Path, config: &Path) -> Result<Option<String>, PortError> {
         let failed = |fault: Fault| PortError::failed(KIND, fault.to_string());
-        let binary = self.binary_of(release).map_err(failed)?;
+        let (binary, source) = self.binary_of(release).map_err(failed)?;
         let run_as = self.run_as().map_err(failed)?;
         let file = under(&self.root, config);
         let text = self.root_only_text(config, &file).map_err(failed)?;
@@ -587,13 +642,23 @@ impl Host for SystemHost<'_> {
             None => format!("the hook's own user (uid {})", self.hook_uid),
             Some((uid, gid)) => format!("{} (uid {uid}, gid {gid})", self.account),
         };
-        let program = binary.to_string_lossy().into_owned();
+        let mut program = binary.to_string_lossy().into_owned();
         let opened;
+        let mut copy = None;
         let (call, by_descriptor) = match (run_as, self.accounts) {
             // `sudo` takes the primary group from the account record itself; the
             // `PrimaryGroupID` read above is still required, so that an account record
             // without one fails as a missing account rather than at the check.
             (Some((uid, _)), Accounts::DirectoryService) => {
+                if source == Source::Package {
+                    let made = self.check_copy(&binary).map_err(|fault| {
+                        failed(Fault(format!(
+                            "the copy of {program} at {CHECK_BINARY} cannot be made: {fault}"
+                        )))
+                    })?;
+                    program = made.to_string_lossy().into_owned();
+                    copy = Some(binary.to_string_lossy().into_owned());
+                }
                 let user = format!("#{uid}");
                 let mut args = vec!["-n", "-u", user.as_str(), "--", program.as_str()];
                 args.extend(check);
@@ -620,6 +685,9 @@ impl Host for SystemHost<'_> {
         } else {
             call.describe()
         };
+        if let Some(of) = &copy {
+            shown.push_str(&format!(" (a copy of {of})"));
+        }
         if handed.is_some() {
             shown.push_str(&format!(
                 ", {shown_config} read by the hook and handed over"
@@ -630,10 +698,18 @@ impl Host for SystemHost<'_> {
             Some(bytes) => call.with_stdin(bytes),
             None => call,
         };
-        let output = self
-            .runner
-            .run(&call)
-            .map_err(|error| PortError::failed(KIND, format!("{shown}: {error}")))?;
+        let output = self.runner.run(&call);
+        let removed = match copy {
+            Some(_) => ServiceBinary::for_check(&self.root, self.release_owner).remove(),
+            None => Ok(()),
+        };
+        let output =
+            output.map_err(|error| PortError::failed(KIND, format!("{shown}: {error}")))?;
+        removed.map_err(|fault| {
+            failed(Fault(format!(
+                "{shown}: the copy at {CHECK_BINARY} cannot be removed: {fault}"
+            )))
+        })?;
         let how = match output.code {
             Some(0) => return Ok(None),
             Some(CONFIG_REFUSED) => return Ok(Some(output.stderr_text())),
@@ -675,3 +751,7 @@ impl Host for SystemHost<'_> {
 #[cfg(test)]
 #[path = "host_root_only_tests.rs"]
 mod root_only_tests;
+
+#[cfg(test)]
+#[path = "host_macos_tests.rs"]
+mod macos_tests;

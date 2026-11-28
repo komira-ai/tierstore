@@ -1,7 +1,7 @@
-//! The process of `tierstore fs` on macOS: the neutral start (`start.rs`), the NFS and MOUNT
-//! protocols on a loopback socket, the mount, and the wait for the signal that ends it. The `fs`
-//! interface of the one process starts and leaves the same front (`interface.rs`), with a core that
-//! calls the node's cache, and no hand-off socket of its own.
+//! The run of the NFS front on macOS: the neutral start (`start.rs`), the NFS and MOUNT protocols
+//! on a loopback socket, the mount, and the wait for what ends it. The `fs` interface of the one
+//! process starts and leaves this front (`interface.rs`), with a core that calls the node's cache;
+//! the tests also run it alone, through `serve_with`, with the wait for SIGTERM or SIGINT.
 //!
 //! A start, in order: the mount user's number is found; if `fs.nfs.handoff_socket` is given, a
 //! running instance is asked for its listening socket (`handoff`); the neutral start is done (the
@@ -54,18 +54,21 @@ use futures::future::BoxFuture;
 use nfsserve::tcp::{NFSTcp as _, NFSTcpListener};
 use tokio::sync::{Notify, oneshot};
 
+#[cfg(test)]
 use super::boot::BootSource;
 use super::error::NfsError;
 use super::fs::{Patience, TreeNfs};
-use super::mount::{Mounter, Runner, System};
+use super::mount::{Mounter, Runner};
 use crate::server::handoff::{
     Front, Handed, Handing, Hold, Offer, Socket, Want, check_control_path, take_with_ready,
 };
 use crate::server::treefs::config::FsSettings;
 use crate::server::treefs::control::Control;
 use crate::server::treefs::core::Core;
-use crate::server::treefs::fills::Reach;
-use crate::server::treefs::start::{Identity, Setup, Signals, io};
+use crate::server::treefs::fills::Calls;
+#[cfg(test)]
+use crate::server::treefs::start::Signals;
+use crate::server::treefs::start::{Identity, Setup, io};
 
 /// A patience that is a timer of `after`.
 fn timer(after: Duration) -> Patience {
@@ -144,14 +147,15 @@ impl Running {
     ///
     /// # Errors
     /// [`NfsError`]: why nothing was served or mounted.
+    #[cfg(test)]
     pub(super) async fn start(
-        settings: &FsSettings,
+        (settings, reach): (&FsSettings, &Calls),
         runner: Arc<dyn Runner>,
         euid: u32,
         patience: Option<Patience>,
         epoch: u32,
     ) -> Result<Self, NfsError> {
-        Self::start_serving(settings, runner, euid, patience, epoch, handle).await
+        Self::start_serving((settings, reach), runner, euid, patience, epoch, handle).await
     }
 
     /// [`Running::start`] of the next image of a process that handed over to it: it serves on the
@@ -162,7 +166,7 @@ impl Running {
     /// As [`Running::start`].
     #[cfg(test)]
     pub(super) async fn start_handed(
-        settings: &FsSettings,
+        (settings, reach): (&FsSettings, &Calls),
         runner: Arc<dyn Runner>,
         euid: u32,
         patience: Option<Patience>,
@@ -170,15 +174,16 @@ impl Running {
         handed: Handed,
     ) -> Result<Self, NfsError> {
         let ways = (runner, euid, patience, epoch);
-        Self::start_from((settings, &Reach::Socket), ways, handle, Some(handed)).await
+        Self::start_from((settings, reach), ways, handle, Some(handed)).await
     }
 
     /// [`Running::start`], with `serve` as what serves the listening socket.
     ///
     /// # Errors
     /// As [`Running::start`].
+    #[cfg(test)]
     pub(super) async fn start_serving(
-        settings: &FsSettings,
+        (settings, reach): (&FsSettings, &Calls),
         runner: Arc<dyn Runner>,
         euid: u32,
         patience: Option<Patience>,
@@ -186,19 +191,18 @@ impl Running {
         serve: Serve,
     ) -> Result<Self, NfsError> {
         let ways = (runner, euid, patience, epoch);
-        Self::start_from((settings, &Reach::Socket), ways, serve, None).await
+        Self::start_from((settings, reach), ways, serve, None).await
     }
 
-    /// [`Running::start_serving`], with a core that asks the node's cache and tree store by
-    /// `reach` (the fill socket of `tierstore fs`, or calls of the one process that holds them),
-    /// and from what `handed` holds when the image before this one handed it over. With `reach`
-    /// of calls it runs on a thread that may block: the attachments are made again through the
-    /// cache, whose answers are worked out on the runtime.
+    /// [`Running::start_serving`], with a core that calls the node's cache and tree store of
+    /// `reach`, and from what `handed` holds when the image before this one handed it over. It
+    /// runs on a thread that may block: the attachments are made again through the cache, whose
+    /// answers are worked out on the runtime.
     ///
     /// # Errors
     /// As [`Running::start`].
     pub(super) async fn start_from(
-        (settings, reach): (&FsSettings, &Reach),
+        (settings, reach): (&FsSettings, &Calls),
         (runner, euid, patience, epoch): (Arc<dyn Runner>, u32, Option<Patience>, u32),
         serve: Serve,
         handed: Option<Handed>,
@@ -419,11 +423,12 @@ impl Running {
             .listener_fd()
             .map_err(io("copying the control socket"))?;
         let core = Arc::clone(&self._setup.core);
-        // Every request read is answered: the node is told of the opens and the tree lists of this
-        // image.
+        // Every request read is answered: the node is told of the opens, the requests and the tree
+        // lists of this image.
         let held = tokio::task::spawn_blocking(move || {
             core.hold(true);
             core.report_opens();
+            core.report_requests();
             core.report_tree_lists();
         })
         .await;
@@ -653,12 +658,15 @@ async fn serve_until(
 }
 
 /// Starts over `runner`, in the boot `boot` names, and serves until SIGTERM or SIGINT, a hand-over,
-/// or a server that stops by itself; then leaves ([`Running::leave`]).
+/// or a server that stops by itself; then leaves ([`Running::leave`]): the loop of the process
+/// that served the mount alone, which the tests run to drive the start and the leave that the `fs`
+/// interface of the one process (`interface.rs`) is made of.
 ///
 /// # Errors
 /// [`NfsError`]: why nothing was mounted, or why the unmount died.
+#[cfg(test)]
 pub(super) fn serve_with(
-    settings: &FsSettings,
+    (settings, reach): (&FsSettings, &Calls),
     runner: Arc<dyn Runner>,
     euid: u32,
     boot: &BootSource,
@@ -671,26 +679,13 @@ pub(super) fn serve_with(
     runtime.block_on(async {
         // The handlers are in place before the mount is: a signal after it is never lost.
         let mut signals = Signals::install()?;
-        let mut running = Running::start(settings, runner, euid, None, epoch).await?;
+        let mut running = Running::start((settings, reach), runner, euid, None, epoch).await?;
         let leaving = tokio::select! {
             () = signals.wait() => Leaving::Signal,
             leaving = running.ended() => leaving,
         };
         running.leave(leaving).await
     })
-}
-
-/// Serves the NFS frontend with the commands of this machine, until SIGTERM or SIGINT.
-///
-/// # Errors
-/// As [`serve_with`].
-pub(in crate::server) fn serve(settings: &FsSettings) -> Result<(), NfsError> {
-    serve_with(
-        settings,
-        Arc::new(System),
-        rustix::process::geteuid().as_raw(),
-        &BootSource::system(),
-    )
 }
 
 #[cfg(test)]

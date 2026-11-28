@@ -101,14 +101,18 @@ pub const HANDOFF_STATE_DIR_CAPABILITY: &str = "handoff-state-dir-v1";
 pub const HANDOFF_FS_CAPABILITY: &str = "handoff-fs-v1";
 
 /// `handoff-service-v1` (Linux builds only): a build node whose file has an `fs` interface serves
-/// the mount itself and hands it over with its sockets. Its start takes the mount and the sockets
-/// from the processes that run, of either layout: it asks the instance on `server.handoff_socket`
-/// for its sockets (`take 1`) and the instance on `handoff.sock` in the runtime directory for the
-/// mount (`take-fs 1`), checks both offers before it accepts either, and accepts the mount's first.
-/// While it holds the mount it answers `take-fs 1` there, for a successor of either layout, and
-/// goes on serving S3 and OCI until a successor takes their sockets; it binds the fill socket
-/// (`local_cache.fill_socket`) while its cache is the writer, as every build node does. The hook
-/// updates a node whose file has an `fs` interface only between releases that both list it.
+/// the mount itself and hands it over with its sockets. Its start takes the mount, the sockets and
+/// the cache lock from the processes that run, of either layout: it asks the instance on
+/// `server.handoff_socket` for all of them in one conversation (`take 1`, `ready`, `mount`), and
+/// from an instance that holds the mount takes them there; one that holds none (the S3 process of
+/// the two-process layout) is asked for its sockets and lock alone, and the mount is taken from the
+/// instance on `handoff.sock` in the runtime directory (`take-fs 1`), both offers checked before
+/// either is accepted, the mount's first. While it holds the mount it offers it on both, to a
+/// successor of either layout or release, one taker at a time; a successor that takes it with the
+/// sockets ends the process, which drains S3 and OCI, as one that takes the sockets after a
+/// `take-fs 1` does. Its file system calls its cache in the process: it binds no fill socket. The
+/// hook updates a node whose file has an `fs` interface only
+/// between releases that both list it.
 pub const HANDOFF_SERVICE_CAPABILITY: &str = "handoff-service-v1";
 
 /// `handoff-exec-v1` (macOS builds only): a build node sent SIGUSR2 hands over to the next image of

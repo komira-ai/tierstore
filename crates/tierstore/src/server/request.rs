@@ -3,6 +3,7 @@
 
 use std::borrow::Cow;
 use std::collections::VecDeque;
+use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
@@ -18,7 +19,7 @@ use hyper::body::Body;
 use hyper::header::HeaderMap;
 use percent_encoding::percent_decode_str;
 
-use crate::{Clock, Error, PartBody, PutClaim};
+use crate::{BodyDigests, Clock, Error, PartBody, PutClaim};
 
 use super::chunked::{Decoder, Framing};
 use super::digests::{Algorithm, Digests};
@@ -273,19 +274,47 @@ where
         }
     }
 
-    /// The whole body, if it has at most the limit and comes to the hashes of `check`.
+    /// The whole body, if it has at most the limit and comes to the hashes of `check`: what the
+    /// tests of the reader read. The server reads a whole body with [`Reader::read_whole`].
     ///
     /// # Errors
-    /// As [`Reader::next`], and the error of [`Check::finish`].
-    pub(crate) async fn read_all(mut self, mut check: Check) -> Result<Bytes, S3Error> {
+    /// As [`Reader::read_whole`].
+    #[cfg(test)]
+    pub(crate) async fn read_all(self, check: Check) -> Result<Bytes, S3Error> {
+        let (whole, _) = self.read_whole(check, || async { Ok(()) }).await?;
+        Ok(whole)
+    }
+
+    /// The whole body, if it has at most the limit and comes to the hashes of `check`, and what
+    /// `at_first` gave when the first byte of it came, before that byte is kept (none for a body
+    /// of no bytes): the server takes a permit of the bodies there (`bounds`).
+    ///
+    /// # Errors
+    /// As [`Reader::next`], the error of `at_first`, and the error of [`Check::finish`].
+    pub(crate) async fn read_whole<T, F, Fut>(
+        mut self,
+        mut check: Check,
+        at_first: F,
+    ) -> Result<(Bytes, Option<T>), S3Error>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<T, S3Error>>,
+    {
         let mut whole = BytesMut::new();
+        let mut at_first = Some(at_first);
+        let mut taken = None;
         while let Some(piece) = self.next().await? {
+            if !piece.is_empty()
+                && let Some(first) = at_first.take()
+            {
+                taken = Some(first().await?);
+            }
             check.update(&piece);
             whole.extend_from_slice(&piece);
         }
         check.accept_trailer(self.trailer())?;
         check.finish()?;
-        Ok(whole.freeze())
+        Ok((whole.freeze(), taken))
     }
 }
 
@@ -397,6 +426,17 @@ impl Check {
         PutClaim { tags }
     }
 
+    /// The digests of the body the request named before it, for the store to check it against
+    /// (see [`BodyDigests`]): the MD5 of `Content-MD5`, and the SHA-256 the signature covers
+    /// (`x-amz-content-sha256`) or of `x-amz-checksum-sha256`. A hash the trailer of an
+    /// `aws-chunked` body carries is not known yet, and is not named.
+    pub(crate) fn digests(&self) -> BodyDigests {
+        BodyDigests {
+            md5: named(&self.wants, Algorithm::Md5),
+            sha256: named(&self.wants, Algorithm::Sha256),
+        }
+    }
+
     /// The framing of the body, if it is an `aws-chunked` one.
     pub(crate) fn framing(&self) -> Option<&Framing> {
         self.framing.as_ref()
@@ -439,6 +479,15 @@ impl Check {
         }
         Ok(())
     }
+}
+
+/// The first hash of `algorithm` that `wants` names in full: a claim of no hash yet (the
+/// trailer's, before the body) or of one of another length names none.
+fn named<const N: usize>(wants: &[Want], algorithm: Algorithm) -> Option<[u8; N]> {
+    wants
+        .iter()
+        .filter(|want| want.algorithm == algorithm)
+        .find_map(|want| <[u8; N]>::try_from(want.expected.as_slice()).ok())
 }
 
 /// The answer to send for a streamed body that was refused (its hashes did not match, it was

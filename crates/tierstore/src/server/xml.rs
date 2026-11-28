@@ -1,7 +1,7 @@
 //! The XML bodies of S3: the error body, the answers of ListObjectsV2, ListMultipartUploads and
 //! the other calls of a multipart upload, and the one body that is read, `CompleteMultipartUpload`.
 
-use roxmltree::{Document, Node};
+use roxmltree::{Document, Node, ParsingOptions};
 
 use crate::{Listed, OpenUpload, UploadedPart};
 
@@ -395,15 +395,19 @@ impl UploadListing<'_> {
     }
 }
 
+/// The most nodes of a `CreateBucketConfiguration` document that are parsed: its few elements,
+/// with room to spare.
+pub(crate) const CREATE_NODES: u32 = 256;
+
 /// The `LocationConstraint` of the body of a CreateBucket, empty if the body has none (a body of
 /// no bytes, or a `CreateBucketConfiguration` without the element). `None` for a body that is
-/// not a `CreateBucketConfiguration` document.
+/// not a `CreateBucketConfiguration` document, or has more than [`CREATE_NODES`] nodes.
 pub(crate) fn parse_create(body: &[u8]) -> Option<String> {
     let text = std::str::from_utf8(body).ok()?;
     if text.trim().is_empty() {
         return Some(String::new());
     }
-    let doc = Document::parse(text).ok()?;
+    let doc = bounded(text, CREATE_NODES)?;
     let root = doc.root_element();
     (root.tag_name().name() == "CreateBucketConfiguration").then_some(())?;
     Some(
@@ -481,6 +485,17 @@ pub(crate) fn completed(bucket: &str, key: &str, etag: &str) -> String {
     )
 }
 
+/// The answer to a copy: the document `root` (`CopyObjectResult` for CopyObject,
+/// `CopyPartResult` for UploadPartCopy) with the `ETag` of what the copy made, quotes included,
+/// and its time of last write.
+pub(crate) fn copied(root: &str, etag: &str, modified_ms: u64) -> String {
+    let (modified, etag) = (iso8601(modified_ms), escape(etag));
+    format!(
+        "{PROLOG}<{root} xmlns=\"{NAMESPACE}\"><LastModified>{modified}</LastModified>\
+         <ETag>{etag}</ETag></{root}>"
+    )
+}
+
 /// The text of the first child of `node` named `name`, in any namespace.
 fn child_text<'a>(node: Node<'a, '_>, name: &str) -> Option<&'a str> {
     node.children()
@@ -488,11 +503,32 @@ fn child_text<'a>(node: Node<'a, '_>, name: &str) -> Option<&'a str> {
         .and_then(|child| child.text())
 }
 
+/// The most nodes of a `CompleteMultipartUpload` document that are parsed: 32 for each of the
+/// 10,000 parts S3 takes (the part, its number and ETag, five checksums, their texts and the
+/// spaces between them), and room for the root. A document of more is not that document.
+pub(crate) const COMPLETE_NODES: u32 = 10_000 * 32 + 64;
+
+/// The most nodes of a `Delete` document that are parsed: 16 for each of the 1000 objects S3
+/// takes (the object, its key and version, their texts and the spaces between them), and room
+/// for the root and `Quiet`.
+pub(crate) const DELETE_NODES: u32 = 1000 * 16 + 64;
+
+/// `text` as a document of at most `nodes` nodes, so that the tree held for it is bounded however
+/// many elements the text packs into its bytes. `None` for a text that is not XML or has more.
+fn bounded(text: &str, nodes: u32) -> Option<Document<'_>> {
+    let options = ParsingOptions {
+        nodes_limit: nodes,
+        ..ParsingOptions::default()
+    };
+    Document::parse_with_options(text, options).ok()
+}
+
 /// The parts a `CompleteMultipartUpload` body names, in its order: the number of each and its
-/// ETag without the quotes. `None` if the body is not that document.
+/// ETag without the quotes. `None` if the body is not that document, or has more than
+/// [`COMPLETE_NODES`] nodes.
 pub(crate) fn parse_complete(body: &[u8]) -> Option<Vec<(u32, String)>> {
     let text = std::str::from_utf8(body).ok()?;
-    let doc = Document::parse(text).ok()?;
+    let doc = bounded(text, COMPLETE_NODES)?;
     let root = doc.root_element();
     (root.tag_name().name() == "CompleteMultipartUpload").then_some(())?;
     root.children()
@@ -522,11 +558,11 @@ pub(crate) struct DeleteRequest {
 }
 
 /// The objects and the `Quiet` flag a `Delete` body names, in its order. `None` if the body is not
-/// that document: not XML, another root, an object with no key or an empty one, or a `Quiet` that
-/// is not `true` or `false`.
+/// that document: not XML, another root, an object with no key or an empty one, a `Quiet` that
+/// is not `true` or `false`, or more than [`DELETE_NODES`] nodes.
 pub(crate) fn parse_delete(body: &[u8]) -> Option<DeleteRequest> {
     let text = std::str::from_utf8(body).ok()?;
-    let doc = Document::parse(text).ok()?;
+    let doc = bounded(text, DELETE_NODES)?;
     let root = doc.root_element();
     (root.tag_name().name() == "Delete").then_some(())?;
     let quiet = match child_text(root, "Quiet").map(str::trim) {

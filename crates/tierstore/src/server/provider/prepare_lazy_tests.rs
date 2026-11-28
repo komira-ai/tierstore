@@ -8,7 +8,7 @@ use std::sync::Arc;
 use super::names::SourceId;
 use super::prepare::run;
 use super::sources::{Stage, mode_line};
-use super::testing::{AGENT, MOUNT, Rig, list_of, source};
+use super::testing::{AGENT, MOUNT, Rig, source};
 use super::{DEFAULT_FETCH_TIMEOUT, Provider, ProviderFlags};
 use crate::Op;
 use crate::server::local_cache::trees::{PlacementId, PreparePrefetch, TreesConfig};
@@ -38,6 +38,7 @@ async fn prepared(rig: &Rig, run_name: &str, key: &str) -> Stage {
         agent: AGENT.to_owned(),
         run: run_name.to_owned(),
         index: 0,
+        attempt: 0,
     };
     let (job, seen) = rig.provider.hold(id, key);
     run(Arc::clone(&rig.provider.shared), job).await;
@@ -62,31 +63,24 @@ async fn by_default_a_preparation_reads_every_file_with_no_open() {
     assert_eq!(held(&rig), [false; 3]);
     assert_eq!(prepared(&rig, "js.1", &rig.key).await, Stage::Placed);
     assert_eq!(held(&rig), [true; 3]);
-    assert_eq!(pack_reads(&rig), 3);
+    // The three files are one range of the list: one read of the pack.
+    assert_eq!(pack_reads(&rig), 1);
     let id = placement(&rig, "js.1");
     assert!(rig.bench.store.placement(&id).unwrap().ready);
 }
 
-/// Asserts that with `none` a preparation of a version 1 list places the tree and reads no file
-/// (no GET of the pack, nothing in the cache), leaves the tree not marked ready, and that each
-/// open then fills exactly the file it opens, once.
+/// Asserts that with `none` a preparation places the tree and reads no file (no GET of the pack,
+/// nothing in the cache), though its spans are otherwise queued, grouped by its pack ranges, as
+/// soon as the list is walked; leaves the tree not marked ready; and that each open then fills
+/// exactly the file it opens, once.
 #[tokio::test]
-async fn with_none_a_v1_tree_is_placed_with_no_file_read_and_an_open_fills_its_file_alone() {
-    let rig = lazy("prov-lazy-v1").await;
+async fn with_none_a_tree_is_placed_with_no_file_read_and_an_open_fills_its_file_alone() {
+    let rig = lazy("prov-lazy-v2").await;
     open_fills_one_file_at_a_time(&rig, &rig.key).await;
 }
 
-/// Asserts the same for a version 2 list, whose spans are otherwise queued, grouped by its pack
-/// ranges, as soon as the list is walked.
-#[tokio::test]
-async fn with_none_a_v2_tree_is_placed_with_no_file_read_and_an_open_fills_its_file_alone() {
-    let rig = lazy("prov-lazy-v2").await;
-    let key = rig.put_list_v2(&list_of(&rig.bench.pack)).await;
-    open_fills_one_file_at_a_time(&rig, &key).await;
-}
-
 /// Prepares the source `js.1`/0 of `rig` (whose mode is `none`) with `key`, the list of the pack's
-/// tree, and asserts what the two tests above say.
+/// tree, and asserts what the test above says.
 async fn open_fills_one_file_at_a_time(rig: &Rig, key: &str) {
     assert_eq!(prepared(rig, "js.1", key).await, Stage::Placed);
     assert_eq!((held(rig), pack_reads(rig)), ([false; 3], 0));
@@ -120,7 +114,7 @@ async fn with_none_mount_release_and_sweep_behave_as_before() {
     rig.provider.release(source("js.1", 0)).unwrap();
     assert!(store.locate_fs(&Rig::place_of("js.1", 0)).is_none());
     assert_eq!(rig.mounted("js.2", 0).await, Rig::path_of("js.2", 0));
-    assert_eq!(rig.provider.sweep(AGENT, &[]), Ok(1));
+    assert_eq!(rig.provider.sweep(AGENT, &[], &[]), Ok(1));
     assert!(store.locate_fs(&Rig::place_of("js.2", 0)).is_none());
     assert!(store.mount_paths().is_empty());
     assert_eq!((held(&rig), pack_reads(&rig)), ([false; 3], 0));
@@ -143,6 +137,7 @@ async fn the_start_line_states_the_mode() {
         socket: rig.bench.rig.dir.path().join("provider.sock"),
         mountpoint: MOUNT.into(),
         fetch_timeout: DEFAULT_FETCH_TIMEOUT,
+        served: true,
     };
     let provider = Provider::new(rig.bench.store.clone(), rig.bench.rig.cache.clone(), &flags);
     assert_eq!(

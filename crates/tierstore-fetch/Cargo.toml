@@ -17,6 +17,8 @@ futures.workspace = true
 # The frozen interfaces this crate implements and calls.
 tierstore-fetch-api.workspace = true
 tierstore-format.workspace = true
+# The node cache's `dirty_bytes` and `writeback_stall_seconds` (4.8, section 12).
+tierstore-metrics.workspace = true
 # Tasks for the parts, the blocking pool for the entry's I/O, channels and the timer of
 # production (`TokioTimer`).
 tokio = { workspace = true, features = ["rt", "sync", "time"] }

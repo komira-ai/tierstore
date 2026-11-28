@@ -49,7 +49,7 @@ fn read_ino_returns_the_bytes_of_a_cached_file_at_any_offset() {
     assert_eq!(core.open_files(), 0);
 }
 
-/// Asserts that a file of no bytes reads as empty and asks the fill socket for nothing.
+/// Asserts that a file of no bytes reads as empty and asks the cache for no fill.
 #[test]
 fn read_ino_of_an_empty_file_is_empty() {
     let rig = attached("tfs-read-empty");
@@ -77,11 +77,11 @@ fn read_ino_of_a_link_is_inval() {
     assert_eq!(rig.core.read_ino(ino::of(9, 1), 0, 10), Err(Errno::NoEnt));
 }
 
-/// Asserts that a blob the cache lacks is filled once through the fill socket, from the source the
+/// Asserts that a blob the cache lacks is filled once through the cache, from the source the
 /// manifest names or from `cas/l/<sha256>` where it names none, and then read from the cache; and
-/// that the blob is pinned for the tree.
+/// that the blob is pinned in the cache for the tree.
 #[test]
-fn read_ino_fills_a_missing_blob_through_the_fill_socket() {
+fn read_ino_fills_a_missing_blob_through_the_cache() {
     let rig = attached("tfs-read-fill");
     let core = &rig.core;
     let tool = blob_with_length(&rig, 10);
@@ -95,15 +95,25 @@ fn read_ino_fills_a_missing_blob_through_the_fill_socket() {
     );
     assert_eq!(core.read_ino(ino::of(1, 4), 2, 3).unwrap(), tool[2..5]);
     assert_eq!(rig.upstream.asked("fill").len(), manifests + 1);
-    assert_eq!(rig.upstream.asked("pin").len(), 1);
+    assert_eq!(rig.node.pinned_bytes(), 10);
     let big = blob_with_length(&rig, 300_000);
     assert_eq!(core.read_ino(ino::of(1, 1), 4, 4).unwrap(), big[4..8]);
+    let at = {
+        let built = rig.upstream.built.lock().unwrap();
+        let sha = built
+            .blobs
+            .iter()
+            .find(|(_, bytes)| bytes.len() == 300_000)
+            .map(|(sha, _)| sha.clone())
+            .unwrap();
+        built.offsets[&sha]
+    };
     assert!(
         rig.upstream
             .asked("fill")
             .last()
             .unwrap()
-            .contains("from packs/one @ 4096")
+            .contains(&format!("from packs/one @ {at}"))
     );
 }
 
@@ -127,13 +137,13 @@ fn read_ino_of_a_fill_failure_is_eio() {
         .failing
         .lock()
         .unwrap()
-        .insert(cc.clone(), "no space".to_owned());
+        .insert(cc.clone(), "mismatch".to_owned());
     assert_eq!(core.read_ino(ino::of(1, 3), 0, 10), Err(Errno::Io));
-    let failures = core.detach(RUN).unwrap();
+    let failures = core.detach(RUN).unwrap().failures;
     assert_eq!(failures.len(), 1);
     assert_eq!(failures[0].path, "/bin/cc");
     assert_eq!(failures[0].digest, cc);
-    assert_eq!(failures[0].reason, "no space");
+    assert_eq!(failures[0].reason, "mismatch");
 }
 
 /// Asserts that a read at the end of a file, and past it, is empty and fills nothing for a blob

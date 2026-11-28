@@ -1,6 +1,5 @@
-//! What the mounts report of their opens, as the cache counts and renders it: the report read back
-//! as written and every other form refused, another number of buckets among them; the families at
-//! zero before any report; each process's totals added by what they grew by, across a hand-over
+//! What the core reports of its opens, as the cache counts and renders it: the families at zero
+//! before any report; each process's totals added by what they grew by, across a hand-over
 //! and a lost report; the gauge as the sum of the mounts' last reports; the bound on the mounts.
 
 use super::{KINDS, Opens, Outcome, Source, Spans, kind};
@@ -93,60 +92,6 @@ fn every_pair_of_an_outcome_and_a_source_has_its_own_place() {
         assert_eq!(kind(outcome, source), at);
     }
     assert_eq!(kind(Outcome::Error, Source::Filled), 3);
-}
-
-/// Asserts that a report reads back as written, the largest numbers included, and that a report
-/// with a bucket fewer or a bucket more (a mount of another release), a missing or an extra word,
-/// an empty word, a number with a sign or a non-digit, a number over 64 bits, a bad mount name and
-/// no numbers at all are refused.
-#[test]
-fn an_opens_report_reads_back_as_written_and_any_other_form_is_refused() {
-    let one = report(
-        "boot-1",
-        4242,
-        7,
-        [
-            spans(30, 5, 1),
-            spans(2, 1, 4),
-            spans(0, 0, 0),
-            spans(9, 3, 2),
-        ],
-    );
-    let line = one.line();
-    let rest = line.strip_prefix("opens ").unwrap();
-    assert!(rest.starts_with("boot-1 4242 7 30 0 0 0 0 0 1 0"), "{line}");
-    assert_eq!(rest.split(' ').count(), 3 + 4 * (1 + BUCKETS));
-    assert_eq!(Opens::parse(rest), Some(one));
-    let most = report("m", u64::MAX, u64::MAX, [spans(u64::MAX, 16, u64::MAX); 4]);
-    let line = most.line();
-    assert_eq!(
-        Opens::parse(line.strip_prefix("opens ").unwrap()),
-        Some(most)
-    );
-    let fewer = rest.rsplit_once(' ').unwrap().0.to_owned();
-    let more = format!("{rest} 0");
-    let big = rest.replacen(" 4242 ", &format!(" {}0 ", u64::MAX), 1);
-    let signed = rest.replacen(" 7 ", " +7 ", 1);
-    let lettered = rest.replacen(" 7 ", " 7x ", 1);
-    let doubled = rest.replacen(" 7 ", "  7 ", 1);
-    let named = rest.replacen("boot-1", "boot\u{e9}", 1);
-    let unnamed = rest.replacen("boot-1", "", 1);
-    for refused in [
-        "",
-        "boot-1",
-        "boot-1 4242",
-        "boot-1 4242 7",
-        fewer.as_str(),
-        more.as_str(),
-        big.as_str(),
-        signed.as_str(),
-        lettered.as_str(),
-        doubled.as_str(),
-        named.as_str(),
-        unnamed.as_str(),
-    ] {
-        assert_eq!(Opens::parse(refused), None, "{refused:?}");
-    }
 }
 
 /// Asserts that before any report the two families have their `# TYPE` lines, every series of the
