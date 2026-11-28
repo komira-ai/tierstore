@@ -25,10 +25,10 @@ address or key of the farm. Every key of `[trees]` is the node's default, but `m
 in `t3-stall` (above the Prepares that arrive, so that every one is placed).
 
 The mount is made with `allow_other`, which tierstore always asks for and which a user other than
-root gets only by `/etc/fuse.conf`: the driver runs as root, in a container with `/dev/fuse` and
-`CAP_SYS_ADMIN`. `start-without-fs` alone has no `fs` interface in its node file, and so no mount
-provider either (tierstore refuses a file with a provider and no `fs` interface), and needs
-neither: it runs as an ordinary user with no capabilities and no network.
+root gets only by `/etc/fuse.conf`, so a case that mounts needs `/dev/fuse` and a right to mount
+with it. `start-without-fs` alone has no `fs` interface in its node file, and so no mount provider
+either (tierstore refuses a file with a provider and no `fs` interface), and needs neither: it runs
+as an ordinary user with no capabilities and no network.
 
 What each case needs of the host it runs on:
 
@@ -75,33 +75,6 @@ The numbers are the plan's; the flags `--cycles`, `--max-placements`, `--burst`,
 
 ## Running it
 
-The workflow `blackbox.yml` runs every case, by hand or from another workflow, against the
-`.deb` of a published release: it builds the two programs, downloads the release's `.deb` and
-`SHA256SUMS`, checks the one against the other, unpacks the package, and runs the driver in a
-container on a hosted runner, with `/dev/fuse`, `CAP_SYS_ADMIN` and a tmpfs of 256 MiB as the small
-disk:
-
-```sh
-gh workflow run blackbox.yml -f tag=v0.3.206
-```
-
-By hand, the same container:
-
-```sh
-cargo build --locked --release -p tierstore-blackbox
-dpkg-deb --extract tierstore_<version>_amd64.deb pkg
-docker run --rm --device /dev/fuse --cap-add SYS_ADMIN --security-opt apparmor=unconfined \
-    --tmpfs /small:size=256m --volume "$PWD/pkg:/pkg:ro" \
-    --volume "$PWD/target/release:/bb:ro" --volume "$PWD/scratch:/scratch" \
-    ubuntu:24.04 /bb/tierstore-blackbox --tierstore /pkg/usr/libexec/tierstore/tierstore \
-    --fake-s3 /bb/fake-s3 --scratch /scratch --small-disk /small
-```
-
-Each case's directory keeps the node file and the logs of both programs (`logs/tierstore.out`,
-`.err`, `logs/fake-s3.out`, `.err`).
-
-## In Buck2
-
 The two programs are the package's `:bin` (`//crates/tierstore-blackbox:bin`, buildrules' target of
 every binary of a member), and the tests of the driver and of `fake-s3` themselves (against the
 model of a node in `src/cases/model.rs`, and against the crate's own programs) are its `:test`, as
@@ -109,16 +82,34 @@ for every member.
 
 The released package is tested by `//crates/tierstore-blackbox:released`, a `blackbox_test` of
 buildrules (`rules/blackbox`): `buck2 test` of it, on the farm, unpacks the pinned `.deb` of a
-release onto the farm's base image and runs `:driver` with that root as its one argument.
-`:driver` (`blackbox.bzl`) is the driver and `fake-s3` copied into one directory; given only a
-root, the driver takes the binary at `<root>/usr/libexec/tierstore/tierstore`, the `fake-s3`
-beside itself and the scratch directory `<root>/var/tmp/tierstore-blackbox`, and runs the cases
-that need no mount. A farm job is an ordinary user with no capabilities, no `/dev/fuse` and no
-network but loopback, so that is `start-without-fs`; the other cases need what the table above
-says, and run by `blackbox.yml` until a farm job can mount. A release passes the package it is
-about to publish in place of the pin:
+release onto the farm's base image, named by its digest, and runs `:driver` with that root as its
+one argument. `:driver` (`blackbox.bzl`) is the driver and `fake-s3` copied into one directory;
+given only a root, the driver takes the binary at `<root>/usr/libexec/tierstore/tierstore`, the
+`fake-s3` beside itself and the scratch directory `<root>/var/tmp/tierstore-blackbox`, and runs the
+cases that need no mount. A cache in a case's directory gets half the scratch's file system, at
+most 1,024 MiB: a farm job's is 1 GiB.
+
+```sh
+buck2 test //crates/tierstore-blackbox:released
+```
+
+A release passes the package it is about to publish in place of the pin:
 
 ```sh
 buck2 test //crates/tierstore-blackbox:released \
     -c blackbox.tierstore_url=<url> -c blackbox.tierstore_sha256=<sha256> -c blackbox.tierstore_size=<bytes>
 ```
+
+A farm job is an ordinary user with no capabilities, no `/dev/fuse` and no network but loopback, so
+`:released` runs `start-without-fs` alone. The cases that mount (every other case of the table
+above) wait for `blackbox_test` to offer `/dev/fuse` and a right to mount on the farm; until then
+nothing runs them, and their code is tested against the model of a node. The driver's other form
+names its programs and its scratch, for a host that can mount:
+
+```sh
+tierstore-blackbox --tierstore <binary> --fake-s3 <fake-s3> --scratch <dir> [--small-disk <fs>] [--case <name>]...
+```
+
+Each case's directory keeps the node file and the logs of both programs (`logs/tierstore.out`,
+`.err`, `logs/fake-s3.out`, `.err`); a program that ends before its start line is reported with the
+first line it wrote to its standard error, since a farm job leaves no log to read.
