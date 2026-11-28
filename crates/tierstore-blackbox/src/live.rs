@@ -144,22 +144,6 @@ impl Live {
         Ok(())
     }
 
-    /// Stops the node (SIGTERM, so that it takes its mount down) and the upstream.
-    ///
-    /// # Errors
-    /// A process that could not be stopped, or a node that did not end as asked: with status 0,
-    /// or by the SIGTERM itself.
-    pub fn stop(mut self) -> Result<(), String> {
-        let node = self.node.take().map(|node| node.terminate(STOP_GRACE));
-        let upstream = self.upstream.terminate(STOP_GRACE);
-        match node.transpose().map_err(|e| e.to_string())? {
-            Some(status) if !status.success() && status.signal() != Some(15) => {
-                Err(format!("the node ended {status} when asked to stop"))
-            }
-            _ => upstream.map(drop).map_err(|e| e.to_string()),
-        }
-    }
-
     fn node(&mut self) -> Result<&mut Process, String> {
         self.node
             .as_mut()
@@ -181,6 +165,34 @@ impl Live {
             .map_err(said)?;
         Ok(answer.trim_end().to_owned())
     }
+}
+
+/// Whether a node that ended with `status` when asked to stop ended as asked: with status 0, or by
+/// the SIGTERM itself; a node that was not running ended as asked.
+fn ended_as_asked(status: Option<std::process::ExitStatus>) -> Result<(), String> {
+    match status {
+        Some(status) if !status.success() && status.signal() != Some(15) => {
+            Err(format!("the node ended {status} when asked to stop"))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// The gauges of a `/metricz` answer of `status` and `body` from the node at `address`.
+fn gauges_of(status: u16, body: &[u8], address: &str) -> Result<Gauges, String> {
+    if status != 200 {
+        return Err(format!("GET http://{address}/metricz answered {status}"));
+    }
+    Ok(Gauges::of(&String::from_utf8_lossy(body)))
+}
+
+/// The count of held requests of fake-s3's answer `answer` to `stats`.
+fn stalled_of(answer: &str) -> Result<u64, String> {
+    answer
+        .split_whitespace()
+        .find_map(|word| word.strip_prefix("stalled="))
+        .and_then(|count| count.parse().ok())
+        .ok_or_else(|| format!("fake-s3 answered stats with {answer:?}"))
 }
 
 /// The control command of `serving`.
@@ -236,9 +248,7 @@ impl Rig for Live {
     async fn gauges(&mut self) -> Result<Gauges, String> {
         let (status, body) =
             crate::http::call(&self.metrics, Method::GET, "/metricz", Vec::new()).await?;
-        (status == 200)
-            .then(|| Gauges::of(&String::from_utf8_lossy(&body)))
-            .ok_or_else(|| format!("GET http://{}/metricz answered {status}", self.metrics))
+        gauges_of(status, &body, &self.metrics)
     }
 
     async fn put(&mut self, tree: &Tree) -> Result<(), String> {
@@ -264,11 +274,7 @@ impl Rig for Live {
 
     async fn stalled(&mut self) -> Result<u64, String> {
         let answer = self.control("stats").await?;
-        answer
-            .split_whitespace()
-            .find_map(|word| word.strip_prefix("stalled="))
-            .and_then(|count| count.parse().ok())
-            .ok_or_else(|| format!("fake-s3 answered stats with {answer:?}"))
+        stalled_of(&answer)
     }
 
     async fn restart(&mut self) -> Result<(), String> {
@@ -303,6 +309,15 @@ impl Rig for Live {
 
     async fn pause(&mut self, time: Duration) {
         tokio::time::sleep(time).await;
+    }
+
+    /// Stops the node (SIGTERM, so that it takes its mount down) and the upstream. A process that
+    /// could not be stopped fails, and so does a node that did not end as asked.
+    async fn stop(mut self) -> Result<(), String> {
+        let node = self.node.take().map(|node| node.terminate(STOP_GRACE));
+        let upstream = self.upstream.terminate(STOP_GRACE);
+        ended_as_asked(node.transpose().map_err(|e| e.to_string())?)?;
+        upstream.map(drop).map_err(|e| e.to_string())
     }
 }
 

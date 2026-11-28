@@ -131,3 +131,18 @@ fn a_node_that_cannot_be_written_says_why() {
         "{refused}"
     );
 }
+
+/// Asserts that a node file that cannot be written (its path is a directory) is named, after its
+/// key files are written.
+#[test]
+fn a_node_file_that_cannot_be_written_is_named() {
+    let dir = TestDir::under(std::env::temp_dir(), "blackbox-config-dir");
+    let paths = Paths::of(&dir.path().join("case"));
+    std::fs::create_dir_all(&paths.file).unwrap();
+    let refused = node(&dir.path().join("cache")).write(&paths).unwrap_err();
+    assert!(
+        refused.starts_with(&format!("{}: ", paths.file.display())),
+        "{refused}"
+    );
+    assert!(paths.dir.join("access.key").is_file());
+}

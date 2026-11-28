@@ -31,8 +31,9 @@ fn driver(scratch: &Path, flags: &[&str]) -> Output {
 
 /// Asserts that a case whose node ends before its start line is reported FAIL with the reason,
 /// that the driver exits 1, and that the case's directory has the logs of both programs; that a
-/// case whose directory is there already is not run over it; and that `disk-full` reads the size
-/// of its small disk before it starts its rig.
+/// case whose directory is there already is not run over it; that the cases whose nodes set
+/// `trees.max_placements` (T2, T3) and `disk-full`, which reads the size of its small disk, fail
+/// the same way; and that a small disk that is not there fails `disk-full`.
 #[test]
 fn a_case_whose_node_does_not_start_fails_with_the_reason() {
     let temp = std::env::temp_dir();
@@ -72,21 +73,23 @@ fn a_case_whose_node_does_not_start_fails_with_the_reason() {
             "disk-full",
             "--case",
             "t2-placements",
+            "--case",
+            "t3-stall",
             "--small-disk",
             small.to_str().unwrap(),
         ],
     );
     let report = String::from_utf8(full.stdout).unwrap();
     let lines: Vec<&str> = report.lines().collect();
-    assert_eq!(lines.len(), 2, "{report}");
-    assert!(
-        lines[0].starts_with("FAIL t2-placements: the rig did not start: tierstore ended"),
-        "{report}"
-    );
-    assert!(
-        lines[1].starts_with("FAIL disk-full: the rig did not start: tierstore ended"),
-        "{report}"
-    );
+    assert_eq!(lines.len(), 3, "{report}");
+    for (line, case) in lines.iter().zip(["t2-placements", "t3-stall", "disk-full"]) {
+        assert!(
+            line.starts_with(&format!(
+                "FAIL {case}: the rig did not start: tierstore ended"
+            )),
+            "{report}"
+        );
+    }
 
     let gone = dir.path().join("gone");
     let no_size = driver(

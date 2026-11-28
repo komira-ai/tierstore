@@ -111,11 +111,11 @@ fn the_cases_run_in_order_and_disk_full_needs_a_small_disk() {
     );
 }
 
-/// Rigs of the tests: a healthy model for each case but those it fails to start, and a failure
-/// to stop each rig, if set.
+/// Rigs of the tests: a healthy model for each case but those it fails to start, and models whose
+/// stop fails, if set.
 struct Models {
     refused: Vec<Case>,
-    stop: VecDeque<Result<(), String>>,
+    stop: VecDeque<Option<String>>,
     started: Vec<Case>,
 }
 
@@ -127,11 +127,9 @@ impl Rigs for Models {
         if self.refused.contains(&case) {
             return Err("no node".to_owned());
         }
-        Ok(Model::healthy())
-    }
-
-    fn stop(&mut self, _rig: Model) -> Result<(), String> {
-        self.stop.pop_front().unwrap_or(Ok(()))
+        let mut model = Model::healthy();
+        model.stop_fails = self.stop.pop_front().flatten();
+        Ok(model)
     }
 }
 
@@ -159,7 +157,7 @@ async fn each_case_runs_on_its_own_rig_and_gets_a_line() {
 
     let mut models = Models {
         refused: vec![Case::Cycles],
-        stop: VecDeque::from([Err("SIGTERM to tierstore: no such process".to_owned())]),
+        stop: VecDeque::from([Some("SIGTERM to tierstore: no such process".to_owned())]),
         started: Vec::new(),
     };
     let mut out = Vec::new();
@@ -178,9 +176,18 @@ async fn each_case_runs_on_its_own_rig_and_gets_a_line() {
     );
 }
 
-/// Asserts the exit status of a run: 0 when every case passed, 1 when one failed.
+/// Asserts the exit status of a run: 0 when every case passed, 1 when one failed, and 1, said on
+/// standard error, when the run's runtime could not be made.
 #[test]
 fn a_run_exits_0_when_every_case_passed_and_1_otherwise() {
-    assert_eq!(exit_of(true), ExitCode::SUCCESS);
-    assert_eq!(exit_of(false), ExitCode::from(1));
+    let mut err = Vec::new();
+    assert_eq!(exit_of(Ok(true), &mut err), ExitCode::SUCCESS);
+    assert_eq!(exit_of(Ok(false), &mut err), ExitCode::from(1));
+    assert!(err.is_empty());
+    let refused = std::io::Error::other("no threads");
+    assert_eq!(exit_of(Err(refused), &mut err), ExitCode::from(1));
+    assert_eq!(
+        String::from_utf8(err).unwrap(),
+        "tierstore-blackbox: the runtime: no threads\n"
+    );
 }

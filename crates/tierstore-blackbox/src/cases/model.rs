@@ -2,7 +2,7 @@
 //! moves only when a case pauses, with a switch for each way a node can go wrong that a case is
 //! the test of.
 //!
-//! A Prepare of a tree the upstream holds places it at once, unless the upstream fails (the source
+//! A Prepare places its tree at once, unless the upstream fails (the source
 //! waits), the disk is full and the model refuses then, or the node holds `max_placements` (the
 //! preparation is unmade; the next Prepare or Mount tries again). A Mount answers the placed
 //! source's directory, or "unavailable" with the node's reason. A Release frees the place, unless
@@ -21,7 +21,7 @@ use tierstore_trees_api::provider::v1::Source;
 use crate::metrics::Gauges;
 use crate::provider::{Code, Refusal};
 use crate::rig::Rig;
-use crate::tree::{PACK_PREFIX, Tree, TreeFault};
+use crate::tree::{Tree, TreeFault};
 
 pub(crate) fn unavailable(message: &str) -> Refusal {
     Refusal {
@@ -34,7 +34,6 @@ pub(crate) fn unavailable(message: &str) -> Refusal {
 #[derive(Debug)]
 pub(crate) struct Model {
     pub now: Duration,
-    trees: BTreeSet<String>,
     sources: BTreeMap<String, String>,
     placed: BTreeSet<String>,
     lingering: usize,
@@ -78,6 +77,10 @@ pub(crate) struct Model {
     pub leak_per_read: u64,
     /// The time each Mount takes, on the model's clock.
     pub mount_takes: Duration,
+    /// The upstream goes on as it was when the rig has it serve all again (a failure goes on).
+    pub failing_sticks: bool,
+    /// The stop of the rig fails, saying this.
+    pub stop_fails: Option<String>,
     /// The next answers of a call, by its name and the run of its source ("" for any), before
     /// the model's own.
     pub next: VecDeque<(&'static str, &'static str, Refusal)>,
@@ -89,7 +92,6 @@ impl Model {
     pub(crate) fn healthy() -> Self {
         Self {
             now: Duration::ZERO,
-            trees: BTreeSet::new(),
             sources: BTreeMap::new(),
             placed: BTreeSet::new(),
             lingering: 0,
@@ -119,6 +121,8 @@ impl Model {
             failing_serves: false,
             leak_per_read: 0,
             mount_takes: Duration::ZERO,
+            failing_sticks: false,
+            stop_fails: None,
             next: VecDeque::new(),
             rig_fails: None,
         }
@@ -185,17 +189,8 @@ impl Rig for Model {
         self.calls.push(format!("Prepare {}", source.run));
         self.alive_or()?;
         self.scripted("prepare", &source.run)?;
-        if !self.trees.contains(tree) {
-            return Err(Refusal {
-                code: Code::FailedPrecondition,
-                message: format!("no tree list at {tree}"),
-            });
-        }
         self.sources.insert(source.run.clone(), tree.to_owned());
-        if let Serving::Stalled { prefix } = &self.serving
-            && PACK_PREFIX.starts_with(prefix.as_str())
-            && !self.stall_unreached
-        {
+        if matches!(self.serving, Serving::Stalled { .. }) && !self.stall_unreached {
             self.stalled += 1;
             let heap = self.heap + self.heap_per_prepare;
             self.heap = self.heap_bound.map_or(heap, |bound| heap.min(bound));
@@ -266,10 +261,8 @@ impl Rig for Model {
         })
     }
 
-    async fn put(&mut self, tree: &Tree) -> Result<(), String> {
-        self.rig("put")?;
-        self.trees.insert(tree.key().to_owned());
-        Ok(())
+    async fn put(&mut self, _tree: &Tree) -> Result<(), String> {
+        self.rig("put")
     }
 
     async fn serve_as(&mut self, serving: Serving) -> Result<(), String> {
@@ -277,7 +270,9 @@ impl Rig for Model {
         if serving == Serving::All {
             self.heap = 0;
         }
-        self.serving = serving;
+        if !(self.failing_sticks && serving == Serving::All) {
+            self.serving = serving;
+        }
         Ok(())
     }
 
@@ -319,5 +314,9 @@ impl Rig for Model {
 
     async fn pause(&mut self, time: Duration) {
         self.now += time;
+    }
+
+    async fn stop(self) -> Result<(), String> {
+        self.stop_fails.map_or(Ok(()), Err)
     }
 }

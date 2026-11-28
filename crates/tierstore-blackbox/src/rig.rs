@@ -68,4 +68,7 @@ pub trait Rig {
 
     /// Waits `time`.
     async fn pause(&mut self, time: Duration);
+
+    /// Stops the node and its upstream.
+    async fn stop(self) -> Result<(), String>;
 }

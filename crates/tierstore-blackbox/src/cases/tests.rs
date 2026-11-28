@@ -590,3 +590,99 @@ async fn a_tree_that_comes_past_its_deadline_fails() {
         ["js.t2-burst-0 within 60s of the Releases: the tree came 10s past the deadline"]
     );
 }
+
+/// Asserts that a tree the cases cannot make (a shape out of bounds) fails each case as a
+/// failure of the rig, naming the shape, before anything is asked of the node.
+#[tokio::test]
+async fn a_tree_that_cannot_be_made_fails_the_case() {
+    let params = Params {
+        cycle_files: 0,
+        stall_files: 0,
+        disk_files: 0,
+        ..Params::defaults()
+    };
+    for case in Case::ALL {
+        let mut model = Model::healthy();
+        let out = with(case, &mut model, &params).await;
+        assert_eq!(out.failures.len(), 1, "{}: {:?}", case.name(), out.failures);
+        assert!(
+            out.failures[0].starts_with("the rig: a tree of 0 files of "),
+            "{}: {:?}",
+            case.name(),
+            out.failures
+        );
+        assert!(model.calls.is_empty(), "{}: {:?}", case.name(), model.calls);
+    }
+}
+
+/// Asserts that a Prepare answered "unavailable" is one the agent waits on and asks again, as a
+/// Mount so answered is: the case of errors counts it as a wait, and the tree comes after it once
+/// the disk has room again.
+#[tokio::test]
+async fn a_prepare_answered_unavailable_is_asked_again() {
+    let mut model = Model::healthy();
+    model
+        .next
+        .push_back(("prepare", "js.errors-0", unavailable("busy")));
+    let out = against(Case::Errors, &mut model).await;
+    assert!(out.passed(), "{:?}", out.failures);
+
+    let mut model = Model::healthy();
+    model
+        .next
+        .push_back(("prepare", "js.disk-full-5", unavailable("busy")));
+    let out = against(Case::Disk, &mut model).await;
+    assert!(out.passed(), "{:?}", out.failures);
+    let asked = model
+        .calls
+        .iter()
+        .filter(|c| *c == "Prepare js.disk-full-5")
+        .count();
+    assert_eq!(asked, 2, "{:?}", model.calls);
+}
+
+/// Catches an upstream that goes on failing after the case of errors has it serve again: no
+/// source gets its tree within the agent's budget.
+#[tokio::test]
+async fn the_case_of_errors_fails_when_no_tree_comes_after_the_errors() {
+    let mut model = Model::healthy();
+    model.failing_sticks = true;
+    let out = against(Case::Errors, &mut model).await;
+    assert_eq!(out.failures.len(), 8, "{:?}", out.failures);
+    assert_eq!(
+        out.failures[0],
+        "js.errors-0 once the upstream served: Mount: Unavailable: no tree by the agent's deadline; the last answer: the read of cas/l/... failed: 503 SlowDown"
+    );
+}
+
+/// Catches a burst Mount refused "unavailable" for a reason other than too many placements: the
+/// agent waits, but the node did not say why it cannot place the tree.
+#[tokio::test]
+async fn t2_fails_a_burst_refused_unavailable_for_another_reason() {
+    let mut model = Model::healthy();
+    model.too_many_answer = Some(unavailable("busy"));
+    let out = against(Case::Placements, &mut model).await;
+    assert_eq!(
+        out.failures[0],
+        "the burst's Mount of js.t2-burst-0 past 1024 placements: Unavailable: busy; not unavailable for too many placements"
+    );
+}
+
+/// Asserts that after the restart the case reads each tree the node answers the agent's Mount
+/// with, and names a read that is not the tree's.
+#[tokio::test]
+async fn the_restart_case_reads_each_tree_it_is_answered() {
+    let mut model = Model::healthy();
+    model.read_fault = Some(TreeFault::Differs {
+        path: "empty".to_owned(),
+        what: "1 bytes, not an empty file".to_owned(),
+    });
+    let out = against(Case::Restart, &mut model).await;
+    assert_eq!(
+        out.failures,
+        [
+            "js.restart-0 after the restart: the read: empty: 1 bytes, not an empty file",
+            "js.restart-1 after the restart: the read: empty: 1 bytes, not an empty file",
+        ]
+    );
+}

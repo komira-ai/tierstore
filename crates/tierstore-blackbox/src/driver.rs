@@ -135,15 +135,12 @@ impl Args {
     }
 }
 
-/// Where the rigs of the cases come from: a rig per case, started and then stopped.
+/// Where the rigs of the cases come from: a rig per case, which the driver stops after it.
 pub(crate) trait Rigs {
     type Rig: Rig;
 
     /// The rig of `case`.
     async fn start(&mut self, case: Case, params: &Params) -> Result<Self::Rig, String>;
-
-    /// Stops `rig`.
-    fn stop(&mut self, rig: Self::Rig) -> Result<(), String>;
 }
 
 /// The rigs of running nodes (`crate::live`).
@@ -189,10 +186,6 @@ impl Rigs for Nodes<'_> {
         });
         Live::start(setup, command).await
     }
-
-    fn stop(&mut self, rig: Live) -> Result<(), String> {
-        rig.stop()
-    }
 }
 
 /// The budget of a cache on the disk `disk`: a share of its size, in MiB.
@@ -214,7 +207,7 @@ pub(crate) async fn drive<S: Rigs>(
         let outcome = match rigs.start(*case, params).await {
             Ok(mut rig) => {
                 let mut outcome = cases::run(*case, &mut rig, params).await;
-                if let Err(why) = rigs.stop(rig) {
+                if let Err(why) = rig.stop().await {
                     outcome.failures.push(format!("stopping the rig: {why}"));
                 }
                 outcome
@@ -261,28 +254,27 @@ pub fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let runtime = match tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-    {
-        Ok(runtime) => runtime,
-        Err(why) => {
-            let _ = writeln!(std::io::stderr(), "tierstore-blackbox: the runtime: {why}");
-            return ExitCode::from(1);
-        }
-    };
     let params = args.params();
     let mut nodes = Nodes { args: &args };
-    let passed = runtime.block_on(drive(&mut nodes, &cases, &params, &mut std::io::stdout()));
-    exit_of(passed)
+    let ran = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map(|runtime| {
+            runtime.block_on(drive(&mut nodes, &cases, &params, &mut std::io::stdout()))
+        });
+    exit_of(ran, &mut std::io::stderr())
 }
 
-/// The exit status of a run: 0 when every case passed, 1 when one failed.
-fn exit_of(passed: bool) -> ExitCode {
-    if passed {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::from(1)
+/// The exit status of a run: 0 when every case passed, 1 when one failed or the runtime of the
+/// run could not be made, which is said on `err`.
+fn exit_of(ran: std::io::Result<bool>, err: &mut impl Write) -> ExitCode {
+    match ran {
+        Ok(true) => ExitCode::SUCCESS,
+        Ok(false) => ExitCode::from(1),
+        Err(why) => {
+            let _ = writeln!(err, "tierstore-blackbox: the runtime: {why}");
+            ExitCode::from(1)
+        }
     }
 }
 

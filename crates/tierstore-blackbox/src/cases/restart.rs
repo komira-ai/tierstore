@@ -1,9 +1,10 @@
 //! The node killed (SIGKILL) and started again between a Prepare and its Mount, twice: once right
 //! after the Prepare's answer, while the tree is being prepared, and once after its placement is
-//! on disk. Asking again as the agent does (a Mount, and after "unavailable" a Prepare and a Mount
-//! again), each source must get its tree, read as the tree, within the agent's budget.
+//! on disk. Asking as the agent does after a restart of its provider (the Mount it was about to
+//! send, and after "unavailable" a Prepare and a Mount again), each source must get its tree,
+//! read as the tree, within the agent's budget.
 
-use super::{Outcome, Params, drained, obtain, source_of};
+use super::{Outcome, Params, Step, drained, obtain, source_of};
 use crate::rig::Rig;
 use crate::tree::Tree;
 
@@ -37,8 +38,15 @@ pub(super) async fn run<R: Rig>(rig: &mut R, p: &Params, out: &mut Outcome) -> R
     rig.restart().await?;
     out.note("killed right after a Prepare, and again once a tree was placed");
     for source in [&early, &placed] {
+        // The agent goes on with the Mount it was about to send; after "unavailable" it asks
+        // again as it does for any tree.
         let until = rig.now() + p.tree_wait;
-        if let Err(step) = obtain(rig, source, &tree, until, p.look).await {
+        let got = match rig.mount(source).await {
+            Ok(at) => rig.read(&at, &tree).await.map_err(Step::Read),
+            Err(refusal) if refusal.fails_the_start() => Err(Step::Mount(refusal)),
+            Err(_) => obtain(rig, source, &tree, until, p.look).await.map(drop),
+        };
+        if let Err(step) = got {
             out.fail(format!("{} after the restart: {step}", source.run));
         }
     }

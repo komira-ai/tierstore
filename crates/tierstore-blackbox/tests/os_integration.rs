@@ -173,3 +173,39 @@ fn the_size_of_a_disk_is_read_and_a_fill_says_why_it_cannot() {
         "{refused}"
     );
 }
+
+/// Asserts that only a line with a `listen=` word is a start line: a program that prints other
+/// lines and ends (the driver's `--help`) ended before its start line, with its status, and its
+/// lines are in its log.
+#[test]
+fn a_line_without_an_address_is_no_start_line() {
+    let (dir, _) = scratch("os-no-line");
+    let mut help = Command::new(support::DRIVER);
+    help.arg("--help");
+    let ended = Process::start(help, "driver", dir.path(), WAIT).unwrap_err();
+    assert_eq!(
+        ended.to_string(),
+        "driver ended before it printed its start line (exit status: 0); see driver.err"
+    );
+    let out = std::fs::read_to_string(dir.path().join("driver.out")).unwrap();
+    assert!(out.contains("--small-disk"), "{out}");
+}
+
+/// Asserts that a program given no time for its start line, or none to end after SIGTERM, is
+/// dealt with all the same: started, or killed and named; and ended, by the SIGTERM or by the
+/// SIGKILL that follows it. Which of the two comes first is the machine's, not the test's.
+#[test]
+fn a_program_given_no_time_is_killed_and_named() {
+    let (dir, control) = scratch("os-no-time");
+    match Process::start(fake(&control), "fake-s3", dir.path(), Duration::ZERO) {
+        Ok(started) => drop(started),
+        Err(refused) => assert_eq!(
+            refused.to_string(),
+            "fake-s3 printed no start line within 0ns, and was killed; see fake-s3.err"
+        ),
+    }
+    std::fs::remove_file(&control).ok();
+    let process = Process::start(fake(&control), "fake-s3", dir.path(), WAIT).unwrap();
+    let ended = process.terminate(Duration::ZERO).unwrap();
+    assert!([Some(9), Some(15)].contains(&ended.signal()), "{ended:?}");
+}

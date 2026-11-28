@@ -158,8 +158,17 @@ async fn the_live_rig_drives_its_node_and_upstream_from_outside() {
         refused.starts_with(&format!("{}: ", nowhere.join("ballast").display())),
         "{refused}"
     );
+    let before = live.now();
     live.pause(Duration::from_millis(1)).await;
-    live.stop().unwrap();
+    // The rig's clock moves on with a pause: the cases' waits rest on it.
+    assert!(live.now() > before);
+    std::fs::remove_file(dir.path().join("upstream.sock")).unwrap();
+    let refused = live.stalled().await.unwrap_err();
+    assert!(
+        refused.starts_with("fake-s3's control socket, \"stats\": "),
+        "{refused}"
+    );
+    live.stop().await.unwrap();
 }
 
 /// Asserts that a node that does not come back from a restart leaves a rig that says so: no
@@ -183,7 +192,7 @@ async fn a_node_that_does_not_come_back_leaves_a_rig_that_says_so() {
     assert!(!live.alive());
     assert_eq!(live.resident().unwrap_err(), "the node is not running");
     assert_eq!(live.restart().await.unwrap_err(), "the node is not running");
-    live.stop().unwrap();
+    live.stop().await.unwrap();
 }
 
 /// Asserts that a rig that cannot start says why: an upstream program that is not there, a node
@@ -229,4 +238,23 @@ async fn a_rig_that_cannot_start_says_why() {
         refused.starts_with(&format!("{}: ", file.join("logs").display())),
         "{refused}"
     );
+}
+
+/// Asserts that a start waits, looking again, for a provider socket that takes a connection
+/// only some time after the node's start line: here, once the stand-in node is running.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_start_waits_for_a_socket_bound_after_the_start_line() {
+    let (dir, socket) = scratch("live-late");
+    let root = dir.path().to_owned();
+    let late = tokio::spawn(async move {
+        while !root.join("node-0.sock").exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        FakeProvider::serve(&socket, &root.join("trees"))
+    });
+    let live = Live::start(setup(dir.path(), None), stand_in(dir.path(), &[]))
+        .await
+        .unwrap();
+    let _provider = late.await.unwrap();
+    live.stop().await.unwrap();
 }
