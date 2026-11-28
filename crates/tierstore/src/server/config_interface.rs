@@ -11,28 +11,23 @@
 //! ```
 //!
 //! An interface is a front over the same proxy. The types are `s3` (the S3 API, `/healthz`,
-//! `/readyz`, `/usagez` and `/metricz`), `oci` (the read-only registry front), `trees` (the
-//! gRPC API of node-local trees, see [`trees`](super::trees)), `mount-provider` (jobscheduler's
-//! mount provider on a Unix socket, see [`provider::config`](super::provider::config), which listens
+//! `/readyz`, `/usagez` and `/metricz`), `oci` (the read-only registry front), `mount-provider`
+//! (jobscheduler's mount provider on a Unix socket, see [`provider::config`](super::provider::config), which listens
 //! on no address and takes params of its own) and `fs` (the trees as a file system, see
 //! [`config::fs`](super::config::fs), which listens on no address either and takes the params of the
 //! `[fs]` table of `tierstore fs`). Every other entry says where it listens with one of two params:
 //! `port`, the wildcard of IPv4 (`0.0.0.0:<port>`), or `addresses`, a socket address or a list
-//! of them. Both are refused, and so is neither, but for a `trees` interface, which listens on
-//! port 9600 of the wildcard when it says neither. An address that two interfaces (or one
+//! of them. Both are refused, and so is neither. An address that two interfaces (or one
 //! interface twice) listen on is refused too, but for a port of 0, which asks the system for a
-//! port.
+//! port. The type `trees`, the gRPC front of node-local trees of earlier releases, is refused
+//! with [`TREES_REMOVED`].
 //!
 //! The entries of a type are served together: one server, one drain, and for `oci` one limit
 //! on connections, per type, on every address of the entries of that type. So the `s3` entries take no other
 //! param, and the `oci` entries, which also take `tls_cert_file`, `tls_key_file`, `prefix`,
 //! `max_connections` and `connection_lifetime`, must agree on those five (one registry front has
-//! one certificate and one prefix); one that differs from the first is refused. The `trees`
-//! entries are served together in the same way and take `tls_cert_file`, `tls_key_file`,
-//! `max_connections` and `connection_lifetime`, which they must agree on (the longest call is
-//! `trees.max_request_bytes` of the `[trees]` table). An `s3` interface has no TLS params yet. At
-//! least one `s3` interface is needed. A `trees` interface is a build node's alone: its `[trees]`
-//! keep the trees.
+//! one certificate and one prefix); one that differs from the first is refused. An `s3`
+//! interface has no TLS params yet. At least one `s3` interface is needed.
 //!
 //! The keys of the release before stay readable: `server.listen` is an `s3` interface at those
 //! addresses and the `[oci]` table (`listen` and the same five params, with `listen` needed) is an
@@ -55,7 +50,10 @@ use super::listen::Addrs;
 use super::provider::ProviderFlags;
 use super::provider::config::provider_of;
 use super::treefs::{NfsTable, PutTable};
-use super::trees::{DEFAULT_PORT, TreesFlags};
+
+/// Why an `[[interface]]` of type `trees` is refused: the gRPC front of node-local trees was
+/// removed, and the tree store, the mount provider and the fs interface stayed.
+pub(super) const TREES_REMOVED: &str = "the trees interface was removed: delete this [[interface]] entry (the tree store, the mount provider and the fs interface are unchanged)";
 
 /// `params.upstream` of an `oci` interface: the registry the front pulls an object from when its
 /// store has none (see `oci::upstream`). The password is in the file `password_file`, never in the
@@ -86,7 +84,7 @@ pub(super) struct UpstreamTable {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct InterfaceTable {
-    /// `s3`, `oci`, `trees`, `mount-provider` or `fs`.
+    /// `s3`, `oci`, `mount-provider` or `fs`.
     #[serde(rename = "type")]
     pub kind: String,
     #[serde(default)]
@@ -196,8 +194,6 @@ pub(super) struct Interfaces {
     pub s3: Vec<SocketAddr>,
     /// The OCI front: no address when there is no `oci` interface.
     pub oci: OciFlags,
-    /// The trees front: no address when there is no `trees` interface.
-    pub trees: TreesFlags,
     /// The mount provider, if there is a `mount-provider` interface.
     pub provider: Option<ProviderFlags>,
     /// The file system, if there is an `fs` interface; a build node's settings make it whole.
@@ -256,42 +252,6 @@ fn refuse_provider_params(place: &str, kind: &str, params: &Params) -> Result<()
     ];
     refuse(place, &format!("not for type \"{kind}\""), &theirs)?;
     refuse_fs_params(place, kind, params)
-}
-
-/// The settings of the front that a `trees` interface says, with `listen` its addresses: the TLS
-/// files go together, and the numbers are at least 1.
-fn trees_of(at: &str, params: &Params, listen: Vec<SocketAddr>) -> Result<TreesFlags, ConfigError> {
-    let place = format!("{at}.params");
-    let others = [
-        ("prefix", params.prefix.is_some()),
-        ("require_auth", params.require_auth.is_some()),
-        ("stage_read", params.stage_read.is_some()),
-        ("max_manifest_bytes", params.max_manifest_bytes.is_some()),
-        ("read_chunk_bytes", params.read_chunk_bytes.is_some()),
-        ("echo_bytes", params.echo_bytes.is_some()),
-        ("upstream", params.upstream.is_some()),
-    ];
-    refuse(&place, "not for type \"trees\"", &others)?;
-    refuse_provider_params(&place, "trees", params)?;
-    together(&place, params)?;
-    let max_connections = match params.max_connections {
-        Some(count) => Some(within(&place, "max_connections", count, 1, u32::MAX)?),
-        None => None,
-    };
-    if params
-        .connection_lifetime
-        .is_some_and(|dur| dur.0.is_zero())
-    {
-        let why = "it must be longer than zero";
-        return Err(invalid(&format!("{place}.connection_lifetime"), why));
-    }
-    Ok(TreesFlags {
-        listen,
-        tls_cert: params.tls_cert_file.clone(),
-        tls_key: params.tls_key_file.clone(),
-        max_connections,
-        connection_lifetime: params.connection_lifetime.map(|dur| dur.0),
-    })
 }
 
 /// Refuses a `tls_cert_file` without a `tls_key_file`, and the other way round.
@@ -404,35 +364,14 @@ fn differing(first: &OciFlags, next: &OciFlags) -> Option<&'static str> {
     same.iter().find(|(_, same)| !same).map(|(name, _)| *name)
 }
 
-/// The first param of `next` that is not that of `first`, by name.
-fn differing_trees(first: &TreesFlags, next: &TreesFlags) -> Option<&'static str> {
-    let same = [
-        ("tls_cert_file", first.tls_cert == next.tls_cert),
-        ("tls_key_file", first.tls_key == next.tls_key),
-        (
-            "max_connections",
-            first.max_connections == next.max_connections,
-        ),
-        (
-            "connection_lifetime",
-            first.connection_lifetime == next.connection_lifetime,
-        ),
-    ];
-    same.iter().find(|(_, same)| !same).map(|(name, _)| *name)
-}
-
-/// Refuses the `trees`, `mount-provider` and `fs` interfaces of a file that is not a build node's
-/// (`node` says what it is): the tree store is a build node's, kept beside its cache by its
-/// `[trees]` table, so another node has nothing to serve the interface from.
+/// Refuses the `mount-provider` and `fs` interfaces of a file that is not a build node's (`node`
+/// says what it is): the tree store is a build node's, kept beside its cache by its `[trees]`
+/// table, so another node has nothing to serve the interface from.
 ///
 /// # Errors
-/// A [`ConfigError`] on the key `trees interface`, `mount-provider interface` or `fs interface`.
-pub(super) fn no_trees(fronts: &Interfaces, node: &str) -> Result<(), ConfigError> {
+/// A [`ConfigError`] on the key `mount-provider interface` or `fs interface`.
+pub(super) fn no_tree_store(fronts: &Interfaces, node: &str) -> Result<(), ConfigError> {
     let build_node = "a build node ([local_cache] and [cold_store] without [hot_store]), whose [trees] keep the trees";
-    if !fronts.trees.listen.is_empty() {
-        let why = format!("{node} has no tree store: a trees interface needs {build_node}");
-        return Err(invalid("trees interface", &why));
-    }
     if fronts.provider.is_some() {
         let why =
             format!("{node} has no tree store: a mount-provider interface needs {build_node}");
@@ -502,13 +441,12 @@ pub(super) const NO_FS: &str = "a mount-provider needs an [[interface]] with typ
 /// # Errors
 /// A [`ConfigError`] that names the entry by its place in the list (`interface[1]`): a type that
 /// is not one, a missing or doubled place to listen, an address in use by another entry, a param
-/// the type does not take, `oci` or `trees` entries that disagree, a second `mount-provider` or
-/// `fs` entry, a `mount-provider` entry in a file with no `fs` entry ([`NO_FS`]), and a
-/// provider's `mountpoint` that is not the `fs` interface's.
+/// the type does not take, `oci` entries that disagree, a `trees` entry ([`TREES_REMOVED`]), a
+/// second `mount-provider` or `fs` entry, a `mount-provider` entry in a file with no `fs` entry
+/// ([`NO_FS`]), and a provider's `mountpoint` that is not the `fs` interface's.
 pub(super) fn interfaces(tables: &[InterfaceTable]) -> Result<Interfaces, ConfigError> {
     let mut s3 = Vec::new();
     let mut oci: Option<(usize, OciFlags)> = None;
-    let mut trees: Option<(usize, TreesFlags)> = None;
     let mut provider: Option<ProviderFlags> = None;
     // The provider's place.
     let mut provider_at: Option<String> = None;
@@ -519,7 +457,8 @@ pub(super) fn interfaces(tables: &[InterfaceTable]) -> Result<Interfaces, Config
     for (index, table) in tables.iter().enumerate() {
         let at = format!("interface[{index}]");
         match table.kind.as_str() {
-            "s3" | "oci" | "trees" => {}
+            "trees" => return Err(invalid(&format!("{at}.type"), TREES_REMOVED)),
+            "s3" | "oci" => {}
             "mount-provider" if provider.is_some() => {
                 let why = "a second mount-provider interface: a node has one mount provider";
                 return Err(invalid(&format!("{at}.type"), why));
@@ -541,17 +480,12 @@ pub(super) fn interfaces(tables: &[InterfaceTable]) -> Result<Interfaces, Config
                 continue;
             }
             _ => {
-                let why = "not an interface type; the types are \"s3\", \"oci\", \"trees\", \"mount-provider\" and \"fs\"";
+                let why = "not an interface type; the types are \"s3\", \"oci\", \"mount-provider\" and \"fs\"";
                 return Err(invalid(&format!("{at}.type"), why));
             }
         }
         let params = &table.params;
-        let listen = if table.kind == "trees" && params.port.is_none() && params.addresses.is_none()
-        {
-            vec![SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), DEFAULT_PORT)]
-        } else {
-            addresses_of(&at, params)?
-        };
+        let listen = addresses_of(&at, params)?;
         for addr in listen.iter().filter(|addr| addr.port() != 0) {
             // A port of 0 asks the system for one: two of them are two ports.
             if let Some((_, other)) = taken.iter().find(|(used, _)| used == addr) {
@@ -567,22 +501,6 @@ pub(super) fn interfaces(tables: &[InterfaceTable]) -> Result<Interfaces, Config
         if table.kind == "s3" {
             check_s3(&at, &table.params)?;
             s3.extend(listen);
-            continue;
-        }
-        if table.kind == "trees" {
-            let this = trees_of(&at, params, listen)?;
-            match &mut trees {
-                None => trees = Some((index, this)),
-                Some((first_at, first)) => {
-                    if let Some(name) = differing_trees(first, &this) {
-                        let why = format!(
-                            "it differs from interface[{first_at}]: one trees front serves every trees interface, so they share tls_cert_file, tls_key_file, max_connections and connection_lifetime"
-                        );
-                        return Err(invalid(&format!("{at}.params.{name}"), why));
-                    }
-                    first.listen.extend(this.listen);
-                }
-            }
             continue;
         }
         let this = oci_of(&at, params, listen)?;
@@ -608,11 +526,9 @@ pub(super) fn interfaces(tables: &[InterfaceTable]) -> Result<Interfaces, Config
     }
     provider_mountpoint(provider.as_mut(), provider_given.as_deref(), fs.as_ref())?;
     let oci = oci.map_or_else(OciFlags::none, |(_, flags)| flags);
-    let trees = trees.map(|(_, flags)| flags).unwrap_or_default();
     Ok(Interfaces {
         s3,
         oci,
-        trees,
         provider,
         fs,
     })
@@ -627,8 +543,8 @@ mod tests;
 mod upstream_tests;
 
 #[cfg(test)]
-#[path = "config_trees_tests.rs"]
-mod trees_tests;
+#[path = "config_trees_removed_tests.rs"]
+mod trees_removed_tests;
 
 #[cfg(test)]
 #[path = "config_provider_tests.rs"]

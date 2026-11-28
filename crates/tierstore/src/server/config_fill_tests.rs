@@ -1,6 +1,6 @@
 //! The keys the fill socket had in `[local_cache]`: `fill_socket`, read and ignored with its line
 //! on stderr whatever its value, the two keys that size the pool of the file system's fills, and
-//! the shape of node that does not take the prefetch keys.
+//! a storage node with a cache, which loads a file that sets the keys of the removed prefetch queue.
 
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -14,6 +14,7 @@ use super::super::build_info::stderr_log::LineLog;
 use super::super::config::{PerRun, Settings, settings_from_text};
 use super::super::config_cache::CacheSettings;
 use super::super::config_testing::DEFAULTS;
+use super::super::config_unknown::unknown_key_warnings;
 use super::super::local_cache::{FILL_SOCKET_CONCURRENCY, FILL_SOCKET_WAIT};
 use super::IGNORED_FILL_SOCKET;
 
@@ -170,11 +171,12 @@ fn the_pool_of_the_socket_has_defaults_and_ranges() {
     );
 }
 
-/// Asserts that a storage node with a cache in front of its proxy has no prefetch queue and
-/// refuses the keys of it by name; and that its `local_cache.fill_socket` is read and ignored with
-/// its line on stderr, as a build node's is.
+/// Asserts that a storage node with a cache in front of its proxy, whose file sets the eight keys
+/// of the removed prefetch queue (an earlier release refused them there), loads: the node is
+/// made, and the keys are warned about by name, in the order of the names, and ignored; and that
+/// its `local_cache.fill_socket` is read and ignored with its line on stderr, as a build node's is.
 #[test]
-fn a_storage_node_with_a_cache_refuses_the_keys_of_the_socket() {
+fn a_storage_node_with_a_cache_loads_a_file_that_sets_the_removed_queue_keys() {
     let node = r#"
 [[interface]]
 type   = "s3"
@@ -203,7 +205,7 @@ KEY
 prefix = "cas/b/"
 cache  = true
 "#;
-    for line in [
+    let lines = [
         "prefetch_concurrency = 1",
         "prefetch_queue = 10",
         "prefetch_queue_ttl = \"5s\"",
@@ -212,15 +214,24 @@ cache  = true
         "hydrate_max_bytes = \"2MiB\"",
         "hold_max = \"1h\"",
         "hold_max_count = 4",
-    ] {
-        let text = node.replace("KEY", line);
-        let key = line.split(' ').next().unwrap();
-        let why = refusal(&text, DEFAULTS);
-        assert_eq!(
-            why,
-            format!("local_cache.{key}: only a build node has a prefetch queue")
-        );
-    }
+    ];
+    let given = node.replace("KEY", &lines.join("\n"));
+    let settings = settings_from_text(&given, serviced()).unwrap();
+    assert!(settings.into_combined().is_some());
+    let table: toml::Table = toml::from_str(&given).unwrap();
+    assert_eq!(
+        unknown_key_warnings(&table),
+        [
+            "tierstore: config key local_cache.hold_max is not known to this release and is ignored",
+            "tierstore: config key local_cache.hold_max_count is not known to this release and is ignored",
+            "tierstore: config key local_cache.hydrate_max_blobs is not known to this release and is ignored",
+            "tierstore: config key local_cache.hydrate_max_bytes is not known to this release and is ignored",
+            "tierstore: config key local_cache.hydrate_max_trees is not known to this release and is ignored",
+            "tierstore: config key local_cache.prefetch_concurrency is not known to this release and is ignored",
+            "tierstore: config key local_cache.prefetch_queue is not known to this release and is ignored",
+            "tierstore: config key local_cache.prefetch_queue_ttl is not known to this release and is ignored",
+        ]
+    );
     let plain = node.replace("KEY", "");
     let (settings, said) = loaded(&plain, serviced());
     assert_eq!(said, "");

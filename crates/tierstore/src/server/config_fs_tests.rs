@@ -270,7 +270,7 @@ fn a_file_of_today_without_an_fs_interface_loads_as_today() {
 }
 
 /// Asserts that an `fs` interface is refused on every shape but a build node, with the words the
-/// `trees` interface is refused with, naming what the node is.
+/// `mount-provider` interface is refused with, naming what the node is.
 #[test]
 fn an_fs_interface_outside_a_build_node_is_refused() {
     let tail = "has no tree store: an fs interface needs a build node ([local_cache] and [cold_store] without [hot_store]), whose [trees] keep the trees";
@@ -647,7 +647,6 @@ fn the_fs_params_and_the_other_types_params_are_apart() {
     ];
     for (kind, listen) in [
         ("s3", "port = 9301, "),
-        ("trees", "port = 9600, "),
         ("oci", "addresses = [\"127.0.0.1:5000\"], "),
         ("mount-provider", "socket = \"/p.sock\", "),
     ] {

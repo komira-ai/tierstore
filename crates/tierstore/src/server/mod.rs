@@ -377,9 +377,6 @@ mod header_timeout_tests;
 mod hosted;
 #[cfg(test)]
 mod hosted_tests;
-mod hydrate;
-#[cfg(test)]
-mod hydrate_pin_down_tests;
 mod idle;
 #[cfg(test)]
 mod idle_tests;
@@ -447,6 +444,8 @@ mod reserved_tests;
 #[cfg(test)]
 mod response_override_tests;
 #[cfg(test)]
+mod retired_paths_tests;
+#[cfg(test)]
 mod role_tests;
 mod rounds;
 mod s3_tls;
@@ -473,7 +472,6 @@ mod time;
 #[cfg(test)]
 mod time_tests;
 mod treefs;
-mod trees;
 #[cfg(test)]
 mod unlistable_key_tests;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -882,10 +880,6 @@ impl Server {
             ops::refuse_unsigned_overrides(parts)?;
         }
         let signed = auth::verify(&self.config, parts)?;
-        let call = hydrate::asked(&parts.method, parts.uri.path());
-        if let Some(call) = call.filter(|_| hosted.is_none()) {
-            return self.hydrate(parts, call, &signed, body).await;
-        }
         let reads = matches!(parts.method, Method::GET | Method::HEAD);
         if self.config.cache.is_some() && !self.config.cache_writes && !reads {
             return Err(S3Error::read_cache());

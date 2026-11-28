@@ -24,15 +24,15 @@
 //! store data of its own, over a cold store that other nodes write too.
 //!
 //! The file is read into a [`ColdSettings`]. What it refuses, besides what every file does: a
-//! `[[policy]]` with `cache = true` (there is no cache), a `[trees]` table or a `trees`
-//! interface (there is no tree store), the keys only `[hot_store]` has, `cold_store.skip_checks`
+//! `[[policy]]` with `cache = true` (there is no cache), a `[trees]` table or a
+//! `mount-provider` or `fs` interface (there is no tree store), the keys only `[hot_store]` has, `cold_store.skip_checks`
 //! and `server.backend_check_wait`.
 
 use std::time::Duration;
 
 use crate::server::config_handoff::handoff_of;
 use crate::server::config_hot_only::refuse_hot_keys;
-use crate::server::config_interface::{Interfaces, no_trees};
+use crate::server::config_interface::{Interfaces, no_tree_store};
 use crate::server::config_policy::{Policy, check_policies};
 use crate::server::config_tuning::S3Client;
 use crate::server::front::FrontSettings;
@@ -71,7 +71,7 @@ impl ColdSettings {
         per_run: PerRun,
     ) -> Result<Self, ConfigError> {
         check_policies(policy, false)?;
-        no_trees(&fronts, "a node over the cold tier alone")?;
+        no_tree_store(&fronts, "a node over the cold tier alone")?;
         let unused = [("backend_check_wait", server.backend_check_wait.is_some())];
         refuse(
             "server",

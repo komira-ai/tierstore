@@ -171,7 +171,7 @@ fn ask_everything(
 /// placements, the tree of a placement and of one that is gone, a placement id that is not one, a
 /// span and the spans of no bytes, of a reserved key and of a digest that is not one, a fill, one
 /// past 2^64, one the upstream does not have and one of a digest that is not one, a manifest of a
-/// digest that is not one, a pin, a pin of the mount id of the holds, an unpin, the pins and holds
+/// digest that is not one, a pin, a pin of the reserved mount id `hold`, an unpin, the pins and holds
 /// kept, a placement id that is not one, and the puts of a reserved key, of a path that is not
 /// absolute, of a digest that is not one and of a staged file that is not there.
 #[tokio::test(flavor = "multi_thread")]

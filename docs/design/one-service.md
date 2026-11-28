@@ -67,8 +67,8 @@ they talk to:
 - **Stopped** as part of the server's stop (section 3.5).
 
 The `fs` interface is allowed only on a build node: a file with `[local_cache]` and `[cold_store]` and no `[hot_store]`
-(`Settings::Cache`, `server/config.rs`), the one shape that has a tree store, as the `trees` and `mount-provider` interfaces
-already are (`no_trees`, `server/config_interface.rs`). One `fs` interface per file.
+(`Settings::Cache`, `server/config.rs`), the one shape that has a tree store, as the `mount-provider` interface
+is (`no_tree_store`, `server/config_interface.rs`). One `fs` interface per file.
 
 ### 1.2 The configuration
 
@@ -93,7 +93,7 @@ refusing a key it does not have").
 
 Rules the one file adds, each a refusal by name at load (and so by `--check-config`):
 
-- An `fs` interface on any shape but a build node is refused, with the words the `trees` interface uses today.
+- An `fs` interface on any shape but a build node is refused, with the words the `mount-provider` interface uses.
 - A second `fs` interface is refused.
 - The `mount-provider` interface's `mountpoint` param may be left out; it is then the `fs` interface's `mountpoint`. When both
   are given they must be equal. (Today they are two files that agree by hand: `provider/config.rs`, "the mount of `tierstore
@@ -390,8 +390,7 @@ start runs it, and that the take is the one hand-over of 3.1:
       `discard_dead_mount` does a `stat` and acts only on `ENOTCONN`). Such a mount has no server: nothing answered the
       hand-over and the store had nothing. Abort its connection and detach it, make the mount point, open `/dev/fuse`,
       `mount(2)`, and put the descriptor in the store (`FDSTORE=1`, `FDNAME=fuse`, and wait for the barrier, as today).
-3. Open the cache (read-only until it holds the lock), bind the trees sockets beside a running instance (`SO_REUSEPORT`),
-   take or bind the S3 and OCI sockets (in the same conversation, for a take), make the file system's state ready (the tree
+3. Open the cache (read-only until it holds the lock), take or bind the S3 and OCI sockets (in the same conversation, for a take), make the file system's state ready (the tree
    table, the attachments made again from their manifests, the control socket or, for a take, the one received, the put
    directory's stage and journal), start the session (the `INIT` handshake of a fresh mount, or the recorded `INIT` reply
    after a take or an adoption, with `FUSE_NOTIFY_RESEND` where the kernel offers it) and the readers, and bind the

@@ -95,8 +95,8 @@ impl LocalCache {
     }
 
     /// Returns once no write this cache started is running (see [`hand_writes`](Self::hand_writes),
-    /// after which none starts): a fill of an object or a range (the fills of the prefetch queue
-    /// and of the mounts are fills of the table too), a put, a keep, or an eviction pass. It looks
+    /// after which none starts): a fill of an object or a range (the fills of the mounts are
+    /// fills of the table too), a put, a keep, or an eviction pass. It looks
     /// every 20 ms. The short writes that are not counted (a stamp of file times, the pins file, a
     /// scrub's removal of a damaged object) look at the mode before each file they write, as on a
     /// lost lock, so what is left of them is the step under way.

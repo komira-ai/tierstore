@@ -77,11 +77,12 @@ nfsserve = { git = "https://github.com/komira-ai/nfsserve", rev = "f2665dd518e1b
 # for macOS (rustix has it for Linux only). Only its `mount` feature.
 nix = { version = "0.31.4", default-features = false, features = ["mount"] }
 percent-encoding = "2.3.2"
-# The protobuf runtime of the trees API (Apache-2.0), and its descriptor types, which the test
-# of the proto's additivity reads the golden descriptor with.
+# The protobuf runtime of the mount provider's wire contract (Apache-2.0), and its well-known
+# types (the `Any` of the farm tests).
 prost = "0.14.1"
 prost-types = "0.14.1"
-# The `.proto` compiler of the trees API's build: pure Rust (MIT or Apache-2.0), so no `protoc`.
+# The `.proto` compiler of the mount provider contract's build: pure Rust (MIT or Apache-2.0),
+# so no `protoc`.
 protox = "0.10.0"
 # Test certificates only. ring is the crypto provider the rustls below uses too.
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }
@@ -108,9 +109,9 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 sha2 = "0.11.0"
 thiserror = "2.0.21"
-# gRPC (MIT): the generated service of the trees API, with tonic's own transport and TLS left off;
-# `tierstore` serves it over its own hyper listener. `tonic-prost` is its prost codec and
-# `tonic-prost-build` the code generator of the trees API's build.
+# gRPC (MIT): the generated service of the mount provider contract, with tonic's own transport and
+# TLS left off; `tierstore` serves it over its own hyper listener. `tonic-prost` is its prost codec
+# and `tonic-prost-build` the code generator of that crate's build.
 tonic = { version = "0.14.2", default-features = false }
 tonic-prost = { version = "0.14.2", default-features = false }
 tonic-prost-build = { version = "0.14.2", default-features = false }
@@ -139,7 +140,7 @@ objstore-conformance = { path = "crates/objstore-conformance" }
 # The hot/cold object store library; it depends on no other workspace crate unless its `s3`
 # feature is on.
 tierstore = { path = "crates/tierstore" }
-# The wire contract of the trees interface (`trees.proto`) and its generated stubs.
+# The wire contract of the mount provider (`provider.proto`) and its generated stubs.
 tierstore-trees-api = { path = "crates/tierstore-trees-api" }
 # Scratch directories, loopback ports and child processes for tests.
 tierstore-testkit = { path = "crates/tierstore-testkit" }

@@ -131,9 +131,9 @@ tierstore-format = { workspace = true, optional = true }
 # `server/provider/prepare.rs`; section 3.5 of docs/design/fetch-cache-serve.md). The list crate
 # has this crate as its dev-dependency, for its tests' version 2 writer, which Cargo allows.
 tierstore-list = { workspace = true, optional = true }
-# The wire contract of the trees interface and its server stub (`server`).
+# The wire contract of the mount provider and its server stub (`server`).
 tierstore-trees-api = { workspace = true, features = ["server"], optional = true }
-# `Status` and the body of a gRPC call, which the trees front answers with; tonic's own transport
+# `Status` and the body of a gRPC call, which the mount provider answers with; tonic's own transport
 # and TLS are not used (`server`).
 tonic = { workspace = true, features = ["codegen"], optional = true }
 # The read-only, private mapping of a version 2 tree list's image (`server`, `tree_image_list.rs`):
@@ -200,7 +200,7 @@ objstore-s3 = { workspace = true, features = ["testkit"] }
 # The `ObjectStore` conformance suite, which tests/s3_front/conformance.rs runs against the S3
 # front: the tierstore target of the suite.
 objstore-conformance.workspace = true
-# Encodes the messages the tests of the trees front send.
+# Encodes the messages the tests of the mount provider send.
 prost.workspace = true
 # The fetch engine the tests of the S3 front's large objects attach to a cache, and its verifier.
 tierstore-fetch.workspace = true

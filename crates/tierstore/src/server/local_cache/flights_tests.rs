@@ -20,8 +20,8 @@ fn free(rig: &Rig) -> (usize, usize) {
 }
 
 /// Asserts that a request of the fill socket that arrives while an S3 read's fill of the same
-/// digest runs joins it: it takes no permit of its pool, the upstream is read once, and both are
-/// answered with the bytes once the fill ends.
+/// digest runs joins it: it takes no permit of its pool, the upstream is read once, both are
+/// answered with the bytes once the fill ends, and the join is counted as the fill socket's.
 #[tokio::test]
 async fn mount_open_during_s3_fill_joins_it() {
     let rig = Rig::new("tflights-mount-joins");
@@ -51,11 +51,13 @@ async fn mount_open_during_s3_fill_joins_it() {
     assert_eq!(rig.calls_on(Op::Get, &key), 1);
     assert_eq!(rig.cache.held(), (2000, 1));
     assert_eq!(free(&rig), all);
+    let counters = rig.cache.counters();
+    assert_eq!((counters.joins(false), counters.joins(true)), (1, 0));
 }
 
 /// Asserts that an S3 read that arrives while the fill socket's fill of the same digest runs
-/// joins it: it takes no permit of the S3 pool, the upstream is read once, and the read is given
-/// the bytes.
+/// joins it: it takes no permit of the S3 pool, the upstream is read once, the read is given the
+/// bytes, and the join is counted as the S3 front's.
 #[tokio::test]
 async fn s3_get_during_mount_fill_joins_it() {
     let rig = Rig::new("tflights-s3-joins");
@@ -88,6 +90,8 @@ async fn s3_get_during_mount_fill_joins_it() {
     assert_eq!(rig.calls_on(Op::Get, &key), 1);
     assert_eq!(rig.cache.held(), (2000, 1));
     assert_eq!(free(&rig), all);
+    let counters = rig.cache.counters();
+    assert_eq!((counters.joins(false), counters.joins(true)), (0, 1));
 }
 
 /// Asserts that an S3 read does not wait for a fill whose bytes are cut out of a pack: the name is

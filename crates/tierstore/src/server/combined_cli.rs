@@ -108,7 +108,6 @@ pub(super) async fn serve_combined(
         beating: Some(beating),
         handoff: cli.handoff.as_ref(),
         trees: None,
-        trees_front: None,
         provider: None,
         put_ingest: None,
         system: OnSystem::default(),

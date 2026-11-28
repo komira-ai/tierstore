@@ -55,14 +55,6 @@ const LOCAL_CACHE_KEYS: &[&str] = &[
     "fill_socket_concurrency",
     "fill_socket_wait",
     "put_ingest",
-    "prefetch_concurrency",
-    "prefetch_queue",
-    "prefetch_queue_ttl",
-    "hydrate_max_trees",
-    "hydrate_max_blobs",
-    "hydrate_max_bytes",
-    "hold_max",
-    "hold_max_count",
 ];
 
 /// Whether `key` is a name some table of the file holds: the last part of a key in [`KEYS`], a

@@ -16,7 +16,7 @@
 //!   opened, and it is counted. Gauges: `tierstore_s3_reads_in_flight`, and the counter
 //!   `tierstore_s3_reads_refused_total`.
 //! - **Bodies held whole.** A body that is not streamed to the backend (that of a completion of
-//!   an upload, a DeleteObjects, a copy, a CreateBucket, a hydrate call, a read or a delete) is at
+//!   an upload, a DeleteObjects, a copy, a CreateBucket, a read or a delete) is at
 //!   most [`WHOLE_BODY_LIMIT`](super::ops::WHOLE_BODY_LIMIT) bytes (DeleteObjects:
 //!   [`DELETE_BODY_LIMIT`](super::delete_objects::DELETE_BODY_LIMIT)), over which it is refused
 //!   with 413 `EntityTooLarge`. From its first byte until the call has answered, it holds a permit

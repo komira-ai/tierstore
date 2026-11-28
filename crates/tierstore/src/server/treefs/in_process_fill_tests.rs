@@ -164,7 +164,7 @@ async fn the_pin_requests_pin_unpin_and_keep_the_live_trees() {
 }
 
 /// Asserts the words of a pin request that the cache refuses: `read-only` for a cache that does
-/// not hold the lock of its directory, and that the mount id of the holds is reserved.
+/// not hold the lock of its directory, and that the mount id `hold` is reserved.
 #[test]
 fn a_pin_request_of_a_read_only_cache_is_answered_read_only() {
     use super::super::pinned;

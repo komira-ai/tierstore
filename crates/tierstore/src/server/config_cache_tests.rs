@@ -7,7 +7,7 @@ use std::time::Duration;
 use super::config::{from_text, settings_from_text};
 use super::config_cache::{CacheSettings, LocalCacheTable, Rate};
 use super::config_testing::{DEFAULT_DRAIN, DEFAULTS, GOLDEN, MINIMAL, oci_interface};
-use super::config_unknown::fields_of;
+use super::config_unknown::{fields_of, unknown_key_warnings};
 use super::local_cache::{FILL_CHUNK, SCRUB_MIN_ROUND, SCRUB_RATE, WHOLE_FILL_LIMIT};
 
 /// A build node's file with every key given a value that is not the default.
@@ -773,19 +773,11 @@ fn the_whole_fill_limit_is_a_size_between_one_byte_and_the_budget() {
 }
 
 /// The keys of `[local_cache]`, which the README of the packaging must document each in a row.
-const LOCAL_CACHE_KEYS: [&str; 38] = [
+const LOCAL_CACHE_KEYS: [&str; 30] = [
     "fill_socket",
     "fill_socket_concurrency",
     "fill_socket_wait",
     "put_ingest",
-    "prefetch_concurrency",
-    "prefetch_queue",
-    "prefetch_queue_ttl",
-    "hydrate_max_trees",
-    "hydrate_max_blobs",
-    "hydrate_max_bytes",
-    "hold_max",
-    "hold_max_count",
     "path",
     "layout",
     "budget",
@@ -879,4 +871,33 @@ fn the_example_in_the_module_header_loads() {
     let cache = cache_of(&example);
     assert_eq!(cache.front.listen, vec!["127.0.0.1:9400".parse().unwrap()]);
     assert_eq!(cache.oci.listen, vec!["127.0.0.1:5000".parse().unwrap()]);
+}
+
+/// Asserts that a build node's file written for the release that had the prefetch queue, the holds
+/// and the hydrate call, which sets the eight keys of them (at values in range, and at values that
+/// release refused), still loads: the cache has the settings it has without them, and each key is
+/// warned about by name, once, in the order of the names, and ignored.
+#[test]
+fn a_file_with_the_removed_queue_and_hold_keys_loads_with_a_warning_for_each() {
+    let keys = "prefetch_concurrency = 5\nprefetch_queue = 0\nprefetch_queue_ttl = \"30s\"\n\
+                hydrate_max_trees = 5\nhydrate_max_blobs = 7\nhydrate_max_bytes = \"3MiB\"\n\
+                hold_max = \"90m\"\nhold_max_count = 0\n";
+    let old = LEAST.replacen("budget = 1000", &format!("budget = 1000\n{keys}"), 1);
+    let loaded = cache_of(&old);
+    let plain = cache_of(LEAST);
+    assert_eq!(format!("{:?}", loaded.cache), format!("{:?}", plain.cache));
+    let table: toml::Table = toml::from_str(&old).unwrap();
+    assert_eq!(
+        unknown_key_warnings(&table),
+        [
+            "tierstore: config key local_cache.hold_max is not known to this release and is ignored",
+            "tierstore: config key local_cache.hold_max_count is not known to this release and is ignored",
+            "tierstore: config key local_cache.hydrate_max_blobs is not known to this release and is ignored",
+            "tierstore: config key local_cache.hydrate_max_bytes is not known to this release and is ignored",
+            "tierstore: config key local_cache.hydrate_max_trees is not known to this release and is ignored",
+            "tierstore: config key local_cache.prefetch_concurrency is not known to this release and is ignored",
+            "tierstore: config key local_cache.prefetch_queue is not known to this release and is ignored",
+            "tierstore: config key local_cache.prefetch_queue_ttl is not known to this release and is ignored",
+        ]
+    );
 }

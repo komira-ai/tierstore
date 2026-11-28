@@ -6,16 +6,16 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish.workspace = true
-description = "The wire contract of the tierstore trees interface (trees.proto, package tierstore.trees.v1) and of the jobscheduler mount provider tierstore serves (provider.proto, package jobscheduler.provider.v1): their generated messages, client and server stubs."
+description = "The wire contract of the jobscheduler mount provider tierstore serves (provider.proto, package jobscheduler.provider.v1): its generated messages, client and server stubs."
 
-# The types are generated from `proto/tierstore/trees/v1/trees.proto` by `build.rs`, with the
+# The types are generated from `proto/jobscheduler/provider/v1/provider.proto` by `build.rs`, with the
 # pure-Rust protobuf compiler `protox`, so no build or CI host needs `protoc`. The crate holds no
 # logic: `tierstore` serves it behind its `server` feature, a client takes the `client` feature.
 
 [features]
-# The generated client stub (`TreesServiceClient`).
+# The generated client stub (`MountProviderClient`).
 client = []
-# The generated server trait and service (`TreesServiceServer`).
+# The generated server trait and service (`MountProviderServer`).
 server = []
 
 [dependencies]
@@ -29,11 +29,7 @@ protox.workspace = true
 tonic-prost-build.workspace = true
 
 [dev-dependencies]
-# Both halves for the crate's own tests, as `tierstore` does for its `server` feature.
-tierstore-trees-api = { workspace = true, features = ["client", "server"] }
-# The descriptor of the checked-in golden of the additivity test is compared with the proto's, which
-# the test compiles as `build.rs` does.
-prost-types.workspace = true
+# The wire test compiles the proto as `build.rs` does, to compare its names with the crate's.
 protox.workspace = true
 
 [lints]

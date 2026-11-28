@@ -19,10 +19,9 @@
 //! These fills have a pool of permits of their own (`fill_socket_concurrency`) and wait for one
 //! up to `fill_socket_wait`: a request that finds none free is answered [`FillError::Busy`]. They
 //! never take a permit of `max_concurrent_fills`, which a miss of the S3 front takes without
-//! waiting. A request for a digest that has a fill running, started by the core, by the S3
-//! front or by a worker of the prefetch queue, joins it and takes no permit; one for a digest that
-//! is only queued starts it, on a permit of this pool. Every fetch is a task of its own, so a
-//! caller that gives up does not stop it. A cache that does not hold the lock of its
+//! waiting. A request for a digest that has a fill running, started by the core or by the S3
+//! front, joins it and takes no permit. Every fetch is a task of its own, so a caller that gives
+//! up does not stop it. A cache that does not hold the lock of its
 //! directory fills nothing ([`FillError::ReadOnly`]).
 //!
 //! The fetch is the one of every fill (`fill::fetch_from`): chunks of `fill_chunk` bytes, a staging
@@ -173,9 +172,8 @@ impl Inner {
             if self.present(&wanted.name).await {
                 return Ok(());
             }
-            // A fill that is only queued is not joined: this request starts it (`join_or_start`
-            // takes it out of the queue), on a permit of its own pool.
-            let pending = match self.joinable(&wanted.name.hex) {
+            let running = locked(&self.flights).get(&wanted.name.hex).cloned();
+            let pending = match running {
                 Some(running) => {
                     self.counters.joined(false);
                     running

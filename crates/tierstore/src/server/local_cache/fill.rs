@@ -22,7 +22,6 @@ use tokio::task::JoinHandle;
 
 use crate::{ByteRange, Error, Meta};
 
-use super::holds::State;
 use super::layout::{
     Name, Origin, Sidecar, data_path, make_dirs, meta_path, object_dir, stage_dir,
 };
@@ -248,32 +247,6 @@ pub(super) enum Class {
     Mount(OwnedSemaphorePermit),
 }
 
-/// The permit a fill that is running holds, which says which pool it came from.
-pub(super) struct Held {
-    permit: OwnedSemaphorePermit,
-    /// Whether the permit is one of `prefetch_concurrency`: when the fill ends, the next queued
-    /// blob starts on it.
-    prefetch: bool,
-}
-
-impl Held {
-    /// A permit of a pool of the reads: `max_concurrent_fills` or `fill_socket_concurrency`.
-    pub(super) fn foreground(permit: OwnedSemaphorePermit) -> Self {
-        Self {
-            permit,
-            prefetch: false,
-        }
-    }
-
-    /// A permit of the prefetch workers.
-    pub(super) fn worker(permit: OwnedSemaphorePermit) -> Self {
-        Self {
-            permit,
-            prefetch: true,
-        }
-    }
-}
-
 /// What starts a fill that has its place in the table: the object it reads, the sender that
 /// gives its task to the readers that wait for it, and the sender of its progress.
 pub(super) struct Launch {
@@ -463,15 +436,6 @@ impl Drop for Flight {
             gone
         };
         drop(gone);
-        // Whatever ended the flight (a fill, a keep, a task cancelled or panicked), the holds that
-        // wait for the blob are told, after the place is out of the table: a hold that asks later
-        // finds no flight. The index says whether the blob is in the cache.
-        let state = if locked(&self.inner.index).get(&self.hex).is_some() {
-            State::Filled
-        } else {
-            State::Failed
-        };
-        self.inner.hold_settle(&self.hex, state);
     }
 }
 
@@ -515,11 +479,6 @@ impl Inner {
     /// The S3 front does not take an entry of origin `span` for an object of the upstream: it
     /// is answered [`Filled::Skipped`], so its read goes to the upstream.
     ///
-    /// A fill that is queued (see the module `prefetch`) has its place in the table and has not
-    /// started: the read that finds it starts it, on the permit of `class`, and the queue forgets
-    /// it. The S3 front, which waits for no permit, is answered [`Filled::Skipped`] if all are
-    /// taken, and the blob stays queued.
-    ///
     /// The fill is started after the table of the fills that run is unlocked. The task is
     /// spawned with its [`Flight`], and a spawn that drops the task at once (the runtime is
     /// shutting down) drops the flight on this thread, which locks the table: with the table
@@ -552,23 +511,21 @@ impl Inner {
                 }
                 Entry::Occupied(running) => {
                     let pending = running.get().clone();
-                    // A fill that is still queued is started now, on the permit of this read.
-                    let launch = self.take_queued(&name.hex, class)?;
-                    if launch.is_none() && !pending.keeping {
+                    if !pending.keeping {
                         self.counters.joined(s3);
                     }
-                    (pending, launch)
+                    (pending, None)
                 }
                 Entry::Vacant(slot) => {
                     let permit = self.foreground_permit(class)?;
                     let (pending, launch) = self.place(key, name, plan);
                     slot.insert(pending.clone());
-                    (pending, Some((launch, Held::foreground(permit))))
+                    (pending, Some((launch, permit)))
                 }
             }
         };
-        if let Some((launch, held)) = launch {
-            self.start(launch, held);
+        if let Some((launch, permit)) = launch {
+            self.start(launch, permit);
         }
         Ok(pending)
     }
@@ -634,7 +591,7 @@ impl Inner {
     /// takes it out of the table of the fills that run when it ends, panics or is cancelled. The
     /// permit is held until then. The task is sent to the fill that waits for it. The table must
     /// not be locked by the caller (see [`join_or_start`](Self::join_or_start)).
-    pub(super) fn start(self: &Arc<Self>, launch: Launch, held: Held) {
+    pub(super) fn start(self: &Arc<Self>, launch: Launch, permit: OwnedSemaphorePermit) {
         let Launch {
             key,
             name,
@@ -652,10 +609,7 @@ impl Inner {
         let task = tokio::spawn(async move {
             let _flight = flight;
             let ended = inner.fill(&key, &name, &plan, &live).await;
-            let Held { permit, prefetch } = held;
-            if prefetch {
-                inner.prefetch_ended(&ended, permit);
-            }
+            drop(permit);
             ended
         });
         // The receiver is in the fill that is in the table, and in the caller: it is there.

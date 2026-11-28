@@ -212,7 +212,7 @@ credentials_file = "/etc/tierstore/cold.credentials"
 ```
 
 - `cold_store.credentials_file` holds a key that may write, since the front's writes go straight to the store.
-- A `[[policy]]` with `cache = true`, a `[trees]` table, a `trees` interface and the keys only `[hot_store]` has are refused: there is no cache, tree store or hot tier to use them.
+- A `[[policy]]` with `cache = true`, a `[trees]` table and the keys only `[hot_store]` has are refused: there is no cache, tree store or hot tier to use them.
 - A storage node over the same cold tier becomes this shape by removing `[hot_store]` from its file and restarting it by the hand-off; see [Turning the hot tier off](operations.md#turning-the-hot-tier-off).
 
 ## A tier in an AWS account
