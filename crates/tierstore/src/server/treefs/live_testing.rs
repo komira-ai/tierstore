@@ -6,7 +6,7 @@
 //! The core's requests block on the tasks of the cache that run on the test's runtime: run the
 //! test on a runtime of more than one thread and call the core through [`Live::on_core`].
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -163,6 +163,34 @@ impl Live {
             &self.runtime,
         ))
     }
+}
+
+/// A core of the mount `mountpoint` that calls `cache` and `trees` in the process, its table of
+/// tree numbers in `runtime` and the cache's directory at `cache_path`: the core of a node's `fs`
+/// interface over the node's own cache and tree store. Call it on a runtime of more than one
+/// thread.
+pub(in crate::server) fn core_over(
+    (cache, trees): (&LocalCache, &TreeStore),
+    cache_path: PathBuf,
+    (runtime, mountpoint): (&Path, PathBuf),
+) -> Arc<Core> {
+    let clock: Arc<dyn Clock> = Arc::new(Mono::new());
+    Arc::new(Core::new(
+        Settings {
+            owner: OWNER,
+            cache_path,
+            mountpoint,
+            mount_id: MOUNT.to_owned(),
+            generation: 1,
+            count_lookups: true,
+            tree_idle: TREE_IDLE,
+            tree_list_ram_bytes: TREE_LIST_RAM,
+            clock,
+        },
+        Live::asks_of((cache, trees), FETCH_TIMEOUT),
+        TreeTable::create(runtime).unwrap(),
+        runtime,
+    ))
 }
 
 /// The inode at the path `names` from the root of the mount, looked up on `core`.

@@ -15,7 +15,9 @@ use tokio::sync::Notify;
 use tonic::Code;
 
 use super::super::mount_check::check;
-use super::super::ports::{MountProvider, ProviderCode, ProviderFault, ReadFault, TreeNode};
+use super::super::ports::{
+    MountProvider, ProviderCode, ProviderFault, ReadFault, TreeAt, TreeNode,
+};
 use super::super::report::{Class, Done, Outcome, Reason};
 use super::super::shape::ProviderShape;
 use super::provider::{MAX_FILE_BYTES, MAX_PATHS, ProviderSocket, ProviderTimes};
@@ -74,6 +76,7 @@ impl Served {
         ProviderShape {
             socket: self.socket.clone(),
             mountpoint: PathBuf::from(MOUNT),
+            nfs: None,
         }
     }
 }
@@ -105,7 +108,10 @@ impl MountProvider for ThroughStore {
         self.socket.release(socket, index)
     }
 
-    fn read_tree(&self, dir: &Path) -> Result<BTreeMap<String, TreeNode>, ReadFault> {
+    fn read_tree(&self, at: TreeAt<'_>) -> Result<BTreeMap<String, TreeNode>, ReadFault> {
+        let TreeAt::Mount(dir) = at else {
+            panic!("the check reads this node's trees through the mount: {at:?}");
+        };
         through_store(&self.store, dir)
     }
 }
@@ -307,7 +313,7 @@ fn an_answer_is_one_frame_of_its_message() {
 
 /// The read of the tree at `dir` with the real client.
 fn read(dir: &Path) -> Result<BTreeMap<String, TreeNode>, ReadFault> {
-    ProviderSocket::new(PathBuf::from("/"), ProviderTimes::default()).read_tree(dir)
+    ProviderSocket::new(PathBuf::from("/"), ProviderTimes::default()).read_tree(TreeAt::Mount(dir))
 }
 
 /// Asserts that the read of a tree gives every path below the directory by its path, with the
@@ -338,7 +344,8 @@ fn a_tree_is_read_whole_without_following_a_link() {
     assert_eq!(read, want);
 }
 
-/// Asserts that the read refuses, by name: a directory that is not there, a file over
+/// Asserts that the read refuses, by name: a directory that is not there (what the system said,
+/// as a failure: no slow fill), a file over
 /// [`MAX_FILE_BYTES`], more than [`MAX_PATHS`] paths, a name or a link target that is not UTF-8,
 /// and a path that is no file, directory or link (a socket). Catches a read that loads a large
 /// file whole, walks a huge directory, or takes a socket for a file.
@@ -346,10 +353,11 @@ fn a_tree_is_read_whole_without_following_a_link() {
 fn a_tree_that_is_no_tree_of_the_check_is_refused_by_name() {
     let dir = TestDir::under(std::env::temp_dir(), "hook-prov-refuse-read");
     let missing = dir.path().join("missing");
-    let refused = read(&missing).unwrap_err();
-    assert!(
-        matches!(&refused, ReadFault::Unread(why) if why.starts_with("the directory could not be listed: ")),
-        "{refused:?}"
+    assert_eq!(
+        read(&missing),
+        Err(ReadFault::Failed(
+            "the directory could not be listed: No such file or directory (os error 2)".to_owned()
+        ))
     );
 
     let large = dir.path().join("large");

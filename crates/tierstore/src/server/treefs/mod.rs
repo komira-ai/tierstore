@@ -135,7 +135,10 @@ pub(super) use config::{builders, from_text};
 pub(super) use groups::{Database, Found, system as system_names};
 #[cfg(target_os = "linux")]
 pub(super) use interface::{Mounted, Served, Service};
+pub(super) use nfs::config::DEFAULT_LISTEN as DEFAULT_NFS_LISTEN;
 pub(super) use nfs::config::NfsTable;
+#[cfg(test)]
+pub(super) use nfs::front_testing::NfsFront;
 #[cfg(any(target_os = "macos", test))]
 pub(super) use nfs::{NfsServed, NfsService};
 pub(super) use put::config::PutTable;

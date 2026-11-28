@@ -7,7 +7,7 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use super::ports::{MountProvider, ProviderCode, ProviderFault, ReadFault, TreeNode};
+use super::ports::{MountProvider, ProviderCode, ProviderFault, ReadFault, TreeAt, TreeNode};
 use crate::server::provider::NOT_PREPARED_HERE;
 use crate::server::provider::check::TREES;
 
@@ -25,7 +25,8 @@ pub(crate) const FAKE_SOCKET: &str = "/var/lib/tierstore/provider.sock";
 struct State {
     /// The ref each source was prepared with, while it is placed.
     placed: BTreeMap<u32, String>,
-    /// The calls, as `<call> <index>`, and `read <dir>` for a read.
+    /// The calls, as `<call> <index>`, `read <dir>` for a read through the mount and
+    /// `read <path under the mount> from <front>` for a read from an NFS front.
     calls: Vec<String>,
     /// What a call of a source is answered with instead, by `<call> <index>`.
     faults: BTreeMap<String, ProviderFault>,
@@ -56,9 +57,7 @@ impl FakeProvider {
 
     /// The directory of the source `index` under this fake's mount.
     fn dir(&self, index: u32) -> PathBuf {
-        self.mount
-            .as_deref()
-            .unwrap_or(Path::new(FAKE_MOUNT))
+        self.mount_dir()
             .join(format!("mount-provider/check/{index}"))
     }
 
@@ -150,9 +149,29 @@ impl MountProvider for FakeProvider {
         Ok(())
     }
 
-    fn read_tree(&self, dir: &Path) -> Result<BTreeMap<String, TreeNode>, ReadFault> {
+    fn read_tree(&self, at: TreeAt<'_>) -> Result<BTreeMap<String, TreeNode>, ReadFault> {
+        let (call, dir) = match at {
+            TreeAt::Mount(dir) => (format!("read {}", dir.display()), dir.to_path_buf()),
+            TreeAt::Front { front, below } => (
+                format!("read {} from {front}", below.display()),
+                self.mount_dir().join(below),
+            ),
+        };
+        self.found(call, &dir)
+    }
+}
+
+impl FakeProvider {
+    /// The mount its trees are under.
+    fn mount_dir(&self) -> &Path {
+        self.mount.as_deref().unwrap_or(Path::new(FAKE_MOUNT))
+    }
+
+    /// What a read, recorded as `call`, finds at `dir`: the tree placed there, or what the fake
+    /// was told a read of it finds.
+    fn found(&self, call: String, dir: &Path) -> Result<BTreeMap<String, TreeNode>, ReadFault> {
         let mut state = self.state.borrow_mut();
-        state.calls.push(format!("read {}", dir.display()));
+        state.calls.push(call);
         let index = (0..2)
             .find(|index| *dir == self.dir(*index))
             .ok_or_else(|| {
@@ -164,7 +183,7 @@ impl MountProvider for FakeProvider {
         let reference = state
             .placed
             .get(&index)
-            .ok_or_else(|| ReadFault::Unread(format!("{} is not placed", dir.display())))?;
+            .ok_or_else(|| ReadFault::Failed(format!("{} is not placed", dir.display())))?;
         let tree = TREES
             .iter()
             .find(|tree| tree.key() == *reference)

@@ -14,6 +14,7 @@
 use std::any::Any;
 use std::collections::BTreeMap;
 use std::fmt;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -540,23 +541,45 @@ pub trait MountProvider {
     /// No answer, or an answer that is not success.
     fn release(&self, socket: &Path, index: u32) -> Result<(), ProviderFault>;
 
-    /// Every path below the directory `dir` with what it is: files with their bytes, directories,
-    /// and links with their targets, never followed.
+    /// Every path below the directory `at` names with what it is: files with their bytes,
+    /// directories, and links with their targets, never followed.
     ///
     /// # Errors
-    /// [`ReadFault::Unread`] when the directory or a path below it could not be read, or the read
-    /// did not end within its bound; [`ReadFault::NotTheTree`] when what is there is no tree of
-    /// the check (a path of no kind of a tree, a name that is not UTF-8, more paths or a larger
-    /// file than a tree of the check has). Neither has the bytes of any file.
-    fn read_tree(&self, dir: &Path) -> Result<BTreeMap<String, TreeNode>, ReadFault>;
+    /// [`ReadFault::Unread`] when the read did not end within its bound; [`ReadFault::Failed`]
+    /// when the system, or the NFS front, answered a read of the directory or of a path below it
+    /// with an error (or the front answered no call of its protocol); [`ReadFault::NotTheTree`]
+    /// when what is there is no tree of the check (a path of no kind of a tree, a name that is
+    /// not UTF-8, more paths or a larger file than a tree of the check has). None has the bytes
+    /// of any file.
+    fn read_tree(&self, at: TreeAt<'_>) -> Result<BTreeMap<String, TreeNode>, ReadFault>;
 }
 
-/// Why a read of a tree through the mount gave no tree.
+/// Where the check reads a tree the provider placed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TreeAt<'a> {
+    /// Through the mount, at the directory the provider answered.
+    Mount(&'a Path),
+    /// From the NFS front of the node's `fs` interface at `front`, at the directory's path under
+    /// the mount, `below` (names alone): how a Mac's check reads, since macOS refuses the hook's
+    /// process every read of the volume.
+    Front {
+        /// The front's address.
+        front: SocketAddr,
+        /// The directory's path under the mount.
+        below: &'a Path,
+    },
+}
+
+/// Why a read of a tree, through the mount or from the NFS front, gave no tree.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ReadFault {
-    /// The system could not read a path, or the read did not end within its bound: the mount
-    /// may be slow to fill it, as it is under load. What the system said.
+    /// The read did not end within its bound: the mount may be slow to fill a file, as it is
+    /// under load. What was waited for.
     Unread(String),
+    /// The system answered a read of a path with an error (a handle the mount no longer knows, a
+    /// permission, a path that is not there): the mount does not serve the tree the provider
+    /// placed. The path and what the system said.
+    Failed(String),
     /// What the read found is no tree of the check. What is wrong.
     NotTheTree(String),
 }
