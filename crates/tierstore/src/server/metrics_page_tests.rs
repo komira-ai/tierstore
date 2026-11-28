@@ -12,8 +12,10 @@ use http_body_util::Full;
 use hyper::{Request, StatusCode};
 
 use super::docs_tests::metrics_in;
+use super::local_cache::ProviderLimits;
 use super::local_cache::testing::Rig as CacheRig;
 use super::oci::OciMetrics;
+use super::process::Figures;
 use super::testing::Rig;
 
 /// The page, as the crate ships it.
@@ -51,9 +53,15 @@ fn drift(page: &str, metricz: &str) -> Vec<String> {
     unshown.chain(unnamed).collect()
 }
 
-/// The `/metricz` of a server with a proxy, the OCI front and a local cache.
+/// The `/metricz` of a server with a proxy, the OCI front and a local cache whose mount provider
+/// has said its bounds.
 async fn every_block() -> String {
     let cache = CacheRig::new("tscache-metrics-page");
+    cache.cache.queued_reads().set_limit(256 << 20);
+    cache.cache.preparations().set_limits(ProviderLimits {
+        sources: 16_384,
+        preparing: 8,
+    });
     let rig = Rig::with(1 << 20, |config| {
         config.oci_metrics = Some(Arc::new(OciMetrics::default()));
         config.cache = Some(cache.cache.clone());
@@ -113,4 +121,26 @@ fn the_comparison_finds_a_name_on_either_side_alone() {
         families(typed_only),
         BTreeSet::from(["tierstore_c".to_owned()])
     );
+}
+
+/// Asserts that the page names every family of the process's figures that `/metricz` can show,
+/// each as the family of a `# TYPE` line of the figures read in full. It fails on a figure the
+/// code shows that the page leaves out.
+#[test]
+fn the_metrics_page_names_every_figure_of_the_process() {
+    let every = Figures {
+        resident_bytes: Some(1),
+        virtual_bytes: Some(1),
+        start_seconds: Some(1.0),
+        cpu_seconds: Some(1.0),
+        open_fds: Some(1),
+    };
+    let shown = families(&every.render());
+    assert_eq!(shown.len(), 5, "{shown:?}");
+    for name in shown {
+        assert!(
+            PAGE.contains(&format!("`{name}`")),
+            "the page does not name {name}"
+        );
+    }
 }

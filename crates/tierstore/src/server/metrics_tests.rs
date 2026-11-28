@@ -13,7 +13,7 @@ use crate::Backend;
 pub(super) const BUDGET: u64 = 1 << 20;
 
 /// Every series of `/metricz` with its labels, as the text names it.
-const SERIES: [&str; 39] = [
+const SERIES: [&str; 42] = [
     "tierstore_hits_total{tier=\"hot\",op=\"get\"}",
     "tierstore_hits_total{tier=\"hot\",op=\"head\"}",
     "tierstore_hits_total{tier=\"cold\",op=\"get\"}",
@@ -53,6 +53,9 @@ const SERIES: [&str; 39] = [
     "tierstore_s3_reads_in_flight",
     "tierstore_s3_reads_refused_total",
     "tierstore_s3_bodies_in_flight",
+    "tierstore_s3_connections_limit",
+    "tierstore_s3_reads_limit",
+    "tierstore_s3_bodies_limit",
 ];
 
 async fn metricz(rig: &Rig) -> Reply {
@@ -115,7 +118,8 @@ async fn cold_only(key: &str, body: &'static [u8]) -> Rig {
 }
 
 /// Asserts that `/metricz` answers without a signature with every series, labels included, at
-/// zero before any read. It would catch a renamed or
+/// zero before any read, and the gauges of the limits of the front's bounds at the defaults of
+/// their settings. It would catch a renamed or
 /// dropped series, a label that changed, and a probe that asks for a key.
 #[tokio::test]
 async fn metricz_lists_every_series_with_its_labels() {
@@ -124,7 +128,13 @@ async fn metricz_lists_every_series_with_its_labels() {
     assert_eq!(reply.status, StatusCode::OK);
     assert_eq!(reply.header("content-type"), "text/plain");
     for series in SERIES {
-        assert_eq!(value(&rig, series).await, 0, "{series}");
+        let want = match series {
+            "tierstore_s3_connections_limit" => 8192,
+            "tierstore_s3_reads_limit" => 512,
+            "tierstore_s3_bodies_limit" => 32,
+            _ => 0,
+        };
+        assert_eq!(value(&rig, series).await, want, "{series}");
     }
 }
 
@@ -194,7 +204,8 @@ async fn metricz_names_the_slot_in_the_build_gauge_only_when_there_is_one() {
 
 /// Asserts that a server with no proxy and no OCI front answers `/metricz` 200 with one comment
 /// line that names the sources, and then the server's own series, the late requests of the drain,
-/// the failed puts of each reason and the gauges and counter of its bounds (`bounds`), at zero, and
+/// the failed puts of each reason and the gauges and counter of its bounds (`bounds`), at zero,
+/// then the gauges of their limits at the defaults of their settings, and
 /// (left out here) the build gauge, and nothing else. It would catch a probe that fails or says
 /// nothing when there is nothing to count, and a server whose own series is shown only with a
 /// source.
@@ -208,7 +219,7 @@ async fn metricz_without_a_source_is_the_line_naming_them_and_the_servers_own_se
         .lines()
         .filter(|line| !line.contains("tierstore_build_info"))
         .collect();
-    assert_eq!(lines.len(), 20, "{}", reply.body);
+    assert_eq!(lines.len(), 26, "{}", reply.body);
     for name in ["proxy", "OCI read front", "local cache"] {
         assert!(
             lines[0].starts_with('#') && lines[0].contains(name),
@@ -237,7 +248,8 @@ async fn metricz_without_a_source_is_the_line_naming_them_and_the_servers_own_se
         assert_eq!(*line, want);
     }
     let bounds = super::bounds::bound_families(0, 0, 0, 0);
-    assert_eq!(lines[12..].join("\n") + "\n", bounds);
+    let limits = super::bounds::limit_families(8192, 512, 32);
+    assert_eq!(lines[12..].join("\n") + "\n", bounds + &limits);
 }
 
 /// Asserts that a server with a proxy and an OCI front shows both blocks, the proxy's first, each

@@ -25,6 +25,7 @@ use super::listen::{bind_all_with, duplicates, local_addrs};
 use super::lock::Received;
 use super::memory_format::start_format;
 use super::oci::{OciError, OciFront, OciListener, OciMode};
+use super::process::Source;
 use super::rounds::Rounds;
 use super::stop_watcher::{oci_cut_note, serve_fronts, serve_oci, stop_watcher};
 use super::{Drained, Server};
@@ -174,7 +175,7 @@ pub async fn run_handing(
     built.server.proxy = Some(Arc::clone(&proxy));
     let oci_backend: Arc<dyn Backend> = proxy.clone();
     let listen = built.server.listen;
-    let server = Server::new(proxy, built.server);
+    let server = Server::with_process(proxy, built.server, Source::own());
     let Bound {
         s3: listeners,
         oci,

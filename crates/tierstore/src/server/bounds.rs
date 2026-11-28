@@ -24,6 +24,11 @@
 //!   too): one over them waits up to `server.put_permit_wait` and is then answered 503 `SlowDown`
 //!   with `Retry-After`. A request with no body takes no permit. Gauge:
 //!   `tierstore_s3_bodies_in_flight`, the streamed and the whole bodies that hold a permit.
+//!
+//! Each bound's limit, as the server was started with it, is a gauge beside the one of what is
+//! held now, so that a use near its limit shows before a refusal: `tierstore_s3_connections_limit`
+//! (`server.max_connections`), `tierstore_s3_reads_limit` (`server.max_concurrent_reads`) and
+//! `tierstore_s3_bodies_limit` (`server.max_concurrent_puts`).
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -61,6 +66,15 @@ const READS_REFUSED: &str = "tierstore_s3_reads_refused_total";
 
 /// The gauge of the bodies, streamed or held whole, that hold a permit.
 const BODIES_IN_FLIGHT: &str = "tierstore_s3_bodies_in_flight";
+
+/// The gauge of the most connections open at once.
+const CONNECTIONS_LIMIT: &str = "tierstore_s3_connections_limit";
+
+/// The gauge of the most reads that hold a permit at once.
+const READS_LIMIT: &str = "tierstore_s3_reads_limit";
+
+/// The gauge of the most bodies that hold a permit at once.
+const BODIES_LIMIT: &str = "tierstore_s3_bodies_limit";
 
 impl Server {
     /// Resolves once fewer than [`ServerConfig::max_connections`] connections are open, so that
@@ -109,7 +123,8 @@ impl Server {
     }
 
     /// The families of the front on `/metricz` after the late requests of a drain (which
-    /// `server/mod.rs` prints): the failed puts, and the gauges of the bounds (module docs).
+    /// `metricz.rs` prints): the failed puts, and the gauges of the bounds and of their limits
+    /// (module docs).
     pub(super) fn front_families(&self) -> String {
         let mut text = self.put_failure_family();
         let taken = |most: usize, free: usize| most.saturating_sub(free);
@@ -128,6 +143,11 @@ impl Server {
             refused,
             bodies,
         ));
+        text.push_str(&limit_families(
+            self.config.max_connections,
+            self.config.max_concurrent_reads,
+            self.config.max_concurrent_puts,
+        ));
         text
     }
 }
@@ -140,6 +160,16 @@ pub(super) fn bound_families(open: usize, reads: usize, refused: u64, bodies: us
          # TYPE {READS_IN_FLIGHT} gauge\n{READS_IN_FLIGHT} {reads}\n\
          # TYPE {READS_REFUSED} counter\n{READS_REFUSED} {refused}\n\
          # TYPE {BODIES_IN_FLIGHT} gauge\n{BODIES_IN_FLIGHT} {bodies}\n"
+    )
+}
+
+/// The text of the gauges of the limits of the bounds: the most `connections` open, the most
+/// `reads` and the most `bodies` that hold a permit.
+pub(super) fn limit_families(connections: usize, reads: usize, bodies: usize) -> String {
+    format!(
+        "# TYPE {CONNECTIONS_LIMIT} gauge\n{CONNECTIONS_LIMIT} {connections}\n\
+         # TYPE {READS_LIMIT} gauge\n{READS_LIMIT} {reads}\n\
+         # TYPE {BODIES_LIMIT} gauge\n{BODIES_LIMIT} {bodies}\n"
     )
 }
 

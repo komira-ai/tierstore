@@ -12,11 +12,13 @@
 //! while it runs).
 //!
 //! The cache keeps the count, and shows it on `/metricz` (`metrics.rs`): the bytes the queued reads hold
-//! (`tierstore_provider_prefetch_queued_bytes`) and the preparations whose reads were not queued
-//! for want of room (`tierstore_provider_prefetch_skipped_total`).
+//! (`tierstore_provider_prefetch_queued_bytes`), the bound they are held under
+//! (`tierstore_provider_prefetch_queued_bytes_limit`, once a provider has said it; none before),
+//! and the preparations whose reads were not queued for want of room
+//! (`tierstore_provider_prefetch_skipped_total`).
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use super::LocalCache;
 
@@ -25,6 +27,9 @@ use super::LocalCache;
 pub(in crate::server) struct QueuedReads {
     bytes: AtomicU64,
     skipped: AtomicU64,
+    /// The bound the provider takes room under, which `/metricz` shows: none until a provider
+    /// has said it.
+    limit: Mutex<Option<u64>>,
 }
 
 impl QueuedReads {
@@ -55,6 +60,16 @@ impl QueuedReads {
     /// The preparations refused room so far.
     pub(in crate::server) fn skipped(&self) -> u64 {
         self.skipped.load(Ordering::Relaxed)
+    }
+
+    /// Says the bound the provider takes room under (the `most` of its [`Self::take`]).
+    pub(in crate::server) fn set_limit(&self, most: u64) {
+        *self.limit.lock().unwrap_or_else(PoisonError::into_inner) = Some(most);
+    }
+
+    /// The bound a provider said, if one has.
+    pub(in crate::server) fn limit(&self) -> Option<u64> {
+        *self.limit.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -87,5 +102,17 @@ mod tests {
         assert!(reads.take(1, u64::MAX));
         assert!(!reads.take(u64::MAX, u64::MAX));
         assert_eq!((reads.bytes(), reads.skipped()), (1, 2));
+    }
+
+    /// Asserts that the bound is none until a provider says it, then the one said last, zero
+    /// (a provider that queues nothing) included.
+    #[test]
+    fn the_limit_is_none_until_a_provider_says_it() {
+        let reads = QueuedReads::default();
+        assert_eq!(reads.limit(), None);
+        reads.set_limit(256 << 20);
+        assert_eq!(reads.limit(), Some(256 << 20));
+        reads.set_limit(0);
+        assert_eq!(reads.limit(), Some(0));
     }
 }

@@ -97,6 +97,7 @@ use super::listen::{LoopbackBind, bind_set, bind_with, joined};
 use super::local_cache::trees::{TreeStore, TreesConfig};
 use super::local_cache::{CacheConfig, Disk, Every, LocalCache, Mode, SystemDisk, check_local};
 use super::oci::OciListener;
+use super::process::Source;
 use super::provider::check::CheckUpstream;
 use super::provider::{self, Provider, ProviderFlags};
 use super::put_ingest::PutIngest;
@@ -587,7 +588,7 @@ pub(super) async fn serve_front(
     let listen = config.listen;
     // The registry front reads what the S3 front reads: through the cache.
     let backend: Arc<dyn Backend> = Arc::new(cache.clone());
-    let server = Server::new(Arc::clone(&backend), config);
+    let server = Server::with_process(Arc::clone(&backend), config, Source::own());
     let got = handed.map(|taken| Got::Taken(Box::new(taken))).or(sockets);
     let fronts_bound = async {
         bind_fronts(

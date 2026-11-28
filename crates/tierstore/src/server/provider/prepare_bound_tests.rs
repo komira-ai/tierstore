@@ -198,3 +198,68 @@ async fn a_release_ends_the_fill_and_gives_back_the_room_of_every_queued_read() 
     drop(taken);
     assert_eq!(pack_reads(&rig), 0);
 }
+
+/// The sample `name` of the cache's block of `/metricz` on the rig's node.
+fn sample(rig: &Rig, name: &str) -> u64 {
+    let text = rig.bench.rig.cache.metrics();
+    let prefix = format!("\n{name} ");
+    let at = text
+        .find(&prefix)
+        .unwrap_or_else(|| panic!("no {name} in:\n{text}"));
+    let rest = &text[at + prefix.len()..];
+    rest[..rest.find('\n').expect("a line")]
+        .parse()
+        .expect("a number")
+}
+
+/// Asserts that `/metricz` shows the heap the queued reads hold beside its bound and the bounds
+/// of the sources and the preparations: the bound of 256 MiB and the bounds of the trees' table
+/// from the start, with nothing held; the bytes of a source's reads while its preparation holds
+/// them queued with every read of the node taken, under the bound; and none again once the source
+/// is released.
+#[tokio::test]
+async fn metricz_shows_the_queued_reads_held_under_their_limit_until_a_release() {
+    let rig = Rig::new("prov-bound-metricz").await;
+    let config = rig.bench.store.config().clone();
+    let limits = [
+        ("tierstore_provider_prefetch_queued_bytes_limit", 256 << 20),
+        (
+            "tierstore_provider_sources_limit",
+            config.max_sources as u64,
+        ),
+        (
+            "tierstore_provider_preparing_limit",
+            config.prepare_concurrency as u64,
+        ),
+    ];
+    for (name, limit) in limits {
+        assert_eq!(sample(&rig, name), limit, "{name}");
+    }
+    assert_eq!(sample(&rig, "tierstore_provider_prefetch_queued_bytes"), 0);
+
+    let taken = every_read(&rig);
+    let id = SourceId {
+        agent: AGENT.to_owned(),
+        run: "js.1".to_owned(),
+        index: 0,
+        attempt: 0,
+    };
+    let (job, mut seen) = rig.provider.hold(id, &rig.key);
+    let running = tokio::spawn(run(Arc::clone(&rig.provider.shared), job));
+    seen.wait_for(|stage| *stage == Stage::Placed)
+        .await
+        .expect("placed");
+    let held = sample(&rig, "tierstore_provider_prefetch_queued_bytes");
+    assert_eq!(held, one_list(&rig));
+    assert!(held > 0 && held <= 256 << 20, "{held}");
+
+    rig.provider.release(source("js.1", 0)).expect("released");
+    until("the released preparation ends", || running.is_finished()).await;
+    running.await.expect("the preparation");
+    assert_eq!(sample(&rig, "tierstore_provider_prefetch_queued_bytes"), 0);
+    assert_eq!(
+        sample(&rig, "tierstore_provider_prefetch_queued_bytes_limit"),
+        256 << 20
+    );
+    drop(taken);
+}

@@ -28,6 +28,7 @@ use crate::server::drain::late_of;
 use crate::server::front::server_config;
 use crate::server::listen::joined;
 use crate::server::oci::OciListener;
+use crate::server::process::Source;
 use crate::server::stop_watcher::{oci_cut_note, serve_fronts, serve_oci, stop_watcher};
 use crate::server::{Drained, Server};
 
@@ -50,7 +51,7 @@ pub(in crate::server) async fn serve_cold(
     let oci = oci_setup_of(&settings.oci, &config, true)?;
     config.oci_metrics = oci.as_ref().map(|setup| Arc::clone(&setup.metrics));
     let listen = config.listen;
-    let server = Server::new(Arc::clone(&cold), config);
+    let server = Server::with_process(Arc::clone(&cold), config, Source::own());
     let addrs = &settings.front.listen;
     let Bound {
         s3: listeners,

@@ -48,6 +48,7 @@ server = [
     "dep:roxmltree",
     "dep:rustls",
     "dep:rustls-native-certs",
+    "dep:sysinfo",
     "dep:tokio-rustls",
     "dep:x509-parser",
     "dep:toml",
@@ -179,6 +180,15 @@ fsevent = { workspace = true, optional = true }
 # The `unmount(2)` with `MNT_FORCE` that `tierstore fs` makes itself, the last step of an unmount
 # of its NFS mount (`server::treefs::nfs::mount`).
 nix = { workspace = true, optional = true }
+# The figures of the process on `/metricz` (`server::process`): its resident and virtual memory,
+# CPU time, start and descriptors, which macOS gives through `proc_pidinfo` and the task's
+# information, calls that need `unsafe` in any crate. On Linux they are read from procfs.
+sysinfo = { workspace = true, optional = true }
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+# The memory of the machine, which tests/s3_front/process_metrics.rs holds the resident memory
+# of the binary below.
+sysinfo.workspace = true
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 # The tests of the tree mount serve a tree from the rig of `tierstore-tree`: the real mount server
@@ -214,8 +224,9 @@ reqwest.workspace = true
 # The TLS client of the tests of the OCI read front.
 rustls.workspace = true
 tokio-rustls.workspace = true
-# SIGTERM to the binary.
-rustix = { workspace = true, features = ["process"] }
+# SIGTERM to the binary, and the memory of the machine, which tests/s3_front/process_metrics.rs
+# holds the resident memory of the binary below (Linux).
+rustix = { workspace = true, features = ["process", "system"] }
 # Turns the `server` feature on for this crate's own tests, and for the clippy and coverage
 # runs over the workspace that build them.
 tierstore = { workspace = true, features = ["server"] }

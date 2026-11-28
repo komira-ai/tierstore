@@ -87,7 +87,11 @@ Prometheus text of the counters of the process. All are counters since the proce
 a cold tier; the block below), the OCI read front's, and the local cache's `tierstore_cache_*`
 block (a build node, or a storage node with a cache in front of its proxy; see "Local cache"
 below). A file with `[local_cache]`, `[hot_store]` and `[cold_store]` is one process with both the
-proxy's block and the cache's.
+proxy's block and the cache's. After the blocks come the gauges of the S3 front's bounds, each
+with its limit, and the `tierstore` binary's own figures under the names the standard Prometheus
+clients give them: `process_resident_memory_bytes`, `process_virtual_memory_bytes`,
+`process_start_time_seconds`, `process_cpu_seconds_total` and `process_open_fds` (on Linux and
+macOS; docs/metrics.md says where each comes from).
 
 The block of the proxy is one labelled family per measure, so one query serves every tier. The
 labels have a few fixed values, never a key or a client: `tier` is `hot` or `cold` here (`local`

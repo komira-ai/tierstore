@@ -233,7 +233,9 @@
 //! other, in the Prometheus text format: the proxy's reads ([`Proxy::metrics`]: hits, misses,
 //! errors and bytes of each tier, the copies cold reads made into the hot tier), the OCI read
 //! front ([`oci`]) and the local cache ([`local_cache`]). A line says so when the process has
-//! none of them. It is not signed either, and a bucket cannot be called `metricz`. A cache node
+//! none of them. Then come the gauges of the front's bounds and their limits (`bounds`), and, for
+//! the servers the binary makes, the figures of its process (`process`; [`Server::new`] shows
+//! none). It is not signed either, and a bucket cannot be called `metricz`. A cache node
 //! and a storage node are different processes; the README of the crate lists every name and
 //! label. A server that is the front of a local cache is a read cache: it answers GET and HEAD
 //! and refuses every other method, copies and multipart calls included, with 403
@@ -414,6 +416,7 @@ mod memory_format;
 mod metrics_page_tests;
 #[cfg(test)]
 mod metrics_tests;
+mod metricz;
 pub mod oci;
 mod oci_upstream_setup;
 #[cfg(test)]
@@ -430,6 +433,7 @@ pub mod presign;
 mod presign_get_tests;
 #[cfg(test)]
 mod presign_server_tests;
+mod process;
 mod provider;
 mod put_ingest;
 #[cfg(test)]
@@ -596,12 +600,24 @@ pub struct Server {
     reads: Arc<Semaphore>,
     /// The front's own counts (`front_counts.rs`).
     counts: front_counts::FrontCounts,
+    /// Where `/metricz` reads the figures of the process from (`process.rs`).
+    process: process::Source,
 }
 
 impl Server {
-    /// A server over `backend`.
+    /// A server over `backend`, whose `/metricz` shows no figure of the process (`process.rs`).
     #[must_use]
     pub fn new(backend: Arc<dyn Backend>, config: ServerConfig) -> Arc<Self> {
+        Self::with_process(backend, config, process::Source::None)
+    }
+
+    /// The same, whose `/metricz` shows the figures `process` reads: the binary's servers read
+    /// their own (`process::Source::own`).
+    fn with_process(
+        backend: Arc<dyn Backend>,
+        config: ServerConfig,
+        process: process::Source,
+    ) -> Arc<Self> {
         Arc::new(Self {
             puts: Arc::new(Semaphore::new(config.max_concurrent_puts)),
             reads: Arc::new(Semaphore::new(config.max_concurrent_reads)),
@@ -614,6 +630,7 @@ impl Server {
             open: AtomicUsize::new(0),
             next_request: AtomicU64::new(1),
             counts: front_counts::FrontCounts::default(),
+            process,
         })
     }
 
@@ -964,36 +981,5 @@ impl Server {
             Some(cache) => format!("ready {}", cache.mode().as_str()),
             None => "ready".to_owned(),
         }
-    }
-
-    /// The text of `/metricz`: the block of every source of counters the process has (the
-    /// proxy's, the OCI front's, the local cache's), one after the other, each ending in a
-    /// newline, or one line that names them all when there is none; then, always,
-    /// `tierstore_build_info` ([`build_info::gauge`]). Every block that exists renders, never one
-    /// of them; a storage node has the proxy's, a cache node the cache's, and either may have the
-    /// OCI front's.
-    fn metrics_probe(&self) -> String {
-        let blocks = [
-            self.config.proxy.as_ref().map(|proxy| proxy.metrics()),
-            self.config.oci_metrics.as_ref().map(|oci| oci.render()),
-            self.config.cache.as_ref().map(|cache| cache.metrics()),
-        ];
-        let mut text = String::new();
-        for block in blocks.into_iter().flatten() {
-            text.push_str(&block);
-            if !block.ends_with('\n') {
-                text.push('\n');
-            }
-        }
-        if text.is_empty() {
-            text = "# this server has no proxy, no OCI read front and no local cache\n".to_owned();
-        }
-        let late = self.late_requests();
-        text.push_str("# TYPE tierstore_drain_late_requests_total counter\n");
-        text.push_str(&format!("tierstore_drain_late_requests_total {late}\n"));
-        text.push_str(&self.front_families());
-        let (version, commit) = (build_info::VERSION, build_info::COMMIT);
-        text.push_str(&build_info::gauge(version, commit, self.config.slot));
-        text
     }
 }
