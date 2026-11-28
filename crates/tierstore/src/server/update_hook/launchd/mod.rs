@@ -43,10 +43,11 @@
 //!   and serving the target only records `swapped`. A failure is reported; hostkeeper then runs
 //!   `rollback`.
 //! - `verify` observes the target version served by the loaded job and, for a release whose node
-//!   has an `fs` interface, the volume served at its mount point ([`volume`]), and records
-//!   `verified`; a job that serves read-only (its cache has not taken the write role yet) defers
-//!   with `not_ready` and records nothing, and a volume that is not served fails with
-//!   `not_ready`. After the commit it only observes the version.
+//!   has an `fs` interface, the volume served at its mount point ([`volume`]); on a node with a
+//!   mount provider the job, once it is the writer, must then pass the mount check
+//!   ([`mount_check`]); and it records `verified`. A job that serves read-only (its cache has not
+//!   taken the write role yet) defers with `not_ready` and records nothing, and a volume that is
+//!   not served fails with `not_ready`. After the commit it only observes the version.
 //! - `rollback` boots the fs job out first when there is one, then, for an update, puts the
 //!   previous binary in place and boots the job out and in again (a hand-over of a loaded job
 //!   sends `SIGUSR2` instead), waits for the previous version and boots the fs job in; a first
@@ -78,6 +79,7 @@ use std::path::Path;
 use super::LAUNCHD_PLIST;
 use super::args::Step;
 use super::look::{Look, verified, writable};
+use super::mount_check;
 use super::params::Params;
 use super::ports::LaunchdPorts;
 use super::record::{Marker, Record, Stale, Written};
@@ -415,12 +417,15 @@ fn verify(c: &Ctx<'_, '_>, params: &Params, record: &mut Record) -> Result<Done,
     let observed = c.look().observed(target)?;
     let mode = writable(observed, c.label, params.verify_retry_secs)?;
     c.volume_served(params)?;
+    // The writer binds the mount provider's socket, and the volume answers: the provider must
+    // now do its job.
+    let mounted = mount_check::on_node(c.ports.host, c.ports.provider, params)?;
     // `verified` follows its act: everything above was observed.
     if !record.has(Marker::Verified) {
         let marked = record.with(Marker::Verified);
         c.save(record, marked)?;
     }
-    Ok(verified(mode, target))
+    Ok(verified(mode, target).led_by(mounted))
 }
 
 fn rollback(c: &Ctx<'_, '_>, params: &Params, record: &mut Record) -> Result<Done, Done> {
