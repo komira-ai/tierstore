@@ -35,6 +35,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use crate::server::update_hook::launchd::{run_step, run_step_with};
+use crate::server::update_hook::provider_fake::FakeProvider;
 use crate::server::update_hook::shape::fs_interface;
 use crate::server::update_hook::{
     Clock, Done, FS_CONFIG_FILE, FS_LAUNCHD_PLIST, Host, Instances, LAUNCHD_PLIST, Launchd,
@@ -163,6 +164,8 @@ pub struct Fake {
     w: RefCell<World>,
     locks: Rc<Cell<u32>>,
     first: bool,
+    /// The node's mount provider.
+    pub provider: FakeProvider,
 }
 
 /// The params of an update to `release` (`version`), from `previous` when there is one.
@@ -244,6 +247,7 @@ impl Fake {
             )),
             locks: Rc::new(Cell::new(0)),
             first: false,
+            provider: FakeProvider::under(FS_MOUNT),
         }
     }
 
@@ -253,6 +257,7 @@ impl Fake {
             w: RefCell::new(Fake::world(None, None, None)),
             locks: Rc::new(Cell::new(0)),
             first: true,
+            provider: FakeProvider::under(FS_MOUNT),
         }
     }
 
@@ -262,6 +267,7 @@ impl Fake {
             launchd: self,
             instances: self,
             host: self,
+            provider: &self.provider,
             clock: self,
             state: self,
         }

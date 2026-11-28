@@ -7,6 +7,11 @@
 //! (`provider::v1::mount_provider_server`) with the `server` feature. The crate keeps its name from
 //! the trees interface it once carried, which was removed.
 
+/// The protobuf runtime the messages are generated for, so that a client that frames a call by
+/// hand (tierstore's update hook asks the mount provider over a Unix socket) encodes and decodes
+/// them with that same version and needs no dependency of its own on it.
+pub use prost;
+
 /// jobscheduler's protocol of a node-local mount provider (komira-ai/jobscheduler,
 /// `docs/design/mount-providers.md` section 3): `proto/jobscheduler/provider/v1/provider.proto`,
 /// package `jobscheduler.provider.v1`, service `MountProvider` with `Prepare`, `Mount`, `Release`

@@ -180,7 +180,8 @@ fn a_mac_with_an_fs_interface_or_no_provider_is_not_refused() {
 /// package's manifest names none), is the hand-over: `prepare` has the staged release check the
 /// file, `cutover` sends `SIGUSR2` with no bootout or bootstrap of either job and the volume stays
 /// listed throughout, `verify` lists the mount at the fs interface's mount point and looks `trees`
-/// up in it before it records `verified`, and `cleanup` commits. The fs job is never named.
+/// up in it, then (the file has a mount provider) runs the mount check, before it records
+/// `verified`, and `cleanup` commits. The fs job is never named.
 /// Catches an update that restarts the job (which unmounts under the running jobs) and one that
 /// verifies without looking at the volume.
 #[test]
@@ -210,8 +211,11 @@ fn a_switched_mac_hands_over_and_verify_proves_the_volume() {
             format!("host.config {CONFIG}"),
             format!("host.mounted {FS_MOUNT}"),
             format!("host.is_dir {FS_MOUNT}/trees"),
+            // Then the mount check reads the file for the provider it drives.
+            format!("host.config {CONFIG}"),
         ]
     );
+    assert!(!fake.provider.calls().is_empty());
     assert!(fake.record().has(Marker::Verified));
     fake.advance(&[Cleanup]);
     assert!(fake.record().committed());

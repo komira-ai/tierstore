@@ -176,12 +176,13 @@ fn the_rollback_of_a_failed_first_install_stops_the_instance_and_says_so_twice()
 }
 
 /// Asserts that no step asks the host for anything but the configuration file the params name,
-/// and only in `prepare`: there is no declaration file in the world and none is read.
+/// and only in `prepare` and in `verify` (which reads it for a `mount-provider` interface, the
+/// mount check's): there is no declaration file in the world and none is read.
 #[test]
 fn only_the_configuration_file_of_the_params_is_ever_read() {
     let fake = SystemdFake::installed();
     fake.complete(&params(NEW, Some(OLD)));
-    assert_eq!(fake.config_paths(), ["/etc/tierstore/config.toml"]);
+    assert_eq!(fake.config_paths(), ["/etc/tierstore/config.toml"; 2]);
     assert!(!fake.log().iter().any(|line| line.contains("updater.d")));
 }
 
