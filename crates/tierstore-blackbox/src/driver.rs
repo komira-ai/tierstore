@@ -37,11 +37,12 @@ use crate::rig::Rig;
 /// How long a node may take to serve its provider's socket after its start line.
 const SOCKET_WAIT: Duration = Duration::from_secs(60);
 
-/// The cache's budget of a case with its cache in its directory.
+/// The most budget of a case with its cache in its directory: less on a scratch file system of
+/// under twice this size, such as a farm job's of 1 GiB.
 const BUDGET_MIB: u64 = 1024;
 
-/// The most of a small disk's size the budget of the case `disk-full` takes: the node refuses a
-/// budget over the disk less its free floor.
+/// The most of its file system's size a cache's budget takes (the small disk of `disk-full`, or
+/// the scratch's): the node refuses a budget over the file system less its free floor.
 const SMALL_DISK_SHARE: u64 = 2;
 
 /// The flags of `tierstore-blackbox`.
@@ -216,10 +217,9 @@ impl Rigs for Nodes<'_> {
         let small_disk = (case == Case::Disk)
             .then(|| self.args.small_disk.clone())
             .flatten();
-        let budget_mib = match &small_disk {
-            Some(disk) => budget_on(disk)?,
-            None => BUDGET_MIB,
-        };
+        let cache_on = small_disk.as_deref().unwrap_or(&self.programs.scratch);
+        let size = os::disk_bytes(cache_on).map_err(|e| e.to_string())?;
+        let budget_mib = budget_mib(size, small_disk.is_some());
         let max_placements = match case {
             Case::Placements => Some(params.max_placements),
             Case::Stall => Some(
@@ -248,10 +248,15 @@ impl Rigs for Nodes<'_> {
     }
 }
 
-/// The budget of a cache on the disk `disk`: a share of its size, in MiB.
-fn budget_on(disk: &Path) -> Result<u64, String> {
-    let size = os::disk_bytes(disk).map_err(|e| e.to_string())?;
-    Ok(((size / SMALL_DISK_SHARE) >> 20).max(1))
+/// The budget, in MiB, of a cache on a file system of `size` bytes: a share of it, and at most
+/// [`BUDGET_MIB`] unless the file system is the case's own disk.
+fn budget_mib(size: u64, own_disk: bool) -> u64 {
+    let share = ((size / SMALL_DISK_SHARE) >> 20).max(1);
+    if own_disk {
+        share
+    } else {
+        share.min(BUDGET_MIB)
+    }
 }
 
 /// Runs `cases` with `params` on the rigs of `rigs`, writing a line per case to `out`: whether

@@ -259,3 +259,16 @@ fn a_run_exits_0_when_every_case_passed_and_1_otherwise() {
         "tierstore-blackbox: the runtime: no threads\n"
     );
 }
+
+/// Asserts that a cache's budget is half its file system's size: at most 1024 MiB on the scratch,
+/// so a farm job's file system of 1 GiB gets 512 MiB, which the node takes under its free floor
+/// of 10 percent; on the case's own small disk, half of it however large; never under 1 MiB.
+#[test]
+fn a_budget_is_half_its_file_system_and_at_most_1024_mib_on_the_scratch() {
+    const GIB: u64 = 1 << 30;
+    assert_eq!(budget_mib(GIB, false), 512);
+    assert_eq!(budget_mib(100 * GIB, false), 1024);
+    assert_eq!(budget_mib(100 * GIB, true), 51_200);
+    assert_eq!(budget_mib(256 << 20, true), 128);
+    assert_eq!(budget_mib(1 << 20, true), 1);
+}
