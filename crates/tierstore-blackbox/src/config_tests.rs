@@ -157,7 +157,7 @@ fn a_node_without_fs_has_no_fs_interface() {
     let with = node.text(&paths);
     node.fs = false;
     let without = node.text(&paths);
-    assert!(!without.contains("type = \"fs\""), "{without}");
+    assert!(!without.contains("type = \"fs\""));
     assert!(without.contains("params = { socket = \"/s/t0/provider.sock\" }\n\n[server]\n"));
     let fs = "\n[[interface]]\ntype = \"fs\"\n[interface.params]\nmountpoint   = \"/s/t0/fs\"\nruntime_dir  = \"/s/t0/fsrun\"\nclient_group = \"1001\"\nowner        = \"1000:1001\"\n";
     assert_eq!(with.replacen(fs, "", 1), without);
