@@ -6,7 +6,7 @@
 
 use super::super::PUBLIC_PORT;
 use super::super::look::{verified, writable};
-use super::super::mount_check;
+use super::super::mount_check::{self, Read};
 use super::super::params::Params;
 use super::super::ports::UnitState;
 use super::super::record::{Marker, Record};
@@ -59,7 +59,7 @@ pub(super) fn verify(c: &Ctx<'_, '_>, params: &Params, record: &Record) -> Resul
     // cannot fill their trees or reach the mount provider, and the node stays in its update.
     let mode = writable(observed, &unit_name(next), params.verify_retry_secs)?;
     // The writer binds the mount provider's socket: the provider must now do its job.
-    let mounted = mount_check::on_node(c.ports.host, c.ports.provider, params)?;
+    let mounted = mount_check::on_node(c.ports.host, c.ports.provider, params, Read::Mount)?;
     // `verified` follows its act: everything above was observed.
     if !record.has(Marker::Verified) {
         c.save(&record.with(Marker::Verified))?;

@@ -80,7 +80,7 @@ pub use params::{
 pub use ports::{
     Clock, Control, Family, Host, Instance, Instances, Launchd, LaunchdPorts, Lock, Markers,
     MountProvider, PortError, PortKind, ProviderCode, ProviderFault, ReadFault, Reply, StateDir,
-    SystemdPorts, TreeNode, UnitState, Units,
+    SystemdPorts, TreeAt, TreeNode, UnitState, Units,
 };
 pub use probe::{Build, CacheMode, build_of, readiness};
 pub use record::{

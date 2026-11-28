@@ -4,9 +4,9 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use super::mount_check::{check, on_node};
+use super::mount_check::{Read as ReadVia, check, on_node};
 use super::params::Params;
-use super::ports::{ProviderCode, ProviderFault, ReadFault, TreeNode};
+use super::ports::{ProviderCode, ProviderFault, ReadFault, TreeAt, TreeNode};
 use super::provider_fake::{FAKE_MOUNT, FAKE_SOCKET, FakeProvider, PROVIDER_ENTRY};
 use super::report::{Done, Outcome, Reason};
 use super::shape::ProviderShape;
@@ -18,6 +18,7 @@ fn shape() -> ProviderShape {
     ProviderShape {
         socket: PathBuf::from(FAKE_SOCKET),
         mountpoint: PathBuf::from(FAKE_MOUNT),
+        nfs: None,
     }
 }
 
@@ -295,29 +296,70 @@ fn a_tree_read_back_wrong_fails_the_check_by_its_first_difference() {
     }
 }
 
-/// Asserts that a read through the mount that fails or does not end in its bound (the mount fills
-/// a file as it is opened, slowly on a node under load) defers the check with `not_ready`, its
-/// detail naming the tree, its directory and what the system said, and releases both sources.
-/// Catches a check that fails, and so rolls back, an update of a node whose mount is only slow.
+/// Asserts that a read through the mount that does not end in its bound (the mount fills a file
+/// as it is opened, slowly on a node under load) defers the check with `not_ready`, its detail
+/// naming the tree, its directory and what was waited for, and releases both sources. Catches a
+/// check that fails, and so rolls back, an update of a node whose mount is only slow.
 #[test]
-fn a_read_that_fails_or_does_not_end_defers_the_check() {
+fn a_read_that_does_not_end_defers_the_check() {
     let dir = FakeProvider::dir_of(1);
-    for why in [
-        "data/one could not be read: Input/output error",
-        "the read did not end within 30000 ms",
+    let why = "the read did not end within 30000 ms";
+    let provider = FakeProvider::default();
+    provider.read_as(1, Err(ReadFault::Unread(why.to_owned())));
+    let (outcome, reason, retry, detail) = failed(checked(&provider));
+    assert_eq!(
+        (outcome, reason, retry),
+        (Outcome::Deferred, Some(Reason::NotReady), Some(5))
+    );
+    assert_eq!(
+        detail,
+        format!(
+            "the tree without an L2 sidecar at {} could not be read yet: {why}",
+            dir.display()
+        )
+    );
+    assert!(provider.placed().is_empty());
+}
+
+/// Asserts that a read through the mount that the system answers with an error (a handle the
+/// mount no longer knows, a permission, a path that is not there, an I/O error) fails the check at
+/// once with `mounted_tree_wrong`, not deferred: its detail names the tree, its directory, the
+/// path and what the system said, and both sources are released. The trees' objects are the
+/// release's own, read from memory, so asking again would only meet the same answer: a Mac's
+/// update looped on such a read, deferred every few seconds, until hostkeeper's deadline. Catches
+/// a check that defers, and so holds the update for `verify_deadline_secs`, on a mount that will
+/// not serve the tree.
+#[test]
+fn a_read_the_system_refuses_fails_the_check_at_once_naming_the_path() {
+    for (index, form, why) in [
+        (
+            0,
+            "with its L2 sidecar",
+            "the directory could not be listed: Stale NFS file handle (os error 70)",
+        ),
+        (
+            1,
+            "without an L2 sidecar",
+            "data could not be listed: Permission denied (os error 13)",
+        ),
+        (
+            1,
+            "without an L2 sidecar",
+            "data/one could not be read: Input/output error (os error 5)",
+        ),
     ] {
         let provider = FakeProvider::default();
-        provider.read_as(1, Err(ReadFault::Unread(why.to_owned())));
+        provider.read_as(index, Err(ReadFault::Failed(why.to_owned())));
         let (outcome, reason, retry, detail) = failed(checked(&provider));
         assert_eq!(
             (outcome, reason, retry),
-            (Outcome::Deferred, Some(Reason::NotReady), Some(5))
+            (Outcome::Failure, Some(Reason::MountedTreeWrong), None)
         );
         assert_eq!(
             detail,
             format!(
-                "the tree without an L2 sidecar at {} could not be read yet: {why}",
-                dir.display()
+                "the tree {form} at {} could not be read through the mount: {why}",
+                FakeProvider::dir_of(index).display()
             )
         );
         assert!(provider.placed().is_empty());
@@ -493,8 +535,8 @@ impl super::ports::MountProvider for FirstReleaseFailsAfterPrepare<'_> {
         self.inner.release(socket, index)
     }
 
-    fn read_tree(&self, dir: &std::path::Path) -> Result<BTreeMap<String, TreeNode>, ReadFault> {
-        self.inner.read_tree(dir)
+    fn read_tree(&self, at: TreeAt<'_>) -> Result<BTreeMap<String, TreeNode>, ReadFault> {
+        self.inner.read_tree(at)
     }
 }
 
@@ -532,8 +574,8 @@ impl super::ports::MountProvider for GoneFault<'_> {
         self.inner.release(socket, index)
     }
 
-    fn read_tree(&self, dir: &std::path::Path) -> Result<BTreeMap<String, TreeNode>, ReadFault> {
-        self.inner.read_tree(dir)
+    fn read_tree(&self, at: TreeAt<'_>) -> Result<BTreeMap<String, TreeNode>, ReadFault> {
+        self.inner.read_tree(at)
     }
 }
 
@@ -587,8 +629,8 @@ impl super::ports::MountProvider for LastReleaseRefused<'_> {
         self.inner.release(socket, index)
     }
 
-    fn read_tree(&self, dir: &std::path::Path) -> Result<BTreeMap<String, TreeNode>, ReadFault> {
-        self.inner.read_tree(dir)
+    fn read_tree(&self, at: TreeAt<'_>) -> Result<BTreeMap<String, TreeNode>, ReadFault> {
+        self.inner.read_tree(at)
     }
 }
 
@@ -613,23 +655,26 @@ fn the_check_runs_on_a_node_with_a_mount_provider_alone() {
     let provider = FakeProvider::default();
     let named = params_naming(Some("/etc/tierstore/config.toml"));
     host.set_config(Some(&format!("[server]\n{PROVIDER_ENTRY}")));
-    let said = on_node(&host, &provider, &named).expect("the check passes");
+    let said = on_node(&host, &provider, &named, ReadVia::Mount).expect("the check passes");
     assert!(said.starts_with("the mount provider at "), "{said}");
     assert_eq!(provider.calls(), every_call());
 
     let provider = FakeProvider::default();
     assert_eq!(
-        on_node(&host, &provider, &params_naming(None)),
+        on_node(&host, &provider, &params_naming(None), ReadVia::Mount),
         Ok(String::new())
     );
     for text in [None, Some("[server]\n")] {
         host.set_config(text);
-        assert_eq!(on_node(&host, &provider, &named), Ok(String::new()));
+        assert_eq!(
+            on_node(&host, &provider, &named, ReadVia::Mount),
+            Ok(String::new())
+        );
     }
     assert!(provider.calls().is_empty());
 
     host.set_config(Some("[[interface]]\ntype = \"mount-provider\"\n"));
-    let done = on_node(&host, &provider, &named).expect_err("refused");
+    let done = on_node(&host, &provider, &named, ReadVia::Mount).expect_err("refused");
     assert_eq!(done.report.reason, Some(Reason::ConfigRefused));
     assert_eq!(
         done.report.detail.as_deref(),
@@ -637,6 +682,128 @@ fn the_check_runs_on_a_node_with_a_mount_provider_alone() {
     );
 
     host.fail_on(Some("host.config"));
-    let done = on_node(&host, &provider, &named).expect_err("the host failed");
+    let done = on_node(&host, &provider, &named, ReadVia::Mount).expect_err("the host failed");
     assert_eq!(done.report.reason, Some(Reason::HostFailed));
+}
+
+/// The calls of a check that passes on a node whose trees are read from the NFS front at `front`.
+fn every_call_from(front: &str) -> Vec<String> {
+    every_call()
+        .into_iter()
+        .map(
+            |call| match call.strip_prefix(&format!("read {FAKE_MOUNT}/")) {
+                Some(below) => format!("read {below} from {front}"),
+                None => call,
+            },
+        )
+        .collect()
+}
+
+/// Asserts that a Mac's check (`ReadVia::NfsFront`) reads both trees from the NFS front of the node's
+/// `fs` interface, at their paths under the mount, and never through the mount: the front its file
+/// names (`fs.nfs.listen`), or the loader's default for a file that names none, its detail saying
+/// so; that a node with no `fs` interface, and a node checked through the mount (`ReadVia::Mount`, a
+/// Linux node, whose `fs` interface serves no NFS), reads through the mount; and that a `listen`
+/// that is not an address and a port, or names port 0, is `config_refused`, with nothing asked of
+/// the provider. Catches a Mac whose check reads the volume, which macOS refuses the hook's
+/// process, and a front the hook cannot reach taken for one it can.
+#[test]
+fn a_mac_reads_the_trees_from_the_nfs_front_its_file_names() {
+    let host = SystemdFake::installed();
+    let named = params_naming(Some("/usr/local/tierstore/etc/tierstore.toml"));
+    let fs = |params: &str| {
+        format!("[server]\n{PROVIDER_ENTRY}\n[[interface]]\ntype = \"fs\"\n{params}")
+    };
+    for (file, front) in [
+        (
+            fs("params = { nfs = { listen = \"127.0.0.1:12050\" } }\n"),
+            "127.0.0.1:12050",
+        ),
+        (fs(""), "127.0.0.1:12049"),
+        (
+            fs("params = { mountpoint = \"/run/tierstore/fs\" }\n"),
+            "127.0.0.1:12049",
+        ),
+    ] {
+        host.set_config(Some(&file));
+        let provider = FakeProvider::default();
+        let said = on_node(&host, &provider, &named, ReadVia::NfsFront).expect("the check passes");
+        assert_eq!(
+            said,
+            format!(
+                "the mount provider at {FAKE_SOCKET} placed, served and released a tree with its \
+                 L2 sidecar and one without an L2 sidecar, read from the NFS front at {front}"
+            )
+        );
+        assert_eq!(provider.calls(), every_call_from(front));
+    }
+
+    for (file, read) in [
+        (format!("[server]\n{PROVIDER_ENTRY}"), ReadVia::NfsFront),
+        (fs(""), ReadVia::Mount),
+    ] {
+        host.set_config(Some(&file));
+        let provider = FakeProvider::default();
+        on_node(&host, &provider, &named, read).expect("the check passes");
+        assert_eq!(provider.calls(), every_call());
+    }
+
+    for (listen, shown) in [
+        ("\"nowhere\"", "\"nowhere\""),
+        ("\"127.0.0.1:0\"", "\"127.0.0.1:0\""),
+        ("5", "5"),
+    ] {
+        host.set_config(Some(&fs(&format!(
+            "params = {{ nfs = {{ listen = {listen} }} }}\n"
+        ))));
+        let provider = FakeProvider::default();
+        let done = on_node(&host, &provider, &named, ReadVia::NfsFront).expect_err("refused");
+        assert_eq!(done.report.reason, Some(Reason::ConfigRefused));
+        assert_eq!(
+            done.report.detail,
+            Some(format!(
+                "the fs interface's nfs.listen, {shown}, is no address and port the hook can reach"
+            ))
+        );
+        assert!(provider.calls().is_empty());
+    }
+}
+
+/// Asserts that a read from the NFS front that the front answers with an error fails the check at
+/// once with `mounted_tree_wrong`, its detail naming the tree, its directory, the front and what
+/// the front said, and that a read from it that does not end defers, as through the mount.
+/// Catches a Mac's check that defers until hostkeeper's deadline on a front that will not serve
+/// the tree.
+#[test]
+fn a_read_from_the_front_fails_at_once_or_defers_as_through_the_mount() {
+    let mut shape = shape();
+    let front: std::net::SocketAddr = "127.0.0.1:12049".parse().unwrap();
+    shape.nfs = Some(front);
+    let why = "mount-provider/check/0 could not be looked up: the NFS front at 127.0.0.1:12049 \
+               answered NFS3ERR_STALE (70)";
+    let provider = FakeProvider::default();
+    provider.read_as(0, Err(ReadFault::Failed(why.to_owned())));
+    let (outcome, reason, retry, detail) = failed(check(&provider, &shape, 5));
+    assert_eq!(
+        (outcome, reason, retry),
+        (Outcome::Failure, Some(Reason::MountedTreeWrong), None)
+    );
+    assert_eq!(
+        detail,
+        format!(
+            "the tree with its L2 sidecar at {} could not be read from the NFS front at {front}: \
+             {why}",
+            FakeProvider::dir_of(0).display()
+        )
+    );
+    assert!(provider.placed().is_empty());
+
+    let provider = FakeProvider::default();
+    let slow = "the NFS front at 127.0.0.1:12049 did not answer READ of data/one: timed out";
+    provider.read_as(1, Err(ReadFault::Unread(slow.to_owned())));
+    let (outcome, reason, retry, _) = failed(check(&provider, &shape, 5));
+    assert_eq!(
+        (outcome, reason, retry),
+        (Outcome::Deferred, Some(Reason::NotReady), Some(5))
+    );
 }

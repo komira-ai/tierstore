@@ -32,6 +32,10 @@ mod run;
 #[cfg(test)]
 mod fixtures;
 #[cfg(test)]
+pub(in crate::server) mod front_testing;
+#[cfg(test)]
+mod hook_read_tests;
+#[cfg(test)]
 mod uid_tests;
 #[cfg(test)]
 mod wire_client;

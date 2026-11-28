@@ -16,6 +16,7 @@ mod host;
 mod instances;
 mod launchd;
 mod markers;
+mod nfs_read;
 mod provider;
 mod runner;
 mod service_binary;
@@ -85,6 +86,8 @@ mod instances_tests;
 mod launchd_tests;
 #[cfg(test)]
 mod markers_tests;
+#[cfg(test)]
+mod nfs_read_tests;
 #[cfg(test)]
 mod provider_tests;
 #[cfg(test)]
