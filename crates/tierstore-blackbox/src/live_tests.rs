@@ -6,7 +6,6 @@ use std::process::ExitStatus;
 
 use tierstore_testkit::dir::TestDir;
 
-use std::os::unix::process::ExitStatusExt as _;
 
 use super::*;
 
