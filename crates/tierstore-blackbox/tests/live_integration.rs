@@ -231,7 +231,8 @@ async fn a_node_that_does_not_come_back_leaves_a_rig_that_says_so() {
     let refused = live.restart().await.unwrap_err();
     assert_eq!(
         refused,
-        "tierstore ended before it printed its start line (exit status: 2); see tierstore.err"
+        "tierstore ended before it printed its start line (exit status: 2); see tierstore.err: \
+         error: unexpected argument '--no-such-flag' found"
     );
     assert!(!live.alive());
     assert_eq!(live.resident().unwrap_err(), "the node is not running");

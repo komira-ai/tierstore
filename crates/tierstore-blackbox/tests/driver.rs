@@ -47,7 +47,7 @@ fn a_case_whose_node_does_not_start_fails_with_the_reason() {
     let report = String::from_utf8(ran.stdout).unwrap();
     assert_eq!(
         report,
-        "FAIL t1-cycles: the rig did not start: tierstore ended before it printed its start line (exit status: 2); see tierstore.err (saw: )\n"
+        "FAIL t1-cycles: the rig did not start: tierstore ended before it printed its start line (exit status: 2); see tierstore.err: error: unexpected argument '--config' found (saw: )\n"
     );
     let logs = dir.path().join("t1-cycles/logs");
     let refused = std::fs::read_to_string(logs.join("tierstore.err")).unwrap();
@@ -169,7 +169,7 @@ fn a_root_runs_the_case_with_no_mount_with_the_programs_it_finds() {
     assert_eq!(ran.status.code(), Some(1));
     assert_eq!(
         String::from_utf8(ran.stdout).unwrap(),
-        "FAIL start-without-fs: the rig did not start: tierstore ended before it printed its start line (exit status: 2); see tierstore.err (saw: )\n"
+        "FAIL start-without-fs: the rig did not start: tierstore ended before it printed its start line (exit status: 2); see tierstore.err: error: unexpected argument '--config' found (saw: )\n"
     );
     let case = dir
         .path()

@@ -37,12 +37,15 @@ pub enum OsError {
         source: io::Error,
     },
     /// The program ended before it printed its start line.
-    #[error("{name} ended before it printed its start line ({status}); see {name}.err")]
+    #[error("{name} ended before it printed its start line ({status}); see {name}.err{said}")]
     Ended {
         /// The name the rig gave it.
         name: String,
         /// How it ended.
         status: String,
+        /// The first line it wrote to its standard error in this start, after `": "`; empty when
+        /// it wrote none. A run on the build farm leaves no log a person can read.
+        said: String,
     },
     /// The program printed no start line within the time it was given, and was killed.
     #[error("{name} printed no start line within {waited:?}, and was killed; see {name}.err")]
@@ -77,6 +80,20 @@ pub struct Process {
     listen: String,
 }
 
+/// The first line that is not blank in the file at `path` from the byte `from` on, after `": "`;
+/// empty when there is none.
+fn first_line(path: &Path, from: u64) -> String {
+    let bytes = std::fs::read(path).unwrap_or_default();
+    let tail = bytes
+        .get(usize::try_from(from).unwrap_or(usize::MAX)..)
+        .unwrap_or_default();
+    String::from_utf8_lossy(tail)
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map_or_else(String::new, |line| format!(": {line}"))
+}
+
 impl Process {
     /// Starts `command` as `name`, its output in `logs`, and waits at most `wait` for its start
     /// line.
@@ -102,6 +119,7 @@ impl Process {
                 })
         };
         let (out, err) = (log("out")?, log("err")?);
+        let err_from = err.metadata().map_or(0, |meta| meta.len());
         let spawned = command
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -131,6 +149,7 @@ impl Process {
                 return Err(OsError::Ended {
                     name: name.to_owned(),
                     status,
+                    said: first_line(&logs.join(format!("{name}.err")), err_from),
                 });
             }
         };

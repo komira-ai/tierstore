@@ -121,10 +121,12 @@ fn a_program_that_does_not_start_says_why() {
     let control = dir.path().join("no-such-dir").join("c.sock");
     let ended = Process::start(fake(&control), "fake-s3", dir.path(), WAIT).unwrap_err();
     assert!(matches!(&ended, OsError::Ended { .. }), "{ended}");
-    assert_eq!(
-        ended.to_string(),
-        "fake-s3 ended before it printed its start line (exit status: 1); see fake-s3.err"
+    let said = format!(
+        "fake-s3 ended before it printed its start line (exit status: 1); see fake-s3.err: \
+         fake-s3: the control socket {}: ",
+        control.display()
     );
+    assert!(ended.to_string().starts_with(&said), "{ended}");
     let err = std::fs::read_to_string(dir.path().join("fake-s3.err")).unwrap();
     assert!(
         err.starts_with(&format!(
