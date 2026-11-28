@@ -12,6 +12,7 @@ fn node(cache: &Path) -> Node {
         budget_mib: 256,
         upstream: "127.0.0.1:4567".to_owned(),
         max_placements: None,
+        fs: true,
         uid: 1000,
         gid: 1001,
     }
@@ -145,4 +146,19 @@ fn a_node_file_that_cannot_be_written_is_named() {
         "{refused}"
     );
     assert!(paths.dir.join("access.key").is_file());
+}
+
+/// Asserts that a node without its `fs` interface has the same file but that interface: the
+/// mount provider's socket, then `[server]`.
+#[test]
+fn a_node_without_fs_has_no_fs_interface() {
+    let paths = Paths::of(Path::new("/s/t0"));
+    let mut node = node(Path::new("/s/t0/cache"));
+    let with = node.text(&paths);
+    node.fs = false;
+    let without = node.text(&paths);
+    assert!(!without.contains("type = \"fs\""), "{without}");
+    assert!(without.contains("params = { socket = \"/s/t0/provider.sock\" }\n\n[server]\n"));
+    let fs = "\n[[interface]]\ntype = \"fs\"\n[interface.params]\nmountpoint   = \"/s/t0/fs\"\nruntime_dir  = \"/s/t0/fsrun\"\nclient_group = \"1001\"\nowner        = \"1000:1001\"\n";
+    assert_eq!(with.replacen(fs, "", 1), without);
 }

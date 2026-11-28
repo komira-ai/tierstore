@@ -149,7 +149,7 @@ impl Tree {
 
     /// The objects that hold the tree, each `(key, bytes)`: the pack, the list, the sidecar.
     #[must_use]
-    pub(crate) fn objects(&self) -> &[(String, Vec<u8>)] {
+    pub fn objects(&self) -> &[(String, Vec<u8>)] {
         &self.objects
     }
 

@@ -5,7 +5,7 @@
 //! each Release must succeed, and the node must live through all of it. Once the disk has room
 //! again, a new source must get its tree within the agent's budget.
 
-use super::{Outcome, Params, Step, drained, held, obtain, source_of};
+use super::{Outcome, Params, drained, held, obtain, source_of};
 use crate::provider::{Code, Refusal};
 use crate::rig::Rig;
 use crate::tree::{Tree, TreeFault};
@@ -34,7 +34,7 @@ pub(super) async fn run<R: Rig>(rig: &mut R, p: &Params, out: &mut Outcome) -> R
                     source.run
                 )),
             },
-            Err(Step::Prepare(refusal) | Step::Mount(refusal)) if clear(&refusal) => refused += 1,
+            Err(step) if step.refusal().is_some_and(clear) => refused += 1,
             Err(step) => out.fail(format!(
                 "{} with the disk full: {step}; not a refusal with its reason",
                 source.run

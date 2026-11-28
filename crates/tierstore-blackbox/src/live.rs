@@ -14,12 +14,14 @@ use std::time::Duration;
 
 use hyper::Method;
 use objstore_s3::s3::fake::Serving;
+use objstore_s3::s3::{Addressing, Credentials, S3Config, S3Store};
+use objstore_s3::{ByteRange, Capabilities, ObjectKey, ObjectStore as _};
 use tierstore_trees_api::provider::v1::Source;
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::UnixStream;
 
 use crate::clock::Stopwatch;
-use crate::config::{Node, Paths};
+use crate::config::{FRONT_KEY, Node, Paths};
 use crate::metrics::Gauges;
 use crate::os::{self, Process};
 use crate::provider::{Bounds, Provider, Refusal};
@@ -53,6 +55,8 @@ pub struct Setup {
     pub budget_mib: u64,
     /// `trees.max_placements`, when the case sets it.
     pub max_placements: Option<u32>,
+    /// Whether the node has its `fs` interface (the FUSE mount, which needs `/dev/fuse` and root).
+    pub fs: bool,
     /// How long a started node may take to take a connection on its provider's socket.
     pub socket_wait: Duration,
 }
@@ -99,6 +103,7 @@ impl Live {
             budget_mib: setup.budget_mib,
             upstream: upstream_address.clone(),
             max_placements: setup.max_placements,
+            fs: setup.fs,
             uid: rustix::process::getuid().as_raw(),
             gid: rustix::process::getgid().as_raw(),
         };
@@ -178,6 +183,26 @@ fn ended_as_asked(status: Option<std::process::ExitStatus>) -> Result<(), String
     }
 }
 
+/// A client of the S3 front of the node at `address`, with the node's access key.
+fn front_store(address: &str) -> Result<S3Store, objstore_s3::s3::S3ConfigError> {
+    let (id, secret) = FRONT_KEY;
+    S3Store::new(S3Config {
+        endpoint: format!("http://{address}"),
+        region: "us-east-1".to_owned(),
+        bucket: "cas".to_owned(),
+        addressing: Addressing::Path,
+        ca_pem: None,
+        credentials: Credentials::new(id, secret),
+        capabilities: Capabilities {
+            conditional_put: false,
+            object_lock: false,
+        },
+        connect_timeout: Duration::from_secs(5),
+        request_timeout: Duration::from_secs(30),
+        min_body_rate: None,
+    })
+}
+
 /// The gauges of a `/metricz` answer of `status` and `body` from the node at `address`.
 fn gauges_of(status: u16, body: &[u8], address: &str) -> Result<Gauges, String> {
     if status != 200 {
@@ -243,6 +268,23 @@ impl Rig for Live {
 
     fn resident(&mut self) -> Result<u64, String> {
         self.node()?.resident_bytes().map_err(|e| e.to_string())
+    }
+
+    async fn ready(&mut self) -> Result<(u16, String), String> {
+        let (status, body) =
+            crate::http::call(&self.metrics, Method::GET, "/readyz", Vec::new()).await?;
+        Ok((status, String::from_utf8_lossy(&body).into_owned()))
+    }
+
+    async fn front_read(&mut self, key: &str, len: u64) -> Result<Vec<u8>, String> {
+        let front = front_store(&self.metrics).map_err(|e| e.to_string())?;
+        let key = ObjectKey::new(key).map_err(|e| e.to_string())?;
+        let range = ByteRange::new(0, len).ok_or_else(|| format!("no range of {len} bytes"))?;
+        let bytes = front
+            .get_range(&key, range)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(bytes.to_vec())
     }
 
     async fn gauges(&mut self) -> Result<Gauges, String> {

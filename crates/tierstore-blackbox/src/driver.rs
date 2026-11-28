@@ -52,7 +52,8 @@ struct Args {
     /// The directory of the cases' directories.
     #[arg(long)]
     scratch: PathBuf,
-    /// A case to run (t1-cycles, t2-placements, t3-stall, restart, upstream-errors, disk-full);
+    /// A case to run (start-without-fs, t1-cycles, t2-placements, t3-stall, restart,
+    /// upstream-errors, disk-full);
     /// again for more. Every case when none is named.
     #[arg(long = "case", value_parser = case_of)]
     cases: Vec<Case>,
@@ -176,6 +177,7 @@ impl Rigs for Nodes<'_> {
             small_disk,
             budget_mib,
             max_placements,
+            fs: case != Case::NoFs,
             socket_wait: SOCKET_WAIT,
         };
         let tierstore = self.args.tierstore.clone();

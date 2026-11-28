@@ -4,6 +4,7 @@
 //! More fronts of one service, each a socket of its own over the same objects and uploads
 //! ([`FakeS3::start_front`]).
 
+use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
 use tokio::net::{TcpListener, TcpStream};
@@ -30,6 +31,23 @@ impl FakeS3 {
     pub(super) async fn listen(tls: Option<TlsAcceptor>) -> Self {
         let state = Arc::new(Mutex::new(State::default()));
         Self::listen_on(tls, state, Arc::new(Notify::new()), 0).await
+    }
+
+    /// Starts the service on `addr`, on the current runtime, serving plain HTTP: for a program
+    /// that is told the address to listen on.
+    ///
+    /// # Errors
+    /// `addr` cannot be bound.
+    pub async fn start_at(addr: SocketAddr) -> std::io::Result<Self> {
+        let listener = TcpListener::bind(addr).await?;
+        let state = Arc::new(Mutex::new(State::default()));
+        Ok(Self::serve_from(
+            listener,
+            None,
+            state,
+            Arc::new(Notify::new()),
+            0,
+        ))
     }
 
     /// Starts another front of this service, over plain HTTP on a free loopback port of its own,
@@ -65,6 +83,21 @@ impl FakeS3 {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind loopback");
+        Self::serve_from(listener, tls, state, changed, front)
+    }
+
+    /// Serves `state` as front `front` on `listener`, plain HTTP or HTTPS with `tls`.
+    #[expect(
+        clippy::expect_used,
+        reason = "a test double: a bound listener with no address is the failure the test reports"
+    )]
+    fn serve_from(
+        listener: TcpListener,
+        tls: Option<TlsAcceptor>,
+        state: Arc<Mutex<State>>,
+        changed: Arc<Notify>,
+        front: usize,
+    ) -> Self {
         let addr = listener.local_addr().expect("address");
         let scheme = if tls.is_some() { "https" } else { "http" };
         let (shared, wake) = (Arc::clone(&state), Arc::clone(&changed));

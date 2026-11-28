@@ -62,6 +62,7 @@ fn setup(dir: &Path, small_disk: Option<PathBuf>) -> Setup {
         small_disk,
         budget_mib: 64,
         max_placements: Some(8),
+        fs: true,
         socket_wait: Duration::from_secs(30),
     }
 }
@@ -103,6 +104,13 @@ async fn the_live_rig_drives_its_node_and_upstream_from_outside() {
     live.release(&one).await.unwrap();
     assert!(provider.prepared().is_empty());
 
+    // The stand-in is no node: whatever its /readyz answers and whether its front serves the
+    // upstream's pack, the rig asks both of the node's address and says what came.
+    live.ready().await.unwrap();
+    let (pack, bytes) = &tree.objects()[0];
+    if let Err(why) = live.front_read(pack, bytes.len() as u64).await {
+        assert!(!why.is_empty());
+    }
     assert_eq!(live.placements().unwrap(), 0);
     assert!(live.resident().unwrap() > 0);
     match live.gauges().await {

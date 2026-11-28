@@ -151,3 +151,47 @@ fn a_program_that_cannot_run_says_why_with_its_status() {
     );
     drop(dir);
 }
+
+/// Asserts that `--listen` is the address the service is served on, as the start line says,
+/// and that one that cannot be bound (another program's) exits 1, naming it.
+#[test]
+fn the_service_is_served_on_the_address_it_is_given() {
+    let (dir, control) = scratch("fake-s3-listen");
+    let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let busy = taken.local_addr().unwrap().to_string();
+    let refused = Command::new(support::FAKE_S3)
+        .arg("--control")
+        .arg(&control)
+        .arg("--listen")
+        .arg(&busy)
+        .output()
+        .unwrap();
+    assert_eq!(refused.status.code(), Some(1));
+    let said = String::from_utf8(refused.stderr).unwrap();
+    assert!(
+        said.starts_with(&format!("fake-s3: the address {busy}: ")),
+        "{said}"
+    );
+
+    drop(taken);
+    let control = dir.path().join("second.sock");
+    let mut child = Command::new(support::FAKE_S3)
+        .arg("--control")
+        .arg(&control)
+        .arg("--listen")
+        .arg(&busy)
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut line = String::new();
+    BufReader::new(child.stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    assert_eq!(
+        line,
+        format!("fake-s3 listen={busy} control={}\n", control.display())
+    );
+    assert_eq!(status_of(&busy, "PUT", "k"), "HTTP/1.1 200 OK");
+    assert_eq!(ask(&control, &["stop"]), ["ok"]);
+    assert_eq!(child.wait().unwrap().code(), Some(0));
+}

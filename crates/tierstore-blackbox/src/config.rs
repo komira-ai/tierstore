@@ -1,5 +1,6 @@
 //! The node file the rig starts the node with: the farm's shape, a build node (a local cache over
-//! an S3 upstream) that serves the mount provider and the `fs` mount, with the rig's own paths, its
+//! an S3 upstream) that serves the mount provider and, but in the case of a node without it, the
+//! `fs` mount, with the rig's own paths, its
 //! own user and group, and none of the farm's names, addresses or keys. The upstream is
 //! `fake-s3`, by its loopback address; the S3 front listens on a free loopback port, which the
 //! node's start line names.
@@ -18,6 +19,9 @@ pub(crate) const MOST_SOCKET_PATH: usize = 103;
 /// The access key the node's S3 front takes, and the key it signs its upstream requests with:
 /// loopback keys of a test, which `fake-s3` does not check.
 const ACCESS_KEY: &str = "blackbox\nblackbox-front-secret-of-the-test\n";
+
+/// The id and the secret of [`ACCESS_KEY`], for a client of the node's S3 front.
+pub(crate) const FRONT_KEY: (&str, &str) = ("blackbox", "blackbox-front-secret-of-the-test");
 const UPSTREAM_KEY: &str = "blackbox-upstream\nblackbox-upstream-secret-of-the-test\n";
 
 /// The files of a node in its case's directory.
@@ -54,12 +58,37 @@ pub(crate) struct Node {
     pub upstream: String,
     /// `trees.max_placements`, when the case sets it; the node's default otherwise.
     pub max_placements: Option<u32>,
+    /// Whether the node has its `fs` interface: the FUSE mount, which needs `/dev/fuse` and root.
+    pub fs: bool,
     /// The user and group the mount is owned by and served to: the rig's own.
     pub uid: u32,
     pub gid: u32,
 }
 
 impl Node {
+    /// The `fs` interface of the node file at `paths`, with the blank line after it; nothing for a
+    /// node without one.
+    fn fs_interface(&self, paths: &Paths) -> String {
+        if !self.fs {
+            return String::new();
+        }
+        format!(
+            r#"
+[[interface]]
+type = "fs"
+[interface.params]
+mountpoint   = "{mountpoint}"
+runtime_dir  = "{dir}/fsrun"
+client_group = "{gid}"
+owner        = "{uid}:{gid}"
+"#,
+            mountpoint = paths.mountpoint.display(),
+            dir = paths.dir.display(),
+            uid = self.uid,
+            gid = self.gid,
+        )
+    }
+
     /// The text of the node file at `paths`.
     pub(crate) fn text(&self, paths: &Paths) -> String {
         let dir = paths.dir.display();
@@ -72,15 +101,7 @@ params = {{ addresses = ["127.0.0.1:0"] }}
 [[interface]]
 type   = "mount-provider"
 params = {{ socket = "{socket}" }}
-
-[[interface]]
-type = "fs"
-[interface.params]
-mountpoint   = "{mountpoint}"
-runtime_dir  = "{dir}/fsrun"
-client_group = "{gid}"
-owner        = "{uid}:{gid}"
-
+{fs}
 [server]
 proxy_id        = "blackbox"
 bucket          = "cas"
@@ -103,9 +124,7 @@ prefix = "cas/"
 cache  = true
 "#,
             socket = paths.socket.display(),
-            mountpoint = paths.mountpoint.display(),
-            uid = self.uid,
-            gid = self.gid,
+            fs = self.fs_interface(paths),
             cache = self.cache.display(),
             budget = self.budget_mib,
             upstream = self.upstream,

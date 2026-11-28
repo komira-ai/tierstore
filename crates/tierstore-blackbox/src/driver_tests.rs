@@ -74,7 +74,7 @@ fn flags_the_cases_cannot_run_with_are_refused() {
     let refused = args(&["--case", "t9"]).unwrap_err().to_string();
     assert!(
         refused.contains(
-            "no case \"t9\"; the cases: t1-cycles, t2-placements, t3-stall, restart, upstream-errors, disk-full"
+            "no case \"t9\"; the cases: start-without-fs, t1-cycles, t2-placements, t3-stall, restart, upstream-errors, disk-full"
         ),
         "{refused}"
     );

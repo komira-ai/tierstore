@@ -13,7 +13,7 @@ Two programs:
   every case passed, 1 when one failed, 2 when its flags are refused.
 - `fake-s3`, the node's upstream: the loopback S3 service of `objstore_s3::s3::fake` as a program
   of its own, with a control socket that stalls or fails every request under a key prefix
-  (`src/fake.rs` has its commands). The node is pointed at it by its file (`[cold_store] endpoint`).
+  (`src/fake.rs` has its commands). It serves on `--listen <address>`, or a free loopback port. The node is pointed at it by its file (`[cold_store] endpoint`).
 
 ## The node
 
@@ -26,7 +26,18 @@ in `t3-stall` (above the Prepares that arrive, so that every one is placed).
 
 The mount is made with `allow_other`, which tierstore always asks for and which a user other than
 root gets only by `/etc/fuse.conf`: the driver runs as root, in a container with `/dev/fuse` and
-`CAP_SYS_ADMIN`.
+`CAP_SYS_ADMIN`. `start-without-fs` alone has no `fs` interface in its node file and needs neither:
+it runs as an ordinary user with no capabilities and no network.
+
+What each case needs of the host it runs on:
+
+| case | mount (`/dev/fuse`, and `CAP_SYS_ADMIN` or a setuid `fusermount3` with `user_allow_other`) | more |
+|---|---|---|
+| `start-without-fs` | no | nothing: an ordinary user, the package unpacked |
+| `t1-cycles`, `t2-placements` | yes | - |
+| `t3-stall`, `upstream-errors` | yes | the node's pid, for its resident memory |
+| `restart` | yes | to kill the node and start it again on the same files |
+| `disk-full` | yes | a small file system of its own for the cache (`--small-disk`) |
 
 ## The cases
 
@@ -40,6 +51,7 @@ later, by a Prepare and a Mount again, for at most the agent's budget for a tree
 
 | case | what it does | passes when | the failure it is the test of |
 |---|---|---|---|
+| `start-without-fs` | a node with no `fs` interface, started first: its `/readyz`, a read through its S3 front of a pack in the upstream, then a Prepare, a Mount and a Release | `/readyz` answers 200; the front serves the pack's bytes from the upstream; Prepare and Mount are "unavailable: no file system serves ..."; the Release succeeds | a node that cannot start, or serve its cache, without its mount, or that answers a source it cannot mount with a refusal that fails the job |
 | `t1-cycles` (T1) | 2,100 cycles, one after another, of Prepare, Mount, read, Release of a tree of 16 files of 4 KiB, at the node's defaults | every step of every cycle succeeds at its first ask; no placement is left 60 s after the last Release | placements that a Release does not free: the cycle after `trees.max_placements` (1,025) is refused |
 | `t2-placements` (T2) | 1,024 sources prepared, mounted and read (held, as running jobs hold their trees), then a burst of 64 more Prepares, a Mount of each, then the Releases of the held 1,024 | each Mount of the burst is "unavailable" for too many placements (none succeeds, none is a refusal that fails the job); within 60 s of the Releases every source of the burst has its tree; no placement is left 60 s after | a Release that leaves the place counted while the mount holds the tree (komira-ai/tierstore#619) |
 | `t3-stall` (T3) | the reads of every pack stalled for 300 s while 3,000 Prepares of new sources of one tree of 16,384 files arrive evenly over the first 60 s; the lists and sidecars are served, so the node places each tree and queues its reads | the resident memory, read every 5 s, is under its idle size plus 1 GiB at every sample and grows by at most 32 MiB over the stall's last 60 s; the stall held requests of the node; the queue gauges (`tierstore_provider_prefetch_queued_bytes`, `tierstore_cache_prefetch_queue_depth`, `tierstore_provider_preparing`) are 0 within 120 s of the stall's end | no bound on the heap of the reads queued while the upstream stalls (komira-ai/tierstore#613) |
@@ -91,7 +103,8 @@ Each case's directory keeps the node file and the logs of both programs (`logs/t
 
 The two programs are the package's `:bin` (`//crates/tierstore-blackbox:bin`, buildrules' target of
 every binary of a member), and its tests are its `:test`, as for every member. buildrules has no
-rule yet for a test of a released artifact (a test target that takes the package under test as an
-input and runs where `/dev/fuse` is); until it has, the suite is run by `blackbox.yml`, and
+merged rule yet for a test of a released artifact (a test target that takes the package under test
+as an input, starts the fakes and the service, and runs the driver); until it has, the suite is run
+by `blackbox.yml`, and
 `:test` holds the tests of the driver and of `fake-s3` themselves (against the model of a node in
 `src/cases/model.rs`, and against the crate's own programs).

@@ -7,7 +7,7 @@
 use objstore_s3::s3::fake::Serving;
 use tierstore_trees_api::provider::v1::Source;
 
-use super::{Memory, Outcome, Params, Step, drained, held, obtain, source_of, waits};
+use super::{Memory, Outcome, Params, drained, held, obtain, source_of, waits};
 use crate::rig::Rig;
 use crate::tree::Tree;
 
@@ -38,9 +38,7 @@ pub(super) async fn run<R: Rig>(rig: &mut R, p: &Params, out: &mut Outcome) -> R
                     ));
                     break 'asking;
                 }
-                Err(Step::Prepare(refusal) | Step::Mount(refusal)) if waits(&refusal) => {
-                    waited += 1;
-                }
+                Err(step) if step.refusal().is_some_and(waits) => waited += 1,
                 Err(step) => {
                     out.fail(format!(
                         "{} while the upstream failed: {step}; not unavailable, so the start would not wait",

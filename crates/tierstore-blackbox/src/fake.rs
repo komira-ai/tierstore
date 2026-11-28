@@ -3,11 +3,12 @@
 //! that switches how it serves.
 //!
 //! ```text
-//! fake-s3 --control <socket>
+//! fake-s3 --control <socket> [--listen <address>]
 //! ```
 //!
-//! It binds the control socket (which must not exist), starts the service on a free loopback
-//! port, and prints one line on standard output: `fake-s3 listen=127.0.0.1:<port>
+//! It binds the control socket (which must not exist), starts the service on `--listen` (a free
+//! loopback port when left out, as the black-box rule of buildrules gives each fake its own), and
+//! prints one line on standard output: `fake-s3 listen=127.0.0.1:<port>
 //! control=<socket>`. It takes any request, signed or not, in path style. On the control socket
 //! each line is a command and each command gets one line back:
 //!
@@ -19,10 +20,11 @@
 //! | `stats` | `stalled=<n> begun=<n>` | the requests a stall has held so far, and every request the service has read |
 //! | `stop` | `ok` | the program then exits 0 |
 //!
-//! Anything else is answered `refused: <why>`. A wrong flag exits 2, a control socket that cannot
-//! be bound exits 1.
+//! Anything else is answered `refused: <why>`. A wrong flag exits 2, a control socket or an address
+//! that cannot be bound exits 1.
 
 use std::io::Write;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -41,6 +43,9 @@ struct Args {
     /// The Unix socket of the control commands, made by the program; it must not exist.
     #[arg(long)]
     control: PathBuf,
+    /// The loopback address to serve S3 on; a free port of 127.0.0.1 when left out.
+    #[arg(long)]
+    listen: Option<SocketAddr>,
 }
 
 /// Why the program stopped.
@@ -49,6 +54,11 @@ enum FakeError {
     #[error("the control socket {}: {source}", path.display())]
     Control {
         path: PathBuf,
+        source: std::io::Error,
+    },
+    #[error("the address {addr}: {source}")]
+    Listen {
+        addr: SocketAddr,
         source: std::io::Error,
     },
     #[error("the start line: {0}")]
@@ -78,7 +88,9 @@ pub fn main() -> ExitCode {
         .enable_all()
         .build()
         .map_err(FakeError::Runtime)
-        .and_then(|runtime| runtime.block_on(run(&args.control, &mut std::io::stdout())));
+        .and_then(|runtime| {
+            runtime.block_on(run(&args.control, args.listen, &mut std::io::stdout()))
+        });
     match ran {
         Ok(()) => ExitCode::SUCCESS,
         Err(why) => {
@@ -88,15 +100,25 @@ pub fn main() -> ExitCode {
     }
 }
 
-/// Binds `control`, starts the service, writes the start line to `out`, and answers the control
-/// socket's connections one after another until one says `stop`.
-async fn run(control: &Path, out: &mut impl Write) -> Result<(), FakeError> {
+/// Binds `control`, starts the service on `listen` (a free loopback port when none), writes the
+/// start line to `out`, and answers the control socket's connections one after another until one
+/// says `stop`.
+async fn run(
+    control: &Path,
+    listen: Option<SocketAddr>,
+    out: &mut impl Write,
+) -> Result<(), FakeError> {
     let refused = |source| FakeError::Control {
         path: control.to_owned(),
         source,
     };
     let listener = UnixListener::bind(control).map_err(refused)?;
-    let s3 = FakeS3::start().await;
+    let s3 = match listen {
+        Some(addr) => FakeS3::start_at(addr)
+            .await
+            .map_err(|source| FakeError::Listen { addr, source })?,
+        None => FakeS3::start().await,
+    };
     let listen = s3.endpoint().trim_start_matches("http://");
     writeln!(out, "fake-s3 listen={listen} control={}", control.display())
         .and_then(|()| out.flush())

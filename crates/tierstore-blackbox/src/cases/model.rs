@@ -81,6 +81,15 @@ pub(crate) struct Model {
     pub failing_sticks: bool,
     /// The stop of the rig fails, saying this.
     pub stop_fails: Option<String>,
+    /// The node has no file system: every Prepare and Mount is unavailable for it.
+    pub no_fs: bool,
+    /// The status of `/readyz`.
+    pub ready: u16,
+    /// The objects put into the upstream, which the S3 front serves; `front_wrong` changes the
+    /// first byte of each it serves, `front_fails` fails each read.
+    objects: BTreeMap<String, Vec<u8>>,
+    pub front_wrong: bool,
+    pub front_fails: bool,
     /// The next answers of a call, by its name and the run of its source ("" for any), before
     /// the model's own.
     pub next: VecDeque<(&'static str, &'static str, Refusal)>,
@@ -123,6 +132,11 @@ impl Model {
             mount_takes: Duration::ZERO,
             failing_sticks: false,
             stop_fails: None,
+            no_fs: false,
+            ready: 200,
+            objects: BTreeMap::new(),
+            front_wrong: false,
+            front_fails: false,
             next: VecDeque::new(),
             rig_fails: None,
         }
@@ -172,6 +186,15 @@ impl Model {
         Ok(())
     }
 
+    fn no_fs_or(&self) -> Result<(), Refusal> {
+        if self.no_fs {
+            return Err(unavailable(
+                "no file system serves /run/tierstore/fs: the node's file has no [[interface]] with type = \"fs\"",
+            ));
+        }
+        Ok(())
+    }
+
     fn alive_or(&self) -> Result<(), Refusal> {
         if self.alive {
             Ok(())
@@ -189,6 +212,7 @@ impl Rig for Model {
         self.calls.push(format!("Prepare {}", source.run));
         self.alive_or()?;
         self.scripted("prepare", &source.run)?;
+        self.no_fs_or()?;
         self.sources.insert(source.run.clone(), tree.to_owned());
         if matches!(self.serving, Serving::Stalled { .. }) && !self.stall_unreached {
             self.stalled += 1;
@@ -205,6 +229,7 @@ impl Rig for Model {
         self.now += self.mount_takes;
         self.alive_or()?;
         self.scripted("mount", &source.run)?;
+        self.no_fs_or()?;
         if self.disk_full && self.full_kills {
             self.alive = false;
             return self.alive_or().map(|()| PathBuf::new());
@@ -261,8 +286,27 @@ impl Rig for Model {
         })
     }
 
-    async fn put(&mut self, _tree: &Tree) -> Result<(), String> {
-        self.rig("put")
+    async fn put(&mut self, tree: &Tree) -> Result<(), String> {
+        self.rig("put")?;
+        self.objects.extend(tree.objects().iter().cloned());
+        Ok(())
+    }
+
+    async fn ready(&mut self) -> Result<(u16, String), String> {
+        self.rig("ready")?;
+        Ok((self.ready, "ready read-cache\n".to_owned()))
+    }
+
+    async fn front_read(&mut self, key: &str, len: u64) -> Result<Vec<u8>, String> {
+        if self.front_fails {
+            return Err("403 SignatureDoesNotMatch".to_owned());
+        }
+        let mut bytes = self.objects.get(key).cloned().unwrap_or_default();
+        bytes.truncate(usize::try_from(len).unwrap_or(usize::MAX));
+        if self.front_wrong {
+            bytes[0] ^= 1;
+        }
+        Ok(bytes)
     }
 
     async fn serve_as(&mut self, serving: Serving) -> Result<(), String> {

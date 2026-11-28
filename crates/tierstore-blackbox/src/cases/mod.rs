@@ -1,6 +1,9 @@
 //! The cases of the black-box test, each against a node of its own (README.md has what each
 //! asserts and which failure of the farm it is the test of):
 //!
+//! - [`Case::NoFs`]: the node started without its `fs` interface, as a farm job can run it (an
+//!   ordinary user, no capability, no FUSE device): it serves through its S3 front, and answers a
+//!   Prepare and a Mount "unavailable" for no file system.
 //! - [`Case::Cycles`] (T1): Prepare, Mount, read and Release, over and over, at the node's
 //!   defaults: every cycle succeeds, and no placement is left a while after the last Release.
 //! - [`Case::Placements`] (T2): a burst of Prepares past `trees.max_placements`: each Mount past it
@@ -30,6 +33,7 @@ use crate::tree::{Tree, TreeFault};
 mod cycles;
 mod disk;
 mod errors;
+mod nofs;
 mod placements;
 mod restart;
 mod stall;
@@ -40,6 +44,7 @@ pub(crate) const AGENT: &str = "blackbox-agent";
 /// A case of the test (module docs).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Case {
+    NoFs,
     Cycles,
     Placements,
     Stall,
@@ -50,7 +55,8 @@ pub(crate) enum Case {
 
 impl Case {
     /// Every case, in the order the driver runs them.
-    pub(crate) const ALL: [Case; 6] = [
+    pub(crate) const ALL: [Case; 7] = [
+        Case::NoFs,
         Case::Cycles,
         Case::Placements,
         Case::Stall,
@@ -62,6 +68,7 @@ impl Case {
     /// The case's name, as `--case` takes it and the report prints it.
     pub(crate) fn name(self) -> &'static str {
         match self {
+            Case::NoFs => "start-without-fs",
             Case::Cycles => "t1-cycles",
             Case::Placements => "t2-placements",
             Case::Stall => "t3-stall",
@@ -180,6 +187,7 @@ impl Outcome {
 pub(crate) async fn run<R: Rig>(case: Case, rig: &mut R, params: &Params) -> Outcome {
     let mut out = Outcome::default();
     let ran = match case {
+        Case::NoFs => nofs::run(rig, params, &mut out).await,
         Case::Cycles => cycles::run(rig, params, &mut out).await,
         Case::Placements => placements::run(rig, params, &mut out).await,
         Case::Stall => stall::run(rig, params, &mut out).await,
@@ -210,6 +218,16 @@ enum Step {
     Release(Refusal),
     /// The tree came, but this long past the deadline it was asked by.
     Late(Duration),
+}
+
+impl Step {
+    /// The provider's answer, when this is a Prepare or a Mount that did not succeed.
+    fn refusal(&self) -> Option<&Refusal> {
+        match self {
+            Step::Prepare(refusal) | Step::Mount(refusal) => Some(refusal),
+            Step::Read(_) | Step::Release(_) | Step::Late(_) => None,
+        }
+    }
 }
 
 impl std::fmt::Display for Step {
@@ -254,7 +272,7 @@ async fn obtain<R: Rig>(
 ) -> Result<PathBuf, Step> {
     loop {
         let asked = held(rig, source, tree).await;
-        let refusal = match asked {
+        let failed = match asked {
             Ok(at) => {
                 rig.read(&at, tree).await.map_err(Step::Read)?;
                 let late = rig.now().saturating_sub(until);
@@ -264,10 +282,13 @@ async fn obtain<R: Rig>(
                     Err(Step::Late(late))
                 };
             }
-            Err(Step::Prepare(refusal) | Step::Mount(refusal)) if !refusal.fails_the_start() => {
-                refusal
-            }
-            Err(failed) => return Err(failed),
+            Err(failed) => failed,
+        };
+        let waiting = failed
+            .refusal()
+            .filter(|refusal| !refusal.fails_the_start());
+        let Some(refusal) = waiting.cloned() else {
+            return Err(failed);
         };
         if rig.now() >= until {
             return Err(Step::Mount(Refusal {

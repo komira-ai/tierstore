@@ -39,6 +39,12 @@ pub trait Rig {
     /// The node's resident memory, in bytes.
     fn resident(&mut self) -> Result<u64, String>;
 
+    /// The status and body of the node's `/readyz`.
+    async fn ready(&mut self) -> Result<(u16, String), String>;
+
+    /// The `len` bytes of the object `key` of the upstream, read through the node's S3 front.
+    async fn front_read(&mut self, key: &str, len: u64) -> Result<Vec<u8>, String>;
+
     /// The node's queue gauges.
     async fn gauges(&mut self) -> Result<Gauges, String>;
 

@@ -38,6 +38,7 @@ fn every_case_has_its_name() {
     assert_eq!(
         names,
         [
+            "start-without-fs",
             "t1-cycles",
             "t2-placements",
             "t3-stall",
@@ -57,7 +58,7 @@ fn every_case_has_its_name() {
 /// queues, the restart's two kills, the waits of the case of errors, the refusals of a full disk.
 #[tokio::test]
 async fn every_case_passes_against_a_healthy_node() {
-    for case in Case::ALL {
+    for case in Case::ALL.into_iter().filter(|case| *case != Case::NoFs) {
         let mut model = Model::healthy();
         let out = against(case, &mut model).await;
         assert!(out.passed(), "{}: {:?}", case.name(), out.failures);
@@ -134,7 +135,7 @@ async fn a_release_that_keeps_the_place_fails_t1_and_t2() {
     );
     assert_eq!(t2.failures.len(), 65, "{:?}", t2.failures);
 
-    for case in Case::ALL {
+    for case in Case::ALL.into_iter().filter(|case| *case != Case::NoFs) {
         let out = against(case, &mut keeps()).await;
         assert!(
             out.failures.iter().any(|f| f.ends_with(LEFT)),
@@ -685,4 +686,112 @@ async fn the_restart_case_reads_each_tree_it_is_answered() {
             "js.restart-1 after the restart: the read: empty: 1 bytes, not an empty file",
         ]
     );
+}
+
+/// A model of a node started without its `fs` interface.
+fn without_fs() -> Model {
+    let mut model = Model::healthy();
+    model.no_fs = true;
+    model
+}
+
+/// Asserts that the case of a node without a file system passes when the node is ready, serves
+/// the upstream's object through its front, and answers a Prepare and a Mount "unavailable" for
+/// no file system; with what it saw noted.
+#[tokio::test]
+async fn a_node_without_fs_passes_when_it_serves_and_waits_the_agent() {
+    let out = against(Case::NoFs, &mut without_fs()).await;
+    assert!(out.passed(), "{:?}", out.failures);
+    assert_eq!(out.notes[0], "/readyz answered ready read-cache");
+    assert!(
+        out.notes[1].starts_with("the S3 front served the 65536 bytes of cas/p/"),
+        "{:?}",
+        out.notes
+    );
+    let reason = "no file system serves /run/tierstore/fs: the node's file has no [[interface]] with type = \"fs\"";
+    assert_eq!(out.notes[2], format!("Prepare was unavailable: {reason}"));
+    assert_eq!(out.notes[3], format!("Mount was unavailable: {reason}"));
+}
+
+/// Catches a node without a file system that is not ready, that serves no object or wrong
+/// bytes through its front, that answers a Prepare and a Mount as if it had a file system, or
+/// refuses them otherwise, or refuses the Release.
+#[tokio::test]
+async fn a_node_without_fs_fails_when_it_does_not_serve_or_does_not_wait_the_agent() {
+    let mut model = without_fs();
+    model.ready = 503;
+    model.front_fails = true;
+    model.next.push_back(("release", "", unavailable("later")));
+    let out = against(Case::NoFs, &mut model).await;
+    assert_eq!(out.failures.len(), 3, "{:?}", out.failures);
+    assert_eq!(out.failures[0], "/readyz answered 503: ready read-cache");
+    assert!(
+        out.failures[1].starts_with("the S3 front did not serve cas/p/")
+            && out.failures[1].ends_with(": 403 SignatureDoesNotMatch"),
+        "{:?}",
+        out.failures
+    );
+    assert_eq!(
+        out.failures[2],
+        "the Release of js.start-without-fs-0: Unavailable: later"
+    );
+
+    let mut model = without_fs();
+    model.front_wrong = true;
+    let out = against(Case::NoFs, &mut model).await;
+    assert!(
+        out.failures[0].ends_with("that are not the upstream's"),
+        "{:?}",
+        out.failures
+    );
+
+    let out = against(Case::NoFs, &mut Model::healthy()).await;
+    assert_eq!(
+        out.failures,
+        [
+            "Prepare succeeded on a node with no file system",
+            "Mount succeeded on a node with no file system",
+        ]
+    );
+
+    let mut model = without_fs();
+    model
+        .next
+        .push_back(("prepare", "", refusal(Code::FailedPrecondition, "no")));
+    let out = against(Case::NoFs, &mut model).await;
+    assert_eq!(
+        out.failures,
+        ["Prepare: FailedPrecondition: no; not unavailable for no file system serves"]
+    );
+
+    let mut model = without_fs();
+    model.next.push_back(("mount", "", unavailable("busy")));
+    let out = against(Case::NoFs, &mut model).await;
+    assert_eq!(
+        out.failures,
+        ["Mount: Unavailable: busy; not unavailable for no file system serves"]
+    );
+}
+
+/// Asserts that the agent's asks for a tree end at a refusal that fails the job's start, named,
+/// without asking again: here the Mount of the source a full disk's case asks for once the disk
+/// has room.
+#[tokio::test]
+async fn a_refusal_that_fails_the_start_ends_the_asks() {
+    let mut model = Model::healthy();
+    let gone = refusal(Code::FailedPrecondition, "the source was released");
+    model.next.push_back(("mount", "js.disk-full-5", gone));
+    let out = against(Case::Disk, &mut model).await;
+    assert_eq!(
+        out.failures,
+        [
+            "js.disk-full-5 once the disk had room: Mount: FailedPrecondition: the source was released"
+        ]
+    );
+    let asked = model
+        .calls
+        .iter()
+        .filter(|c| *c == "Mount js.disk-full-5")
+        .count();
+    assert_eq!(asked, 1, "{:?}", model.calls);
 }
