@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use super::mount_check::{Read, check, on_node};
+use super::mount_check::{Read as ReadVia, check, on_node};
 use super::params::Params;
 use super::ports::{ProviderCode, ProviderFault, ReadFault, TreeAt, TreeNode};
 use super::provider_fake::{FAKE_MOUNT, FAKE_SOCKET, FakeProvider, PROVIDER_ENTRY};
@@ -655,26 +655,26 @@ fn the_check_runs_on_a_node_with_a_mount_provider_alone() {
     let provider = FakeProvider::default();
     let named = params_naming(Some("/etc/tierstore/config.toml"));
     host.set_config(Some(&format!("[server]\n{PROVIDER_ENTRY}")));
-    let said = on_node(&host, &provider, &named, Read::Mount).expect("the check passes");
+    let said = on_node(&host, &provider, &named, ReadVia::Mount).expect("the check passes");
     assert!(said.starts_with("the mount provider at "), "{said}");
     assert_eq!(provider.calls(), every_call());
 
     let provider = FakeProvider::default();
     assert_eq!(
-        on_node(&host, &provider, &params_naming(None), Read::Mount),
+        on_node(&host, &provider, &params_naming(None), ReadVia::Mount),
         Ok(String::new())
     );
     for text in [None, Some("[server]\n")] {
         host.set_config(text);
         assert_eq!(
-            on_node(&host, &provider, &named, Read::Mount),
+            on_node(&host, &provider, &named, ReadVia::Mount),
             Ok(String::new())
         );
     }
     assert!(provider.calls().is_empty());
 
     host.set_config(Some("[[interface]]\ntype = \"mount-provider\"\n"));
-    let done = on_node(&host, &provider, &named, Read::Mount).expect_err("refused");
+    let done = on_node(&host, &provider, &named, ReadVia::Mount).expect_err("refused");
     assert_eq!(done.report.reason, Some(Reason::ConfigRefused));
     assert_eq!(
         done.report.detail.as_deref(),
@@ -682,7 +682,7 @@ fn the_check_runs_on_a_node_with_a_mount_provider_alone() {
     );
 
     host.fail_on(Some("host.config"));
-    let done = on_node(&host, &provider, &named, Read::Mount).expect_err("the host failed");
+    let done = on_node(&host, &provider, &named, ReadVia::Mount).expect_err("the host failed");
     assert_eq!(done.report.reason, Some(Reason::HostFailed));
 }
 
@@ -699,10 +699,10 @@ fn every_call_from(front: &str) -> Vec<String> {
         .collect()
 }
 
-/// Asserts that a Mac's check (`Read::NfsFront`) reads both trees from the NFS front of the node's
+/// Asserts that a Mac's check (`ReadVia::NfsFront`) reads both trees from the NFS front of the node's
 /// `fs` interface, at their paths under the mount, and never through the mount: the front its file
 /// names (`fs.nfs.listen`), or the loader's default for a file that names none, its detail saying
-/// so; that a node with no `fs` interface, and a node checked through the mount (`Read::Mount`, a
+/// so; that a node with no `fs` interface, and a node checked through the mount (`ReadVia::Mount`, a
 /// Linux node, whose `fs` interface serves no NFS), reads through the mount; and that a `listen`
 /// that is not an address and a port, or names port 0, is `config_refused`, with nothing asked of
 /// the provider. Catches a Mac whose check reads the volume, which macOS refuses the hook's
@@ -727,7 +727,7 @@ fn a_mac_reads_the_trees_from_the_nfs_front_its_file_names() {
     ] {
         host.set_config(Some(&file));
         let provider = FakeProvider::default();
-        let said = on_node(&host, &provider, &named, Read::NfsFront).expect("the check passes");
+        let said = on_node(&host, &provider, &named, ReadVia::NfsFront).expect("the check passes");
         assert_eq!(
             said,
             format!(
@@ -739,8 +739,8 @@ fn a_mac_reads_the_trees_from_the_nfs_front_its_file_names() {
     }
 
     for (file, read) in [
-        (format!("[server]\n{PROVIDER_ENTRY}"), Read::NfsFront),
-        (fs(""), Read::Mount),
+        (format!("[server]\n{PROVIDER_ENTRY}"), ReadVia::NfsFront),
+        (fs(""), ReadVia::Mount),
     ] {
         host.set_config(Some(&file));
         let provider = FakeProvider::default();
@@ -757,7 +757,7 @@ fn a_mac_reads_the_trees_from_the_nfs_front_its_file_names() {
             "params = {{ nfs = {{ listen = {listen} }} }}\n"
         ))));
         let provider = FakeProvider::default();
-        let done = on_node(&host, &provider, &named, Read::NfsFront).expect_err("refused");
+        let done = on_node(&host, &provider, &named, ReadVia::NfsFront).expect_err("refused");
         assert_eq!(done.report.reason, Some(Reason::ConfigRefused));
         assert_eq!(
             done.report.detail,
