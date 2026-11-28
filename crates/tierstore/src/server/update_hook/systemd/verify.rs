@@ -1,8 +1,12 @@
 //! `verify`: observes that the staged release serves, and records it; before the commit, a new
-//! instance whose cache is still read-only defers it ([`writable`]).
+//! instance whose cache is still read-only defers it ([`writable`]). On a node with a mount
+//! provider, the new instance, once it is the cache's writer, must also pass the mount check
+//! ([`mount_check`]): its provider prepares, mounts and releases the two trees of the check, and
+//! every file of them reads back right.
 
 use super::super::PUBLIC_PORT;
 use super::super::look::{verified, writable};
+use super::super::mount_check;
 use super::super::params::Params;
 use super::super::ports::UnitState;
 use super::super::record::{Marker, Record};
@@ -54,11 +58,13 @@ pub(super) fn verify(c: &Ctx<'_, '_>, params: &Params, record: &Record) -> Resul
     // Before the commit the new instance must be the cache's writer: until it is, the node's jobs
     // cannot fill their trees or reach the mount provider, and the node stays in its update.
     let mode = writable(observed, &unit_name(next), params.verify_retry_secs)?;
+    // The writer binds the mount provider's socket: the provider must now do its job.
+    let mounted = mount_check::on_node(c.ports.host, c.ports.provider, params)?;
     // `verified` follows its act: everything above was observed.
     if !record.has(Marker::Verified) {
         c.save(&record.with(Marker::Verified))?;
     }
-    Ok(verified(mode, target))
+    Ok(verified(mode, target).led_by(mounted))
 }
 
 /// `done` deferred when it is a look at `/readyz` that was not answered ready, so that hostkeeper

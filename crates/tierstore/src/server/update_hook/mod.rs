@@ -52,6 +52,7 @@ pub mod config_hook;
 pub(super) mod launchd;
 mod look;
 pub mod machine;
+mod mount_check;
 mod old_layout;
 mod params;
 mod plain;
@@ -78,7 +79,8 @@ pub use params::{
 };
 pub use ports::{
     Clock, Control, Family, Host, Instance, Instances, Launchd, LaunchdPorts, Lock, Markers,
-    PortError, PortKind, Reply, StateDir, SystemdPorts, UnitState, Units,
+    MountProvider, PortError, PortKind, ProviderCode, ProviderFault, ReadFault, Reply, StateDir,
+    SystemdPorts, TreeNode, UnitState, Units,
 };
 pub use probe::{Build, CacheMode, build_of, readiness};
 pub use record::{
@@ -290,9 +292,13 @@ mod launchd_tests;
 #[cfg(test)]
 mod look_tests;
 #[cfg(test)]
+mod mount_check_tests;
+#[cfg(test)]
 mod params_tests;
 #[cfg(test)]
 mod probe_tests;
+#[cfg(test)]
+mod provider_fake;
 #[cfg(test)]
 mod record_tests;
 #[cfg(test)]

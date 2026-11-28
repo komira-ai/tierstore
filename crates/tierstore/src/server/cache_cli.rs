@@ -97,6 +97,7 @@ use super::listen::{LoopbackBind, bind_set, bind_with, joined};
 use super::local_cache::trees::{TreeStore, TreesConfig};
 use super::local_cache::{CacheConfig, Disk, Every, LocalCache, Mode, SystemDisk, check_local};
 use super::oci::OciListener;
+use super::provider::check::CheckUpstream;
 use super::provider::{self, Provider, ProviderFlags};
 use super::put_ingest::PutIngest;
 use super::stop_watcher::{
@@ -344,6 +345,13 @@ pub(super) async fn serve_cache_on(
     )?;
     config.oci_metrics = oci.as_ref().map(|setup| Arc::clone(&setup.metrics));
     let run = probe_run_id(&settings.front.proxy_id, clock.now(), std::process::id());
+    // A build node with a mount provider has the objects of the update check in front of its
+    // upstream, so that the update hook's `verify` can have the provider mount a tree that is
+    // neither read from the network nor written to the store (`provider/check.rs`).
+    let upstream = settings.provider.as_ref().map_or_else(
+        || Arc::clone(&upstream),
+        |_| -> Arc<dyn Backend> { Arc::new(CheckUpstream::new(Arc::clone(&upstream))) },
+    );
     let cache = open(&settings.cache, &upstream, &disk, &run).await?;
     if settings.cache.write_through {
         config.cache_writes = true;

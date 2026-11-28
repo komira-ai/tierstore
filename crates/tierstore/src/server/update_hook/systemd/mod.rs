@@ -20,7 +20,8 @@
 //!   drains and exits on its own; in a restart `live` is stopped first; on a first install
 //!   there is no `live`. It then waits for the staged release to serve, and records `swapped`.
 //!   A failure is reported and nothing is undone here: hostkeeper runs `rollback`.
-//! - `verify` observes the staged release on the public port and records `verified`.
+//! - `verify` observes the staged release on the public port and records `verified`; on a node
+//!   with a mount provider the mount check must pass too (`mount_check`).
 //! - `rollback` brings the previous release back on the instance that served it (or stops the
 //!   only instance of a first install) and records nothing in flight. Before the commit only.
 //! - `cleanup` confirms afresh (it waits for `/readyz`, which the old instance, still draining

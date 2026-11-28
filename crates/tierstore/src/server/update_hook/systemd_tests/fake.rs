@@ -29,13 +29,13 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use crate::server::build_info::gauge;
-use crate::server::update_hook::systemd::run_step;
 use crate::server::update_hook::{
     CACHE_HANDOFF_CAPABILITY, Clock, Done, HANDOFF_CAPABILITY, HANDOFF_STATE_DIR_CAPABILITY, Host,
     Instance, Instances, LOCAL_CACHE_TABLE, Lock, Markers, Outcome, Params, PortError, PortKind,
     Reason, Record, Reply, SERVICE_BINARY, StateDir, Step, SystemdPorts, UnitState, Units,
     marker_path,
 };
+use crate::server::update_hook::{provider_fake::FakeProvider, systemd::run_step};
 
 /// The release that runs at first.
 pub const OLD: &str = "/var/lib/hostkeeper/packages/tierstore/0.3.0";
@@ -403,6 +403,7 @@ pub struct SystemdFake {
     w: Rc<RefCell<World>>,
     /// The ports of the second unit, over the same world, for the looks at it.
     fs: fake_fs::FsPorts,
+    pub provider: FakeProvider,
 }
 
 impl SystemdFake {
@@ -446,6 +447,7 @@ impl SystemdFake {
         SystemdFake {
             fs: fake_fs::FsPorts::new(Rc::clone(&w)),
             w,
+            provider: FakeProvider::default(),
         }
     }
 
@@ -477,6 +479,7 @@ impl SystemdFake {
             fs_markers: &self.fs,
             instances: self,
             host: self,
+            provider: &self.provider,
             clock: self,
             state: self,
         }
