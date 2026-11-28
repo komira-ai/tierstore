@@ -1,0 +1,41 @@
+[package]
+name = "tierstore-hot"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "The hot tier of a tierstore storage node (docs/design/fetch-cache-serve.md 10.3, T-S4): the HotStore of tierstore-store-api on a node's NVMe or SSD: write segments with group commit, replication with ballots and the ack rule, the majority seal, seal-and-roll and take-over, seal triggers, large files teed to every replica, the startup sweep, hot scrub, reclaim and the HotSched queue."
+
+[dependencies]
+# `HotStore` and `HotPeers` are used as `dyn`, so their async methods are boxed.
+async-trait.workspace = true
+bytes.workspace = true
+# Streams of a large body and the joins of the replica round trips; runtime-agnostic.
+futures.workspace = true
+# `fallocate` of a large upload whose length is known (Linux), without `unsafe`.
+rustix = { workspace = true, features = ["fs"] }
+thiserror.workspace = true
+# The injected clock and the byte ranges and drive states the store shares with the read path.
+tierstore-fetch-api.workspace = true
+# The record, block, trailer, seal and name formats, ids, the cluster clock.
+tierstore-format.workspace = true
+# The key index and block table, and the recovery of the index from the hot files.
+tierstore-index.workspace = true
+# The hot tier's metric families (section 12).
+tierstore-metrics.workspace = true
+# The frozen `HotStore` trait, the peer protocol's messages and the membership view.
+tierstore-store-api.workspace = true
+# The watch, oneshot and mutex of the segment committer: runtime-agnostic, no timer, no I/O
+# driver (the `sync` feature only).
+tokio = { workspace = true, features = ["sync"] }
+
+[dev-dependencies]
+# The crash-point disk, the progress barriers and the simulated network of the tests.
+tierstore-harness.workspace = true
+# Scratch directories for the tests of the real directory.
+tierstore-testkit.workspace = true
+
+[lints]
+workspace = true

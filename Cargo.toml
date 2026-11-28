@@ -161,6 +161,12 @@ tierstore-store-api = { path = "crates/tierstore-store-api" }
 tsfuse = { path = "crates/tsfuse" }
 # The metrics of section 12 of the fetch-cache-serve design and the demand-read trace.
 tierstore-metrics = { path = "crates/tierstore-metrics" }
+# A storage node's key index and block table on fjall or redb, and its recovery.
+tierstore-index = { path = "crates/tierstore-index" }
+# The shared fakes and protocol models of the test plan (tests only).
+tierstore-harness = { path = "crates/tierstore-harness" }
+# The hot tier of a storage node: write segments, replication, the majority seal, large files.
+tierstore-hot = { path = "crates/tierstore-hot" }
 # The hash pool: the `Verifier` of the read path (bounded, sha256 on dedicated threads).
 tierstore-hashpool = { path = "crates/tierstore-hashpool" }
 # The journal and snapshot of a node-cache entry (section 8), shared by the entry stores.

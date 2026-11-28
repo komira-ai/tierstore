@@ -3522,6 +3522,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "tierstore-hot"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "futures",
+ "rustix",
+ "thiserror",
+ "tierstore-fetch-api",
+ "tierstore-format",
+ "tierstore-harness",
+ "tierstore-index",
+ "tierstore-metrics",
+ "tierstore-store-api",
+ "tierstore-testkit",
+ "tokio",
+]
+
+[[package]]
 name = "tierstore-index"
 version = "0.1.0"
 dependencies = [
