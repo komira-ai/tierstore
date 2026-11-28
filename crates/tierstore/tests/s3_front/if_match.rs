@@ -16,10 +16,11 @@ use rustix::process::Signal;
 use crate::binary::start;
 use crate::files::{BIN_KEY_ID, BIN_SECRET, Files};
 
-const BUCKET: &str = "tier-bucket";
+pub(crate) const BUCKET: &str = "tier-bucket";
 
-/// The file of a build node that writes through a cache of `cas/` to the bucket of `endpoint`.
-fn node_file(files: &Files, endpoint: &str) -> String {
+/// The file of a build node that writes through a cache of `cas/` to the bucket of `endpoint`
+/// (also the node of `object_store_client.rs`).
+pub(crate) fn node_file(files: &Files, endpoint: &str) -> String {
     let upstream_key = files.secret("upstream.key", "UPKEY\nup-secret\n");
     let text = format!(
         r#"

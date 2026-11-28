@@ -365,8 +365,10 @@ async fn a_put_the_hot_tier_refuses_with_full_is_503_slowdown_when_the_landing_i
 
 /// Asserts that with the landing on a put the hot tier refuses with `Full` before it took a byte
 /// lands in the cold tier: 200, the cold tier holds the bytes, the hot tier none, the cold tier is
-/// asked for its HEAD and then written, and the marker is removed once the landing is settled. The
-/// same for a key that exists in the hot tier, whose hot object is deleted before the answer.
+/// asked for its HEAD and then written, and the marker is removed once the landing is settled.
+/// The landing gives no tag, so the front asks with one HEAD after it (the hot tier misses, the
+/// cold tier answers), and the 200 has the `ETag` of the cold object. The same for a key that
+/// exists in the hot tier, whose hot object is deleted before that HEAD and the answer.
 #[tokio::test]
 async fn a_put_the_hot_tier_refuses_with_full_lands_in_the_cold_tier_when_the_landing_is_on() {
     let h = landing().await;
@@ -374,9 +376,11 @@ async fn a_put_the_hot_tier_refuses_with_full_lands_in_the_cold_tier_when_the_la
     let mut seen = Cursor::at(&h);
     let put = plain(&h, K, b"one").await;
     assert_eq!(put.status(), 200);
+    let landed = format!("\"{}\"", h.cold_mem.head(K).await.unwrap().tag);
+    assert_eq!(put.headers()["etag"].to_str().unwrap(), landed);
     unmarked(&h, K).await;
     let requests = seen.take(&h, K);
-    assert_eq!(requests.cold, vec![Op::Head, Op::Put]);
+    assert_eq!(requests.cold, vec![Op::Head, Op::Put, Op::Head]);
     assert!(!requests.hot.contains(&Op::Delete), "{requests:?}");
     assert_eq!(text(&*h.cold_mem, K).await.as_deref(), Some("one"));
     assert_eq!(text(&*h.hot_mem, K).await, None);
@@ -388,10 +392,14 @@ async fn a_put_the_hot_tier_refuses_with_full_lands_in_the_cold_tier_when_the_la
     let mut seen = Cursor::at(&h);
     let put = plain(&h, other, b"new").await;
     assert_eq!(put.status(), 200);
+    let landed = format!("\"{}\"", h.cold_mem.head(other).await.unwrap().tag);
+    assert_eq!(put.headers()["etag"].to_str().unwrap(), landed);
     unmarked(&h, other).await;
     let requests = seen.take(&h, other);
-    assert_eq!(requests.cold, vec![Op::Head, Op::Put]);
-    assert_eq!(requests.hot.last(), Some(&Op::Delete));
+    assert_eq!(requests.cold, vec![Op::Head, Op::Put, Op::Head]);
+    let deleted = requests.hot.iter().position(|op| *op == Op::Delete);
+    let asked = requests.hot.iter().rposition(|op| *op == Op::Head);
+    assert!(deleted.is_some() && asked > deleted, "{requests:?}");
     assert_eq!(text(&*h.cold_mem, other).await.as_deref(), Some("new"));
     assert_eq!(text(&*h.hot_mem, other).await, None);
 }

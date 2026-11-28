@@ -770,11 +770,12 @@ impl Backend for LocalCache {
         sha256: TreeDigest,
     ) -> Result<PutOutcome, Error> {
         let sent = Sent::Checked(len, sha256);
-        self.inner.put_through(key, Some(len), body, sent).await
+        let put = self.inner.put_through(key, Some(len), body, sent);
+        put.await.map(|(outcome, _)| outcome)
     }
 
     /// A plain `PUT`: sent to the upstream as its plain put, and the cache keeps the new copy
-    /// and forgets the old one (see `put_through`, in `keep`).
+    /// and forgets the old one (see `put_through`, in `keep`). The answer is the upstream's.
     async fn put_stream_replacing(
         &self,
         key: &str,
@@ -783,8 +784,8 @@ impl Backend for LocalCache {
         claim: &PutClaim,
     ) -> Result<Option<PutAnswer>, Error> {
         let sent = Sent::Replaces(claim);
-        self.inner.put_through(key, len, body, sent).await?;
-        Ok(None)
+        let put = self.inner.put_through(key, len, body, sent);
+        put.await.map(|(_, answer)| answer)
     }
 
     /// Sent to the upstream's own copy; the key the copy writes is forgotten (`write`).
@@ -806,7 +807,7 @@ impl Backend for LocalCache {
         let put = self
             .inner
             .put_through_digested(key, len, body, (sent, digests));
-        put.await.map(|_| None)
+        put.await.map(|(_, answer)| answer)
     }
 
     async fn put_if_match(&self, _key: &str, _body: Bytes, _etag: &str) -> Result<String, Error> {

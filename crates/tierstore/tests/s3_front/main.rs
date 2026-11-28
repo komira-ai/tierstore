@@ -31,6 +31,7 @@ mod if_match;
 mod keys;
 mod listeners;
 mod marks_put;
+mod object_store_client;
 mod raw;
 mod roles;
 mod run;

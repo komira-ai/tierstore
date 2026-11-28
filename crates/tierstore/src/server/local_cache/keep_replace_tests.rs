@@ -66,7 +66,7 @@ async fn a_plain_put_replaces_the_object_with_no_head_and_the_next_read_is_a_loc
         );
         assert_eq!(rig.calls(Op::Put), 0, "on {on}");
 
-        assert!(matches!(plain(&rig, key, "new").await, Ok(None)), "on {on}");
+        let answered = plain(&rig, key, "new").await.unwrap();
         assert_eq!(rig.calls(Op::Put), 1, "on {on}");
         assert_eq!(rig.calls(Op::Head), heads, "on {on}");
         let upstream = rig.tamper.memory.get(key, None).await.unwrap();
@@ -78,6 +78,11 @@ async fn a_plain_put_replaces_the_object_with_no_head_and_the_next_read_is_a_loc
         assert_eq!(read(&rig.cache.counters().hits), hits + 1, "on {on}");
         let told = rig.tamper.memory.head(key).await.unwrap();
         let kept = sidecar(&rig, key);
+        assert_eq!(
+            answered.map(|answer| answer.tag),
+            Some(told.tag.clone()),
+            "on {on}"
+        );
         assert_eq!((kept.tag, kept.size), (told.tag, 3), "on {on}");
         assert_eq!(rig.cache.held(), (3, 1), "on {on}");
         assert_eq!(rig.staged_files(), 0, "on {on}");
@@ -117,7 +122,11 @@ async fn a_plain_put_that_keeps_nothing_drops_the_old_copy_also_after_a_restart(
         .cache
         .put_stream_replacing(key, None, whole("new"), &claim)
         .await;
-    assert!(matches!(made, Ok(None)), "{made:?}");
+    let told = rig.tamper.memory.head(key).await.unwrap().tag;
+    assert_eq!(
+        made.map(|answer| answer.map(|answer| answer.tag)),
+        Ok(Some(told))
+    );
     assert_eq!(rig.cache.counters().keeps_skipped(SkippedKeep::Budget), 1);
     assert_eq!(rig.cache.held(), (0, 0));
     assert!(!rig.has_file(key));
@@ -134,7 +143,7 @@ async fn a_plain_put_that_keeps_nothing_drops_the_old_copy_also_after_a_restart(
 async fn the_copy_of_a_plain_put_is_served_by_a_restarted_cache_and_the_old_one_is_gone() {
     let key = "cas/b/k";
     let rig = holding_old("tscache-replace-restart", key, |_| {}).await;
-    assert!(matches!(plain(&rig, key, "new").await, Ok(None)));
+    assert!(matches!(plain(&rig, key, "new").await, Ok(Some(_))));
     let (gets, heads) = (rig.calls(Op::Get), rig.calls(Op::Head));
 
     let restarted = rig.reopen();
@@ -180,7 +189,7 @@ async fn a_fill_that_read_the_old_object_does_not_keep_it_over_a_plain_put() {
     })
     .await;
 
-    assert!(matches!(plain(&rig, key, "new").await, Ok(None)));
+    assert!(matches!(plain(&rig, key, "new").await, Ok(Some(_))));
     parked.add_permits(16);
     drop(reader.await.unwrap());
     assert_eq!(rig.cache.held(), (0, 0));
@@ -225,8 +234,8 @@ async fn two_plain_puts_of_a_key_at_once_keep_no_copy() {
     .await;
 
     held.add_permits(2);
-    assert!(matches!(a.await.unwrap(), Ok(None)));
-    assert!(matches!(b.await.unwrap(), Ok(None)));
+    assert!(matches!(a.await.unwrap(), Ok(Some(_))));
+    assert!(matches!(b.await.unwrap(), Ok(Some(_))));
     // The keeps run at once: one is told the puts overlapped, and the other may find the first
     // one's place taken.
     let counters = rig.cache.counters();

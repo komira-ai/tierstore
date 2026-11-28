@@ -410,14 +410,15 @@ impl Inner {
     /// that of a create-only put, under the tag of the answer.
     ///
     /// Gives what the upstream did: [`PutOutcome::Existed`] only for a put that names its digest
-    /// and found the object there.
+    /// and found the object there; and what the upstream's answer said of the object it made, for
+    /// a put whatever the key (none for one that names its digest, or an answer with no tag).
     pub(super) async fn put_through(
         self: &Arc<Self>,
         key: &str,
         len: Option<u64>,
         body: PartBody<'_>,
         sent: Sent<'_>,
-    ) -> Result<PutOutcome, Error> {
+    ) -> Result<(PutOutcome, Option<PutAnswer>), Error> {
         let none = BodyDigests::default();
         self.put_through_digested(key, len, body, (sent, none))
             .await
@@ -432,7 +433,7 @@ impl Inner {
         len: Option<u64>,
         body: PartBody<'_>,
         (sent, digests): (Sent<'_>, BodyDigests),
-    ) -> Result<PutOutcome, Error> {
+    ) -> Result<(PutOutcome, Option<PutAnswer>), Error> {
         self.writable(key)?;
         let replaces = matches!(sent, Sent::Replaces(_));
         let checked = matches!(sent, Sent::Checked(..));
@@ -487,15 +488,17 @@ impl Inner {
         if replaces {
             self.forget(key);
         }
-        match sent {
+        let told = match sent {
             // Nothing was written, and the body may not have been read to its end: nothing to
             // keep or count as a write.
-            Ok((PutOutcome::Existed, _)) => return Ok(PutOutcome::Existed),
+            Ok((PutOutcome::Existed, _)) => return Ok((PutOutcome::Existed, None)),
             Ok((PutOutcome::Created, answer)) => {
+                let told = answer.as_ref().map(|(answer, _)| answer.clone());
                 if let Some(keeping) = &mut keeping {
                     keeping.answer = answer;
                     keeping.writing = writing;
                 }
+                told
             }
             Err(error) => {
                 // The put reached the upstream (the HEAD before it, if any, was another call)
@@ -506,7 +509,7 @@ impl Inner {
                 }
                 return Err(error);
             }
-        }
+        };
         bump(&self.counters.upstream_puts);
         add(&self.counters.upstream_put_bytes, passed.into_inner());
         bump(&self.counters.writes_through);
@@ -538,7 +541,7 @@ impl Inner {
                 bump(&self.counters.keeps_expired);
             }
         }
-        Ok(PutOutcome::Created)
+        Ok((PutOutcome::Created, told))
     }
 
     /// The copy for a body of `len` bytes: a keep permit, room for the bytes and a stage file

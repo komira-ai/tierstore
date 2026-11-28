@@ -432,7 +432,8 @@ pub trait Backend: Send + Sync {
     /// [`Backend::put_stream`], or [`Backend::put_stream_hot_only`] if `hot_only`, giving what the
     /// answer to the write says of the object when that is the tag [`Backend::head`] gives for it
     /// (and `None` when the backend cannot say without another call). For a caller that keeps a
-    /// copy of what it writes and would otherwise ask with a HEAD.
+    /// copy of what it writes and would otherwise ask with a HEAD, and for the S3 front (through
+    /// [`Backend::put_stream_digested`]), which answers a put with that tag as its `ETag`.
     ///
     /// The provided implementation writes and answers `None`: the caller asks. A backend overrides
     /// it only if the tag of the answer is the tag its HEAD gives, which it must be for as long as

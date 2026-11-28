@@ -76,6 +76,12 @@ nfsserve = { git = "https://github.com/komira-ai/nfsserve", rev = "f2665dd518e1b
 # which runs no program; a safe wrapper of the call, which no other crate of the workspace offers
 # for macOS (rustix has it for Linux only). Only its `mount` feature.
 nix = { version = "0.31.4", default-features = false, features = ["mount"] }
+# The `object_store` crate's S3 client, which LanceDB, delta-rs and SlateDB reach S3 through:
+# tests/s3_front/object_store_client.rs drives the front with it (tierstore's tests only).
+# Pinned exactly, so that the test is of one client version. No default features, and not its
+# `aws` feature, which brings aws-lc: the S3 client (`aws-base`), reqwest (whose client the test
+# hands it, built on ring by tierstore-testkit) and ring for its signing. MIT OR Apache-2.0.
+object_store = { version = "=0.14.2", default-features = false, features = ["aws-base", "reqwest", "ring"] }
 percent-encoding = "2.3.2"
 # The protobuf runtime of the trees API (Apache-2.0), and its descriptor types, which the test
 # of the proto's additivity reads the golden descriptor with.

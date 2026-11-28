@@ -12,7 +12,7 @@ use objstore_s3::key_rules;
 use tokio::task::JoinError;
 
 use crate::journal::is_reserved;
-use crate::{Error, Meta, Opened, PutKind, ReadBody, Span, Window};
+use crate::{Error, Meta, Opened, PutAnswer, PutKind, ReadBody, Span, Window};
 
 use super::Server;
 use super::bucket;
@@ -42,6 +42,7 @@ mod copy_cache_tests;
 mod copy_scoped_tests;
 #[cfg(test)]
 mod copy_tests;
+mod landed;
 pub(super) mod placed;
 #[cfg(test)]
 mod placed_tests;
@@ -637,7 +638,7 @@ impl Server {
     /// ends the stream with an error, so the backend
     /// stores nothing, and `refused` has the answer to send. `len` is the `Content-Length` of
     /// the request, if it has one. The digests the request named go with the put, for the
-    /// store to check the body against.
+    /// store to check the body against. The answer has the object's `ETag` (see [`landed`]).
     ///
     /// The backend's call runs on a task of its own, so that a client that goes away after
     /// the whole body was handed over leaves the put to be carried to its end, with its
@@ -675,10 +676,11 @@ impl Server {
         let mut storing = tokio::spawn(async move {
             let _permit = permit;
             match (swap, claim) {
-                (Some(tag), _) => backend
-                    .put_stream_if_match(&name, len, body, &tag)
-                    .await
-                    .map(Some),
+                (Some(tag), _) => {
+                    let put = backend.put_stream_if_match(&name, len, body, &tag);
+                    let modified = None;
+                    put.await.map(|tag| Some(PutAnswer { tag, modified }))
+                }
                 (None, claim) => {
                     let kind = match &claim {
                         Some(claim) => PutKind::Replaces(claim),
@@ -686,7 +688,7 @@ impl Server {
                         None => PutKind::Creates,
                     };
                     let put = backend.put_stream_digested(&name, len, body, kind, digests);
-                    put.await.map(|_| None)
+                    put.await
                 }
             }
         });
@@ -703,15 +705,11 @@ impl Server {
         if let Some(error) = refused.take() {
             return Err(error);
         }
-        let tag = stored.map_err(|error| match writes {
+        let answered = stored.map_err(|error| match writes {
             Writes::Swaps(_) => conditional::swap_error(error),
             _ => S3Error::from(error),
         })?;
-        let headers: Vec<_> = tag
-            .map(|tag| ("etag", format!("\"{tag}\"")))
-            .into_iter()
-            .collect();
-        Ok(answer(StatusCode::OK, &headers, Bytes::new()))
+        Ok(landed::answer_put(self.backend.as_ref(), key, answered).await)
     }
 
     async fn delete_object(&self, key: &str) -> Result<Answer, S3Error> {

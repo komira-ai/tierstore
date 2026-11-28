@@ -330,8 +330,8 @@ async fn a_cut_multipart_sized_body_leaves_nothing_over_s3() {
 /// holds, for a body sent as one PUT and for one sent as a multipart upload, with no HEAD (the
 /// bucket is asked for nothing but the write), and that the copy the cache keeps has the tag the
 /// bucket's answer to the write gave: the sidecar tag is what a later HEAD of the bucket gives
-/// (the multipart one has a dash), and the next read is the new bytes, a hit with no call of the
-/// upstream. A create-only put of the same keys is still refused.
+/// (the multipart one has a dash) and the tag the put answers, and the next read is the new bytes,
+/// a hit with no call of the upstream. A create-only put of the same keys is still refused.
 #[tokio::test]
 async fn a_plain_put_over_s3_replaces_the_object_and_keeps_the_upstreams_tag_also_as_parts() {
     let s3 = FakeS3::start().await;
@@ -363,10 +363,12 @@ async fn a_plain_put_over_s3_replaces_the_object_and_keeps_the_upstreams_tag_als
     let (heads, before) = (upstream.calls(Op::Head), s3.stats());
 
     let claim = PutClaim::default();
+    let mut answered = Vec::new();
     for (key, bytes) in [("cas/b/parts", &new_large), ("cas/b/single", &new_small)] {
         let len = Some(bytes.len() as u64);
         let made = cache.put_stream_replacing(key, len, pieces(bytes), &claim);
-        assert_eq!(made.await, Ok(None), "{key}");
+        let answer = made.await.unwrap();
+        answered.push(answer.map(|answer| answer.tag));
     }
     let stats = s3.stats();
     assert_eq!(stats.completed, before.completed + 1);
@@ -379,6 +381,11 @@ async fn a_plain_put_over_s3_replaces_the_object_and_keeps_the_upstreams_tag_als
         assert_eq!(kept.tag, backend.head(key).await.unwrap().tag, "{key}");
         assert_eq!(kept.sha256, digest(bytes), "{key}");
     }
+    let told = [
+        Some(backend.head("cas/b/parts").await.unwrap().tag),
+        Some(backend.head("cas/b/single").await.unwrap().tag),
+    ];
+    assert_eq!(answered, told);
     assert!(backend.head("cas/b/parts").await.unwrap().tag.contains('-'));
     let gets = upstream.calls(Op::Get);
     assert_eq!(cache.get("cas/b/parts", None).await.unwrap(), new_large);
