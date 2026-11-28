@@ -2,11 +2,12 @@
 
 use super::old_layout;
 use super::{
-    CACHE_HANDOFF_CAPABILITY, CONFIG_FILE_KEY, FS_CONFIG_FILE, FS_LAUNCHD_LABEL_KEY,
+    CACHE_HANDOFF_CAPABILITY, CHECK_BINARY, CONFIG_FILE_KEY, FS_CONFIG_FILE, FS_LAUNCHD_LABEL_KEY,
     FS_LAUNCHD_PLIST, HANDOFF_CAPABILITY, HANDOFF_EXEC_CAPABILITY, HANDOFF_SERVICE_CAPABILITY,
-    HANDOFF_SOCKET_KEY, HANDOFF_STATE_DIR_CAPABILITY, LAUNCHD_LABEL_KEY, LAUNCHD_PLIST, MARKER_DIR,
-    MODE_KEY, PREVIOUS_RELEASE_KEY, PREVIOUS_VERSION_KEY, PROMOTION_CEILING_KEY, RESTART_MODE,
-    Reason, SERVICE_MANAGER_KEY, STAGED_RELEASE_KEY, STATE_DIR, Step, TARGET_VERSION_KEY,
+    HANDOFF_SOCKET_KEY, HANDOFF_STATE_DIR_CAPABILITY, LAUNCHD_LABEL_KEY, LAUNCHD_PLIST,
+    MACOS_PACKAGE_RELEASE_BINARY, MARKER_DIR, MODE_KEY, PACKAGE_RELEASE_BINARY,
+    PREVIOUS_RELEASE_KEY, PREVIOUS_VERSION_KEY, PROMOTION_CEILING_KEY, RESTART_MODE, Reason,
+    SERVICE_MANAGER_KEY, STAGED_RELEASE_KEY, STATE_DIR, Step, TARGET_VERSION_KEY,
 };
 use crate::server::build_info::CAPABILITIES;
 
@@ -63,8 +64,9 @@ fn the_page_describes_every_step() {
 }
 
 /// Asserts that the page names the directories, the plist and the capability the hook works
-/// with, and the configuration key of the hand-over socket. It would catch a path or a name that
-/// changed in the code and not in the page.
+/// with, the configuration key of the hand-over socket, the paths of a native package's binary
+/// in its version's tree (Linux and Mac) and the copy a Mac's check runs. It would catch a path or
+/// a name that changed in the code and not in the page.
 #[test]
 fn the_page_names_the_paths_and_the_capability() {
     for needle in [
@@ -75,6 +77,9 @@ fn the_page_names_the_paths_and_the_capability() {
         FS_CONFIG_FILE,
         HANDOFF_CAPABILITY,
         HANDOFF_SOCKET_KEY,
+        PACKAGE_RELEASE_BINARY,
+        MACOS_PACKAGE_RELEASE_BINARY,
+        CHECK_BINARY,
     ] {
         assert!(PAGE.contains(needle), "update-hook.md lacks {needle}");
     }

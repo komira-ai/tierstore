@@ -77,7 +77,7 @@ fn under(root: &Path, absolute: &str) -> PathBuf {
 
 /// The host of `config` for the arm `manager` names: on launchd (a Mac) the service account is
 /// `_tierstore` in the directory service, on systemd `tierstore` in `etc/passwd`.
-fn host_for<'a>(config: &SystemConfig<'a>, manager: &ServiceManager) -> SystemHost<'a> {
+pub(super) fn host_for<'a>(config: &SystemConfig<'a>, manager: &ServiceManager) -> SystemHost<'a> {
     let host = SystemHost::new(config.root.clone(), config.runner, CAPABILITIES_TIMEOUT)
         .with_release_owner(config.release_owner)
         .with_hook_user(config.hook_uid);
