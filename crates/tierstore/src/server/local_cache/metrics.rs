@@ -693,7 +693,11 @@ impl LocalCache {
         text.push_str(&inner.extents.counters.render(entries, filled));
         text.push_str(&inner.starts.render());
         let queued = &inner.queued_reads;
-        text.push_str(&queued_reads(queued.bytes(), queued.skipped(), queued.limit()));
+        text.push_str(&queued_reads(
+            queued.bytes(),
+            queued.skipped(),
+            queued.limit(),
+        ));
         text.push_str(&inner.preparations.render());
         text
     }

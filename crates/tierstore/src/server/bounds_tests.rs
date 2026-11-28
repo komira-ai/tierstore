@@ -355,10 +355,16 @@ async fn metricz_shows_each_limit_beside_what_is_held() {
         .await;
     assert_eq!(open.status(), StatusCode::OK);
     let held = rig.server.metrics_probe();
-    assert!(held.contains("\ntierstore_s3_reads_in_flight 1\n"), "{held}");
+    assert!(
+        held.contains("\ntierstore_s3_reads_in_flight 1\n"),
+        "{held}"
+    );
     assert!(held.contains("\ntierstore_s3_reads_limit 2\n"), "{held}");
     drop(open);
     let after = rig.server.metrics_probe();
-    assert!(after.contains("\ntierstore_s3_reads_in_flight 0\n"), "{after}");
+    assert!(
+        after.contains("\ntierstore_s3_reads_in_flight 0\n"),
+        "{after}"
+    );
     assert!(after.contains("\ntierstore_s3_reads_limit 2\n"), "{after}");
 }

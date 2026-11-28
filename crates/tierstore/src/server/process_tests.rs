@@ -148,7 +148,10 @@ mod linux {
         assert_eq!(no_ticks.resident_bytes, Some(300 * 4096));
         assert_eq!(no_ticks.open_fds, None);
         assert_eq!(figures_of(&stat, None, None, 100, 4096).start_seconds, None);
-        assert_eq!(figures_of(&stat, Some(0), None, 100, 4096).start_seconds, None);
+        assert_eq!(
+            figures_of(&stat, Some(0), None, 100, 4096).start_seconds,
+            None
+        );
         let huge = Stat {
             user_ticks: Some(u64::MAX),
             system_ticks: Some(1),
@@ -158,7 +161,11 @@ mod linux {
         };
         let figures = figures_of(&huge, Some(1), None, 100, 4096);
         assert_eq!(
-            (figures.cpu_seconds, figures.resident_bytes, figures.virtual_bytes),
+            (
+                figures.cpu_seconds,
+                figures.resident_bytes,
+                figures.virtual_bytes
+            ),
             (None, None, None)
         );
         let zero = Stat {

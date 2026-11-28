@@ -111,7 +111,10 @@ async fn metricz_of_the_binary_shows_its_own_memory_start_cpu_and_descriptors() 
     assert!(resident < machine_memory() as f64, "{resident}");
     assert!(value(&text, "process_virtual_memory_bytes") >= resident);
     let started = value(&text, "process_start_time_seconds");
-    assert!(started >= before.floor() - 1.01, "{started} before {before}");
+    assert!(
+        started >= before.floor() - 1.01,
+        "{started} before {before}"
+    );
     assert!(started <= after, "{started} after {after}");
     assert!(value(&text, "process_open_fds") >= 3.0, "{text}");
     running.signal(Signal::TERM);
@@ -136,12 +139,14 @@ async fn the_bodies_held_rise_under_their_limit_while_a_put_is_in_flight() {
         let key = ObjectKey::new("held/body").unwrap();
         store.put_stream(&key, 8, body).await
     });
-    feed.unbounded_send(Ok(Bytes::from_static(b"1234"))).unwrap();
+    feed.unbounded_send(Ok(Bytes::from_static(b"1234")))
+        .unwrap();
     shows(&running, "tierstore_s3_bodies_in_flight", 1.0).await;
     let held = metricz(&running).await;
     assert_eq!(value(&held, "tierstore_s3_bodies_limit"), 32.0);
 
-    feed.unbounded_send(Ok(Bytes::from_static(b"5678"))).unwrap();
+    feed.unbounded_send(Ok(Bytes::from_static(b"5678")))
+        .unwrap();
     drop(feed);
     putting.await.unwrap().unwrap();
     shows(&running, "tierstore_s3_bodies_in_flight", 0.0).await;

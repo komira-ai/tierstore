@@ -223,7 +223,10 @@ async fn metricz_shows_the_queued_reads_held_under_their_limit_until_a_release()
     let config = rig.bench.store.config().clone();
     let limits = [
         ("tierstore_provider_prefetch_queued_bytes_limit", 256 << 20),
-        ("tierstore_provider_sources_limit", config.max_sources as u64),
+        (
+            "tierstore_provider_sources_limit",
+            config.max_sources as u64,
+        ),
         (
             "tierstore_provider_preparing_limit",
             config.prepare_concurrency as u64,
