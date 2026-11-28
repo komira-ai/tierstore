@@ -1,0 +1,9 @@
+/* Unit ${n} of the generated project: a few lines for the compiler, different in each unit. */
+int unit_${n}(int x)
+{
+    int sum = 0;
+    for (int i = 0; i < x; i++) {
+        sum += i * ${n} + (x ^ ${n});
+    }
+    return sum;
+}

@@ -139,6 +139,8 @@ jobs:
       LLVM_COV_SHA256: b3f68e625481fed9b16444174f3fa5ebcdbde4a1878803a35eabe2dcefcdc41a
       NEXTEST_VERSION: 0.9.146
       NEXTEST_SHA256: 682c21b777c333e96fd532e114d3a5a894e0729ab88d94c0a9f20f8419695428
+      EXAMPLE_SCCACHE_VERSION: 0.19.0
+      EXAMPLE_SCCACHE_SHA256: aa73c7270c997894038c0d8f0d297865f57569e1687883322bc431713d4bb9dd
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -155,6 +157,12 @@ jobs:
       - run: cargo "+$COVERAGE_TOOLCHAIN" llvm-cov --version
       - name: Install cargo-nextest (pinned version and checksum)
         run: cargo "+$COVERAGE_TOOLCHAIN" xtask fetch --url "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-$NEXTEST_VERSION/cargo-nextest-$NEXTEST_VERSION-x86_64-unknown-linux-gnu.tar.gz" --sha256 "$NEXTEST_SHA256" --out "$HOME/.cargo/bin/cargo-nextest" --extract tar.gz --member cargo-nextest
+      # The compiler-cache example (examples/build-cache), which crates/tierstore/tests/examples
+      # runs, drives sccache with its S3 backend against tierstore: the release binary, checked
+      # against its SHA-256. `make` and `cc` are the runner image's. Without sccache on PATH the
+      # example's two tests say so on stderr and end.
+      - name: Install sccache for the compiler-cache example (pinned version and checksum)
+        run: cargo "+$COVERAGE_TOOLCHAIN" xtask fetch --url "https://github.com/mozilla/sccache/releases/download/v$EXAMPLE_SCCACHE_VERSION/sccache-v$EXAMPLE_SCCACHE_VERSION-x86_64-unknown-linux-musl.tar.gz" --sha256 "$EXAMPLE_SCCACHE_SHA256" --out "$HOME/.cargo/bin/sccache" --extract tar.gz --member "sccache-v$EXAMPLE_SCCACHE_VERSION-x86_64-unknown-linux-musl/sccache"
       # This job's own cache key: no other job's cache is restored here (the lint job's holds a
       # build without coverage instrumentation).
       - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0

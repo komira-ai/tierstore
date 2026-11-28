@@ -1,0 +1,131 @@
+# The compiler-cache example: sccache with its S3 backend on tierstore's S3 front builds a
+# generated C project three times.
+#
+# - build1 starts with nothing cached: every unit is compiled and its object put.
+# - build2 starts sccache afresh (a new server, an empty SCCACHE_DIR, no local preprocessor
+#   cache) in read-only mode: every lookup is a hit, and tierstore answers every read from its
+#   disk cache, with no request to the cold tier.
+# - build3 starts sccache afresh in read-write mode, as a CI job does: its start writes
+#   .sccache_check again, which tierstore refuses (komira-ai/tierstore#599).
+
+[client]
+program      = "sccache"
+version_args = ["--version"]
+version      = "sccache 0.19.0"
+
+# 30 units, unit_1.c to unit_30.c.
+[[generate]]
+template = "unit.c.in"
+path     = "project/src/unit_${n}.c"
+count    = 30
+
+[env]
+SCCACHE_BUCKET        = "${bucket}"
+SCCACHE_ENDPOINT      = "${endpoint}"
+SCCACHE_REGION        = "us-east-1"
+SCCACHE_S3_USE_SSL    = "false"
+SCCACHE_S3_KEY_PREFIX = "sccache"
+SCCACHE_DIRECT        = "false"
+SCCACHE_SERVER_PORT   = "${port:sccache}"
+AWS_ACCESS_KEY_ID     = "${access_key_id}"
+AWS_SECRET_ACCESS_KEY = "${secret_access_key}"
+AWS_EC2_METADATA_DISABLED = "true"
+
+[[step]]
+name     = "build1"
+env      = { SCCACHE_DIR = "${work}/sccache-1", SCCACHE_ERROR_LOG = "${work}/logs/sccache-1.log" }
+commands = [
+  { argv = ["sccache", "--start-server"] },
+  { argv = ["make", "-j4", "-C", "${work}/project", "-f", "${example}/Makefile", "OUT=build1", "CC=sccache cc"] },
+  { argv = ["sccache", "--show-stats", "--stats-format", "json"], stdout = "build1-stats.json" },
+  { argv = ["sccache", "--stop-server"] },
+]
+
+[[step]]
+name     = "build2"
+env      = { SCCACHE_DIR = "${work}/sccache-2", SCCACHE_ERROR_LOG = "${work}/logs/sccache-2.log", SCCACHE_S3_RW_MODE = "READ_ONLY" }
+commands = [
+  { argv = ["sccache", "--start-server"] },
+  { argv = ["make", "-j4", "-C", "${work}/project", "-f", "${example}/Makefile", "OUT=build2", "CC=sccache cc"] },
+  { argv = ["sccache", "--show-stats", "--stats-format", "json"], stdout = "build2-stats.json" },
+  { argv = ["sccache", "--stop-server"] },
+]
+
+[[step]]
+name     = "build3"
+env      = { SCCACHE_DIR = "${work}/sccache-3", SCCACHE_ERROR_LOG = "${work}/logs/sccache-3.log" }
+commands = [
+  { argv = ["sccache", "--start-server"] },
+  { argv = ["make", "-j4", "-C", "${work}/project", "-f", "${example}/Makefile", "OUT=build3", "CC=sccache cc"] },
+  { argv = ["sccache", "--show-stats", "--stats-format", "json"], stdout = "build3-stats.json" },
+  { argv = ["sccache", "--stop-server"] },
+]
+
+# A server a failed step left running.
+[[cleanup]]
+argv = ["sccache", "--stop-server"]
+
+[[check]]
+name = "build1.sccache.requests"
+json = { file = "build1-stats.json", pointer = "/stats/compile_requests" }
+
+[[check]]
+name = "build1.sccache.misses"
+json = { file = "build1-stats.json", pointer = "/stats/cache_misses/counts/C~1C++", default = "0" }
+
+[[check]]
+name = "build1.sccache.writes"
+json = { file = "build1-stats.json", pointer = "/stats/cache_writes" }
+
+[[check]]
+name = "build1.tierstore.puts"
+metric = { series = "tierstore_cache_upstream_puts_total", step = "build1" }
+
+[[check]]
+name = "build2.sccache.hits"
+json = { file = "build2-stats.json", pointer = "/stats/cache_hits/counts/C~1C++", default = "0" }
+
+[[check]]
+name = "build2.sccache.misses"
+json = { file = "build2-stats.json", pointer = "/stats/cache_misses/counts/C~1C++", default = "0" }
+
+[[check]]
+name = "build2.objects"
+same = { a = "project/build1", b = "project/build2" }
+
+[[check]]
+name = "build2.tierstore.hits"
+metric = { series = "tierstore_cache_hits_total", step = "build2" }
+
+[[check]]
+name = "build2.tierstore.misses"
+metric = { series = "tierstore_cache_misses_total", step = "build2" }
+
+[[check]]
+name = "build2.tierstore.upstream_gets"
+metric = { series = "tierstore_cache_upstream_reads_total{op=\"get\"}", step = "build2" }
+
+[[check]]
+name = "build2.tierstore.upstream_heads"
+metric = { series = "tierstore_cache_upstream_reads_total{op=\"head\"}", step = "build2" }
+
+[[check]]
+name = "build2.tierstore.upstream_bytes"
+metric = { series = "tierstore_cache_upstream_bytes_read_total", step = "build2" }
+
+[[check]]
+name = "build3.sccache.hits"
+json = { file = "build3-stats.json", pointer = "/stats/cache_hits/counts/C~1C++", default = "0" }
+
+[[check]]
+name = "build3.sccache.misses"
+json = { file = "build3-stats.json", pointer = "/stats/cache_misses/counts/C~1C++", default = "0" }
+
+[[check]]
+name = "build3.tierstore.rewrite_refused"
+metric = { series = "tierstore_cache_upstream_put_failures_total{reason=\"exists\"}", step = "build3" }
+expected_failure = { issue = "komira-ai/tierstore#599", passing = "0" }
+
+[[check]]
+name = "store.objects"
+objects = { prefix = "sccache/" }

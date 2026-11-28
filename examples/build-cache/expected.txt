@@ -1,0 +1,17 @@
+build1.sccache.requests 30
+build1.sccache.misses 30
+build1.sccache.writes 30
+build1.tierstore.puts 31
+build2.sccache.hits 30
+build2.sccache.misses 0
+build2.objects same, 30 files
+build2.tierstore.hits 31
+build2.tierstore.misses 0
+build2.tierstore.upstream_gets 0
+build2.tierstore.upstream_heads 0
+build2.tierstore.upstream_bytes 0
+build3.sccache.hits 30
+build3.sccache.misses 0
+build3.tierstore.rewrite_refused 1 (expected failure: komira-ai/tierstore#599)
+store.objects 31
+tierstore.stop exit status: 0

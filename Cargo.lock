@@ -3265,6 +3265,7 @@ dependencies = [
  "sha2 0.11.0",
  "thiserror",
  "tierstore 0.3.0",
+ "tierstore-examples",
  "tierstore-fetch",
  "tierstore-fetch-api 0.1.0",
  "tierstore-format 0.1.0",
@@ -3428,6 +3429,21 @@ dependencies = [
  "tierstore-journal",
  "tierstore-metrics",
  "tierstore-testkit",
+]
+
+[[package]]
+name = "tierstore-examples"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "objstore-s3 0.1.0",
+ "rustix",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tierstore-testkit",
+ "tokio",
+ "toml",
 ]
 
 [[package]]

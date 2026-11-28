@@ -1,0 +1,29 @@
+# tierstore for the compiler-cache example: one process, no hot tier, a disk cache in front of a
+# cold tier. Both are directories in the run's work directory; nothing is in a cloud.
+# `${work}` is the work directory, which the runner fills in.
+
+[[interface]]
+type   = "s3"
+params = { addresses = ["127.0.0.1:0"] }
+
+[server]
+proxy_id        = "example-build-cache"
+bucket          = "examples"
+access_key_file = "${work}/access.key"
+drain_lb_wait   = "1s"
+
+# Every put goes to the cold tier before it is answered, and a put under a kept prefix is
+# kept in the cache too, so the next read of it is a local hit.
+[local_cache]
+path          = "${work}/cache"
+budget        = "1GiB"
+write_through = true
+
+[cold_store]
+kind = "dir"
+path = "${work}/cold"
+
+# The keys the cache keeps: sccache's, under its SCCACHE_S3_KEY_PREFIX.
+[[policy]]
+prefix = "sccache/"
+cache  = true

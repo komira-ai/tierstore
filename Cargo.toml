@@ -177,6 +177,7 @@ tierstore-mount-client = { path = "crates/tierstore-mount-client" }
 # A tree read by path from its mapped L2 list and the packs of the mount protocol: the read
 # path of the tree mount (T-F8), under the daemon's `TreeFs`.
 tierstore-tree = { path = "crates/tierstore-tree" }
+tierstore-examples = { path = "crates/tierstore-examples" }
 # The previous release: `v0.3.17`, the tag of the commit below, taken from the public repository
 # at that commit alone (the `rev` is what pins it; a tag can be moved). Used only by the
 # dev-dependencies of `crates/compat`. When a release is made, move both to the new release's
