@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use super::model::{Model, unavailable};
+use super::model::{Model, NO_PROVIDER, unavailable};
 use super::*;
 
 fn refusal(code: Code, message: &str) -> Refusal {
@@ -688,7 +688,7 @@ async fn the_restart_case_reads_each_tree_it_is_answered() {
     );
 }
 
-/// A model of a node started without its `fs` interface.
+/// A model of a node started without its `fs` interface and its mount provider.
 fn without_fs() -> Model {
     let mut model = Model::healthy();
     model.no_fs = true;
@@ -696,10 +696,10 @@ fn without_fs() -> Model {
 }
 
 /// Asserts that the case of a node without a file system passes when the node is ready, serves
-/// the upstream's object through its front, and answers a Prepare and a Mount "unavailable" for
-/// no file system; with what it saw noted.
+/// the upstream's object through its front, and gives a Prepare no answer; with what it saw
+/// noted.
 #[tokio::test]
-async fn a_node_without_fs_passes_when_it_serves_and_waits_the_agent() {
+async fn a_node_without_fs_passes_when_it_serves_and_has_no_provider() {
     let out = against(Case::NoFs, &mut without_fs()).await;
     assert!(out.passed(), "{:?}", out.failures);
     assert_eq!(out.notes[0], "/readyz answered ready read-cache");
@@ -708,32 +708,28 @@ async fn a_node_without_fs_passes_when_it_serves_and_waits_the_agent() {
         "{:?}",
         out.notes
     );
-    let reason = "no file system serves /run/tierstore/fs: the node's file has no [[interface]] with type = \"fs\"";
-    assert_eq!(out.notes[2], format!("Prepare was unavailable: {reason}"));
-    assert_eq!(out.notes[3], format!("Mount was unavailable: {reason}"));
+    assert_eq!(
+        out.notes[2],
+        format!("a Prepare had no answer: {NO_PROVIDER}")
+    );
+    assert_eq!(out.notes.len(), 3, "{:?}", out.notes);
 }
 
 /// Catches a node without a file system that is not ready, that serves no object or wrong
-/// bytes through its front, that answers a Prepare and a Mount as if it had a file system, or
-/// refuses them otherwise, or refuses the Release.
+/// bytes through its front, or that answers a Prepare, by taking it or by refusing it.
 #[tokio::test]
-async fn a_node_without_fs_fails_when_it_does_not_serve_or_does_not_wait_the_agent() {
+async fn a_node_without_fs_fails_when_it_does_not_serve_or_answers_a_prepare() {
     let mut model = without_fs();
     model.ready = 503;
     model.front_fails = true;
-    model.next.push_back(("release", "", unavailable("later")));
     let out = against(Case::NoFs, &mut model).await;
-    assert_eq!(out.failures.len(), 3, "{:?}", out.failures);
+    assert_eq!(out.failures.len(), 2, "{:?}", out.failures);
     assert_eq!(out.failures[0], "/readyz answered 503: ready read-cache");
     assert!(
         out.failures[1].starts_with("the S3 front did not serve cas/p/")
             && out.failures[1].ends_with(": 403 SignatureDoesNotMatch"),
         "{:?}",
         out.failures
-    );
-    assert_eq!(
-        out.failures[2],
-        "the Release of js.start-without-fs-0: Unavailable: later"
     );
 
     let mut model = without_fs();
@@ -748,10 +744,7 @@ async fn a_node_without_fs_fails_when_it_does_not_serve_or_does_not_wait_the_age
     let out = against(Case::NoFs, &mut Model::healthy()).await;
     assert_eq!(
         out.failures,
-        [
-            "Prepare succeeded on a node with no file system",
-            "Mount succeeded on a node with no file system",
-        ]
+        ["a Prepare was answered by a node with no mount provider"]
     );
 
     let mut model = without_fs();
@@ -761,15 +754,7 @@ async fn a_node_without_fs_fails_when_it_does_not_serve_or_does_not_wait_the_age
     let out = against(Case::NoFs, &mut model).await;
     assert_eq!(
         out.failures,
-        ["Prepare: FailedPrecondition: no; not unavailable for no file system serves"]
-    );
-
-    let mut model = without_fs();
-    model.next.push_back(("mount", "", unavailable("busy")));
-    let out = against(Case::NoFs, &mut model).await;
-    assert_eq!(
-        out.failures,
-        ["Mount: Unavailable: busy; not unavailable for no file system serves"]
+        ["a Prepare: FailedPrecondition: no; not no answer, as of a node with no mount provider"]
     );
 }
 

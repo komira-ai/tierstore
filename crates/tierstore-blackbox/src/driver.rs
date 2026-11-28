@@ -3,7 +3,15 @@
 //! ```text
 //! tierstore-blackbox --tierstore <binary> --fake-s3 <binary> --scratch <dir>
 //!     [--case <name>]... [--small-disk <dir>] [the numbers of the cases]
+//! tierstore-blackbox <root> [--case <name>]...
 //! ```
+//!
+//! The second form is the driver of a `blackbox_test` of buildrules, which runs it with one
+//! argument, the root the package under test was unpacked onto: the binary is
+//! `<root>/usr/libexec/tierstore/tierstore`, `fake-s3` is the program beside the driver's own,
+//! the scratch directory is `<root>/var/tmp/tierstore-blackbox` (made if it is not there), and
+//! with no `--case` only the cases that need no mount run (`start-without-fs`): such a run is an
+//! ordinary user with no capabilities and no `/dev/fuse`.
 //!
 //! `--tierstore` is the binary of the package under test (`/usr/libexec/tierstore/tierstore` of
 //! the `.deb`); it is started as `<binary> --config <node file>`. Each case gets the directory
@@ -43,15 +51,18 @@ const SMALL_DISK_SHARE: u64 = 2;
     about = "The black-box test of a released tierstore: its mount provider, driven from outside"
 )]
 struct Args {
+    /// The root the package under test was unpacked onto, in place of the three flags below.
+    #[arg(conflicts_with_all = ["tierstore", "fake_s3", "scratch"])]
+    root: Option<PathBuf>,
     /// The binary of the package under test.
-    #[arg(long)]
-    tierstore: PathBuf,
+    #[arg(long, required_unless_present = "root")]
+    tierstore: Option<PathBuf>,
     /// The `fake-s3` program, the node's upstream.
-    #[arg(long)]
-    fake_s3: PathBuf,
+    #[arg(long, required_unless_present = "root")]
+    fake_s3: Option<PathBuf>,
     /// The directory of the cases' directories.
-    #[arg(long)]
-    scratch: PathBuf,
+    #[arg(long, required_unless_present = "root")]
+    scratch: Option<PathBuf>,
     /// A case to run (start-without-fs, t1-cycles, t2-placements, t3-stall, restart,
     /// upstream-errors, disk-full);
     /// again for more. Every case when none is named.
@@ -118,12 +129,13 @@ impl Args {
         }
     }
 
-    /// The cases to run, in their order: those named, or every one.
+    /// The cases to run, in their order: those named, or every one (under a root, every one that
+    /// needs no mount).
     fn cases(&self) -> Result<Vec<Case>, String> {
-        let mut cases = if self.cases.is_empty() {
-            Case::ALL.to_vec()
-        } else {
-            self.cases.clone()
+        let mut cases = match (self.cases.is_empty(), &self.root) {
+            (false, _) => self.cases.clone(),
+            (true, None) => Case::ALL.to_vec(),
+            (true, Some(_)) => Case::ALL.into_iter().filter(|c| !c.mounts()).collect(),
         };
         cases.sort_unstable();
         cases.dedup();
@@ -133,6 +145,51 @@ impl Args {
             );
         }
         Ok(cases)
+    }
+}
+
+/// The programs a run starts and the directory of its cases.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Programs {
+    tierstore: PathBuf,
+    fake_s3: PathBuf,
+    scratch: PathBuf,
+}
+
+/// Where the binary of the package is under the root it was unpacked onto.
+const PACKAGED_BINARY: &str = "usr/libexec/tierstore/tierstore";
+
+/// The scratch directory under the root.
+const ROOT_SCRATCH: &str = "var/tmp/tierstore-blackbox";
+
+impl Args {
+    /// The programs and the scratch directory: the flags', or, under a root, the package's binary,
+    /// the `fake-s3` beside `driver` (the path of this program) and the root's scratch directory,
+    /// made if it is not there.
+    fn programs(&self, driver: std::io::Result<PathBuf>) -> Result<Programs, String> {
+        let Some(root) = &self.root else {
+            return match (&self.tierstore, &self.fake_s3, &self.scratch) {
+                (Some(tierstore), Some(fake_s3), Some(scratch)) => Ok(Programs {
+                    tierstore: tierstore.clone(),
+                    fake_s3: fake_s3.clone(),
+                    scratch: scratch.clone(),
+                }),
+                _ => {
+                    Err("--tierstore, --fake-s3 and --scratch are needed without a root".to_owned())
+                }
+            };
+        };
+        let driver = driver.map_err(|why| format!("the path of this program: {why}"))?;
+        let beside = driver
+            .parent()
+            .ok_or_else(|| format!("{} is in no directory", driver.display()))?;
+        let scratch = root.join(ROOT_SCRATCH);
+        std::fs::create_dir_all(&scratch).map_err(|why| format!("{}: {why}", scratch.display()))?;
+        Ok(Programs {
+            tierstore: root.join(PACKAGED_BINARY),
+            fake_s3: beside.join("fake-s3"),
+            scratch,
+        })
     }
 }
 
@@ -147,13 +204,14 @@ pub(crate) trait Rigs {
 /// The rigs of running nodes (`crate::live`).
 struct Nodes<'a> {
     args: &'a Args,
+    programs: &'a Programs,
 }
 
 impl Rigs for Nodes<'_> {
     type Rig = Live;
 
     async fn start(&mut self, case: Case, params: &Params) -> Result<Live, String> {
-        let dir = self.args.scratch.join(case.name());
+        let dir = self.programs.scratch.join(case.name());
         std::fs::create_dir(&dir).map_err(|why| format!("{}: {why}", dir.display()))?;
         let small_disk = (case == Case::Disk)
             .then(|| self.args.small_disk.clone())
@@ -173,14 +231,14 @@ impl Rigs for Nodes<'_> {
         };
         let setup = Setup {
             dir,
-            fake_s3: self.args.fake_s3.clone(),
+            fake_s3: self.programs.fake_s3.clone(),
             small_disk,
             budget_mib,
             max_placements,
-            fs: case != Case::NoFs,
+            fs: case.mounts(),
             socket_wait: SOCKET_WAIT,
         };
-        let tierstore = self.args.tierstore.clone();
+        let tierstore = self.programs.tierstore.clone();
         let command = Box::new(move |file: &Path| {
             let mut command = Command::new(&tierstore);
             command.arg("--config").arg(file);
@@ -256,8 +314,18 @@ pub fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    let programs = match args.programs(std::env::current_exe()) {
+        Ok(programs) => programs,
+        Err(why) => {
+            let _ = writeln!(std::io::stderr(), "tierstore-blackbox: {why}");
+            return ExitCode::from(1);
+        }
+    };
     let params = args.params();
-    let mut nodes = Nodes { args: &args };
+    let mut nodes = Nodes {
+        args: &args,
+        programs: &programs,
+    };
     let ran = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()

@@ -23,6 +23,9 @@ use crate::provider::{Code, Refusal};
 use crate::rig::Rig;
 use crate::tree::{Tree, TreeFault};
 
+/// What a Prepare or a Mount of a node with no mount provider has for an answer.
+pub(crate) const NO_PROVIDER: &str = "/s/provider.sock: No such file or directory (os error 2)";
+
 pub(crate) fn unavailable(message: &str) -> Refusal {
     Refusal {
         code: Code::Unavailable,
@@ -81,7 +84,7 @@ pub(crate) struct Model {
     pub failing_sticks: bool,
     /// The stop of the rig fails, saying this.
     pub stop_fails: Option<String>,
-    /// The node has no file system: every Prepare and Mount is unavailable for it.
+    /// The node has no mount provider: a Prepare has no answer.
     pub no_fs: bool,
     /// The status of `/readyz`.
     pub ready: u16,
@@ -188,9 +191,10 @@ impl Model {
 
     fn no_fs_or(&self) -> Result<(), Refusal> {
         if self.no_fs {
-            return Err(unavailable(
-                "no file system serves /run/tierstore/fs: the node's file has no [[interface]] with type = \"fs\"",
-            ));
+            return Err(Refusal {
+                code: Code::NoAnswer,
+                message: NO_PROVIDER.to_owned(),
+            });
         }
         Ok(())
     }
@@ -229,7 +233,6 @@ impl Rig for Model {
         self.now += self.mount_takes;
         self.alive_or()?;
         self.scripted("mount", &source.run)?;
-        self.no_fs_or()?;
         if self.disk_full && self.full_kills {
             self.alive = false;
             return self.alive_or().map(|()| PathBuf::new());

@@ -1,15 +1,13 @@
-//! The node started without its `fs` interface: what a job of the build farm can run, an ordinary
-//! user with no capability and no FUSE device, the package unpacked and not installed. The node
+//! The node started without its `fs` interface and its mount provider: what a job of the build
+//! farm can run, an ordinary user with no capability and no FUSE device, the package unpacked and
+//! not installed (a node file with a provider and no `fs` interface is refused at load). The node
 //! must start, answer `/readyz` 200, serve through its S3 front an object it reads from the
-//! upstream through its cache, and answer a Prepare and a Mount "unavailable" with the reason
-//! that no file system serves its mount point: the agent's start waits, and is not failed.
+//! upstream through its cache, and give a Prepare no answer: it serves no provider.
 
-use super::{Outcome, Params, source_of, waits};
+use super::{Outcome, Params, source_of};
+use crate::provider::Code;
 use crate::rig::Rig;
 use crate::tree::Tree;
-
-/// The reason a node without a file system gives a Prepare and a Mount.
-pub(super) const NO_FS: &str = "no file system serves";
 
 pub(super) async fn run<R: Rig>(rig: &mut R, p: &Params, out: &mut Outcome) -> Result<(), String> {
     let tree = Tree::new("start-without-fs", p.cycle_files, p.cycle_file_bytes)
@@ -34,19 +32,14 @@ pub(super) async fn run<R: Rig>(rig: &mut R, p: &Params, out: &mut Outcome) -> R
         Err(why) => out.fail(format!("the S3 front did not serve {key}: {why}")),
     }
     let source = source_of("start-without-fs", 0);
-    let prepared = rig.prepare(&source, tree.key()).await.err();
-    let mounted = rig.mount(&source).await.err();
-    for (step, refusal) in [("Prepare", prepared), ("Mount", mounted)] {
-        match refusal {
-            None => out.fail(format!("{step} succeeded on a node with no file system")),
-            Some(refusal) if waits(&refusal) && refusal.message.contains(NO_FS) => {
-                out.note(format!("{step} was unavailable: {}", refusal.message));
-            }
-            Some(refusal) => out.fail(format!("{step}: {refusal}; not unavailable for {NO_FS}")),
+    match rig.prepare(&source, tree.key()).await {
+        Ok(()) => out.fail("a Prepare was answered by a node with no mount provider"),
+        Err(refusal) if refusal.code == Code::NoAnswer => {
+            out.note(format!("a Prepare had no answer: {}", refusal.message));
         }
-    }
-    if let Err(refusal) = rig.release(&source).await {
-        out.fail(format!("the Release of {}: {refusal}", source.run));
+        Err(refusal) => out.fail(format!(
+            "a Prepare: {refusal}; not no answer, as of a node with no mount provider"
+        )),
     }
     Ok(())
 }

@@ -26,8 +26,9 @@ in `t3-stall` (above the Prepares that arrive, so that every one is placed).
 
 The mount is made with `allow_other`, which tierstore always asks for and which a user other than
 root gets only by `/etc/fuse.conf`: the driver runs as root, in a container with `/dev/fuse` and
-`CAP_SYS_ADMIN`. `start-without-fs` alone has no `fs` interface in its node file and needs neither:
-it runs as an ordinary user with no capabilities and no network.
+`CAP_SYS_ADMIN`. `start-without-fs` alone has no `fs` interface in its node file, and so no mount
+provider either (tierstore refuses a file with a provider and no `fs` interface), and needs
+neither: it runs as an ordinary user with no capabilities and no network.
 
 What each case needs of the host it runs on:
 
@@ -51,7 +52,7 @@ later, by a Prepare and a Mount again, for at most the agent's budget for a tree
 
 | case | what it does | passes when | the failure it is the test of |
 |---|---|---|---|
-| `start-without-fs` | a node with no `fs` interface, started first: its `/readyz`, a read through its S3 front of a pack in the upstream, then a Prepare, a Mount and a Release | `/readyz` answers 200; the front serves the pack's bytes from the upstream; Prepare and Mount are "unavailable: no file system serves ..."; the Release succeeds | a node that cannot start, or serve its cache, without its mount, or that answers a source it cannot mount with a refusal that fails the job |
+| `start-without-fs` | a node with no `fs` interface and no mount provider, started first: its `/readyz`, a read through its S3 front of a pack in the upstream, then a Prepare | `/readyz` answers 200; the front serves the pack's bytes from the upstream; the Prepare has no answer | a package that cannot start, or serve its cache, as an ordinary user without its mount |
 | `t1-cycles` (T1) | 2,100 cycles, one after another, of Prepare, Mount, read, Release of a tree of 16 files of 4 KiB, at the node's defaults | every step of every cycle succeeds at its first ask; no placement is left 60 s after the last Release | placements that a Release does not free: the cycle after `trees.max_placements` (1,025) is refused |
 | `t2-placements` (T2) | 1,024 sources prepared, mounted and read (held, as running jobs hold their trees), then a burst of 64 more Prepares, a Mount of each, then the Releases of the held 1,024 | each Mount of the burst is "unavailable" for too many placements (none succeeds, none is a refusal that fails the job); within 60 s of the Releases every source of the burst has its tree; no placement is left 60 s after | a Release that leaves the place counted while the mount holds the tree (komira-ai/tierstore#619) |
 | `t3-stall` (T3) | the reads of every pack stalled for 300 s while 3,000 Prepares of new sources of one tree of 16,384 files arrive evenly over the first 60 s; the lists and sidecars are served, so the node places each tree and queues its reads | the resident memory, read every 5 s, is under its idle size plus 1 GiB at every sample and grows by at most 32 MiB over the stall's last 60 s; the stall held requests of the node; the queue gauges (`tierstore_provider_prefetch_queued_bytes`, `tierstore_cache_prefetch_queue_depth`, `tierstore_provider_preparing`) are 0 within 120 s of the stall's end | no bound on the heap of the reads queued while the upstream stalls (komira-ai/tierstore#613) |
@@ -102,9 +103,22 @@ Each case's directory keeps the node file and the logs of both programs (`logs/t
 ## In Buck2
 
 The two programs are the package's `:bin` (`//crates/tierstore-blackbox:bin`, buildrules' target of
-every binary of a member), and its tests are its `:test`, as for every member. buildrules has no
-merged rule yet for a test of a released artifact (a test target that takes the package under test
-as an input, starts the fakes and the service, and runs the driver); until it has, the suite is run
-by `blackbox.yml`, and
-`:test` holds the tests of the driver and of `fake-s3` themselves (against the model of a node in
-`src/cases/model.rs`, and against the crate's own programs).
+every binary of a member), and the tests of the driver and of `fake-s3` themselves (against the
+model of a node in `src/cases/model.rs`, and against the crate's own programs) are its `:test`, as
+for every member.
+
+The released package is tested by `//crates/tierstore-blackbox:released`, a `blackbox_test` of
+buildrules (`rules/blackbox`): `buck2 test` of it, on the farm, unpacks the pinned `.deb` of a
+release onto the farm's base image and runs `:driver` with that root as its one argument.
+`:driver` (`blackbox.bzl`) is the driver and `fake-s3` copied into one directory; given only a
+root, the driver takes the binary at `<root>/usr/libexec/tierstore/tierstore`, the `fake-s3`
+beside itself and the scratch directory `<root>/var/tmp/tierstore-blackbox`, and runs the cases
+that need no mount. A farm job is an ordinary user with no capabilities, no `/dev/fuse` and no
+network but loopback, so that is `start-without-fs`; the other cases need what the table above
+says, and run by `blackbox.yml` until a farm job can mount. A release passes the package it is
+about to publish in place of the pin:
+
+```sh
+buck2 test //crates/tierstore-blackbox:released \
+    -c blackbox.tierstore_url=<url> -c blackbox.tierstore_sha256=<sha256> -c blackbox.tierstore_size=<bytes>
+```

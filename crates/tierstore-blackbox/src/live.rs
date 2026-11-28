@@ -4,8 +4,8 @@
 //! provider's socket, the mount, `/metricz` on the node's S3 front, the placements in its cache
 //! directory, `/proc/<pid>/status`, the upstream's control socket, a ballast file on its disk.
 //!
-//! A node counts as started once it has printed its start line and its provider's socket takes a
-//! connection.
+//! A node counts as started once it has printed its start line and, when it has its mount
+//! provider, once the provider's socket takes a connection.
 
 use std::os::unix::process::ExitStatusExt as _;
 use std::path::{Path, PathBuf};
@@ -55,7 +55,8 @@ pub struct Setup {
     pub budget_mib: u64,
     /// `trees.max_placements`, when the case sets it.
     pub max_placements: Option<u32>,
-    /// Whether the node has its `fs` interface (the FUSE mount, which needs `/dev/fuse` and root).
+    /// Whether the node has its `fs` interface (the FUSE mount, which needs `/dev/fuse` and root)
+    /// and the mount provider under it.
     pub fs: bool,
     /// How long a started node may take to take a connection on its provider's socket.
     pub socket_wait: Duration,
@@ -74,6 +75,7 @@ pub struct Live {
     provider: Provider,
     cache: PathBuf,
     ballast: Option<PathBuf>,
+    provides: bool,
     socket_wait: Duration,
     clock: Stopwatch,
 }
@@ -120,6 +122,7 @@ impl Live {
             control,
             cache,
             ballast: setup.small_disk.map(|disk| disk.join("ballast")),
+            provides: setup.fs,
             socket_wait: setup.socket_wait,
             clock,
         };
@@ -127,7 +130,8 @@ impl Live {
         Ok(live)
     }
 
-    /// Starts the node and waits until its provider's socket takes a connection.
+    /// Starts the node and, when it has its mount provider, waits until the provider's socket takes
+    /// a connection.
     async fn start_node(&mut self) -> Result<(), String> {
         let command = (self.command)(&self.file);
         let started = Process::start(command, "tierstore", &self.paths.logs, START_WAIT)
@@ -135,7 +139,8 @@ impl Live {
         self.metrics = started.listen().to_owned();
         self.node = Some(started);
         let since = self.clock.elapsed();
-        while std::os::unix::net::UnixStream::connect(&self.paths.socket).is_err() {
+        while self.provides && std::os::unix::net::UnixStream::connect(&self.paths.socket).is_err()
+        {
             if self.clock.elapsed().saturating_sub(since) >= self.socket_wait {
                 return Err(format!(
                     "the node's provider socket {} took no connection within {:?}",

@@ -148,17 +148,16 @@ fn a_node_file_that_cannot_be_written_is_named() {
     assert!(paths.dir.join("access.key").is_file());
 }
 
-/// Asserts that a node without its `fs` interface has the same file but that interface: the
-/// mount provider's socket, then `[server]`.
+/// Asserts that a node without its `fs` interface has the same file but that interface and the
+/// mount provider, which a node file may not have without it: the S3 interface, then `[server]`.
 #[test]
-fn a_node_without_fs_has_no_fs_interface() {
+fn a_node_without_fs_has_no_fs_interface_and_no_provider() {
     let paths = Paths::of(Path::new("/s/t0"));
     let mut node = node(Path::new("/s/t0/cache"));
     let with = node.text(&paths);
     node.fs = false;
     let without = node.text(&paths);
-    assert!(!without.contains("type = \"fs\""));
-    assert!(without.contains("params = { socket = \"/s/t0/provider.sock\" }\n\n[server]\n"));
-    let fs = "\n[[interface]]\ntype = \"fs\"\n[interface.params]\nmountpoint   = \"/s/t0/fs\"\nruntime_dir  = \"/s/t0/fsrun\"\nclient_group = \"1001\"\nowner        = \"1000:1001\"\n";
-    assert_eq!(with.replacen(fs, "", 1), without);
+    assert!(without.contains("params = { addresses = [\"127.0.0.1:0\"] }\n\n[server]\n"));
+    let mounts = "\n[[interface]]\ntype   = \"mount-provider\"\nparams = { socket = \"/s/t0/provider.sock\" }\n\n[[interface]]\ntype = \"fs\"\n[interface.params]\nmountpoint   = \"/s/t0/fs\"\nruntime_dir  = \"/s/t0/fsrun\"\nclient_group = \"1001\"\nowner        = \"1000:1001\"\n";
+    assert_eq!(with.replacen(mounts, "", 1), without);
 }

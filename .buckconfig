@@ -26,7 +26,7 @@
 
 [external_cell_buildrules]
   git_origin = https://github.com/komira-ai/buildrules
-  commit_hash = f6121253794016c1b10e77291e609b32d3fb3fbb
+  commit_hash = 777bb5f1abde235850876a54c8f3c1624c9f3996
 
 # The farm's linux x86_64 worker property set, for buildrules, which reads it from this (the root)
 # cell. In CI, komira's farm-connect action (.github/workflows/farm.yml) writes it under

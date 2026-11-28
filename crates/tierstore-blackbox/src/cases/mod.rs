@@ -1,9 +1,9 @@
 //! The cases of the black-box test, each against a node of its own (README.md has what each
 //! asserts and which failure of the farm it is the test of):
 //!
-//! - [`Case::NoFs`]: the node started without its `fs` interface, as a farm job can run it (an
-//!   ordinary user, no capability, no FUSE device): it serves through its S3 front, and answers a
-//!   Prepare and a Mount "unavailable" for no file system.
+//! - [`Case::NoFs`]: the node started without its `fs` interface and its mount provider, as a farm
+//!   job can run it (an ordinary user, no capability, no FUSE device): it serves through its S3
+//!   front, and a Prepare has no answer.
 //! - [`Case::Cycles`] (T1): Prepare, Mount, read and Release, over and over, at the node's
 //!   defaults: every cycle succeeds, and no placement is left a while after the last Release.
 //! - [`Case::Placements`] (T2): a burst of Prepares past `trees.max_placements`: each Mount past it
@@ -76,6 +76,12 @@ impl Case {
             Case::Errors => "upstream-errors",
             Case::Disk => "disk-full",
         }
+    }
+
+    /// Whether the case's node serves the `fs` interface, the FUSE mount, which takes
+    /// `/dev/fuse` and a right to mount; `start-without-fs` alone has none.
+    pub(crate) fn mounts(self) -> bool {
+        self != Case::NoFs
     }
 
     /// The case named `name`.

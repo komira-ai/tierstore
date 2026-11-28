@@ -58,7 +58,9 @@ pub(crate) struct Node {
     pub upstream: String,
     /// `trees.max_placements`, when the case sets it; the node's default otherwise.
     pub max_placements: Option<u32>,
-    /// Whether the node has its `fs` interface: the FUSE mount, which needs `/dev/fuse` and root.
+    /// Whether the node has its `fs` interface, the FUSE mount, which needs `/dev/fuse` and root,
+    /// and the mount provider that answers directories under it; a node without them is its S3
+    /// front over its cache, since a node file with a provider and no `fs` interface is refused.
     pub fs: bool,
     /// The user and group the mount is owned by and served to: the rig's own.
     pub uid: u32,
@@ -66,14 +68,18 @@ pub(crate) struct Node {
 }
 
 impl Node {
-    /// The `fs` interface of the node file at `paths`, with the blank line after it; nothing for a
-    /// node without one.
-    fn fs_interface(&self, paths: &Paths) -> String {
+    /// The mount provider and the `fs` interface of the node file at `paths`, with the blank line
+    /// after them; nothing for a node without them.
+    fn mount_interfaces(&self, paths: &Paths) -> String {
         if !self.fs {
             return String::new();
         }
         format!(
             r#"
+[[interface]]
+type   = "mount-provider"
+params = {{ socket = "{socket}" }}
+
 [[interface]]
 type = "fs"
 [interface.params]
@@ -82,6 +88,7 @@ runtime_dir  = "{dir}/fsrun"
 client_group = "{gid}"
 owner        = "{uid}:{gid}"
 "#,
+            socket = paths.socket.display(),
             mountpoint = paths.mountpoint.display(),
             dir = paths.dir.display(),
             uid = self.uid,
@@ -97,11 +104,7 @@ owner        = "{uid}:{gid}"
 [[interface]]
 type   = "s3"
 params = {{ addresses = ["127.0.0.1:0"] }}
-
-[[interface]]
-type   = "mount-provider"
-params = {{ socket = "{socket}" }}
-{fs}
+{mounts}
 [server]
 proxy_id        = "blackbox"
 bucket          = "cas"
@@ -123,8 +126,7 @@ credentials_file = "{dir}/upstream.key"
 prefix = "cas/"
 cache  = true
 "#,
-            socket = paths.socket.display(),
-            fs = self.fs_interface(paths),
+            mounts = self.mount_interfaces(paths),
             cache = self.cache.display(),
             budget = self.budget_mib,
             upstream = self.upstream,

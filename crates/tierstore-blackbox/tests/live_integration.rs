@@ -22,7 +22,7 @@ use objstore_s3::s3::fake::Serving;
 use support::provider::FakeProvider;
 use tierstore_blackbox::live::{Live, NodeCommand, Setup};
 use tierstore_blackbox::metrics::Gauges;
-use tierstore_blackbox::provider::source;
+use tierstore_blackbox::provider::{Code, source};
 use tierstore_blackbox::rig::Rig as _;
 use tierstore_blackbox::tree::{Tree, TreeFault};
 use tierstore_testkit::dir::TestDir;
@@ -300,5 +300,31 @@ async fn a_start_waits_for_a_socket_bound_after_the_start_line() {
         .await
         .unwrap();
     let _provider = late.await.unwrap();
+    live.stop().await.unwrap();
+}
+
+/// Asserts that a node without its `fs` interface, and so without its mount provider, counts as
+/// started at its start line, with no wait for a provider's socket that no process binds, and
+/// that a Prepare of it has no answer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_node_without_fs_starts_with_no_provider_to_wait_for() {
+    let (dir, socket) = scratch("live-no-fs");
+    let mut no_fs = setup(dir.path(), None);
+    no_fs.fs = false;
+    no_fs.socket_wait = Duration::ZERO;
+    let mut live = Live::start(no_fs, stand_in(dir.path(), &[])).await.unwrap();
+    let file = std::fs::read_to_string(dir.path().join("node.toml")).unwrap();
+    assert!(!file.contains("mount-provider"));
+    let refused = live
+        .prepare(&source("blackbox-agent", "js.no-fs-0", 0), "t")
+        .await
+        .unwrap_err();
+    assert_eq!(refused.code, Code::NoAnswer);
+    assert!(
+        refused
+            .message
+            .starts_with(&format!("{}: ", socket.display())),
+        "{refused}"
+    );
     live.stop().await.unwrap();
 }

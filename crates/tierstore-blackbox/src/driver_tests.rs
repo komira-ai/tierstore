@@ -111,6 +111,74 @@ fn the_cases_run_in_order_and_disk_full_needs_a_small_disk() {
     );
 }
 
+/// Asserts that the three flags are the programs and the scratch directory as given, and that a
+/// root is the package's binary under it, the `fake-s3` beside the driver and a scratch directory
+/// under it, made (again, when it is there); that under a root only the cases with no mount run
+/// unless cases are named; and that a root does not go with the three flags.
+#[test]
+fn a_root_stands_for_the_packages_binary_the_fake_beside_the_driver_and_its_scratch() {
+    let given = args(&[]).unwrap().programs(Ok(PathBuf::from("/b/d")));
+    let flagged = Programs {
+        tierstore: PathBuf::from("/t"),
+        fake_s3: PathBuf::from("/f"),
+        scratch: PathBuf::from("/s"),
+    };
+    assert_eq!(given, Ok(flagged));
+
+    let dir = tierstore_testkit::dir::TestDir::under(std::env::temp_dir(), "blackbox-root");
+    let root = dir.path().to_str().unwrap();
+    let rooted = Args::try_parse_from(["tierstore-blackbox", root]).unwrap();
+    let want = Programs {
+        tierstore: dir.path().join("usr/libexec/tierstore/tierstore"),
+        fake_s3: PathBuf::from("/b/fake-s3"),
+        scratch: dir.path().join("var/tmp/tierstore-blackbox"),
+    };
+    for _ in 0..2 {
+        assert_eq!(rooted.programs(Ok(PathBuf::from("/b/d"))), Ok(want.clone()));
+        assert!(want.scratch.is_dir());
+    }
+    assert_eq!(rooted.cases(), Ok(vec![Case::NoFs]));
+    let named = Args::try_parse_from(["tierstore-blackbox", root, "--case", "t1-cycles"]).unwrap();
+    assert_eq!(named.cases(), Ok(vec![Case::Cycles]));
+
+    for flag in ["--tierstore", "--fake-s3", "--scratch"] {
+        let both = Args::try_parse_from(["tierstore-blackbox", root, flag, "/x"]);
+        assert!(both.is_err(), "{flag}");
+    }
+}
+
+/// Asserts what a run that cannot find its programs says: the driver's own path not read, a
+/// driver in no directory, a scratch directory that cannot be made, and no root and no flags.
+#[test]
+fn a_run_that_cannot_find_its_programs_says_why() {
+    let dir = tierstore_testkit::dir::TestDir::under(std::env::temp_dir(), "blackbox-root-refused");
+    let file = dir.path().join("a-file");
+    std::fs::write(&file, b"x").unwrap();
+    let rooted = Args::try_parse_from(["tierstore-blackbox", file.to_str().unwrap()]).unwrap();
+    let unread = std::io::Error::new(std::io::ErrorKind::NotFound, "gone");
+    assert_eq!(
+        rooted.programs(Err(unread)),
+        Err("the path of this program: gone".to_owned())
+    );
+    assert_eq!(
+        rooted.programs(Ok(PathBuf::from("/"))),
+        Err("/ is in no directory".to_owned())
+    );
+    let blocked = rooted.programs(Ok(PathBuf::from("/b/d"))).unwrap_err();
+    let scratch = file.join("var/tmp/tierstore-blackbox");
+    assert!(
+        blocked.starts_with(&format!("{}: ", scratch.display())),
+        "{blocked}"
+    );
+
+    let mut bare = rooted;
+    bare.root = None;
+    assert_eq!(
+        bare.programs(Ok(PathBuf::from("/b/d"))),
+        Err("--tierstore, --fake-s3 and --scratch are needed without a root".to_owned())
+    );
+}
+
 /// Rigs of the tests: a healthy model for each case but those it fails to start, and models whose
 /// stop fails, if set.
 struct Models {

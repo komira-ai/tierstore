@@ -1,3 +1,30 @@
+load("@buildrules//rules/blackbox:defs.bzl", "blackbox_test")
 load("//:buildrules.bzl", "cargo_package")
+load(":blackbox.bzl", "blackbox_driver")
 
 cargo_package(path = ".")
+
+# The driver and fake-s3 in one directory, the driver the program (blackbox.bzl).
+blackbox_driver(
+    name = "driver",
+    bins = ":bin",
+)
+
+# The released package as a black-box test on the farm (`buck2 test`, never `buck2 build`, which runs nothing): its .deb unpacked onto the farm's
+# base image and the driver run with that root, as an ordinary user with no capabilities, no /dev/fuse and no network but loopback. So it runs the
+# cases that need no mount (`start-without-fs`, README.md). A release passes the package it is about to publish with
+# `-c blackbox.tierstore_url=... -c blackbox.tierstore_sha256=... -c blackbox.tierstore_size=...`; without them, the pin below.
+blackbox_test(
+    name = "released",
+    # Ubuntu 24.04 (noble-20260917), the linux-amd64 manifest: the farm's one base image, as in buildrules' rules/blackbox/tests.
+    image = "docker://docker.io/library/ubuntu@sha256:f610ab94648195aa356059f5b41d6085c9d4d903c072430cdd1af7bdb646106b",
+    packages = [
+        {
+            "url": "https://github.com/komira-ai/tierstore/releases/download/v0.3.213/tierstore_0.3.213_amd64.deb",
+            "sha256": "32d7d680141a4849532c65c29025d1a4c823fe6786f63e5414ad9f9d54bce56b",
+            "size": 7792338,
+            "candidate": "tierstore",
+        },
+    ],
+    driver = ":driver",
+)
