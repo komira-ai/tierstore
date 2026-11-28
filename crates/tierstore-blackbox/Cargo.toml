@@ -1,0 +1,63 @@
+[package]
+name = "tierstore-blackbox"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+# The black-box test of a released `tierstore` (README.md): a driver that starts the binary of the
+# package under test with a node file of the farm's shape and drives its mount-provider socket as
+# the job agent does (Prepare, Mount, a read of the tree through the mount, Release), and the
+# upstream it points that node at, `fake-s3`: the loopback S3 service of `objstore_s3::s3::fake`
+# as a program of its own, with a control socket that stalls or fails its keys. Linux only (the
+# mount is FUSE, the memory is read from /proc): on other systems both programs say so and exit 2.
+
+[[bin]]
+name = "tierstore-blackbox"
+path = "src/main.rs"
+
+[[bin]]
+name = "fake-s3"
+path = "src/bin/fake-s3.rs"
+
+[dependencies]
+bytes.workspace = true
+clap.workspace = true
+hex.workspace = true
+http-body-util.workspace = true
+# The client of the provider's gRPC (HTTP/2, on its Unix socket) and of the node's and the
+# upstream's HTTP (`/metricz`, the PUTs of the trees).
+hyper = { workspace = true, features = ["client", "http1", "http2"] }
+hyper-util = { workspace = true, features = ["tokio"] }
+# `s3::fake`, the service `fake-s3` serves.
+objstore-s3 = { workspace = true, features = ["testkit"] }
+prost.workspace = true
+# SIGTERM to a process the rig started, and the size of a file system (`statvfs`).
+rustix = { workspace = true, features = ["fs", "process"] }
+thiserror.workspace = true
+# The tree lists the trees are written as: the version 2 list and its key (no feature: the
+# format alone, no server).
+tierstore.workspace = true
+# The L2 sidecar beside each list, as a CAS service writes it.
+tierstore-list.workspace = true
+# The provider's messages and the paths of its methods.
+tierstore-trees-api.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
+# The `grpc-status` of an answer.
+tonic = { workspace = true, features = ["codegen"] }
+
+[dev-dependencies]
+# The provider's server trait, for the provider the tests serve on a socket of their own.
+tierstore-trees-api = { workspace = true, features = ["server"] }
+hyper = { workspace = true, features = ["client", "http1", "http2", "server"] }
+hyper-util = { workspace = true, features = ["tokio"] }
+tierstore-testkit.workspace = true
+
+[lints]
+workspace = true
+
+[package.metadata.buildrules]
+# Policy only: `actions = { name = ["lint", "test"] }`, `default-action`, `[package.metadata.buildrules.lint]`.
+# Absent keys inherit [workspace.metadata.buildrules]. See docs/contract.md.

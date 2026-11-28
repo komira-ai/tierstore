@@ -1,0 +1,71 @@
+# The black-box test of a published release (crates/tierstore-blackbox/README.md): the `.deb` of the
+# release named by `tag`, checked against the release's SHA256SUMS and unpacked, its binary started
+# with a node file of the farm's shape and driven from outside through its mount-provider socket by
+# `tierstore-blackbox`, against `fake-s3` as its upstream. The driver runs as root in a container on
+# a hosted runner, with /dev/fuse, CAP_SYS_ADMIN (the mount is FUSE, made with `allow_other`) and a
+# tmpfs of 256 MiB for the case that fills its cache's disk. It prints a PASS or FAIL line per case
+# and exits 1 when a case failed; the cases' node files and logs (not their caches) are kept as
+# the artifact `blackbox`.
+#
+# By hand (`gh workflow run blackbox.yml -f tag=v<version>`) or from another workflow
+# (`workflow_call`). It holds nothing: no job of release.yml needs it, and a pull request does not
+# run it.
+name: blackbox
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: The release under test, v<major>.<minor>.<patch>
+        required: true
+        type: string
+  workflow_call:
+    inputs:
+      tag:
+        description: The release under test, v<major>.<minor>.<patch>
+        required: true
+        type: string
+
+permissions: {}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  blackbox:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      TAG: ${{ inputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - name: Build the driver and fake-s3
+        run: cargo build --locked --release -p tierstore-blackbox
+      - name: Download the release's .deb and SHA256SUMS
+        run: curl --fail --location --silent --show-error --create-dirs --output-dir "$RUNNER_TEMP/package" --remote-name "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/tierstore_${TAG#v}_amd64.deb" --remote-name "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/SHA256SUMS"
+      - name: Check the .deb against SHA256SUMS
+        working-directory: ${{ runner.temp }}/package
+        run: sha256sum --check --ignore-missing --strict SHA256SUMS
+      - name: Unpack the .deb
+        working-directory: ${{ runner.temp }}/package
+        run: dpkg-deb --extract "tierstore_${TAG#v}_amd64.deb" root
+      - name: Every case, against the release's binary
+        run: docker run --rm --device /dev/fuse --cap-add SYS_ADMIN --security-opt apparmor=unconfined --tmpfs /small:size=256m --volume "$RUNNER_TEMP/package/root:/package:ro" --volume "$GITHUB_WORKSPACE/target/release:/blackbox:ro" --volume "$RUNNER_TEMP/scratch:/scratch" ubuntu@sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852 /blackbox/tierstore-blackbox --tierstore /package/usr/libexec/tierstore/tierstore --fake-s3 /blackbox/fake-s3 --scratch /scratch --small-disk /small
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ !cancelled() }}
+        with:
+          name: blackbox
+          path: |
+            ${{ runner.temp }}/scratch/*/node.toml
+            ${{ runner.temp }}/scratch/*/logs
+          if-no-files-found: ignore

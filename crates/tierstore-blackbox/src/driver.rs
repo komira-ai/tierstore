@@ -1,0 +1,291 @@
+//! `tierstore-blackbox`: runs the cases, each against a node of its own, and reports them.
+//!
+//! ```text
+//! tierstore-blackbox --tierstore <binary> --fake-s3 <binary> --scratch <dir>
+//!     [--case <name>]... [--small-disk <dir>] [the numbers of the cases]
+//! ```
+//!
+//! `--tierstore` is the binary of the package under test (`/usr/libexec/tierstore/tierstore` of
+//! the `.deb`); it is started as `<binary> --config <node file>`. Each case gets the directory
+//! `<scratch>/<case>`, which must not exist yet. `--small-disk` is a file system of its own (a
+//! tmpfs of a few hundred MiB) for the case `disk-full`, which fills it; that case is refused
+//! without it. With no `--case`, every case runs.
+//!
+//! It prints one line per case, `PASS <case>: <what it saw>` or `FAIL <case>: <what failed>`,
+//! and exits 0 when every case passed, 1 when one failed, and 2 when its flags are refused.
+
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::process::{Command, ExitCode};
+use std::time::Duration;
+
+use clap::Parser;
+
+use crate::cases::{self, Case, Outcome, Params};
+use crate::live::{Live, Setup};
+use crate::os;
+use crate::rig::Rig;
+
+/// How long a node may take to serve its provider's socket after its start line.
+const SOCKET_WAIT: Duration = Duration::from_secs(60);
+
+/// The cache's budget of a case with its cache in its directory.
+const BUDGET_MIB: u64 = 1024;
+
+/// The most of a small disk's size the budget of the case `disk-full` takes: the node refuses a
+/// budget over the disk less its free floor.
+const SMALL_DISK_SHARE: u64 = 2;
+
+/// The flags of `tierstore-blackbox`.
+#[derive(Debug, Parser)]
+#[command(
+    name = "tierstore-blackbox",
+    about = "The black-box test of a released tierstore: its mount provider, driven from outside"
+)]
+struct Args {
+    /// The binary of the package under test.
+    #[arg(long)]
+    tierstore: PathBuf,
+    /// The `fake-s3` program, the node's upstream.
+    #[arg(long)]
+    fake_s3: PathBuf,
+    /// The directory of the cases' directories.
+    #[arg(long)]
+    scratch: PathBuf,
+    /// A case to run (t1-cycles, t2-placements, t3-stall, restart, upstream-errors, disk-full);
+    /// again for more. Every case when none is named.
+    #[arg(long = "case", value_parser = case_of)]
+    cases: Vec<Case>,
+    /// A file system of its own for the cache of `disk-full`, which fills it.
+    #[arg(long)]
+    small_disk: Option<PathBuf>,
+    /// T1: the cycles.
+    #[arg(long, default_value_t = Params::defaults().cycles)]
+    cycles: usize,
+    /// T2: the node's trees.max_placements.
+    #[arg(long, default_value_t = Params::defaults().max_placements, value_parser = clap::value_parser!(u32).range(1..))]
+    max_placements: u32,
+    /// T2: the Prepares past it.
+    #[arg(long, default_value_t = Params::defaults().burst)]
+    burst: usize,
+    /// T3: the Prepares that arrive while the upstream stalls.
+    #[arg(long, default_value_t = u32::try_from(Params::defaults().prepares).unwrap_or(u32::MAX), value_parser = clap::value_parser!(u32).range(1..))]
+    prepares: u32,
+    /// T3: the seconds they arrive over.
+    #[arg(long, default_value_t = Params::defaults().arrival.as_secs())]
+    arrival_secs: u64,
+    /// T3: the seconds the upstream stalls.
+    #[arg(long, default_value_t = Params::defaults().stall.as_secs())]
+    stall_secs: u64,
+    /// T3: the files of its tree.
+    #[arg(long, default_value_t = Params::defaults().stall_files)]
+    stall_files: usize,
+    /// T3 and the case of errors: the MiB the resident memory may be above its idle size.
+    #[arg(long, default_value_t = Params::defaults().memory_bound >> 20)]
+    memory_bound_mib: u64,
+    /// The case of errors: the seconds the upstream fails.
+    #[arg(long, default_value_t = Params::defaults().errors_for.as_secs())]
+    errors_secs: u64,
+    /// The seconds a sample of the memory is read every.
+    #[arg(long, default_value_t = Params::defaults().sample.as_secs(), value_parser = clap::value_parser!(u64).range(1..))]
+    sample_secs: u64,
+}
+
+fn case_of(name: &str) -> Result<Case, String> {
+    Case::of(name).ok_or_else(|| {
+        let names: Vec<&str> = Case::ALL.iter().map(|case| case.name()).collect();
+        format!("no case {name:?}; the cases: {}", names.join(", "))
+    })
+}
+
+impl Args {
+    /// The numbers of the cases.
+    fn params(&self) -> Params {
+        let defaults = Params::defaults();
+        Params {
+            cycles: self.cycles,
+            max_placements: self.max_placements,
+            burst: self.burst,
+            prepares: self.prepares as usize,
+            arrival: Duration::from_secs(self.arrival_secs),
+            stall: Duration::from_secs(self.stall_secs),
+            stall_files: self.stall_files,
+            memory_bound: self.memory_bound_mib << 20,
+            errors_for: Duration::from_secs(self.errors_secs),
+            sample: Duration::from_secs(self.sample_secs),
+            ..defaults
+        }
+    }
+
+    /// The cases to run, in their order: those named, or every one.
+    fn cases(&self) -> Result<Vec<Case>, String> {
+        let mut cases = if self.cases.is_empty() {
+            Case::ALL.to_vec()
+        } else {
+            self.cases.clone()
+        };
+        cases.sort_unstable();
+        cases.dedup();
+        if cases.contains(&Case::Disk) && self.small_disk.is_none() {
+            return Err(
+                "the case disk-full needs --small-disk, a file system of its own that it fills; give one, or name the other cases with --case".to_owned(),
+            );
+        }
+        Ok(cases)
+    }
+}
+
+/// Where the rigs of the cases come from: a rig per case, started and then stopped.
+pub(crate) trait Rigs {
+    type Rig: Rig;
+
+    /// The rig of `case`.
+    async fn start(&mut self, case: Case, params: &Params) -> Result<Self::Rig, String>;
+
+    /// Stops `rig`.
+    fn stop(&mut self, rig: Self::Rig) -> Result<(), String>;
+}
+
+/// The rigs of running nodes (`crate::live`).
+struct Nodes<'a> {
+    args: &'a Args,
+}
+
+impl Rigs for Nodes<'_> {
+    type Rig = Live;
+
+    async fn start(&mut self, case: Case, params: &Params) -> Result<Live, String> {
+        let dir = self.args.scratch.join(case.name());
+        std::fs::create_dir(&dir).map_err(|why| format!("{}: {why}", dir.display()))?;
+        let small_disk = (case == Case::Disk)
+            .then(|| self.args.small_disk.clone())
+            .flatten();
+        let budget_mib = match &small_disk {
+            Some(disk) => budget_on(disk)?,
+            None => BUDGET_MIB,
+        };
+        let max_placements = match case {
+            Case::Placements => Some(params.max_placements),
+            Case::Stall => Some(
+                u32::try_from(params.prepares)
+                    .unwrap_or(u32::MAX)
+                    .saturating_add(1024),
+            ),
+            _ => None,
+        };
+        let setup = Setup {
+            dir,
+            fake_s3: self.args.fake_s3.clone(),
+            small_disk,
+            budget_mib,
+            max_placements,
+            socket_wait: SOCKET_WAIT,
+        };
+        let tierstore = self.args.tierstore.clone();
+        let command = Box::new(move |file: &Path| {
+            let mut command = Command::new(&tierstore);
+            command.arg("--config").arg(file);
+            command
+        });
+        Live::start(setup, command).await
+    }
+
+    fn stop(&mut self, rig: Live) -> Result<(), String> {
+        rig.stop()
+    }
+}
+
+/// The budget of a cache on the disk `disk`: a share of its size, in MiB.
+fn budget_on(disk: &Path) -> Result<u64, String> {
+    let size = os::disk_bytes(disk).map_err(|e| e.to_string())?;
+    Ok(((size / SMALL_DISK_SHARE) >> 20).max(1))
+}
+
+/// Runs `cases` with `params` on the rigs of `rigs`, writing a line per case to `out`: whether
+/// every case passed.
+pub(crate) async fn drive<S: Rigs>(
+    rigs: &mut S,
+    cases: &[Case],
+    params: &Params,
+    out: &mut impl Write,
+) -> bool {
+    let mut passed = true;
+    for case in cases {
+        let outcome = match rigs.start(*case, params).await {
+            Ok(mut rig) => {
+                let mut outcome = cases::run(*case, &mut rig, params).await;
+                if let Err(why) = rigs.stop(rig) {
+                    outcome.failures.push(format!("stopping the rig: {why}"));
+                }
+                outcome
+            }
+            Err(why) => Outcome {
+                failures: vec![format!("the rig did not start: {why}")],
+                notes: Vec::new(),
+            },
+        };
+        passed &= outcome.passed();
+        let _ = writeln!(out, "{}", line(*case, &outcome));
+        let _ = out.flush();
+    }
+    passed
+}
+
+/// The report line of `case`.
+fn line(case: Case, outcome: &Outcome) -> String {
+    if outcome.passed() {
+        format!("PASS {}: {}", case.name(), outcome.notes.join("; "))
+    } else {
+        format!(
+            "FAIL {}: {} (saw: {})",
+            case.name(),
+            outcome.failures.join("; "),
+            outcome.notes.join("; ")
+        )
+    }
+}
+
+/// The program: the flags, then every case.
+pub fn main() -> ExitCode {
+    let args = match Args::try_parse() {
+        Ok(args) => args,
+        Err(refused) => {
+            let _ = refused.print();
+            return ExitCode::from(u8::try_from(refused.exit_code()).unwrap_or(2));
+        }
+    };
+    let cases = match args.cases() {
+        Ok(cases) => cases,
+        Err(why) => {
+            let _ = writeln!(std::io::stderr(), "tierstore-blackbox: {why}");
+            return ExitCode::from(2);
+        }
+    };
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(why) => {
+            let _ = writeln!(std::io::stderr(), "tierstore-blackbox: the runtime: {why}");
+            return ExitCode::from(1);
+        }
+    };
+    let params = args.params();
+    let mut nodes = Nodes { args: &args };
+    let passed = runtime.block_on(drive(&mut nodes, &cases, &params, &mut std::io::stdout()));
+    exit_of(passed)
+}
+
+/// The exit status of a run: 0 when every case passed, 1 when one failed.
+fn exit_of(passed: bool) -> ExitCode {
+    if passed {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    }
+}
+
+#[cfg(test)]
+#[path = "driver_tests.rs"]
+mod tests;

@@ -3367,6 +3367,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "tierstore-blackbox"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "clap",
+ "hex",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "objstore-s3 0.1.0",
+ "prost",
+ "rustix",
+ "thiserror",
+ "tierstore 0.3.0",
+ "tierstore-list 0.1.0",
+ "tierstore-testkit",
+ "tierstore-trees-api 0.1.0",
+ "tokio",
+ "tonic",
+]
+
+[[package]]
 name = "tierstore-budget"
 version = "0.1.0"
 dependencies = [

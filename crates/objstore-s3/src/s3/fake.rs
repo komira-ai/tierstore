@@ -36,7 +36,8 @@
 //! unless a test makes the service keep the bytes that came of a PUT cut short, as SeaweedFS 4.54
 //! can ([`FakeS3::keep_cut_bodies`], `fake/cut.rs`). A test can hold every HEAD until it lets
 //! them go ([`FakeS3::hold_heads`], `fake/held.rs`), so that the service has taken such a PUT
-//! before it answers the HEAD a client sends after it.
+//! before it answers the HEAD a client sends after it; and stall or fail every request under a key
+//! prefix ([`FakeS3::serve_as`]): an upstream that hangs, or one that answers only errors.
 //!
 //! A PUT that carries `x-amz-copy-source` is CopyObject, or UploadPartCopy with an upload id and a
 //! part number, with S3's four source conditions (`fake/copy.rs`).
@@ -81,6 +82,7 @@ mod uploads;
 use self::checksums::Sums;
 use self::dates::{http_date, iso_date, system_seconds};
 use self::escape::{unescape, xml_text};
+pub use self::held::Serving;
 use self::kept::Kept;
 use self::uploads::{list_parts, list_uploads};
 use super::sigv4::{Request as Signed, Signer};
@@ -264,6 +266,8 @@ struct State {
     /// HEADs wait unanswered until a test lets them go, after this many more are let through
     /// ([`FakeS3::hold_heads`]); none: no HEAD is held.
     hold_heads: Option<u32>,
+    /// What the service does with each request, and how many it held ([`FakeS3::serve_as`]).
+    serving: held::Modes,
 }
 
 /// An S3 service on loopback (module docs). It serves until the runtime it was
@@ -522,12 +526,10 @@ async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
         if held::abort_dropped(&mut sock, &state, &changed, &request).await {
             return None;
         }
-        if request.method == "HEAD" {
-            held::heads_let_go(&state, &changed).await;
-        }
+        held::let_go(&state, &changed, &request).await;
         let answer = {
             let mut state = state.lock().unwrap_or_else(PoisonError::into_inner);
-            handle(&mut state, &request)
+            held::failed(&state, &request).unwrap_or_else(|| handle(&mut state, &request))
         };
         changed.notify_waiters();
         sock.write_all(&answer).await.ok()?;
