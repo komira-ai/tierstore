@@ -2,7 +2,8 @@
 //! sections 1.2 and 3.6): whether the node holds a mount, and the three paths a successor must
 //! share with the instance that runs to take the mount over (the mount point, the control socket
 //! and the runtime directory, which holds the hand-over socket of the mount and its state); and
-//! about its `mount-provider` interface: the socket `verify` asks and the mount its trees are under.
+//! about its `mount-provider` interface: the socket `verify` asks and the mount its trees are under;
+//! and the address of the NFS front of its `fs` interface, which a Mac's `verify` reads the trees from.
 //!
 //! The file is read as TOML, not loaded: the hook does not resolve users or groups, nor look at
 //! the disk. A path a param leaves out is the default the loader gives it (`treefs/config.rs`).
@@ -10,10 +11,13 @@
 //! whose path params are not strings is taken as it would read for the comparison: its own value,
 //! so two files that differ there differ.
 
+use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use crate::server::provider::DEFAULT_MOUNTPOINT as PROVIDER_DEFAULT_MOUNTPOINT;
-use crate::server::treefs::{DEFAULT_CONTROL_SOCKET, DEFAULT_MOUNTPOINT, DEFAULT_RUNTIME_DIR};
+use crate::server::treefs::{
+    DEFAULT_CONTROL_SOCKET, DEFAULT_MOUNTPOINT, DEFAULT_NFS_LISTEN, DEFAULT_RUNTIME_DIR,
+};
 
 /// The `type` of the interface that serves the trees as a file system.
 pub(super) const FS_INTERFACE: &str = "fs";
@@ -100,6 +104,9 @@ pub(in crate::server) struct ProviderShape {
     pub(in crate::server) socket: PathBuf,
     /// `params.mountpoint`, or the loader's default.
     pub(in crate::server) mountpoint: PathBuf,
+    /// The NFS front of the node's `fs` interface, on a node whose check reads its trees from it
+    /// (a Mac); `None`: the trees are read through the mount.
+    pub(in crate::server) nfs: Option<SocketAddr>,
 }
 
 /// The `mount-provider` interface of the file whose text is `text`: `None` for a file with none
@@ -123,7 +130,41 @@ pub(super) fn provider_interface(text: &str) -> Result<Option<ProviderShape>, St
     Ok(Some(ProviderShape {
         socket: path("socket", None)?,
         mountpoint: path("mountpoint", Some(PROVIDER_DEFAULT_MOUNTPOINT))?,
+        nfs: None,
     }))
+}
+
+/// The address of the NFS front of the `fs` interface of the file whose text is `text`:
+/// `params.nfs.listen`, or the loader's default; `None` for a file with no `fs` interface (or a
+/// text that is not TOML).
+///
+/// # Errors
+/// A `listen` that is not an address and a port, or that names port 0: the hook could not reach
+/// it.
+pub(super) fn nfs_front(text: &str) -> Result<Option<SocketAddr>, String> {
+    let Some(entry) = interface(text, FS_INTERFACE) else {
+        return Ok(None);
+    };
+    let listen = entry
+        .get("params")
+        .and_then(toml::Value::as_table)
+        .and_then(|params| params.get("nfs"))
+        .and_then(toml::Value::as_table)
+        .and_then(|nfs| nfs.get("listen"));
+    let Some(listen) = listen else {
+        return Ok(Some(DEFAULT_NFS_LISTEN));
+    };
+    listen
+        .as_str()
+        .and_then(|text| text.parse::<SocketAddr>().ok())
+        .filter(|address| address.port() != 0)
+        .map(Some)
+        .ok_or_else(|| {
+            format!(
+                "the {FS_INTERFACE} interface's nfs.listen, {listen}, is no address and port the \
+                 hook can reach"
+            )
+        })
 }
 
 #[cfg(test)]
@@ -245,6 +286,7 @@ mod tests {
         let shape = |socket: &str, mountpoint: &str| ProviderShape {
             socket: PathBuf::from(socket),
             mountpoint: PathBuf::from(mountpoint),
+            nfs: None,
         };
         assert_eq!(
             provider_interface(&entry("params = { socket = \"/var/p.sock\" }\n")),

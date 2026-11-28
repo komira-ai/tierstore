@@ -8,6 +8,9 @@
 //! that is not one of the protocol are [`ProviderFault::Silent`]; a gRPC status other than OK is
 //! [`ProviderFault::Answered`], with the provider's message.
 //!
+//! The read of a Mac's tree is not through the mount but from the NFS front of the node's `fs`
+//! interface (`nfs_read.rs`), with the same bounds.
+//!
 //! The read walks the directory without following a link, reads every file whole, and gives up
 //! past [`MAX_PATHS`] paths or a file over [`MAX_FILE_BYTES`] (a tree of the check is far
 //! smaller), or after its own bound: it runs on a thread of its own, so that a mount that never
@@ -33,8 +36,11 @@ use tierstore_trees_api::provider::v1::{
 use tokio::net::UnixStream;
 use tonic::{Code, Status};
 
-use super::super::ports::{MountProvider, ProviderCode, ProviderFault, ReadFault, TreeNode};
+use super::super::ports::{
+    MountProvider, ProviderCode, ProviderFault, ReadFault, TreeAt, TreeNode,
+};
 use super::host::under;
+use super::nfs_read;
 use crate::server::provider::check::{AGENT, RUN};
 
 /// The longest a `Prepare` may take, as jobscheduler's agent bounds it.
@@ -225,12 +231,31 @@ impl MountProvider for ProviderSocket {
         Ok(())
     }
 
-    fn read_tree(&self, dir: &Path) -> Result<BTreeMap<String, TreeNode>, ReadFault> {
-        let at = under(&self.root, dir);
-        let (sender, read) = mpsc::channel();
-        // The thread is left to the end of the process if the mount never answers it.
-        std::thread::spawn(move || sender.send(walk(&at)));
-        read.recv_timeout(self.times.read).unwrap_or_else(|_| {
+    fn read_tree(&self, at: TreeAt<'_>) -> Result<BTreeMap<String, TreeNode>, ReadFault> {
+        // The thread is left to the end of the process if the mount, or the front, never answers.
+        match at {
+            TreeAt::Mount(dir) => {
+                let dir = under(&self.root, dir);
+                self.bounded(move || walk(&dir))
+            }
+            TreeAt::Front { front, below } => {
+                let (below, bound) = (below.to_path_buf(), self.times.read);
+                // Each call waits at most the bound, and the whole read too.
+                self.bounded(move || nfs_read::read_tree(front, &below, bound))
+            }
+        }
+    }
+}
+
+impl ProviderSocket {
+    /// What `read` gives, on a thread of its own, if it ends within the read's bound.
+    fn bounded(
+        &self,
+        read: impl FnOnce() -> Result<BTreeMap<String, TreeNode>, ReadFault> + Send + 'static,
+    ) -> Result<BTreeMap<String, TreeNode>, ReadFault> {
+        let (sender, answer) = mpsc::channel();
+        std::thread::spawn(move || sender.send(read()));
+        answer.recv_timeout(self.times.read).unwrap_or_else(|_| {
             Err(ReadFault::Unread(format!(
                 "the read did not end within {} ms",
                 self.times.read.as_millis()
@@ -307,7 +332,7 @@ fn read_file(path: &str, at: &Path) -> Result<Vec<u8>, ReadFault> {
 
 /// `path` could not be `done`, with the system's words.
 fn shown(path: &str, done: &str, error: &std::io::Error) -> ReadFault {
-    ReadFault::Unread(format!("{path} could not be {done}: {error}"))
+    ReadFault::Failed(format!("{path} could not be {done}: {error}"))
 }
 
 /// What the read found is no tree of the check: `why`.

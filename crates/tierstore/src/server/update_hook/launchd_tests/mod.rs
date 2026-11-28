@@ -3,7 +3,8 @@
 //! step, the binary the plist runs, the refusals of every step, and the convergence of every step
 //! after a failure at each of its calls; and the volume of a Mac: the refusal of a node of
 //! the two-process layout, and the volume `verify` requires served; and every step of a Mac of the
-//! macOS installer package, over the machine's own host and the layout the release ships.
+//! macOS installer package, over the machine's own host and the layout the release ships, and its
+//! mount check, read from the node's NFS front.
 
 mod binary;
 mod crash;
@@ -14,6 +15,7 @@ mod fs_job;
 mod lifecycle;
 mod mount_check;
 mod package;
+mod package_check;
 mod package_provider;
 mod refusals;
 mod rollback;

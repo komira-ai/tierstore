@@ -120,8 +120,9 @@ pub enum Reason {
     /// be refused the same way.
     ProviderRefused,
     /// `verify`: a tree the node's mount provider placed for the mount check was read back wrong
-    /// through the mount (a file missing or of other bytes, a path of another kind or not in the
-    /// tree, a directory outside the mount), or its placement outlived its release.
+    /// (through the mount, or on a Mac from the node's NFS front: a file missing or of other bytes,
+    /// a path of another kind or not in the tree, a directory outside the mount), a read of it was
+    /// answered with an error, or its placement outlived its release.
     MountedTreeWrong,
     /// `verify`: the node's mount provider answered a call of the mount check `UNAVAILABLE` (exit
     /// 75): it is there, and has no room or no turn now (its placements, its sources or its

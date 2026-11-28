@@ -8,7 +8,10 @@
 //! 2. `Prepare` of each source with its tree's list, then `Mount` of each: the directory of its
 //!    tree, which must be below the provider's mount.
 //! 3. A read of every path below each directory, compared with the tree: every file's bytes,
-//!    every directory and the link's target, and nothing else.
+//!    every directory and the link's target, and nothing else. On a node whose trees are read from
+//!    the NFS front of its `fs` interface ([`Read::NfsFront`], a Mac), the read asks the front
+//!    for the directory's path under the mount, as the kernel's client of the mount asks it, and
+//!    never reads the mount itself: macOS refuses the hook's process every read of the volume.
 //! 4. `Release` of both, then a `Mount` of each, which must be answered `UNAVAILABLE` with
 //!    [`NOT_PREPARED_HERE`]: the provider finds no placement at the source's path. A directory
 //!    answered then is a placement that outlived its release; any other answer is judged as at
@@ -16,16 +19,17 @@
 //!
 //! What fails the check, and so `verify`, with the provider's reason: a refusal of any call
 //! (`FAILED_PRECONDITION`, `INVALID_ARGUMENT` or any status but `UNAVAILABLE`,
-//! [`Reason::ProviderRefused`]), and a tree read back wrong or no tree of the check, a directory
-//! outside the mount, or a placement that outlives its release ([`Reason::MountedTreeWrong`]). Both are the release's: the
+//! [`Reason::ProviderRefused`]), and a tree read back wrong or no tree of the check, a path of it
+//! the system answers with an error (a stale handle, a permission), a directory outside the mount,
+//! or a placement that outlives its release ([`Reason::MountedTreeWrong`]). Both are the release's: the
 //! node's jobs would fail the same way. What defers it (hostkeeper asks again and ends the
 //! deferrals itself at `verify_deadline_secs`) is what load or a start explains:
 //! [`Reason::ProviderBusy`], of the environment, for a provider that answers `UNAVAILABLE` (it has
 //! no room or no turn now: `trees.max_sources`, `trees.max_placements` or
 //! `trees.prepare_concurrency` at its bound, or a tree not placed within the `Mount`'s wait), and
 //! [`Reason::NotReady`] for a provider that does not answer (its socket not bound yet: the new
-//! instance binds it once it holds the cache's lock) or a read through the mount that fails or
-//! does not end within its bound (a slow fill).
+//! instance binds it once it holds the cache's lock) or a read through the mount that does not
+//! end within its bound (a slow fill).
 //! A check that fails or defers after
 //! its first `Prepare` asks for the release of both sources before it ends (each asked even when
 //! the other's is not answered), so that it leaves no placement the provider can release; a
@@ -36,24 +40,37 @@
 //! while jobs run. A node without the interface has no provider, and nothing is checked.
 
 use std::collections::BTreeMap;
-use std::path::{Component, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use super::params::Params;
-use super::ports::{Host, MountProvider, ProviderCode, ProviderFault, ReadFault, TreeNode};
+use super::ports::{Host, MountProvider, ProviderCode, ProviderFault, ReadFault, TreeAt, TreeNode};
 use super::report::{Done, Reason};
-use super::shape::{ProviderShape, provider_interface};
+use super::shape::{ProviderShape, nfs_front, provider_interface};
 use crate::server::provider::NOT_PREPARED_HERE;
 use crate::server::provider::check::{CheckTree, TREES};
 
-/// Runs the check on the node whose file the params name: what to say of it when it passed (an
-/// empty text on a node with no provider, or with no file named).
+/// How the check reads the trees the provider placed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Read {
+    /// Through the mount, as a job reads them (systemd).
+    Mount,
+    /// From the NFS front of the node's `fs` interface (launchd): macOS refuses the process
+    /// hostkeeper runs the hook in every read of the network volume, which no privacy grant of
+    /// it covers.
+    NfsFront,
+}
+
+/// Runs the check on the node whose file the params name, reading the trees as `read` says: what
+/// to say of it when it passed (an empty text on a node with no provider, or with no file named).
 ///
 /// # Errors
-/// The check failed or is deferred; the file cannot be read, or its provider entry is refused.
+/// The check failed or is deferred; the file cannot be read, or its provider entry, or the
+/// address of its NFS front, is refused.
 pub(super) fn on_node(
     host: &dyn Host,
     provider: &dyn MountProvider,
     params: &Params,
+    read: Read,
 ) -> Result<String, Done> {
     let Some(config) = &params.config_file else {
         return Ok(String::new());
@@ -61,11 +78,14 @@ pub(super) fn on_node(
     let Some(text) = host.config(config)? else {
         return Ok(String::new());
     };
-    let shape = provider_interface(&text).map_err(|why| Done::fail(Reason::ConfigRefused, why))?;
-    match shape {
-        Some(shape) => check(provider, &shape, params.verify_retry_secs),
-        None => Ok(String::new()),
+    let refused = |why| Done::fail(Reason::ConfigRefused, why);
+    let Some(mut shape) = provider_interface(&text).map_err(refused)? else {
+        return Ok(String::new());
+    };
+    if read == Read::NfsFront {
+        shape.nfs = nfs_front(&text).map_err(refused)?;
     }
+    check(provider, &shape, params.verify_retry_secs)
 }
 
 /// Runs the check against the provider at `shape`: what to say of it.
@@ -98,8 +118,12 @@ pub(in crate::server) fn check(
         }
     }
     let forms: Vec<&str> = TREES.iter().map(|tree| tree.form).collect();
+    let from = shape
+        .nfs
+        .map(|front| format!(", read from the NFS front at {front}"))
+        .unwrap_or_default();
     Ok(format!(
-        "the mount provider at {} placed, served and released a tree {}",
+        "the mount provider at {} placed, served and released a tree {}{from}",
         shape.socket.display(),
         forms.join(" and one ")
     ))
@@ -142,9 +166,9 @@ impl Asked<'_> {
             dirs.push(self.below_mount(&tree, dir)?);
         }
         for (tree, dir) in TREES.iter().zip(&dirs) {
-            let read = self.provider.read_tree(dir).map_err(|fault| match fault {
+            let read = self.read(dir).map_err(|fault| match fault {
                 // The mount fills a file as it is opened, and a node under load fills slowly: a
-                // read that does not end, or fails, is asked again, until hostkeeper's deadline.
+                // read that does not end is asked again, until hostkeeper's deadline.
                 ReadFault::Unread(why) => Done::deferred(
                     Reason::NotReady,
                     format!(
@@ -154,6 +178,18 @@ impl Asked<'_> {
                     ),
                     self.retry_secs,
                 ),
+                // The check's objects are the release's own, read from memory: a read the system
+                // answers with an error is no slow fill but a mount that does not serve the tree
+                // placed, and asking again would only ask it again.
+                ReadFault::Failed(why) => wrong(format!(
+                    "the tree {} at {} could not be read {}: {why}",
+                    tree.form,
+                    dir.display(),
+                    self.shape.nfs.map_or_else(
+                        || "through the mount".to_owned(),
+                        |front| format!("from the NFS front at {front}")
+                    )
+                )),
                 ReadFault::NotTheTree(why) => wrong(format!(
                     "the tree {} at {} is not the tree prepared: {why}",
                     tree.form,
@@ -169,6 +205,19 @@ impl Asked<'_> {
             }
         }
         Ok(())
+    }
+
+    /// The tree at `dir`, a directory below the provider's mount: from the NFS front when the
+    /// node's trees are read from it, else through the mount.
+    fn read(&self, dir: &Path) -> Result<BTreeMap<String, TreeNode>, ReadFault> {
+        let at = match self.shape.nfs {
+            Some(front) => TreeAt::Front {
+                front,
+                below: dir.strip_prefix(&self.shape.mountpoint).unwrap_or(dir),
+            },
+            None => TreeAt::Mount(dir),
+        };
+        self.provider.read_tree(at)
     }
 
     /// `dir`, if it is below the provider's mount.

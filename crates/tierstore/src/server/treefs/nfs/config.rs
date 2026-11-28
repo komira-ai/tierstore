@@ -33,8 +33,10 @@ use crate::server::config_units::Dur;
 use crate::server::handoff::Handoff;
 use crate::server::lock::check_lock_path;
 
-/// The address the protocols are served on when the file leaves out `fs.nfs.listen`.
-const DEFAULT_LISTEN: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12_049);
+/// The address the protocols are served on when the file leaves out `fs.nfs.listen`: also where
+/// the update hook reads a Mac's check trees (`update_hook/shape.rs`).
+pub(in crate::server) const DEFAULT_LISTEN: SocketAddr =
+    SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12_049);
 
 /// The time a failing mount is tried again when the file leaves out `fs.nfs.mount_wait`.
 const DEFAULT_MOUNT_WAIT: Duration = Duration::from_secs(30);

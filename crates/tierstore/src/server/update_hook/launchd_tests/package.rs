@@ -37,7 +37,7 @@ use std::time::Duration;
 use tierstore_testkit::dir::TestDir;
 
 use super::fake::{assert_failed, assert_ok};
-use super::package_provider::{PackageProvider, SOCKET};
+use super::package_provider::{Arranged, FILE_FRONT, PackageProvider, SOCKET};
 use crate::server::build_info::gauge;
 use crate::server::provider::check::WITHOUT_SIDECAR;
 use crate::server::update_hook::launchd::run_step_with;
@@ -57,13 +57,13 @@ use crate::server::update_hook::{
 /// Where hostkeeper keeps the versions of the service.
 const PACKAGES: &str = "/var/lib/hostkeeper/packages/tierstore";
 /// The release hostkeeper's `current` names on the farm Macs.
-const CURRENT: &str = "0.3.202";
+pub(super) const CURRENT: &str = "0.3.202";
 /// The release of the update the hook's record holds in flight on them.
 const STALE: &str = "0.3.203";
 /// The release whose `prepare` failed on one of them.
 const FAILED: &str = "0.3.208";
 /// The release this repository ships next.
-const NEXT: &str = "0.3.209";
+pub(super) const NEXT: &str = "0.3.209";
 /// The commit every stand-in build names in its build gauge.
 const COMMIT: &str = "0000000000d1";
 /// The user id `dscl` gives `_tierstore`.
@@ -73,7 +73,7 @@ const MOUNT_PROGRAM: &str = "/sbin/mount";
 /// The node's file of a Mac: one process, with an `fs` interface.
 const NODE_FILE: &str = include_str!("../../../../../../packaging/macos/tierstore.toml");
 /// The mount point of that file's `fs` interface.
-const MOUNT: &str = "/private/var/tierstore/fs";
+pub(super) const MOUNT: &str = "/private/var/tierstore/fs";
 /// The plist the macOS installer package installs.
 const PACKAGE_PLIST: &str = include_str!("../../../../../../packaging/macos-pkg/tierstore.plist");
 /// The label of the package's job and the manifest's `launchd_label`.
@@ -197,7 +197,7 @@ struct Job {
 }
 
 /// A Mac under a scratch root, and the stand-ins of its programs.
-struct Mac {
+pub(super) struct Mac {
     _dir: TestDir,
     root: PathBuf,
     /// Where the packages are built, outside the root.
@@ -207,25 +207,25 @@ struct Mac {
     calls: RefCell<Vec<Call>>,
     now: Cell<u64>,
     /// The node's mount provider, on the socket its file names.
-    provider: PackageProvider,
+    pub(super) provider: PackageProvider,
 }
 
 impl Mac {
     /// A Mac with hostkeeper's packages directory (0711) and service directory (0711), the node's
     /// file, and the namespace `trees` that tierstore's file system has at the mount point.
     fn new(name: &str) -> Mac {
-        Mac::with_provider(name, false)
+        Mac::with_provider(name, Arranged::Built)
     }
 
-    /// [`Mac::new`], whose provider refuses the tree without a sidecar when `refuse_plain`.
-    fn with_provider(name: &str, refuse_plain: bool) -> Mac {
+    /// [`Mac::new`], whose provider's objects and placements stand as `arranged` says.
+    pub(super) fn with_provider(name: &str, arranged: Arranged) -> Mac {
         let dir = TestDir::under(std::env::temp_dir(), name);
         let root = dir.path().join("host");
         let work = dir.path().join("work");
         fs::create_dir_all(&work).expect("work");
         fs::create_dir_all(&root).expect("root");
         set_mode(&root, 0o755);
-        let provider = PackageProvider::new(name, &root, MOUNT, refuse_plain);
+        let provider = PackageProvider::new(name, &root, MOUNT, arranged);
         let mac = Mac {
             _dir: dir,
             root,
@@ -258,7 +258,7 @@ impl Mac {
 
     /// The payload of the package of `version`, laid out as `release macos-pkg` lays it out, and
     /// staged as hostkeeper's `macos-pkg` installer stages it.
-    fn stage(&self, version: &str) {
+    pub(super) fn stage(&self, version: &str) {
         let payload = self.work.join(format!("{version}.payload"));
         let files = [
             (package_binary(), 0o755, program_text(version)),
@@ -289,7 +289,7 @@ impl Mac {
 
     /// hostkeeper's `activate` of the staged `version` (and its rollback, the `activate` of the
     /// kept previous version): its payload installed at `/`.
-    fn activate(&self, version: &str) {
+    pub(super) fn activate(&self, version: &str) {
         install_copy(&self.at(&release(version)).join("tree"), &self.root);
     }
 
@@ -300,7 +300,7 @@ impl Mac {
         state.save(&record.encode()).expect("save");
     }
 
-    fn record(&self) -> Record {
+    pub(super) fn record(&self) -> Record {
         let state = self.state();
         let bytes = state.load().expect("load").expect("a record");
         Record::decode(&bytes).expect("decode")
@@ -311,7 +311,7 @@ impl Mac {
     }
 
     /// The job's process and the version it serves, if it serves.
-    fn serving(&self) -> Option<(u32, String)> {
+    pub(super) fn serving(&self) -> Option<(u32, String)> {
         let job = self.job.borrow();
         let job = job.as_ref()?;
         Some((job.pid, job.image.as_ref()?.version.clone()))
@@ -340,7 +340,7 @@ impl Mac {
     }
 
     /// Runs `step` of the hook of a release, as hostkeeper runs it on a Mac (root).
-    fn step(&self, step: Step, params: &Params) -> Done {
+    pub(super) fn step(&self, step: Step, params: &Params) -> Done {
         let config = SystemConfig {
             root: self.root.clone(),
             owner: me(),
@@ -567,7 +567,7 @@ fn params_text(version: &str, previous: Option<&str>) -> String {
 }
 
 /// [`params_text`], parsed.
-fn params(version: &str, previous: Option<&str>) -> Params {
+pub(super) fn params(version: &str, previous: Option<&str>) -> Params {
     Params::parse(&params_text(version, previous)).expect("params")
 }
 
@@ -589,7 +589,7 @@ fn farm_mac(name: &str) -> Mac {
 }
 
 /// [`farm_mac`] of `mac`.
-fn farm_mac_with(mac: Mac) -> Mac {
+pub(super) fn farm_mac_with(mac: Mac) -> Mac {
     mac.stage(CURRENT);
     mac.activate(CURRENT);
     let booted = mac.launchctl(&["bootstrap", "system", LAUNCHD_PLIST]);
@@ -638,12 +638,13 @@ fn updates_by_hand_over(mac: &Mac) {
     let verified = mac.step(Step::Verify, &params);
     assert_ok(&verified);
     // The node's provider, on the socket of the Mac's file, placed both trees of the check under
-    // the file's mount point, they read back through it, and it released them.
+    // the file's mount point, they read back from the NFS front of the file (never the volume,
+    // which macOS does not let the hook's process read), and it released them.
     let said = verified.report.detail.clone().unwrap_or_default();
     assert!(
         said.starts_with(&format!(
             "the mount provider at {SOCKET} placed, served and released a tree with its L2 \
-             sidecar and one without an L2 sidecar; "
+             sidecar and one without an L2 sidecar, read from the NFS front at {FILE_FRONT}; "
         )),
         "{said}"
     );
@@ -708,7 +709,10 @@ fn a_farm_mac_with_a_failed_attempt_staged_updates_the_same_way() {
 /// of that form, on the package the release ships and the node file a Mac has.
 #[test]
 fn a_farm_mac_whose_provider_refuses_a_tree_fails_verify_and_rolls_back() {
-    let mac = farm_mac_with(Mac::with_provider("mac-package-refused", true));
+    let mac = farm_mac_with(Mac::with_provider(
+        "mac-package-refused",
+        Arranged::NoPlainList,
+    ));
     let (pid, _) = mac.serving().expect("the job serves");
     mac.stage(NEXT);
     let params = params(NEXT, Some(CURRENT));

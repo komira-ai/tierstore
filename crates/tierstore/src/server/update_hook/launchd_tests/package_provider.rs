@@ -4,69 +4,93 @@
 //! point that file names; asked by the hook's real client (`ProviderSocket`), as `system.rs`
 //! builds it for a step, through the root.
 //!
-//! What stands in is the volume alone: tierstore's file system, which a Mac serves over NFS from
-//! the job's own process, cannot be mounted here. So once the provider answers a `Mount` with a
-//! directory, the stand-in lays out at that directory, under the root, the tree the provider
-//! placed there: the tree of the placement the store has at the source's path, read from the image
-//! the provider wrote (the version 2 list it placed), every file's bytes read through the node's
-//! cache from the pack the list names, as the volume serves them; a `Release` takes it away. Then
-//! the hook's real read walks it. Nothing of the check's own trees is put there: what the hook
-//! reads is what the provider made of the objects.
+//! The trees it places are read as a Mac's check reads them: from the NFS front of the node's
+//! `fs` interface, by the hook's real reader over loopback TCP. The front is real too: the NFS
+//! front of the release, over a core of the file system that calls the provider's own cache and
+//! tree store in the process, as the node's `fs` interface does, so what the hook reads is what
+//! the provider placed, found by the front at the source's path. It serves on a free loopback
+//! port, not on the port of the Mac's file (`127.0.0.1:12049`): a read the hook asks of the
+//! file's front is checked to name that front and then asked of this one.
+//!
+//! The volume itself is the one thing not read: the hook's process may not read it on a Mac
+//! (macOS answers `Operation not permitted` to a process that its privacy grant of network
+//! volumes does not cover), and a read of it here is answered so.
 //!
 //! The check's objects are in the store as a build service stores them (the pack, both lists, the
 //! one sidecar): the node's own `CheckUpstream` is proved by the node test of `serve_tests.rs`.
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tokio::runtime::Runtime;
 use tokio::sync::Notify;
 
-use crate::server::local_cache::trees::image_path;
 use crate::server::provider::check::{WITH_SIDECAR, WITHOUT_SIDECAR, pack, pack_key};
 use crate::server::provider::serve;
 use crate::server::provider::testing::Rig;
+use crate::server::treefs::NfsFront;
 use crate::server::update_hook::machine::{ProviderSocket, ProviderTimes};
-use crate::server::update_hook::{MountProvider, ProviderFault, ReadFault, TreeNode};
-use crate::{Backend, ByteRange, RecordChild, TreeDigest, TreeLimits, TreeListV2, TreeRecord};
+use crate::server::update_hook::{MountProvider, ProviderFault, ReadFault, TreeAt, TreeNode};
 
 /// The provider's socket in the Mac's file.
 pub(super) const SOCKET: &str = "/usr/local/tierstore/run/provider.sock";
 
-/// The node's provider, its socket under the Mac's root, and the hook's client of it.
+/// The NFS front of the Mac's file (`fs.nfs.listen`).
+pub(super) const FILE_FRONT: &str = "127.0.0.1:12049";
+
+/// What macOS answers the hook's process for a read of the volume.
+pub(super) const NOT_PERMITTED: &str =
+    "the directory could not be listed: Operation not permitted (os error 1)";
+
+/// How the check's objects and placements stand.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Arranged {
+    /// As a build service stores the objects, and the placements as the provider makes them.
+    Built,
+    /// The list of the tree without a sidecar left out of the store, so that the provider
+    /// refuses that tree (`no tree list at cas/l/<id>`).
+    NoPlainList,
+    /// The placements let go of in the tree store just before the hook reads them, so that the
+    /// front finds no tree at the sources' paths.
+    GoneBeforeRead,
+}
+
+/// The node's provider, its socket under the Mac's root, its NFS front, and the hook's client.
 pub(super) struct PackageProvider {
-    runtime: Runtime,
+    /// The runtime the provider, the front and the cache run on, kept while they serve.
+    _runtime: Runtime,
     rig: Rig,
     halt: Arc<Notify>,
-    root: PathBuf,
-    mount: PathBuf,
+    front: NfsFront,
+    arranged: Arranged,
     client: ProviderSocket,
 }
 
 impl PackageProvider {
-    /// The provider of the Mac under `root`, whose mount point is `mount`; with `refuse_plain`,
-    /// the list of the tree without a sidecar is left out of the store, so the provider refuses
-    /// that tree (`no tree list at cas/l/<id>`).
-    pub(super) fn new(name: &str, root: &Path, mount: &str, refuse_plain: bool) -> Self {
+    /// The provider of the Mac under `root`, whose mount point is `mount`, arranged as
+    /// `arranged` says.
+    pub(super) fn new(name: &str, root: &Path, mount: &str, arranged: Arranged) -> Self {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
             .expect("a runtime");
         let mount_path = PathBuf::from(mount);
-        let rig = runtime.block_on(async {
+        let (rig, front) = runtime.block_on(async {
             let rig = Rig::mounted_under(name, &mount_path).await;
             let up = &rig.bench.rig;
             up.put(&pack_key(), &pack()).await;
             up.put(&WITH_SIDECAR.key(), WITH_SIDECAR.list).await;
             up.put(&WITH_SIDECAR.sidecar_key(), WITH_SIDECAR.sidecar.unwrap())
                 .await;
-            if !refuse_plain {
+            if arranged != Arranged::NoPlainList {
                 up.put(&WITHOUT_SIDECAR.key(), WITHOUT_SIDECAR.list).await;
             }
-            rig
+            let trees = (&rig.bench.rig.cache, &rig.bench.store);
+            let front = NfsFront::over(name, trees, rig.bench.rig.config.path.clone()).await;
+            (rig, front)
         });
         let socket = root.join(SOCKET.trim_start_matches('/'));
         fs::create_dir_all(socket.parent().expect("the socket's directory")).expect("run");
@@ -79,11 +103,11 @@ impl PackageProvider {
             || socket.exists(),
         ));
         Self {
-            runtime,
+            _runtime: runtime,
             rig,
             halt,
-            root: root.to_path_buf(),
-            mount: mount_path,
+            front,
+            arranged,
             client: ProviderSocket::new(root.to_path_buf(), ProviderTimes::default()),
         }
     }
@@ -93,96 +117,24 @@ impl PackageProvider {
         self.rig.bench.store.sizes().0
     }
 
-    /// `dir` (absolute on the Mac) under the root.
-    fn at(&self, dir: &Path) -> PathBuf {
-        self.root.join(dir.strip_prefix("/").unwrap_or(dir))
+    /// Where the front this provider's trees are read from serves.
+    pub(super) fn front(&self) -> SocketAddr {
+        self.front.address
     }
 
-    /// Lays out at `dir` the tree the store has placed there, as the volume serves it.
-    fn serve_volume(&self, dir: &Path) {
-        let place = dir.strip_prefix(&self.mount).expect("below the mount");
-        let located = self
-            .rig
-            .bench
-            .store
-            .locate_fs(&place.to_string_lossy())
-            .expect("a placement at the source's path");
-        let image = fs::read(image_path(&self.rig.bench.rig.config.path, &located.tree))
-            .expect("the image the provider wrote");
-        let list = TreeListV2::open(&image).expect("a version 2 list");
-        let built = list
-            .build(&TreeLimits::default(), |_| {})
-            .expect("the tree");
-        let records: BTreeMap<[u8; 32], TreeRecord> = built
-            .records
-            .into_iter()
-            .map(|(digest, record)| (*digest.as_bytes(), record))
-            .collect();
-        let sources: BTreeMap<String, (String, u64)> = built
-            .files
-            .into_iter()
-            .filter_map(|file| {
-                let source = file.source?;
-                Some((file.path, (source.key.to_string(), source.offset)))
-            })
-            .collect();
-        let at = self.at(dir);
-        fs::create_dir_all(&at).expect("the source's directory");
-        self.lay_out(&records, &sources, &built.root, &at, "");
-    }
-
-    /// Lays out the directory whose record is `digest` at `at`, its paths below `prefix`.
-    fn lay_out(
-        &self,
-        records: &BTreeMap<[u8; 32], TreeRecord>,
-        sources: &BTreeMap<String, (String, u64)>,
-        digest: &TreeDigest,
-        at: &Path,
-        prefix: &str,
-    ) {
-        for child in records[digest.as_bytes()].children() {
-            let path = format!("{prefix}{}", child.name());
-            let to = at.join(child.name());
-            match child {
-                RecordChild::Dir { digest, .. } => {
-                    fs::create_dir(&to).expect("a directory");
-                    self.lay_out(records, sources, digest, &to, &format!("{path}/"));
-                }
-                RecordChild::Symlink { target, .. } => {
-                    std::os::unix::fs::symlink(target, &to).expect("a link");
-                }
-                RecordChild::File {
-                    mode, size, sha256, ..
-                } => {
-                    let bytes = match sources.get(&path) {
-                        Some((key, offset)) => {
-                            let cache = self.rig.bench.rig.cache.clone();
-                            let range = Some(ByteRange::new(*offset, *size));
-                            let key = key.clone();
-                            self.runtime
-                                .block_on(async move { cache.get(&key, range).await })
-                                .expect("the file's bytes through the cache")
-                                .to_vec()
-                        }
-                        None => Vec::new(),
-                    };
-                    assert_eq!(TreeDigest::of(&bytes), *sha256, "{path}");
-                    fs::write(&to, &bytes).expect("a file");
-                    fs::set_permissions(&to, fs::Permissions::from_mode(u32::from(mode.bits())))
-                        .expect("its mode");
-                }
+    /// Lets go of every placement of the check's sources in the tree store.
+    fn let_go(&self) {
+        let store = &self.rig.bench.store;
+        for index in 0..2 {
+            let place = format!(
+                "mount-provider/{}/{}/{index}",
+                hex::encode(crate::server::provider::check::AGENT),
+                hex::encode(crate::server::provider::check::RUN)
+            );
+            if let Some(located) = store.locate_fs(&place) {
+                store.release_now(&located.placement).expect("let go");
             }
         }
-    }
-
-    /// The directory the source `index` is placed at, as the provider names it.
-    fn dir_of(&self, index: u32) -> PathBuf {
-        let place = format!(
-            "mount-provider/{}/{}/{index}",
-            hex::encode(crate::server::provider::check::AGENT),
-            hex::encode(crate::server::provider::check::RUN)
-        );
-        self.mount.join(place)
     }
 }
 
@@ -198,25 +150,24 @@ impl MountProvider for PackageProvider {
     }
 
     fn mount(&self, socket: &Path, index: u32) -> Result<PathBuf, ProviderFault> {
-        let dir = self.client.mount(socket, index)?;
-        // The volume shows a placed tree only once: a second `Mount` of a source finds it there.
-        if !self.at(&dir).exists() {
-            self.serve_volume(&dir);
-        }
-        Ok(dir)
+        self.client.mount(socket, index)
     }
 
     fn release(&self, socket: &Path, index: u32) -> Result<(), ProviderFault> {
-        self.client.release(socket, index)?;
-        // The volume no longer shows the source's tree.
-        let at = self.at(&self.dir_of(index));
-        if at.exists() {
-            fs::remove_dir_all(&at).expect("the released tree");
-        }
-        Ok(())
+        self.client.release(socket, index)
     }
 
-    fn read_tree(&self, dir: &Path) -> Result<BTreeMap<String, TreeNode>, ReadFault> {
-        self.client.read_tree(dir)
+    fn read_tree(&self, at: TreeAt<'_>) -> Result<BTreeMap<String, TreeNode>, ReadFault> {
+        match at {
+            TreeAt::Mount(_) => Err(ReadFault::Failed(NOT_PERMITTED.to_owned())),
+            TreeAt::Front { front, below } => {
+                assert_eq!(front.to_string(), FILE_FRONT, "the front of the Mac's file");
+                if self.arranged == Arranged::GoneBeforeRead {
+                    self.let_go();
+                }
+                let front = self.front.address;
+                self.client.read_tree(TreeAt::Front { front, below })
+            }
+        }
     }
 }
