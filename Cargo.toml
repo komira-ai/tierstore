@@ -168,6 +168,8 @@ tierstore-journal = { path = "crates/tierstore-journal" }
 # The node cache's entry stores: on Linux (T1) and in process (T-M1); the mount client's tests
 # serve from it.
 tierstore-entry = { path = "crates/tierstore-entry" }
+# Eviction and admission of the node cache (section 7) and its evictor lock `packs-v2/.lock`.
+tierstore-evict = { path = "crates/tierstore-evict" }
 # The shared fakes and models of section 14 and the EntryStore conformance suite (tests only).
 tierstore-harness = { path = "crates/tierstore-harness" }
 # The server side of the mount protocol (T5); the mount client's tests run against it.

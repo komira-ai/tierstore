@@ -32,17 +32,26 @@
 
 mod book;
 mod cells;
+mod committed;
+pub(crate) mod stack;
+pub(crate) mod upstream;
 
 #[cfg(test)]
 mod book_tests;
 #[cfg(test)]
 mod cells_tests;
 #[cfg(test)]
+mod committed_tests;
+#[cfg(test)]
 mod front_tests;
 #[cfg(test)]
 mod routing_tests;
 #[cfg(test)]
-pub(super) mod testing;
+mod stack_tests;
+#[cfg(test)]
+pub(in crate::server) mod testing;
+#[cfg(test)]
+mod upstream_tests;
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -160,6 +169,8 @@ pub struct LargeObjects {
     book: Mutex<Book>,
     jobs: AtomicU64,
     counters: LargeCounters,
+    /// The families of the read path it is served by, once [`stack`] built one.
+    exported: std::sync::OnceLock<Arc<stack::Exported>>,
 }
 
 impl LargeObjects {
@@ -179,7 +190,22 @@ impl LargeObjects {
             book: Mutex::new(Book::new(limit)),
             jobs: AtomicU64::new(0),
             counters: LargeCounters::default(),
+            exported: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Shows the families of `exported` on `/metricz` after the cache's own counters (once).
+    pub(crate) fn export(&self, exported: Arc<stack::Exported>) {
+        let _ = self.exported.set(exported);
+    }
+
+    /// The text of the families of the read path, or none if no read path is exported.
+    #[must_use]
+    pub(crate) fn metrics(&self) -> String {
+        self.exported
+            .get()
+            .map(|exported| exported.render())
+            .unwrap_or_default()
     }
 
     /// What the path did.

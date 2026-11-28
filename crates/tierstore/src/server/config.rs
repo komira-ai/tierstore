@@ -56,6 +56,7 @@ use super::cli::{
     DEFAULT_PUT_PERMIT_WAIT, DEFAULT_REGION,
 };
 use super::cli_heartbeat::HeartbeatFlags;
+use super::config_cache::read_path::{CacheTable, over_upstream, read_path_of};
 use super::config_cache::{CacheSettings, LocalCacheTable};
 use super::config_combined::{CombinedSettings, combined};
 #[path = "config_cold.rs"]
@@ -311,6 +312,9 @@ pub(super) struct File {
     /// The node-local trees of a build node.
     #[serde(default)]
     pub trees: Option<TreesTable>,
+    /// The new cache of a build node (see `config_read_path`).
+    #[serde(default)]
+    pub cache: Option<CacheTable>,
 }
 
 /// `[server]`: what the process is, its limits, and two retired no-op `grant_*` keys. A key that
@@ -679,6 +683,7 @@ pub(super) fn settings(
         local_cache,
         policy,
         trees,
+        cache: read_table,
     } = file;
     server.id = proxy_id_of(
         server.proxy_id.as_deref(),
@@ -694,6 +699,7 @@ pub(super) fn settings(
     }
     let listed = with_legacy(interface, server.listen.take(), oci)?;
     let fronts = interfaces(&listed)?;
+    let read_path = read_path_of(read_table, hot_store.is_none() && local_cache.is_some())?;
     match (hot_store, cold_store, local_cache) {
         (Some(hot), Some(cold), None) => {
             check_policies(&policy, false)?;
@@ -702,7 +708,9 @@ pub(super) fn settings(
             Ok(Settings::Storage(Box::new(cli)))
         }
         (None, Some(cold), Some(cache)) => {
-            let cache = CacheSettings::new(server, (cache, cold), fronts, &policy, per_run, trees)?;
+            let mut cache =
+                CacheSettings::new(server, (cache, cold), fronts, &policy, per_run, trees)?;
+            cache.read_path = over_upstream(read_path, &cache.upstream)?;
             Ok(Settings::Cache(Box::new(cache)))
         }
         (Some(hot), Some(cold), Some(cache)) => {

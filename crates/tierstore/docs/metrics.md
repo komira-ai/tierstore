@@ -335,6 +335,19 @@ Every `/metricz`, with or without the front, ends with one more series:
 Everything below is on main and not in a released tierstore yet; this page is updated when it
 ships. Do not build alerts on these series until they are in a release.
 
+### The read path of `[cache]`
+
+A build node whose file has `[cache]` (see [configuration](configuration.md#cache)) shows, after
+the cache's own series, the families of section 12 of `docs/design/fetch-cache-serve.md` for the
+fetch engine and its budget (`gets_total`, `bytes_fetched_total`, `budget_ceiling_parts`,
+`parts_in_flight`, `budget_reason` and the rest of the group, with
+`store_copy_generation_mismatch_total`) and for the node cache (`holds`, `evictions_total`,
+`punched_bytes_total` and the rest), each named with the prefix `tierstore_` and with a `# TYPE`
+line. The engine's GET counts, the bytes it fetched, the copies it found at
+another generation, and the budget's ceiling, parts in flight and reason are copied in each time
+the page is read; the evictor counts into its families as it runs. A family no part of this
+release counts into yet stays at 0.
+
 ### v1: changes in the next release
 
 The series of "The build-node cache (v1)" above change as follows, and the cache gains the series

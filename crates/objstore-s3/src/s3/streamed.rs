@@ -1,5 +1,7 @@
 //! The calls of [`S3Store`] that never hold an object whole: a read that gives the answer's body
-//! as the pieces it arrives in ([`S3Store::get_stream`]), and a conditional replacement that sends
+//! as the pieces it arrives in ([`S3Store::get_stream`]), the same for a range of the object only
+//! if it still has a given entity tag ([`S3Store::get_stream_if_match`]), and a conditional
+//! replacement that sends
 //! the new body as it is given ([`S3Store::put_stream_if_match`], and [`S3Store::put_stream_if_match_unsized`]
 //! for a body whose length is not known).
 //!
@@ -77,18 +79,44 @@ impl S3Store {
         key: &ObjectKey,
         range: Option<ByteRange>,
     ) -> Result<ObjectRead, ObjectStoreError> {
-        retrying(&self.conn.tuning, move || self.open_read(key, range)).await
+        retrying(&self.conn.tuning, move || self.open_read(key, range, None)).await
+    }
+
+    /// Reads `range` of the object (cut at the end of the object) as [`S3Store::get_stream`]
+    /// does, with `If-Match: <etag>` on the GET (the tag sent as it is, quotes included as the
+    /// store sent it): the store answers with the bytes only if the object still has that entity
+    /// tag, so the bytes are never those of an object written to the key since the tag was read.
+    ///
+    /// # Errors
+    /// As [`S3Store::get_stream`]; and [`ObjectStoreError::Service`] with status 412 if the
+    /// object has another entity tag.
+    pub async fn get_stream_if_match(
+        &self,
+        key: &ObjectKey,
+        range: ByteRange,
+        etag: &str,
+    ) -> Result<ObjectRead, ObjectStoreError> {
+        let asked = Some(range);
+        retrying(&self.conn.tuning, move || {
+            self.open_read(key, asked, Some(etag))
+        })
+        .await
     }
 
     async fn open_read(
         &self,
         key: &ObjectKey,
         range: Option<ByteRange>,
+        if_match: Option<&str>,
     ) -> Result<ObjectRead, ObjectStoreError> {
-        let headers = range
-            .map(|asked| format!("bytes={}-{}", asked.offset(), asked.last()))
-            .map(|value| vec![("range", value)])
-            .unwrap_or_default();
+        let ranged = range.map(|asked| {
+            (
+                "range",
+                format!("bytes={}-{}", asked.offset(), asked.last()),
+            )
+        });
+        let condition = if_match.map(|etag| ("if-match", etag.to_owned()));
+        let headers: Vec<(&'static str, String)> = ranged.into_iter().chain(condition).collect();
         let resp = self.conn.send_read(key, headers).await?;
         let size = match (resp.status(), range) {
             (StatusCode::OK, None) => resp.content_length(),

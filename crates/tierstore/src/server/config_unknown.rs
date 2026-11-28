@@ -14,6 +14,7 @@ use serde::de::{self, DeserializeOwned, Deserializer, Error as _, Visitor};
 
 use super::config::{File, ServerTable, TierTable};
 use super::config_cache::LocalCacheTable;
+use super::config_cache::read_path::CacheTable;
 use super::config_interface::OciTable;
 use super::config_policy::Policy;
 use super::local_cache::trees::TreesTable;
@@ -102,6 +103,7 @@ pub(super) fn unknown_key_warnings(file: &toml::Table) -> Vec<String> {
             "oci" => fields_of::<OciTable>(),
             "local_cache" => fields_of::<LocalCacheTable>(),
             "trees" => fields_of::<TreesTable>(),
+            "cache" => fields_of::<CacheTable>(),
             "policy" => fields_of::<Policy>(),
             // An `[[interface]]` entry keeps refusing a key it does not have: see `config_interface`.
             "interface" => continue,

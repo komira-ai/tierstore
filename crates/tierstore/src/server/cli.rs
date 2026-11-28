@@ -125,7 +125,6 @@ use super::trees::trees_setup_of;
 #[path = "cli_s3.rs"]
 mod s3_tier;
 pub(super) use s3_tier::S3Flags;
-#[cfg(test)]
 pub(super) use s3_tier::s3_backend;
 use s3_tier::s3_tier;
 

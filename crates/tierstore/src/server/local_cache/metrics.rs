@@ -665,7 +665,8 @@ impl LocalCache {
     /// counted by the bytes they have filled) and the free space of the file system now, then
     /// the counters of the entries by extents, then `tierstore_request_to_start_seconds` and the
     /// families of what the mounts report of their attaches (`attaches`), their descriptors
-    /// (`descriptors`) and their opens (`opens`).
+    /// (`descriptors`) and their opens (`opens`), and, with a read path of `[cache]` attached, the
+    /// section 12 families of its engine, its budget and its evictor (see `large::stack`).
     #[must_use]
     pub fn metrics(&self) -> String {
         let inner = &self.inner;
@@ -694,6 +695,9 @@ impl LocalCache {
         let queued = &inner.queued_reads;
         text.push_str(&queued_reads(queued.bytes(), queued.skipped()));
         text.push_str(&inner.preparations.render());
+        if let Some(large) = inner.large.get() {
+            text.push_str(&large.metrics());
+        }
         text
     }
 }

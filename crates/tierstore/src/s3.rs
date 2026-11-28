@@ -186,7 +186,8 @@ const INVALID_PART_CODES: [&str; 3] = ["InvalidPart", "InvalidPartOrder", "Entit
 /// One bucket of an S3-compatible store, as a [`Backend`].
 #[derive(Debug)]
 pub struct S3Backend {
-    store: S3Store,
+    /// The bucket's client; the fetch engine's upstream reads through it with `If-Match`.
+    pub(crate) store: S3Store,
     /// Whether `delete_if_match` sends `If-Match` with the DELETE; otherwise it reads the tag
     /// first. Set from the tier's `conditional_delete` setting; off unless set.
     conditional_delete: bool,

@@ -298,6 +298,9 @@ pub(super) struct CacheSettings {
     pub fs: Option<FsSettings>,
     /// The root of the put ingest (`local_cache.put_ingest`), or none.
     pub put_ingest: Option<std::path::PathBuf>,
+    /// The new cache (`[cache]`), whose read path serves the S3 front's large objects; none
+    /// without the table.
+    pub read_path: Option<read_path::ReadPath>,
 }
 
 /// The percent in `value`, or `default`, from `low` to `high`.
@@ -513,6 +516,10 @@ impl CacheSettings {
             provider,
             fs,
             put_ingest,
+            read_path: None,
         })
     }
 }
+
+#[path = "config_read_path.rs"]
+pub(super) mod read_path;

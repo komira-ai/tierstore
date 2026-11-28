@@ -238,7 +238,7 @@ impl Hold {
 }
 
 /// Removes the file at `path`; one that is not there is removed already.
-fn remove_if_there(path: &Path) -> io::Result<()> {
+pub(super) fn remove_if_there(path: &Path) -> io::Result<()> {
     match std::fs::remove_file(path) {
         Err(why) if why.kind() != io::ErrorKind::NotFound => Err(why),
         _ => Ok(()),
